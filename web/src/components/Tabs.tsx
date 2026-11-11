@@ -26,11 +26,16 @@ export interface TabItem<T extends string> {
 
 /**
  * `default` is the compact inspector strip; `workspace` is the header tab bar
- * (Conversation / Changes); `settings` is the settings sheet's section strip;
- * `fileview` is the file viewer's Preview/Source control. All four share the
- * same tablist semantics and differ only in the classes the stylesheets key off.
+ * (Conversation / Changes); `fileview` is the file viewer's Preview/Source
+ * control. All three share the same tablist semantics and differ only in the
+ * classes the stylesheets key off.
+ *
+ * The settings sheet used to be a fourth (`settings`, a horizontal strip). It is
+ * a two-pane window now — a vertical rail, a search field and a pane header — so
+ * its navigation is `SettingsNav.tsx` rather than a variant of this strip: one
+ * implementation per role.
  */
-export type TabVariant = 'default' | 'workspace' | 'settings' | 'fileview';
+export type TabVariant = 'default' | 'workspace' | 'fileview';
 
 export interface TabsProps<T extends string> {
   items: readonly TabItem<T>[];
@@ -64,22 +69,9 @@ export function Tabs<T extends string>({
   const generated = useId();
   const prefix = idPrefix ?? generated;
   const workspace = variant === 'workspace';
-  const settings = variant === 'settings';
   const fileview = variant === 'fileview';
-  const listClass = fileview
-    ? 'file-view-tabs'
-    : settings
-      ? 'settings-tabs'
-      : workspace
-        ? 'workspace-tabs'
-        : 'tabs';
-  const tabClass = fileview
-    ? 'file-view-tab'
-    : settings
-      ? 'settings-tab'
-      : workspace
-        ? 'workspace-tab'
-        : 'tab';
+  const listClass = fileview ? 'file-view-tabs' : workspace ? 'workspace-tabs' : 'tabs';
+  const tabClass = fileview ? 'file-view-tab' : workspace ? 'workspace-tab' : 'tab';
   const listRef = useRef<HTMLDivElement>(null);
 
   // Measured by hand rather than with `scrollIntoView`, which would also scroll

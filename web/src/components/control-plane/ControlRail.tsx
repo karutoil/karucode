@@ -10,6 +10,7 @@ import { pluralise, relativeTime } from '../../lib/format';
 import * as actions from '../../state/actions';
 import {
   ArrowRightIcon,
+  ChevronLeftIcon,
   KebabIcon,
   PlusIcon,
   RefreshIcon,
@@ -53,6 +54,14 @@ export interface ControlRailProps {
   projectCount: number;
   /** A session's project name, or "No project". */
   projectName: (id: string | null | undefined) => string;
+  /**
+   * Leave the plane for the workbench's session list.
+   *
+   * The rail's head owns it because the rail is the plane's top-left corner: on a
+   * phone this head is the first thing on screen, and the compact project rail
+   * that carries the desktop exit is `display: none` there.
+   */
+  onLeave: () => void;
   onRefresh: () => void;
   onNewChat: () => void;
   onNavigate: (session: { id: string; project_id: string | null }) => void;
@@ -242,6 +251,7 @@ export function ControlRail({
   onQuery,
   projectCount,
   projectName,
+  onLeave,
   onRefresh,
   onNewChat,
   onNavigate,
@@ -350,6 +360,21 @@ export function ControlRail({
 
   return <aside ref={railRef} class="cp-browser" aria-label="Sessions across projects" tabIndex={-1}>
     <header class="side-head cp-head">
+      {/* The way out of the plane. On a desktop the compact project rail's tiles
+          are one, but a phone hides that rail outright (`styles/rail.css`), so
+          without this control the plane would replace the whole workspace with no
+          way back to the session list. `.icon-button` + `ChevronLeftIcon` is the
+          vocabulary the open conversation's own back control uses, and it sits
+          first in the head so it is the first thing read (and the first Tab stop).
+          No private class: this is the base recipe, exactly like the refresh
+          button beside it. */}
+      <button
+        type="button"
+        class="icon-button"
+        aria-label="Back to sessions"
+        title="Back to sessions"
+        onClick={onLeave}
+      ><ChevronLeftIcon size={16} /></button>
       {/* The workbench's rail head is `.project-title` holding a text span and a
           `.path-hint`; the plane's head is the same role on a screen that lists
           every project, so it wears the same structure instead of a fourth

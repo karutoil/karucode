@@ -1,24 +1,35 @@
-/* Settings sheet — a tabbed panel over provider profiles, model libraries,
- * appearance, generation, approvals, subagent/limit tuning, notifications and
- * plugin/MCP diagnostics.
+/* Settings sheet — a two-pane window over appearance, models and providers,
+ * approvals and limits, access, notifications, plugins/MCP and updates.
  *
- * Visual contract: the v3 mock's `.settings-modal` / `.setting-row` /
- * `.toggle` blocks (typography, dividers, 36×21 switches). The sheet used to be
- * one long scroll; it is now five tabs (see `.settings-tabs`) with per-tab
- * disclosures (`.settings-advanced`) for the knobs most installs never touch.
+ * Visual contract: the v3 mock's `.setting-row` / `.toggle` blocks (typography,
+ * dividers, 36×21 switches) inside the shell language the rest of the harness
+ * already speaks — the rail's rows and active tint (`.session-row`), the
+ * inspector's section rhythm, `.eyebrow` kickers, `.badge` facts and the Theme
+ * Studio's header (title, subtitle, one close button).
  *
- * The scroll lives on the *panel*, not on `.settings-body`: the tab strip and
- * the footer have to stay put while the content between them scrolls, and a
- * single scroller on the body would carry both away.
+ * Layout model, pinned by `styles/settings.test.ts`:
+ *
+ *   .settings-form
+ *     .settings-shell          two columns, fills the sheet
+ *       .settings-nav          kicker, search, one row per section
+ *       .settings-content
+ *         .settings-pane-head  section title, scope badge, caption, close
+ *         .settings-panels     the scroller; every panel stays mounted
+ *     .settings-footer         error or save note, then Cancel / Save changes
+ *
+ * The scroll lives on the *panel*, not on the body or the content column: the
+ * rail and the footer have to stay put, and the pane header has to keep naming
+ * the section while its settings scroll beneath it.
  */
 
 .dialog-settings {
-  width: min(680px, 100vw);
+  /* Two panes plus a readable measure of content. At 680px the rail left the
+   * form 380px wide, which is why the sheet was one column of tiny controls. */
+  width: min(960px, 100vw);
 }
 
-/* The sheet's three bands: the header (in Dialog), the scrolling panel, the
- * footer. `min-height: 0` on the body is what lets the panel, and not the page,
- * own the overflow. */
+/* The sheet's bands: the shell (rail + content) and the footer. `min-height: 0`
+ * on the body is what lets the panel, and not the page, own the overflow. */
 .settings-body {
   display: flex;
   flex: 1 1 auto;
@@ -31,7 +42,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
-  padding: var(--space-9) var(--space-9);
+  padding: var(--space-9) 0;
 }
 
 .skeleton-setting-row {
@@ -45,76 +56,267 @@
   min-height: 0;
 }
 
-/* ---------- tabs ------------------------------------------------------- */
+/* ---------- the two panes ---------------------------------------------- */
 
-/* Same tablist semantics as the inspector strip (Tabs.tsx), different look: a
- * full-width row of equal cells under the sheet header, because the sheet has a
- * fixed, small number of sections rather than a growing plugin list. */
-.settings-tabs {
+.settings-shell {
   display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ---------- navigation rail -------------------------------------------- */
+
+/* The rail's fill is the app's *sidebar* rung, exactly as the sessions rail sits
+ * one step under the canvas: the sheet reads as a window with a rail in it,
+ * rather than as one flat panel with a line drawn down it. */
+.settings-nav {
+  display: flex;
+  flex: 0 0 248px;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+  background: var(--sidebar);
+}
+
+.settings-nav-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
   flex: 0 0 auto;
-  gap: var(--space-1);
-  padding: 0 var(--space-7);
-  border-bottom: 1px solid var(--line);
-  overflow-x: auto;
-  overflow-y: hidden;
-  overscroll-behavior-x: contain;
-  scrollbar-width: auto;
-  scrollbar-color: auto;
+  padding: var(--space-8) var(--space-5) var(--space-5);
 }
 
-.settings-tab {
-  position: relative;
-  display: inline-flex;
+/* "⚙ SETTINGS": the one place the sheet names itself. The dialog's own header
+ * is suppressed (`showHeader={false}`) because the pane header below already
+ * carries the section's title and the close button. */
+.settings-nav-kicker {
+  display: flex;
   align-items: center;
-  justify-content: center;
   gap: var(--space-3);
-  /* Grow to share the row, but never shrink below the label: on a narrow sheet
-   * the strip scrolls instead of overlapping its labels. */
-  flex: 1 0 max-content;
-  min-width: 0;
-  height: 40px;
-  padding: 0 var(--space-5);
-  border: 0;
+  margin: 0;
+  color: var(--accent-fill);
+  font-size: var(--fs-micro);
+  font-weight: var(--weight-kicker);
+  letter-spacing: var(--tracking-kicker);
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+/* `.side-search` is the shared search field (layout.css). Only its placement is
+ * overridden here: its margins belong to the sessions rail's gutter, and this
+ * field sits in the nav's own head with that padding around it. */
+.settings-search {
+  margin: 0;
+}
+
+.settings-nav-list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-height: 0;
+  padding: 0 var(--space-4) var(--space-6);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+/* One section row: icon, label, and a line saying what is behind it.
+ *
+ * The active state is the session rail's answer (`--accent-bg` + `--line`), not
+ * a second recipe: selection is the one thing the accent is for. */
+.settings-nav-item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-4);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--space-4) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--muted);
-  font-size: var(--fs-small);
-  font-weight: 550;
-  white-space: nowrap;
-  transition: color var(--transition-fast);
+  color: var(--text-secondary);
+  text-align: left;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
 }
 
-.settings-tab > span:not(.tab-count):not(.tab-icon) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.settings-tab:hover {
-  color: var(--tab-hover);
-}
-
-.settings-tab.is-active {
+.settings-nav-item:hover {
+  background: var(--surface);
   color: var(--text);
 }
 
-.settings-tab.is-active::after {
-  content: '';
-  position: absolute;
-  right: 8px;
-  bottom: 0;
-  left: 8px;
-  height: 2px;
-  border-radius: var(--radius-xs) var(--radius-xs) 0 0;
-  background: var(--accent);
+.settings-nav-item.is-active {
+  border-color: var(--accent-line);
+  background: var(--accent-bg);
+  color: var(--accent-on-tint);
 }
 
-.settings-tab:focus-visible {
+.settings-nav-item:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: calc(-1 * var(--focus-ring-offset));
-  border-radius: var(--radius-sm);
 }
 
-/* The panel area: one scroller for whichever tab is showing. */
+.settings-nav-icon {
+  display: grid;
+  place-items: center;
+  height: 18px;
+  color: var(--faint);
+}
+
+.settings-nav-item:hover .settings-nav-icon,
+.settings-nav-item.is-active .settings-nav-icon {
+  color: inherit;
+}
+
+.settings-nav-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.settings-nav-label {
+  color: inherit;
+  font-size: var(--fs-label);
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.settings-nav-note {
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.settings-nav-item.is-active .settings-nav-note {
+  color: inherit;
+}
+
+/* A note that is answering a search, not describing the section. */
+.settings-nav-note.is-match {
+  color: var(--accent-fill);
+}
+
+.settings-nav-item.is-active .settings-nav-note.is-match {
+  color: inherit;
+}
+
+.settings-nav-hint,
+.settings-nav-empty {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  line-height: 1.5;
+}
+
+.settings-nav-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-6);
+}
+
+/* ---------- content column --------------------------------------------- */
+
+.settings-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The pane header: which section this is, who owns its values, what it is for.
+ * It sits outside `.settings-panels`, so it stays put while a long tab scrolls
+ * under it — the fix for a 900px-tall tab whose title used to scroll away. */
+.settings-pane-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-6);
+  padding: var(--space-8) var(--space-9) var(--space-7);
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-pane-headings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.settings-pane-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.settings-pane-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-heading);
+  font-weight: 700;
+  letter-spacing: -0.25px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.settings-scope {
+  flex: 0 0 auto;
+}
+
+.settings-pane-caption {
+  max-width: 64ch;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+}
+
+.settings-close {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 31px;
+  height: 31px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--muted);
+  transition:
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.settings-close:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+
+.settings-close:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Load/save/locked alerts sit in the content column, under the pane header:
+ * they are about the settings on screen, not about the rail. */
+.settings-alert {
+  flex: 0 0 auto;
+  margin: var(--space-6) var(--space-9) 0;
+}
+
+/* The panel area: one scroller for whichever section is showing. */
 .settings-panels {
   display: flex;
   flex: 1 1 auto;
@@ -125,24 +327,45 @@
 .settings-panels > .tab-panel {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 0 var(--space-9);
+  padding: 0 var(--space-9) var(--space-9);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
 }
 
-/* Tabs keep their panels mounted (tab state would otherwise be lost), so a
+/* Panels keep their contents mounted (form state would otherwise be lost), so a
  * hidden panel must also be inert: `display: none` takes it out of the tab
  * order and out of the layout in one declaration. */
 .settings-panels > .tab-panel[hidden] {
   display: none;
 }
 
-
 /* The panel is `tabindex="0"` so a keyboard user can scroll it, and it runs flush
  * to the sheet's right edge inside an `overflow: hidden` shell — a 2px ring with
  * a 2px offset was clipped there. Draw it inside instead. */
 .settings-panels > .tab-panel:focus-visible {
+  outline-offset: calc(-1 * var(--focus-ring-offset));
+}
+
+/* A section a search sent the reader to. The flash is the only thing that says
+ * "here, not the top of the page": the scroll can land mid-screen, and a ring
+ * on a region that was already visible is easy to miss. The duration matches
+ * `FOUND_FLASH_MS` in SettingsSheet.tsx, which removes the class. */
+.settings-section.is-found {
+  animation: settings-found 1600ms ease-out;
+}
+
+@keyframes settings-found {
+  from {
+    background: var(--accent-bg);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+.settings-section.is-found:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
@@ -316,6 +539,15 @@
   color: inherit;
 }
 
+/* ---------- controls --------------------------------------------------- */
+
+/* One control height across the sheet (DESIGN-AUDIT M3): an `.input` is 32px, so
+ * every button that can sit beside one is 32px too. The base `.button` is 30px,
+ * which left "Add" 2px short of the field it belongs to. */
+.settings-body .button {
+  height: var(--space-10);
+}
+
 /* ---------- fields ----------------------------------------------------- */
 
 .field-grid {
@@ -374,7 +606,7 @@
   padding: var(--space-5) var(--space-6);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: var(--surface-raised);
+  background: transparent;
   color: var(--text-secondary);
   font-size: var(--fs-small);
 }
@@ -557,6 +789,9 @@
   gap: var(--space-6);
 }
 
+/* A provider is a card, at the rung the Theme Studio's presets use (`--surface`
+ * inside the sheet's `--surface-raised`): one step of the ladder is what makes a
+ * card a card here, not a second shadow. */
 .provider-card {
   display: flex;
   flex-direction: column;
@@ -565,33 +800,46 @@
   padding: var(--space-6) var(--space-7);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: var(--surface-raised);
+  background: var(--surface);
 }
 
 .provider-card:focus-within {
   border-color: var(--accent-line);
 }
 
+/* Name and id on the left, state on the right: the row answers "which endpoint
+ * is this, and is it the one in use" before anything else on the card. */
 .provider-card-head {
   display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
   min-width: 0;
 }
 
 .provider-card-title {
   display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-4);
+  min-width: 0;
+}
+
+.provider-badges {
+  display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--space-4);
-  min-width: 0;
+  gap: var(--space-3);
 }
 
 .provider-name {
   color: var(--text);
   font-family: var(--font-ui);
-  font-size: var(--fs-message);
-  font-weight: 660;
+  font-size: var(--fs-lead);
+  font-weight: 700;
+  letter-spacing: -0.15px;
+  line-height: 1.3;
   overflow-wrap: anywhere;
 }
 
@@ -599,7 +847,7 @@
   padding: var(--space-1) var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-xs);
-  background: var(--surface);
+  background: var(--rail);
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: var(--fs-tiny);
@@ -619,7 +867,7 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--space-4);
+  gap: var(--space-3) var(--space-4);
   color: var(--muted);
   font-size: var(--fs-tiny);
   min-width: 0;
@@ -635,8 +883,12 @@
   white-space: nowrap;
 }
 
+/* The count belongs to the right edge of the meta row, so it does not float in
+ * the middle of a wrapped line of URL. */
 .provider-count {
+  margin-left: auto;
   color: var(--muted);
+  font-family: var(--font-mono);
   font-size: var(--fs-tiny);
   white-space: nowrap;
 }
@@ -647,14 +899,49 @@
   gap: var(--space-3);
 }
 
+/* A property of the endpoint, not an action: it sits between the header and the
+   buttons, and reads as one line plus its consequence. A hairline instead of a
+   box, because the card is already a box. */
+.provider-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.provider-toggle input {
+  margin-top: 2px;
+  accent-color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.provider-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.provider-toggle-label {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.provider-toggle .field-hint {
+  margin: 0;
+}
+
 .provider-key-editor {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   padding: var(--space-5) var(--space-6);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
-  background: var(--surface);
+  background: transparent;
 }
 
 .provider-key-row {
@@ -673,7 +960,7 @@
 .model-library {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-2);
   min-width: 0;
 }
 
@@ -684,10 +971,12 @@
   gap: var(--space-3) var(--space-5);
 }
 
+/* Models are rows inside the provider card, not cards inside a card: a hairline
+ * between two models says the same thing as a box each, without the second and
+ * third border a 3-model provider used to carry. */
 .model-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
   list-style: none;
 }
 
@@ -695,11 +984,13 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-3) var(--space-5);
-  padding: var(--space-4) var(--space-5);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
+  gap: var(--space-2) var(--space-5);
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--line);
+}
+
+.model-list > .model-row:last-child {
+  border-bottom: 1px solid var(--line);
 }
 
 .model-row-main {
@@ -713,6 +1004,7 @@
 .model-name {
   color: var(--text);
   font-size: var(--fs-label);
+  font-weight: 600;
   overflow-wrap: anywhere;
 }
 
@@ -724,7 +1016,7 @@
 }
 
 .model-meta {
-  grid-column: 1 / -1;
+  grid-column: 1;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -735,8 +1027,14 @@
   overflow-wrap: anywhere;
 }
 
+/* The row's controls keep to the right edge and stay on one line while the name
+ * and metadata wrap beside them. */
 .model-actions {
   display: flex;
+  flex-wrap: wrap;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  justify-content: flex-end;
   gap: var(--space-3);
   justify-self: end;
 }
@@ -767,7 +1065,7 @@
   padding: var(--space-6) var(--space-7);
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius);
-  background: var(--surface-raised);
+  background: transparent;
 }
 
 .provider-add-title {
@@ -1029,7 +1327,7 @@
   padding: var(--space-4) var(--space-5);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: var(--surface-raised);
+  background: var(--surface);
 }
 
 .diagnostics-name {
@@ -1221,12 +1519,23 @@
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--space-4) var(--space-6);
   padding: var(--space-6) var(--space-9);
   border-top: 1px solid var(--line);
   background: transparent;
+}
+
+/* What the shared Save button does to the section on screen. It takes the row
+ * when there is no error, so the buttons stay put between the two states. */
+.settings-footer-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  line-height: 1.5;
 }
 
 /* The error summary takes the row when it is there, so the buttons stay put
@@ -1263,32 +1572,98 @@
 
 /* ---------- narrow ----------------------------------------------------- */
 
-@media (max-width: 600px) {
-  .settings-tabs {
-    padding: 0 var(--space-5);
-    /* Five tabs do not fit a 320-430px sheet even at this density, and the strip
-     * scrolls rather than squashing its labels (the contract above). A scrollable
-     * strip with a hard cut edge reads as a truncated row - "Plugins & MCP" was
-     * simply absent at 320px with nothing to suggest it existed - so fade the cut
-     * edge. The gradient is a mask, not a paint: only its alpha is used, so it is
-     * theme-independent, and where the strip already fits it falls on empty
-     * padding and shows nothing. */
+/* Below 780px there is no room for two panes: the rail turns into a scrolling
+ * strip above the content, the way the app's own header tabs do. The rail keeps
+ * its vertical `tablist` semantics — both arrow axes move the selection — so a
+ * keyboard user is not asked to notice which layout they are looking at. */
+@media (max-width: 780px) {
+  /* The two panes stack: the rail becomes the header band of the content. */
+  .settings-shell {
+    flex-direction: column;
+  }
+
+  .settings-nav {
+    flex: 0 0 auto;
+    min-height: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .settings-nav-head {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-5) 0;
+  }
+
+  /* The pane header names the section on the row below; a second "Settings" in
+   * a 390px column is a row spent on nothing. */
+  .settings-nav-kicker {
+    display: none;
+  }
+
+  .settings-nav-list {
+    flex: 0 0 auto;
+    flex-direction: row;
+    gap: var(--space-2);
+    min-height: 0;
+    padding: var(--space-3) var(--space-5) var(--space-4);
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    /* Seven labels do not fit 390px, and the strip scrolls rather than squashing
+     * them. A hard cut edge reads as a truncated row, so fade it: the gradient is
+     * a mask (alpha only), which is theme-independent, and where the strip
+     * already fits it falls on empty padding and shows nothing. */
     -webkit-mask-image: linear-gradient(to right, black calc(100% - var(--space-7)), transparent);
     mask-image: linear-gradient(to right, black calc(100% - var(--space-7)), transparent);
     scroll-padding-inline: var(--space-5);
   }
 
-  .settings-tab {
-    /* Geometry, not rhythm: the phone strip keeps its own compact height. */
-    height: 38px;
-    padding: 0 var(--space-4);
-    font-size: var(--fs-tiny);
+  .settings-nav-item {
+    flex: 0 0 auto;
+    grid-template-columns: 15px auto;
+    align-items: center;
+    gap: var(--space-3);
+    width: auto;
+    min-height: 32px;
+    padding: var(--space-2) var(--space-4);
+  }
+
+  .settings-nav-text {
+    flex-direction: row;
+  }
+
+  /* The note is a description, and the pane header below the strip carries the
+   * section's caption: two lines per chip in a 390px strip is noise. */
+  .settings-nav-note {
+    display: none;
+  }
+
+  .settings-nav-hint,
+  .settings-nav-empty {
+    padding: var(--space-2) var(--space-5) var(--space-4);
+  }
+
+  .settings-pane-head {
+    padding: var(--space-6) var(--space-7);
+  }
+
+  .settings-pane-title {
+    font-size: var(--fs-title);
   }
 
   .settings-panels > .tab-panel {
-    padding: 0 var(--space-7);
+    padding: 0 var(--space-7) var(--space-7);
   }
 
+  .settings-alert {
+    margin: var(--space-4) var(--space-7) 0;
+  }
+}
+
+@media (max-width: 600px) {
   .field-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1303,6 +1678,7 @@
     padding-left: var(--space-7);
   }
 
+  .settings-footer-note,
   .settings-error-summary {
     flex-basis: 100%;
   }
@@ -1356,6 +1732,12 @@
   .settings-advanced-label svg,
   .panel-action-btn {
     transition: none;
+  }
+
+  /* The arrival flash is an animation, not a fade of state: a reader who asked
+   * for less motion gets the scroll and the focus ring without it. */
+  .settings-section.is-found {
+    animation: none;
   }
 }
 /* --- Updates tab --------------------------------------------------------- */

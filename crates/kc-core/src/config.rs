@@ -417,6 +417,10 @@ impl ProviderProfile {
             "base_url": self.base_url,
             "models": self.models,
             "request_timeout_secs": self.request_timeout_secs,
+            // Editable from the settings screen: whether a 401/403/404 is worth
+            // another attempt because the next one lands on a different upstream
+            // channel. See `ProviderProfile::aggregator`.
+            "aggregator": self.aggregator,
             "api_key_set": self.has_api_key(),
         })
     }
@@ -666,6 +670,42 @@ pub struct Limits {
     /// is still dropped.
     #[serde(default)]
     pub command_env_passthrough: Vec<String>,
+    /// How many times a *turn* may be asked again after the provider layer has
+    /// already given up on it.
+    ///
+    /// The three retry layers answer three different questions, and this is the
+    /// slowest one:
+    ///
+    /// * `retry_max_retries` (pre-content) and `retry_max_stream_restarts`
+    ///   (mid-answer) both spend *attempts* in seconds - they absorb a dying
+    ///   channel;
+    /// * this one spends **time**: after the fast budgets are exhausted the run
+    ///   would simply end, which is what made an operator type "continue" 26
+    ///   times in two weeks. Here the same turn is asked again after
+    ///   `turn_retry_delay_ms`, and only for a failure a wait can fix - a
+    ///   transient 4xx/5xx, a rate limit or cooldown named in the body, or a
+    ///   transport death. A dead key (401), a content refusal, a request the
+    ///   endpoint judged (`[permanent]`) and a context overflow never reach it.
+    ///
+    /// Each retry is a fresh generation, so the budget is small: `2` by default,
+    /// `0` disables the layer, and the ceiling is 10. The wait doubles per
+    /// retry, capped at eight times `turn_retry_delay_ms`. Nothing of a failed
+    /// attempt is persisted, and every retry is announced: a `stream_retry`
+    /// event (so a live client drops any text it rendered) and a warning notice
+    /// naming the attempt and the wait.
+    #[serde(default = "d_turn_retries")]
+    pub max_turn_retries: u32,
+    /// Wait before the first turn retry, in milliseconds. Doubles per retry,
+    /// capped at eight times this value. Default 30 s.
+    #[serde(default = "d_turn_retry_delay")]
+    pub turn_retry_delay_ms: u64,
+}
+
+fn d_turn_retries() -> u32 {
+    2
+}
+fn d_turn_retry_delay() -> u64 {
+    30_000
 }
 
 fn d_iterations() -> u32 {
@@ -731,6 +771,8 @@ impl Default for Limits {
             max_tool_calls_per_turn: d_parallel_calls(),
             parallel_tool_calls: d_true(),
             command_env_passthrough: Vec::new(),
+            max_turn_retries: d_turn_retries(),
+            turn_retry_delay_ms: d_turn_retry_delay(),
         }
     }
 }
@@ -2702,6 +2744,50 @@ impl Config {
             .unwrap_or_else(|| self.model.model.clone())
     }
 
+    /// Every model id this config can actually send: the profile the session
+    /// resolves against (its pin's profile, else the active one), plus the id
+    /// that profile will send by default.
+    ///
+    /// This exists so a model id that came from *outside* the config - a
+    /// `spawn_agent` `model` override, which the caller types and nothing
+    /// validates - can be checked before it is used. An empty list means
+    /// "unknown, do not judge": a profile that declares no catalog (or only the
+    /// single entry synthesized from a flat `[model]` section) says nothing about
+    /// which other ids the endpoint accepts, so refusing there would break a
+    /// setup that works today.
+    pub fn known_models(&self, selection: Option<&SessionModelSelection>) -> Vec<String> {
+        let profile = selection
+            .and_then(|selection| {
+                let id = selection.provider.trim();
+                self.providers.iter().find(|profile| profile.id == id)
+            })
+            .or_else(|| self.active_profile());
+        let Some(profile) = profile else {
+            return Vec::new();
+        };
+        // Nothing to check against means nothing to refuse: a profile with no
+        // declared catalog, or the single entry that the flat `[model]` section
+        // synthesizes, says nothing about which *other* ids the endpoint accepts.
+        // A refusal is only honest where the operator has declared a catalog.
+        if profile.models.len() < 2 {
+            return Vec::new();
+        }
+        let mut ids: Vec<String> = profile
+            .models
+            .iter()
+            .map(|model| model.id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect();
+        // The model this profile sends may be newer than the catalog snapshot, or
+        // set directly in `active_model`; it is always a valid answer.
+        let sent = self.model_for_profile(profile).model;
+        let sent = sent.trim();
+        if !sent.is_empty() && !ids.iter().any(|id| id == sent) {
+            ids.insert(0, sent.to_string());
+        }
+        ids
+    }
+
     /// The `[[providers.models]]` entry for `model_id` on `profile`, if listed.
     pub fn model_entry_for<'a>(
         &self,
@@ -3277,6 +3363,49 @@ mod tests {
             models: models.iter().map(|id| ModelEntry::new(*id)).collect(),
             ..ProviderProfile::default()
         }
+    }
+
+    /// The ids a spawn's `model` override is checked against: the active
+    /// profile's catalog plus the model that profile actually sends. A profile
+    /// with no catalog is unknown ground, and reports nothing so nothing is
+    /// refused.
+    #[test]
+    fn known_models_are_the_active_profile_s_catalog() {
+        let mut cfg = Config {
+            providers: vec![
+                profile("gateway", &["model-a", "model-b"]),
+                profile("local", &["tiny"]),
+            ],
+            active_provider: Some("gateway".into()),
+            active_model: Some("model-b".into()),
+            ..Config::default()
+        };
+        cfg.normalize_providers();
+
+        assert_eq!(cfg.known_models(None), vec!["model-a", "model-b"]);
+
+        // A pin that names another profile is judged against *that* profile - and
+        // a profile declaring a single model has no catalog to judge by.
+        let pinned = SessionModelSelection {
+            provider: "local".into(),
+            model: "tiny".into(),
+            reasoning_effort: None,
+        };
+        assert!(cfg.known_models(Some(&pinned)).is_empty());
+
+        // A cap that a profile never declared is still a valid answer: the model
+        // it sends is always in the list.
+        cfg.active_model = Some("not-in-the-catalog".into());
+        assert_eq!(
+            cfg.known_models(None),
+            vec!["not-in-the-catalog", "model-a", "model-b"]
+        );
+
+        // No catalog at all means "cannot judge".
+        let mut flat = Config::default();
+        flat.model.model = "anything".into();
+        flat.normalize_providers();
+        assert!(flat.known_models(None).is_empty(), "{:?}", flat.known_models(None));
     }
 
     #[test]

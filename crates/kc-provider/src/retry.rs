@@ -232,6 +232,14 @@ pub fn retryable_with(err: &Error, aggregator: bool) -> bool {
         // terminal until the runtime compacts the conversation. This guard also
         // covers remote errors that carry no HTTP status tag.
         Error::Provider(message) if errors::is_context_overflow(message) => false,
+        // A refusal that names a condition clearing by itself is transient
+        // whatever status carried it. Gateways put rate limits inside 400/402
+        // ("tier_limit_exceeded", "no provider's ask matches your max-per-mtok
+        // bid (reset after 2m)"), where the status table below reads "the
+        // request is wrong" and ends the run. The two guards above still win:
+        // an explicit permanent verdict, and a request that is too large for the
+        // window, are judgements about *this* request.
+        Error::Provider(message) if errors::is_transient_refusal(message) => true,
         Error::Provider(message) => match errors::http_status_of(message) {
             Some(status) => status_retryable(status, aggregator),
             // No status: a transport/decode failure, a splash page, a stream
@@ -247,9 +255,10 @@ pub fn retryable_with(err: &Error, aggregator: bool) -> bool {
 /// The status half of [`retryable`], split out so the table is testable without
 /// building error messages.
 pub fn status_retryable(status: u16, aggregator: bool) -> bool {
+    if kc_core::error::status_is_transient(status) {
+        return true;
+    }
     match status {
-        408 | 409 | 425 | 429 => true,
-        500..=599 => true,
         // Permanent for this endpoint unless it is a multi-channel gateway.
         401 | 403 | 404 => aggregator,
         // 400/413/422 and every other 4xx: the request itself was refused.
@@ -445,21 +454,45 @@ impl RetryState {
         }
 
         let delay = self.policy.delay(self.attempt.saturating_sub(1));
+        // The provider may have named its own window ("reset after 2m",
+        // "reset_seconds": 1024). A cooldown is not a backoff: honouring the hint
+        // is the difference between a run that continues after the window and one
+        // that spends the whole budget crawling a 30 s exponential towards a
+        // reset it can never reach.
+        let hint = errors::retry_after_hint(&err.to_string());
+        let delay = match hint {
+            Some(hint) if hint > delay => hint,
+            _ => delay,
+        };
         // Wall-clock budget: the attempt count alone would allow ~20 minutes of
         // retrying against a 30 s backoff ceiling. Stop before sleeping past the
         // budget rather than after, so the user sees the real error promptly.
         let elapsed = self.started.elapsed();
-        if elapsed.saturating_add(delay) > self.policy.max_total() {
+        let remaining = self.policy.max_total().saturating_sub(elapsed);
+        if delay > remaining {
             self.done = true;
+            // Name the window when the *provider* is what makes the wait
+            // impossible: "rate limited for another 17 minutes" is actionable
+            // (switch model, lower concurrency), "gave up after 18 attempts" is
+            // not.
+            let note = hint.filter(|hint| *hint > remaining).map(|hint| {
+                format!(
+                    " (the provider asked for a {}s wait, longer than the {}s retry budget left; \
+                     a different model, or fewer parallel requests, would not be waiting)",
+                    hint.as_secs(),
+                    remaining.as_secs()
+                )
+            });
             tracing::warn!(
                 provider = self.inner.id(),
                 attempt = self.attempt,
                 elapsed_secs = elapsed.as_secs(),
                 budget_secs = self.policy.max_total().as_secs(),
+                delay_secs = delay.as_secs(),
                 error = %err,
                 "provider retry budget exhausted; surfacing the failure"
             );
-            return Some(Err(self.exhausted(err)));
+            return Some(Err(self.exhausted_with(err, note.as_deref())));
         }
 
         tracing::warn!(
@@ -490,11 +523,24 @@ impl RetryState {
     /// is: it is surfaced after one attempt, so there is no count to report, and
     /// a suffix would only bury the reason the operator has to act on.
     fn exhausted(&self, err: Error) -> Error {
+        self.exhausted_with(err, None)
+    }
+
+    /// [`Self::exhausted`] plus an operator-facing note explaining *why* the
+    /// retries stopped (today: the provider's own reset window did not fit the
+    /// budget).
+    fn exhausted_with(&self, err: Error, note: Option<&str>) -> Error {
         let attempts = self.attempt.max(1);
-        if attempts <= 1 || errors::is_permanent(&err.to_string()) {
+        let mut suffix = String::new();
+        if attempts > 1 && !errors::is_permanent(&err.to_string()) {
+            suffix.push_str(&format!(" (gave up after {attempts} attempts)"));
+        }
+        if let Some(note) = note {
+            suffix.push_str(note);
+        }
+        if suffix.is_empty() {
             return err;
         }
-        let suffix = format!(" (gave up after {attempts} attempts)");
         match err {
             Error::Provider(message) => Error::Provider(message + &suffix),
             Error::Timeout(message) => Error::Timeout(message + &suffix),

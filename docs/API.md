@@ -134,13 +134,15 @@ directory. `provider_configured` is computed from the effective model (below).
                     "max_output_tokens": 16384, "tool_call": true,
                     "reasoning": false, "vision": true, "cost_input": 0.25,
                     "cost_output": 1.5, "catalog_provider": "openai" } ],
-      "request_timeout_secs": 300, "api_key_set": true } ],
+      "request_timeout_secs": 300, "aggregator": false,
+      "api_key_set": true } ],
   "active": { "provider": "gateway", "model": "coder" },
   "limits": { "max_iterations": 0, "max_run_secs": 86400,
               "max_tool_output_bytes": 24000, "max_command_output_bytes": 32000,
               "command_timeout_secs": 120, "max_command_timeout_secs": 600,
               "max_file_read_bytes": 200000, "search_max_results": 200,
-              "context_max_chars": 240000, "max_tool_calls_per_turn": 32 },
+              "context_max_chars": 240000, "max_tool_calls_per_turn": 32,
+              "max_turn_retries": 2, "turn_retry_delay_ms": 30000 },
   "approvals": { "mode": "ask", "allow_commands": [], "auto_approve_paths": [],
                  "timeout_secs": 300 },
   "subagents": { "max_concurrent": 3, "max_iterations": 0,
@@ -246,7 +248,14 @@ Provider profiles:
   out keep their current value; `models`, when present, **replaces the whole
   list**. A new profile defaults to `name` = id, `provider` =
   `openai_compatible`, `base_url` = `http://127.0.0.1:4000/v1`,
-  `request_timeout_secs` = 300, no models and no key.
+  `request_timeout_secs` = 300, `aggregator` = `false`, no models and no key.
+* `providers.upsert[].aggregator` marks the endpoint as a multi-channel gateway,
+  which makes a `401`/`403`/`404` worth another attempt: on such a proxy those
+  usually mean *this channel's* key is dead and the next attempt lands on another
+  one. It is the same field as `[model] aggregator` / `[[providers]] aggregator`
+  in the file, and the same switch as **Multi-channel gateway** on the profile's
+  card in Settings. Leave it off for a direct vendor API, where a revoked key
+  stays revoked.
 * `providers.delete[]` removes profiles by id. Deleting the active profile clears
   the selection and the first remaining profile becomes active. Deleting the last
   profile does not leave zero profiles: a `default` profile is re-synthesised from

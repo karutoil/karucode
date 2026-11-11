@@ -1030,6 +1030,14 @@ impl Updater {
         file.flush().await.map_err(|e| {
             UpdateError::local(format!("could not flush {}: {e}", partial.display()))
         })?;
+        // Close the descriptor *here*, synchronously. `tokio::fs::File` closes on
+        // a blocking-pool thread when it is dropped, so `drop(file)` only
+        // schedules the close: `prove_artifact` can then `execve` a file that is
+        // still open for writing, and Linux answers `ETXTBSY` ("Text file busy")
+        // for exactly that - a staged update refused for a reason that has
+        // nothing to do with the download. `into_std` hands back the plain handle,
+        // whose drop closes it before the next line runs.
+        let file = file.into_std();
         drop(file);
 
         if let Some(expected) = artifact.size {
@@ -1313,20 +1321,38 @@ async fn prove_artifact(path: &Path, expected: u64) -> Result<()> {
     if let Some(path_env) = std::env::var_os("PATH") {
         command.env("PATH", path_env);
     }
-    let output = tokio::time::timeout(VERSION_PROBE_TIMEOUT, command.output())
-        .await
-        .map_err(|_| {
-            UpdateError::remote(format!(
-                "the downloaded binary did not answer `--version` within {}s; it was refused",
-                VERSION_PROBE_TIMEOUT.as_secs()
-            ))
-        })?
-        .map_err(|e| {
-            UpdateError::remote(format!(
-                "the downloaded file {} could not be executed: {e}; it was refused",
-                path.display()
-            ))
-        })?;
+    // `execve` answers `ETXTBSY` while *any* process still holds the file open
+    // for writing, and a file written moments ago looks busy for as long as a
+    // forked sibling takes to finish its own `exec` - the "text file busy" race
+    // `std` itself retries for a few milliseconds. Under a parallel run (and on
+    // a busy install) that window is longer than `std`'s budget, so a staged
+    // update was refused for a reason that had nothing to do with the download.
+    // A real failure still fails: the message is the same after a second of
+    // retries.
+    const EXEC_BUSY_RETRIES: u32 = 40;
+    const EXEC_BUSY_DELAY: Duration = Duration::from_millis(25);
+    let mut attempt = 0u32;
+    let output = loop {
+        match tokio::time::timeout(VERSION_PROBE_TIMEOUT, command.output()).await {
+            Err(_) => {
+                return Err(UpdateError::remote(format!(
+                    "the downloaded binary did not answer `--version` within {}s; it was refused",
+                    VERSION_PROBE_TIMEOUT.as_secs()
+                )))
+            }
+            Ok(Ok(output)) => break output,
+            Ok(Err(e)) if is_text_file_busy(&e) && attempt < EXEC_BUSY_RETRIES => {
+                attempt += 1;
+                tokio::time::sleep(EXEC_BUSY_DELAY).await;
+            }
+            Ok(Err(e)) => {
+                return Err(UpdateError::remote(format!(
+                    "the downloaded file {} could not be executed: {e}; it was refused",
+                    path.display()
+                )))
+            }
+        }
+    };
     if !output.status.success() {
         return Err(UpdateError::remote(format!(
             "the downloaded binary's `--version` failed with {}; it was refused",
@@ -1430,6 +1456,23 @@ fn make_executable(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+/// Is this error Linux's "Text file busy"?
+///
+/// It means *another process is writing the file*, not that the file is bad or
+/// that the download failed - so the caller waits and tries the exec again rather
+/// than refusing a good artifact.
+fn is_text_file_busy(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
 }
 
 fn sha256_matches(bytes: &[u8], expected_hex: &str) -> bool {

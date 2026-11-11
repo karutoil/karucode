@@ -76,4 +76,35 @@ describe('Workbench result resizing', () => {
     expect(compact).toMatch(/\.workspace-tabs \{[^}]*order:\s*5;[^}]*flex:\s*1 0 100%;/s);
     expect(compact).toMatch(/min-height:\s*calc\(var\(--workbench-header-h\) \+ var\(--workbench-result-bar-h\)\)/);
   });
+
+  it('gives a popped-out panel the same width variable and a card on the same geometry', () => {
+    // The pop-out is the only place the dock's width variable is *required*: its
+    // card and its handle both read it, so they cannot drift apart while dragging.
+    const popout = workbench.slice(workbench.indexOf('/* ---------- popped-out results'));
+    expect(popout.length).toBeGreaterThan(0);
+
+    expect(popout).toMatch(/width:\s*min\(var\(--workbench-result-w, 560px\), calc\(100vw - var\(--space-10\)\)\);/);
+    expect(popout).toMatch(
+      /\.center-body > \.result-resizer \{[^}]*position:\s*fixed;[^}]*right:\s*calc\(\s*var\(--space-6\) \+ min\(var\(--workbench-result-w, 560px\)/s,
+    );
+    expect(popout).toMatch(/\.center-body > \.result-resizer \{[^}]*width:\s*var\(--workbench-resizer-w\);/s);
+    // Closed means display:none, not the docked "0 width, hidden" column.
+    expect(popout).toMatch(/collapsed='true'[^}]*> \.inspector \{\s*display:\s*none;/s);
+    // The card's inner box follows the card instead of the rail width.
+    expect(popout).toMatch(/> \.inspector\s*> \.inspector-inner \{\s*width:\s*100%;/s);
+  });
+
+  it('scopes the pop-out to the desktop tier so the phone sheet keeps its contract', () => {
+    const start = workbench.indexOf('/* ---------- popped-out results');
+    // Everything the pop-out adds sits inside one `min-width: 1024px` query: below
+    // it the inspector is a slide-over sheet with its own trap and width.
+    const block = workbench.slice(start, workbench.indexOf('@container workbench (max-width: 780px)', start));
+    expect(block.startsWith('/*')).toBe(true);
+    expect(block).toContain('@media (min-width: 1024px) {');
+    const rules = block.slice(block.indexOf('@media (min-width: 1024px) {'));
+    // The block has to end where the media query does: one closing brace for it.
+    expect(rules.trimEnd().endsWith('}')).toBe(true);
+    expect((rules.match(/data-inspector-mode='popout'/g) ?? []).length).toBeGreaterThanOrEqual(4);
+    expect(rules).not.toContain('@media (max-width: 1023px)');
+  });
 });

@@ -687,7 +687,7 @@ def main() -> int:
         # This is the check that catches "adopted the class, then overrode it".
         # Compare only a *variant-matched* pair. The workbench never renders a
         # bare `.button` or a bare `.icon-button`: every instance it draws carries
-        # a modifier (`inspector-quick`, `inspector-context-button`, `button-send`,
+        # a modifier (`inspector-quick`, `context-header-btn`, `button-send`,
         # and the send button is disabled while the draft is empty). Pairing one of
         # those against the plane's base element reported two variants of one class
         # as a design divergence, so such a pair is recorded and excluded - the

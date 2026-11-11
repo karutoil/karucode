@@ -26,7 +26,7 @@
 
 /** The composer's action row, left of the model pins. */
 export const UI_SLOT_COMPOSER_TOOLBAR = 'composer.toolbar';
-/** The results inspector's header, beside **Context**. */
+/** The results inspector's header. */
 export const UI_SLOT_INSPECTOR_HEADER = 'inspector.header';
 /** The session header row above the transcript. */
 export const UI_SLOT_SESSION_HEADER = 'session.header';
@@ -48,8 +48,15 @@ export const UI_HIDE_INSPECTOR_TAB_CHANGES = 'inspector.tab.changes';
 export const UI_HIDE_INSPECTOR_TAB_SESSION = 'inspector.tab.session';
 /** The results inspector's **Agents** tab. */
 export const UI_HIDE_INSPECTOR_TAB_AGENTS = 'inspector.tab.agents';
-/** The results inspector's **Context** button. */
-export const UI_HIDE_INSPECTOR_CONTEXT = 'inspector.context';
+/**
+ * The **Context** button in the session header.
+ *
+ * The wire id keeps saying `inspector.context` (a plugin that already asked to
+ * hide it must keep working) but the control it names moved out of the results
+ * header: Context has to stay reachable while the results panel is closed or
+ * popped out, so it lives in the header the workbench always draws.
+ */
+export const UI_HIDE_CONTEXT_BUTTON = 'inspector.context';
 
 /**
  * Every built-in element a plugin may hide.
@@ -64,7 +71,7 @@ export const UI_HIDE_TARGETS: readonly string[] = [
   UI_HIDE_INSPECTOR_TAB_CHANGES,
   UI_HIDE_INSPECTOR_TAB_SESSION,
   UI_HIDE_INSPECTOR_TAB_AGENTS,
-  UI_HIDE_INSPECTOR_CONTEXT,
+  UI_HIDE_CONTEXT_BUTTON,
 ];
 
 /** Cap on a label. Matches the host's `MAX_UI_LABEL_BYTES` closely enough. */

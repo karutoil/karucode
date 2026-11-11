@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { SettingsSheet } from './SettingsSheet';
 import type {
   CatalogLookupResponse,
@@ -59,6 +59,7 @@ function twoProfileConfig(): Config {
           },
         ],
         request_timeout_secs: 300,
+        aggregator: false,
         api_key_set: true,
       },
       {
@@ -82,6 +83,9 @@ function twoProfileConfig(): Config {
           },
         ],
         request_timeout_secs: 120,
+        // A multi-channel gateway: the errors its channels return look permanent
+        // but the next attempt lands somewhere else.
+        aggregator: true,
         api_key_set: false,
       },
     ],
@@ -188,6 +192,7 @@ function applyPatches(config: Config, patch: ConfigPatch): Config {
         base_url: incoming.base_url ?? '',
         models: incoming.models ?? [],
         request_timeout_secs: incoming.request_timeout_secs ?? 300,
+        aggregator: incoming.aggregator ?? false,
         api_key_set: Boolean(incoming.api_key),
       });
       continue;
@@ -199,6 +204,7 @@ function applyPatches(config: Config, patch: ConfigPatch): Config {
       name: incoming.name ?? existing.name,
       base_url: incoming.base_url ?? existing.base_url,
       models: incoming.models ?? existing.models,
+      aggregator: incoming.aggregator ?? existing.aggregator,
       api_key_set: incoming.clear_api_key
         ? false
         : incoming.api_key
@@ -331,7 +337,10 @@ function renderSheet(config: Config) {
 
 /** Open one of the sheet's tabs. */
 async function openTab(name: string): Promise<HTMLElement> {
-  const tab = await screen.findByRole('tab', { name });
+  // A prefix match, because the labels carry their one-line note: the tab is
+  // "Models & providers" and the test that opens it says "Models". A section
+  // rename then breaks one helper instead of eighty tests.
+  const tab = await screen.findByRole('tab', { name: new RegExp(`^${name}`, 'i') });
   fireEvent.click(tab);
   return tab;
 }
@@ -423,7 +432,7 @@ describe('SettingsSheet providers', () => {
   it('lists every provider profile with the active badge and key state', async () => {
     installFetch(twoProfileConfig());
     const { container } = renderSheet(twoProfileConfig());
-    await openTab('Models');
+    await openTab('Models & providers');
 
     expect(await screen.findByRole('heading', { name: 'Default' })).not.toBeNull();
     expect(screen.getByRole('heading', { name: 'Gateway' })).not.toBeNull();
@@ -447,10 +456,46 @@ describe('SettingsSheet providers', () => {
     expect(within(gatewayCard).getByText('Qwen3 32B')).not.toBeNull();
   });
 
+  it('saves the multi-channel gateway switch on the profile it belongs to', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+    await openTab('Models & providers');
+
+    const gateway = await profileCard('Gateway');
+    const gatewayToggle = within(gateway).getByRole('checkbox', {
+      name: /Multi-channel gateway/,
+    }) as HTMLInputElement;
+    const defaultToggle = within(await profileCard('Default')).getByRole('checkbox', {
+      name: /Multi-channel gateway/,
+    }) as HTMLInputElement;
+    // The switch reflects the profile, not the install: this endpoint is a
+    // gateway, the other one is not.
+    expect(gatewayToggle.checked).toBe(true);
+    expect(defaultToggle.checked).toBe(false);
+    // What the switch means is written next to it, not left to the label.
+    expect(within(gateway).getByText(/Retry a 401, 403 or 404 on another upstream channel/)).not.toBeNull();
+
+    fireEvent.click(gatewayToggle);
+
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.providers?.upsert).toEqual([{ id: 'gateway', aggregator: false }]);
+
+    // The answer from the server is what the switch shows afterwards.
+    await waitFor(() =>
+      expect(
+        (
+          within(gateway).getByRole('checkbox', {
+            name: /Multi-channel gateway/,
+          }) as HTMLInputElement
+        ).checked,
+      ).toBe(false),
+    );
+  });
+
   it('posts {profile:id} to /api/provider/test and renders the inline result', async () => {
     const { fetchMock } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await openTab('Models');
+    await openTab('Models & providers');
 
     const gateway = await profileCard('Gateway');
     fireEvent.click(within(gateway).getByRole('button', { name: /Test connection for/ }));
@@ -472,7 +517,7 @@ describe('SettingsSheet providers', () => {
       testResult: { ok: false, models: undefined, error: '401 invalid key', latency_ms: 7 },
     });
     renderSheet(twoProfileConfig());
-    await openTab('Models');
+    await openTab('Models & providers');
 
     const defaultCard = await profileCard('Default');
     fireEvent.click(within(defaultCard).getByRole('button', { name: /Test connection for/ }));
@@ -505,7 +550,7 @@ describe('SettingsSheet providers', () => {
   it('adds a picked models.dev model with prefilled metadata', async () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await openTab('Models');
+    await openTab('Models & providers');
 
     const gateway = await profileCard('Gateway');
     fireEvent.click(within(gateway).getByRole('button', { name: /Browse models\.dev/ }));
@@ -545,7 +590,7 @@ describe('SettingsSheet providers', () => {
   it('detects metadata when adding a gateway-prefixed model id by hand', async () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await openTab('Models');
+    await openTab('Models & providers');
 
     const gateway = await profileCard('Gateway');
     const input = within(gateway).getByLabelText('Add a model id');
@@ -580,7 +625,7 @@ describe('SettingsSheet providers', () => {
   it('refreshes one model’s metadata from the catalog, keeping the custom name', async () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await openTab('Models');
+    await openTab('Models & providers');
 
     const gateway = await profileCard('Gateway');
     fireEvent.click(within(gateway).getByRole('button', { name: 'Refresh metadata for Qwen3 32B on Gateway' }));
@@ -608,7 +653,7 @@ describe('SettingsSheet providers', () => {
   it('leaves the model alone when a refresh finds no catalog entry', async () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await openTab('Models');
+    await openTab('Models & providers');
 
     const defaultCard = await profileCard('Default');
     fireEvent.click(
@@ -626,7 +671,7 @@ describe('SettingsSheet providers', () => {
   it('edits a model’s metadata through the dialog', async () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await openTab('Models');
+    await openTab('Models & providers');
 
     const gateway = await profileCard('Gateway');
     fireEvent.click(within(gateway).getByRole('button', { name: 'Edit Qwen3 32B on Gateway' }));
@@ -661,7 +706,7 @@ describe('SettingsSheet providers', () => {
   it('leaves the per-model image flag undeclared when the dialog is left alone', async () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await openTab('Models');
+    await openTab('Models & providers');
 
     const gateway = await profileCard('Gateway');
     fireEvent.click(within(gateway).getByRole('button', { name: 'Edit Qwen3 32B on Gateway' }));
@@ -679,7 +724,7 @@ describe('SettingsSheet providers', () => {
   it('rejects an out-of-range context window before saving', async () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await openTab('Models');
+    await openTab('Models & providers');
 
     const gateway = await profileCard('Gateway');
     fireEvent.click(within(gateway).getByRole('button', { name: 'Edit Qwen3 32B on Gateway' }));
@@ -695,7 +740,7 @@ describe('SettingsSheet providers', () => {
   it('still adds the bare id when the catalog has no match', async () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await openTab('Models');
+    await openTab('Models & providers');
 
     const gateway = await profileCard('Gateway');
     const input = within(gateway).getByLabelText('Add a model id');
@@ -868,7 +913,7 @@ describe('SettingsSheet controls', () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
 
-    await openTab('Models');
+    await openTab('Models & providers');
     await openAdvanced();
     const parallel = await screen.findByRole('switch', { name: 'Parallel tool calls' });
     expect(parallel.getAttribute('aria-checked')).toBe('true');
@@ -924,7 +969,7 @@ describe('SettingsSheet controls', () => {
     const { patches } = installFetch(config);
     renderSheet(config);
 
-    await openTab('Models');
+    await openTab('Models & providers');
     await openAdvanced();
     const images = await screen.findByRole('switch', { name: 'Send images to models' });
     expect(images.getAttribute('aria-checked')).toBe('false');
@@ -949,7 +994,7 @@ describe('SettingsSheet controls', () => {
     const { patches } = installFetch(config);
     const { container } = renderSheet(config);
 
-    await openTab('Models');
+    await openTab('Models & providers');
     await openAdvanced();
     const toggle = await screen.findByRole('switch', { name: 'Send a temperature' });
     expect(toggle.getAttribute('aria-checked')).toBe('false');
@@ -970,7 +1015,7 @@ describe('SettingsSheet controls', () => {
     const { patches } = installFetch(config);
     const { container } = renderSheet(config);
 
-    await openTab('Models');
+    await openTab('Models & providers');
     await openAdvanced();
     const toggle = await screen.findByRole('switch', { name: 'Send a temperature' });
     expect(toggle.getAttribute('aria-checked')).toBe('true');
@@ -991,8 +1036,11 @@ describe('SettingsSheet controls', () => {
     const sheet = await screen.findByRole('dialog', { name: 'Settings' });
     expect(sheet.className).toContain('dialog-sheet');
     expect(sheet.className).toContain('dialog-settings');
-    // Title + description are the mock's `.modal-title` / `.modal-desc` pair.
-    expect(within(sheet).getByText('Personalize your coding experience.')).not.toBeNull();
+    // The two-pane shell: a rail with the search field and one row per section,
+    // then a pane header that names the section on screen.
+    expect(within(sheet).getByRole('searchbox', { name: 'Search settings' })).not.toBeNull();
+    expect(within(sheet).getByRole('tablist', { name: 'Settings sections' })).not.toBeNull();
+    expect(sheet.querySelector('.settings-pane-title')?.textContent).toBe('Appearance');
     expect(container.querySelectorAll('.setting-row').length).toBeGreaterThan(0);
     expect(container.querySelector('.settings-footer')).not.toBeNull();
   });
@@ -1013,10 +1061,12 @@ describe('SettingsSheet appearance', () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
 
-    await openTab('General');
-    const appearance = await screen.findByRole('region', { name: 'Appearance' });
-    expect(within(appearance).getByText(/stored in this browser/i)).not.toBeNull();
-    // The General tab is where the theme is actually chosen now, not only a door
+    await openTab('Appearance');
+    const appearance = await screen.findByRole('region', { name: 'Theme and layout' });
+    // The pane header says who owns these values; the section itself no longer
+    // repeats it (SettingsSummary asserts the header).
+    expect(screen.getByText(/stored in this browser/i)).not.toBeNull();
+    // The Appearance pane is where the theme is chosen now, not only a door
     // into the Studio: the sheet's most-used appearance settings belong here.
     expect(within(appearance).getByLabelText('Theme')).not.toBeNull();
     expect(within(appearance).getByLabelText('Density')).not.toBeNull();
@@ -1035,12 +1085,17 @@ describe('SettingsSheet appearance', () => {
     installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
 
-    await openTab('General');
-    const appearance = await screen.findByRole('region', { name: 'Appearance' });
+    await openTab('Appearance');
+    const appearance = await screen.findByRole('region', { name: 'Theme and layout' });
     const controls = [
       ['Theme', 'settings-theme-hint', 'Applies immediately. Saving this sheet is not required.'],
       ['Density', 'settings-density-hint', 'Moves type size and spacing together.'],
       ['Colour mode', 'settings-mode-hint', 'Re-bases the surfaces, keeping your accent.'],
+      [
+        'Results panel',
+        'settings-results-mode-hint',
+        'Docked: Results keeps its own column beside the conversation.',
+      ],
     ] as const;
 
     for (const [label, hintId, hintText] of controls) {
@@ -1048,6 +1103,32 @@ describe('SettingsSheet appearance', () => {
       expect(control.getAttribute('aria-describedby')).toBe(hintId);
       expect(document.getElementById(hintId)?.textContent).toBe(hintText);
     }
+  });
+
+  it('offers Results panel as a browser-stored presentation choice', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    await openTab('Appearance');
+    const appearance = await screen.findByRole('region', { name: 'Theme and layout' });
+    const select = within(appearance).getByLabelText('Results panel') as HTMLSelectElement;
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['docked', 'popout']);
+    expect(select.value).toBe('docked');
+
+    fireEvent.change(select, { target: { value: 'popout' } });
+    expect(store.inspectorMode.value).toBe('popout');
+    // The point of a pop-out is that nothing covers the conversation until it is
+    // asked for, so choosing it starts with the panel closed.
+    expect(store.inspectorCollapsed.value).toBe(true);
+    expect(localStorage.getItem('karucode.inspectorMode')).toBe('popout');
+    // Browser preference, not config: the shared Save button must not send it on.
+    expect(patches).toHaveLength(0);
+
+    fireEvent.change(select, { target: { value: 'docked' } });
+    expect(store.inspectorMode.value).toBe('docked');
+    expect(store.inspectorCollapsed.value).toBe(false);
+    expect(localStorage.getItem('karucode.inspectorMode')).toBe('docked');
+    expect(patches).toHaveLength(0);
   });
 
   it('renders the Notifications section inside the sheet', async () => {
@@ -1065,7 +1146,7 @@ describe('SettingsSheet appearance', () => {
 });
 
 describe('SettingsSheet appearance controls', () => {
-  /* The General tab is the second front door to the theme engine: it exposes the
+  /* The Appearance pane is the second front door to the theme engine: it exposes the
    * same options as the Theme Studio but writes them straight into the sheet, so
    * every one of them has to apply to <html>, persist in the browser and — the
    * part that is easy to get wrong — never travel to the server as a config
@@ -1105,7 +1186,7 @@ describe('SettingsSheet appearance controls', () => {
   it('offers all eight built-in themes and applies any of them locally', async () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    const select = (await settleOnTab('General', 'Theme', twoProfileConfig())) as unknown as HTMLSelectElement;
+    const select = (await settleOnTab('Appearance', 'Theme', twoProfileConfig())) as unknown as HTMLSelectElement;
     const options = Array.from(select.options)
       .map((option) => option.value)
       .filter((value) => value !== 'draft');
@@ -1126,7 +1207,7 @@ describe('SettingsSheet appearance controls', () => {
   it('applies both colour modes, re-basing the palette for the chosen one', async () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await settleOnTab('General', 'Theme', twoProfileConfig());
+    await settleOnTab('Appearance', 'Theme', twoProfileConfig());
     const mode = screen.getByLabelText('Colour mode');
 
     // The default theme is dark, so the light flip comes first: it is the one that
@@ -1151,7 +1232,7 @@ describe('SettingsSheet appearance controls', () => {
     async (value) => {
       const { patches } = installFetch(twoProfileConfig());
       renderSheet(twoProfileConfig());
-      await settleOnTab('General', 'Theme', twoProfileConfig());
+      await settleOnTab('Appearance', 'Theme', twoProfileConfig());
 
       fireEvent.change(screen.getByLabelText('Density'), { target: { value } });
 
@@ -1192,7 +1273,7 @@ describe('SettingsSheet appearance controls', () => {
     async (_label, toolStyle, grouping, working, thinking) => {
       const { patches } = installFetch(twoProfileConfig());
       renderSheet(twoProfileConfig());
-      await settleOnTab('General', 'Theme', twoProfileConfig());
+      await settleOnTab('Appearance', 'Theme', twoProfileConfig());
 
       fireEvent.change(screen.getByLabelText('Tool calls'), { target: { value: toolStyle } });
       fireEvent.change(screen.getByLabelText('Grouping'), { target: { value: grouping } });
@@ -1217,7 +1298,7 @@ describe('SettingsSheet appearance controls', () => {
   it('names the transcript options the way the Theme Studio does', async () => {
     installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await settleOnTab('General', 'Theme', twoProfileConfig());
+    await settleOnTab('Appearance', 'Theme', twoProfileConfig());
 
     const valuesOf = (label: string): string[] =>
       Array.from((screen.getByLabelText(label) as HTMLSelectElement).options).map(
@@ -1237,7 +1318,7 @@ describe('SettingsSheet appearance controls', () => {
   ])('applies the %s option "%s"', async (label, value, stack) => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await settleOnTab('General', 'Theme', twoProfileConfig());
+    await settleOnTab('Appearance', 'Theme', twoProfileConfig());
     await openAdvanced();
 
     fireEvent.change(screen.getByLabelText(label), { target: { value } });
@@ -1255,7 +1336,7 @@ describe('SettingsSheet appearance controls', () => {
   it.each([MIN_ROUNDING, MAX_ROUNDING])('applies the %i px corner radius endpoint', async (value) => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await settleOnTab('General', 'Theme', twoProfileConfig());
+    await settleOnTab('Appearance', 'Theme', twoProfileConfig());
     await openAdvanced();
 
     fireEvent.input(screen.getByLabelText('Corner rounding (px)'), { target: { value: String(value) } });
@@ -1276,7 +1357,7 @@ describe('SettingsSheet appearance controls', () => {
      * nothing at all when nothing else changed. */
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
-    await settleOnTab('General', 'Theme', twoProfileConfig());
+    await settleOnTab('Appearance', 'Theme', twoProfileConfig());
     await openAdvanced();
 
     fireEvent.change(screen.getByLabelText('Density'), { target: { value: 'compact' } });
@@ -1307,21 +1388,33 @@ describe('SettingsSheet tabs', () => {
     vi.unstubAllGlobals();
   });
 
-  it('splits the sheet into seven labelled tabs, one panel at a time', async () => {
+  it('splits the sheet into seven labelled sections, one panel at a time', async () => {
     installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
 
     const tabs = await screen.findAllByRole('tab');
-    expect(tabs.map((tab) => tab.textContent)).toEqual([
-      'General',
-      'Models',
+    // Each rail row is a label plus a line of copy; the accessible name is the
+    // label alone (the note is a description), so the two are read here
+    // separately.
+    expect(tabs.map((tab) => tab.querySelector('.settings-nav-label')?.textContent)).toEqual([
+      'Appearance',
+      'Models & providers',
       'Agent',
-      'Access',
+      'Access & sign-in',
       'Notifications',
       'Plugins & MCP',
       'Updates',
     ]);
-    // Exactly one tab is selected and reachable; the rest are one Tab away.
+    expect(tabs.map((tab) => tab.querySelector('.settings-nav-note')?.textContent)).toEqual([
+      'Theme, transcript, results',
+      'Endpoints, keys, models',
+      'Approvals, subagents, limits',
+      'Sign-in, password, passkeys',
+      'Run events, delivery, device',
+      'Processes, tools, preferences',
+      'Build, checks, install',
+    ]);
+    // Exactly one section is selected and reachable; the rest are one Tab away.
     expect(tabs.map((tab) => tab.getAttribute('aria-selected'))).toEqual([
       'true',
       'false',
@@ -1333,15 +1426,44 @@ describe('SettingsSheet tabs', () => {
     ]);
     expect(tabs.map((tab) => tab.tabIndex)).toEqual([0, -1, -1, -1, -1, -1, -1]);
 
-    // The first tab is the one that opens, and it is the only visible panel.
+    // The first section is the one that opens, and it is the only visible panel.
     expect(tabs[0]?.getAttribute('aria-controls')).toBe('settings-panel-general');
     const panels = document.querySelectorAll('.settings-panels > .tab-panel');
     expect(panels).toHaveLength(7);
     expect(panels[0]?.hasAttribute('hidden')).toBe(false);
     expect([...panels].slice(1).every((panel) => panel.hasAttribute('hidden'))).toBe(true);
 
-    // A locked sheet still lets every tab be read, so the strip is never disabled.
+    // A locked sheet still lets every section be read, so the rail is never
+    // disabled.
     expect(tabs.every((tab) => !(tab as HTMLButtonElement).disabled)).toBe(true);
+  });
+
+  it('names the section on screen above its panel, with who owns its values', async () => {
+    installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const dialog = document.querySelector('[role=dialog]') as HTMLElement;
+    const title = (): string | null | undefined =>
+      dialog.querySelector('.settings-pane-title')?.textContent;
+    const badge = (): string | null | undefined =>
+      dialog.querySelector('.settings-scope')?.textContent;
+    const saveNote = (): string | null | undefined =>
+      dialog.querySelector('.settings-footer-note')?.textContent;
+
+    expect(title()).toBe('Appearance');
+    // Appearance is stored in the browser and applied as it changes, so the
+    // footer must not imply that Save is what commits it.
+    expect(badge()).toBe('This browser');
+    expect(saveNote()).toContain('Applied immediately');
+
+    await openTab('Agent');
+    expect(title()).toBe('Agent');
+    expect(badge()).toBe('This install');
+    expect(saveNote()).toContain('when you press Save changes');
+
+    await openTab('Notifications');
+    expect(badge()).toBe('Install + browser');
+    expect(saveNote()).toContain('browser');
   });
 
   it('moves between tabs with the arrow keys and keeps the panels in sync', async () => {
@@ -1351,7 +1473,7 @@ describe('SettingsSheet tabs', () => {
     const strip = await screen.findByRole('tablist', { name: 'Settings sections' });
     fireEvent.keyDown(strip, { key: 'ArrowRight' });
 
-    const models = screen.getByRole('tab', { name: 'Models' });
+    const models = screen.getByRole('tab', { name: 'Models & providers' });
     expect(models.getAttribute('aria-selected')).toBe('true');
     expect(document.getElementById('settings-panel-models')?.hasAttribute('hidden')).toBe(false);
     expect(document.getElementById('settings-panel-general')?.hasAttribute('hidden')).toBe(true);
@@ -1367,15 +1489,15 @@ describe('SettingsSheet tabs', () => {
 
     // A panel that unmounted on switch would lose this; it is why the sheet's
     // panels persist rather than being created on demand.
-    const density = await settleOnTab('General', 'Theme', config);
+    const density = await settleOnTab('Appearance', 'Theme', config);
     fireEvent.input(screen.getByLabelText('Top-p'), { target: { value: '' } });
-    await openTab('Models');
+    await openTab('Models & providers');
     await openAdvanced();
     const topP = screen.getByLabelText('Top-p') as HTMLInputElement;
     fireEvent.input(topP, { target: { value: '0.8' } });
 
     await openTab('Agent');
-    await openTab('Models');
+    await openTab('Models & providers');
     expect((screen.getByLabelText('Top-p') as HTMLInputElement).value).toBe('0.8');
     expect(density).not.toBeNull();
   });
@@ -1422,7 +1544,7 @@ describe('SettingsSheet tabs', () => {
     });
     // Start the save from a different tab, which is the real situation: the
     // footer is shared, so a user can press Save from anywhere.
-    await openTab('General');
+    await openTab('Appearance');
 
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
@@ -1441,13 +1563,155 @@ describe('SettingsSheet tabs', () => {
     renderSheet(config);
 
     await settleOnTab('Agent', 'Max concurrent', config);
-    // The approval timeout is on the Agent tab but *outside* its fold, next to
+    // The approval timeout is on the Agent pane but *outside* its fold, next to
     // the approval mode. Revealing it must not expand anything.
     fireEvent.input(screen.getByLabelText('Approval timeout (s)'), { target: { value: '0' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     expect(await screen.findByText('Approval timeout must be 1–86400 seconds.')).not.toBeNull();
     expect(advancedOf('agent').open).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Search: the rail's answer to "where is that setting".
+ * ------------------------------------------------------------------ */
+
+describe('SettingsSheet search', () => {
+  beforeEach(() => {
+    resetAppState();
+  });
+
+  afterEach(() => {
+    resetAppState();
+    vi.unstubAllGlobals();
+  });
+
+  /** The labels the rail currently shows, top to bottom. */
+  function railLabels(): (string | null | undefined)[] {
+    return screen
+      .queryAllByRole('tab')
+      .map((tab) => tab.querySelector('.settings-nav-label')?.textContent);
+  }
+
+  it('filters the rail to the sections a query reaches, and says what matched', async () => {
+    installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const input = await screen.findByRole('searchbox', { name: 'Search settings' });
+    fireEvent.input(input, { target: { value: 'timeout' } });
+
+    // The corpus is the rendered panels, so this is the sheet answering about
+    // itself: the approval timeout, the subagent timeout and the command
+    // timeouts in Limits all live on Agent.
+    expect(railLabels()).toEqual(['Agent']);
+    const note = screen
+      .getByRole('tab', { name: 'Agent' })
+      .querySelector('.settings-nav-note')?.textContent;
+    expect(note).toContain('Approvals');
+    expect(note).toContain('Limits');
+    expect(screen.getByText(/1 section match/)).not.toBeNull();
+  });
+
+  it('opens the first match on Enter, and focuses it', async () => {
+    installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const input = await screen.findByRole('searchbox', { name: 'Search settings' });
+    fireEvent.input(input, { target: { value: 'approval timeout' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    // The section is selected, scrolled to and focused, and the pane header
+    // names it — the three things that make a search result an arrival rather
+    // than a suggestion.
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: 'Agent' }).getAttribute('aria-selected')).toBe('true'),
+    );
+    expect(document.getElementById('settings-panel-agent')?.hasAttribute('hidden')).toBe(false);
+    const section = document.getElementById('settings-approvals')?.closest('.settings-section');
+    await waitFor(() => expect(section?.classList.contains('is-found')).toBe(true));
+    expect(document.activeElement).toBe(section);
+  });
+
+  it('opens a disclosure to reach a section inside it', async () => {
+    installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const input = await screen.findByRole('searchbox', { name: 'Search settings' });
+    fireEvent.input(input, { target: { value: 'max concurrent' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    // "Max concurrent" only exists inside Agent's Advanced fold, so the fold has
+    // to open before the section can be scrolled to.
+    await waitFor(() => expect(advancedOf('agent').open).toBe(true));
+    const section = document.getElementById('settings-subagents')?.closest('.settings-section');
+    await waitFor(() => expect(section?.classList.contains('is-found')).toBe(true));
+  });
+
+  it('clears on Escape without closing the sheet, and closes on the second press', async () => {
+    installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const input = await screen.findByRole('searchbox', { name: 'Search settings' });
+    fireEvent.input(input, { target: { value: 'timeout' } });
+    // The field claims Escape while it holds a query (`data-escape-local`), which
+    // is what stops the focus trap from closing the whole sheet.
+    expect(input.getAttribute('data-escape-local')).toBe('');
+    fireEvent.keyDown(input, { key: 'Escape' });
+
+    expect((input as HTMLInputElement).value).toBe('');
+    expect(railLabels()).toHaveLength(7);
+    expect(document.querySelector('[role=dialog]')).not.toBeNull();
+  });
+
+  it('says so when nothing matches, and offers the way back', async () => {
+    installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const input = await screen.findByRole('searchbox', { name: 'Search settings' });
+    fireEvent.input(input, { target: { value: 'zzzz' } });
+
+    expect(railLabels()).toHaveLength(0);
+    expect(await screen.findByText('No setting matches “zzzz”.')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear the search' }));
+    expect((input as HTMLInputElement).value).toBe('');
+    expect(railLabels()).toHaveLength(7);
+  });
+
+  it('keeps the rail operable while the selected section is filtered out', async () => {
+    installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const input = await screen.findByRole('searchbox', { name: 'Search settings' });
+    fireEvent.input(input, { target: { value: 'timeout' } });
+
+    // Appearance is still the panel on screen but no longer a row in the rail,
+    // so the first surviving row has to be the one Tab reaches.
+    expect(railLabels()).toEqual(['Agent']);
+    const agent = screen.getByRole('tab', { name: 'Agent' });
+    expect(agent.tabIndex).toBe(0);
+
+    // …and the arrow keys still move the selection from there.
+    fireEvent.keyDown(screen.getByRole('tablist', { name: 'Settings sections' }), {
+      key: 'ArrowDown',
+    });
+    expect(screen.getByRole('tab', { name: 'Agent' }).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('never lets Enter in the search field submit the settings form', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const input = await screen.findByRole('searchbox', { name: 'Search settings' });
+    fireEvent.input(input, { target: { value: 'zzzz' } });
+    const enter = createEvent.keyDown(input, { key: 'Enter' });
+    fireEvent(input, enter);
+
+    // A search field inside the form would otherwise submit it: Enter with no
+    // match has nothing to open, and an implicit save is not what was asked for.
+    expect(enter.defaultPrevented).toBe(true);
+    expect(patches).toHaveLength(0);
   });
 });
 /* ------------------------------------------------------------------ *

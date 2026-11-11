@@ -226,7 +226,11 @@ pub const UI_HIDE_INSPECTOR_TAB_CHANGES: &str = "inspector.tab.changes";
 pub const UI_HIDE_INSPECTOR_TAB_SESSION: &str = "inspector.tab.session";
 /// The results inspector's **Agents** tab.
 pub const UI_HIDE_INSPECTOR_TAB_AGENTS: &str = "inspector.tab.agents";
-/// The results inspector's **Context** button.
+/// The **Context** button in the session header.
+///
+/// The wire name predates the move: the control used to live in the results
+/// header and now sits in the session header, so hiding it works whether the
+/// results panel is docked, popped out or closed.
 pub const UI_HIDE_INSPECTOR_CONTEXT: &str = "inspector.context";
 
 /// Most contributions one plugin may add. A manifest is a manifest, not a UI

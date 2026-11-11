@@ -396,6 +396,28 @@ from 500 ms to a 30 s ceiling, plus a 300 s wall-clock ceiling for the chain
 `retry_max_total_secs` under `[model]`, or the `KARUCODE_RETRY_*`
 equivalents).
 
+Classification is by status first — 408/409/425/429 and 5xx retry, 400/413/422
+and 401/403/404 do not — but the body can overrule it in one direction: a
+refusal that names a rate limit, a cooldown or a reset window
+(`tier_limit_exceeded`, "reset after 2m", `"reset_seconds": 1024`) is retried
+whatever status carried it, because that condition clears by itself. When the
+body names its own window, the attempt waits that long instead of the
+exponential; when the window is longer than `retry_max_total_secs`, it fails at
+once and says so instead of crawling a backoff towards a reset it can never
+reach. Quota and balance wording (`insufficient_quota`) is deliberately excluded:
+that needs a recharge, not another attempt.
+
+A gateway that fronts several upstream channels is a fourth case: set
+`aggregator = true` on its profile (Settings → Models & providers → **Multi-channel
+gateway**, or the same key in `[model]`/`[[providers]]`) and a 401/403/404 is
+retried too, because there the status usually means *this channel's* key is dead.
+
+A third layer, `[limits] max_turn_retries` (default 2, `turn_retry_delay_ms`
+default 30 s, doubling), spends *time* rather than attempts: after both budgets
+above are spent, the same turn is asked again for a failure a wait can fix. It is
+announced as `stream_retry` plus a warning notice, and a dead key, a content
+refusal, a context overflow or a `[permanent]` verdict still ends the run at once.
+
 A stream that dies *after* it started cannot be replayed without duplicating
 what you already saw, so it is handled one level up: the partial attempt is
 discarded, the browser is told to drop it (`stream_retry`), and the request is

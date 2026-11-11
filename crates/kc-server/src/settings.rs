@@ -15,7 +15,7 @@
 // @kc-title: Change karucode's configuration
 // @kc-summary: The four config layers, which settings apply live, and how secrets and invalid values are handled.
 // @kc-tags: config, settings, configuration, toml, env
-// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_PARALLEL_TOOL_CALLS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:limits.parallel_tool_calls, config:notifications.enabled, config:notifications.min_run_secs, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings, config:[updates], config:updates.check, config:updates.check_secs, config:updates.manifest_url, config:updates.auto_apply, env:KARUCODE_UPDATE_CHECK, env:KARUCODE_UPDATE_CHECK_SECS, env:KARUCODE_UPDATE_MANIFEST_URL, env:KARUCODE_UPDATE_AUTO_APPLY, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, ui:Settings > Updates
+// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_PARALLEL_TOOL_CALLS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:limits.parallel_tool_calls, config:limits.max_turn_retries, config:limits.turn_retry_delay_ms, config:notifications.enabled, config:notifications.min_run_secs, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings, config:[updates], config:updates.check, config:updates.check_secs, config:updates.manifest_url, config:updates.auto_apply, env:KARUCODE_UPDATE_CHECK, env:KARUCODE_UPDATE_CHECK_SECS, env:KARUCODE_UPDATE_MANIFEST_URL, env:KARUCODE_UPDATE_AUTO_APPLY, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, ui:Settings > Updates
 //
 // # Where the settings come from
 //
@@ -246,6 +246,37 @@
 // numbers: `subagents.max_iterations` (0 = no ceiling) and
 // `subagents.timeout_secs`.
 //
+// ## A turn the provider gave up on is asked again, after a wait
+//
+// Two retry layers already sit under a turn, both counting *attempts in the same
+// second*: `[model] retry_max_retries` before any content arrives, and
+// `[model] retry_max_stream_restarts` for an answer that dies mid-stream. When
+// both are spent the run used to end, and the only recovery was a human typing
+// the prompt again - which is what happened 26 times in two weeks on one install,
+// every time for a condition that cleared by itself.
+//
+// ```toml
+// [limits]
+// max_turn_retries = 2        # 0 disables the layer; each retry is a generation
+// turn_retry_delay_ms = 30000 # first wait; doubles per retry, capped at 8x
+// ```
+//
+// This layer spends *time* instead of attempts. After the fast budgets are gone,
+// the same turn is asked again once the upstream has had 30 s, then 60 s, to
+// recover. It only engages for a failure a wait can fix: a transient status
+// (408/409/425/429/5xx), a body naming a rate limit, cooldown or reset window, or
+// a transport death with no status at all. A dead key (401), a content refusal, a
+// request the endpoint judged (`[permanent]`) and a context overflow still end the
+// run at once with their real reason - those are statements about the request, and
+// two more generations only buy the same answer.
+//
+// Every retry is announced, because a run that pauses for a minute otherwise looks
+// hung: a `stream_retry` event (a live client drops anything the failed attempt
+// rendered) and a warning notice naming the attempt, the wait and this key's name.
+// Nothing of a failed attempt is persisted, so a retry can never duplicate an
+// answer, and the run's own wall clock still applies: if the next wait would run
+// past `max_run_secs`, the run fails now instead.
+//
 // Environment: `KARUCODE_MAX_ITERATIONS`, `KARUCODE_MAX_RUN_SECS`,
 // `KARUCODE_CONTEXT_MAX_CHARS`, `KARUCODE_PARALLEL_TOOL_CALLS`.
 //
@@ -332,7 +363,8 @@
 // concurrent calls.
 //
 // This key is **not** `model.parallel_tool_calls`: that one asks the endpoint to
-// let the model emit several calls in one turn, and it lives on the Models tab.
+// let the model emit several calls in one turn, and it lives in the **Models &
+// providers** section of Settings.
 // This one decides how the calls the model did emit are run. Anything the
 // runtime cannot prove independent of its siblings always runs in call order -
 // `run_command` (a shell can touch anything), plugin and MCP tools, subagent
@@ -549,6 +581,10 @@ pub struct ModelPatch {
     pub parallel_tool_calls: Option<bool>,
     /// Whether the model accepts image input (`read_file` on a PNG/JPEG/...).
     pub supports_images: Option<bool>,
+    /// Multi-channel gateway: retry 401/403/404 because the next attempt lands on
+    /// a different upstream channel. Mirrored onto the active profile, which is
+    /// where the retry policy reads it.
+    pub aggregator: Option<bool>,
     /// Write-only. Empty strings are treated as absent.
     pub api_key: Option<String>,
     /// Erase the stored API key (wins over `api_key`).
@@ -569,6 +605,12 @@ pub struct LimitsPatch {
     pub search_max_results: Option<usize>,
     pub context_max_chars: Option<usize>,
     pub max_tool_calls_per_turn: Option<usize>,
+    /// Slow retry layer: how many times a turn the provider gave up on is asked
+    /// again, after a wait. 0 disables it.
+    pub max_turn_retries: Option<u32>,
+    /// Wait before the first turn retry; doubles per retry, capped at eight times
+    /// this.
+    pub turn_retry_delay_ms: Option<u64>,
     /// Run a turn's independent calls at the same time. Only meaningful for a
     /// session run's execution order; a boolean has no invalid value.
     pub parallel_tool_calls: Option<bool>,
@@ -658,6 +700,10 @@ pub struct ProviderPatch {
     /// Replaces the whole model list when present.
     pub models: Option<Vec<ModelEntry>>,
     pub request_timeout_secs: Option<u64>,
+    /// This endpoint fronts several upstream channels, so a 401/403/404 may mean
+    /// "this channel's key is dead" and be worth retrying. See
+    /// [`ProviderProfile::aggregator`].
+    pub aggregator: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1172,6 +1218,10 @@ impl Settings for SettingsHandle {
         resolve_session_model(&self.snapshot(), selection)
     }
 
+    async fn known_models(&self, selection: Option<&SessionModelSelection>) -> Vec<String> {
+        self.snapshot().known_models(selection)
+    }
+
     async fn limits(&self) -> Limits {
         self.read().limits.clone()
     }
@@ -1485,6 +1535,9 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
             if let Some(timeout) = incoming.request_timeout_secs {
                 profile.request_timeout_secs = timeout;
             }
+            if let Some(aggregator) = incoming.aggregator {
+                profile.aggregator = aggregator;
+            }
             match index {
                 Some(index) => config.providers[index] = profile,
                 None => config.providers.push(profile),
@@ -1536,6 +1589,9 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
                 }
                 config.active_model = Some(model_id.to_string());
             }
+            if let Some(aggregator) = model_patch.and_then(|m| m.aggregator) {
+                profile.aggregator = aggregator;
+            }
         }
     }
 
@@ -1572,6 +1628,12 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         }
         if let Some(v) = limits.max_tool_calls_per_turn {
             config.limits.max_tool_calls_per_turn = v;
+        }
+        if let Some(v) = limits.max_turn_retries {
+            config.limits.max_turn_retries = v;
+        }
+        if let Some(v) = limits.turn_retry_delay_ms {
+            config.limits.turn_retry_delay_ms = v;
         }
         if let Some(v) = limits.parallel_tool_calls {
             config.limits.parallel_tool_calls = v;
@@ -2298,6 +2360,12 @@ const LIMITS_BOUNDS: &[(&str, u64, u64)] = &[
     ("limits.max_command_timeout_secs", 1, 3_600),
     ("limits.search_max_results", 1, 2_000),
     ("limits.max_tool_calls_per_turn", 1, 256),
+    // 0 = the layer is off: a turn the provider gave up on ends the run, as it
+    // did before the layer existed. Each retry is a fresh generation.
+    ("limits.max_turn_retries", 0, 10),
+    // The first wait; it doubles per retry up to eight times this. 0 means "ask
+    // again at once", which is only sane against a local endpoint.
+    ("limits.turn_retry_delay_ms", 0, 600_000),
 ];
 
 const SUBAGENT_BOUNDS: &[(&str, u64, u64)] = &[
@@ -2327,7 +2395,7 @@ fn check_bounds(name: &str, value: u64, min: u64, max: u64) -> Result<()> {
 }
 
 fn validate_limits(limits: &Limits) -> Result<()> {
-    let values: [(&str, u64); 11] = [
+    let values: [(&str, u64); 13] = [
         (
             "limits.max_file_read_bytes",
             limits.max_file_read_bytes as u64,
@@ -2360,6 +2428,8 @@ fn validate_limits(limits: &Limits) -> Result<()> {
             "limits.max_tool_calls_per_turn",
             limits.max_tool_calls_per_turn as u64,
         ),
+        ("limits.max_turn_retries", u64::from(limits.max_turn_retries)),
+        ("limits.turn_retry_delay_ms", limits.turn_retry_delay_ms),
     ];
     for ((name, value), (expected, min, max)) in values.iter().zip(LIMITS_BOUNDS) {
         debug_assert_eq!(*name, *expected, "bounds table and values disagree");
@@ -3738,6 +3808,71 @@ mod tests {
         let profile = cfg.active_profile().unwrap();
         assert_eq!(profile.models.len(), 2);
         assert_eq!(profile.api_key.as_deref(), Some("sk-secret"));
+    }
+
+    /// `aggregator` decides whether a 401/403/404 is retried, so it has to be
+    /// editable per profile from the settings screen - and it has to reach the
+    /// retry policy, which reads the *effective* model, not the profile list.
+    #[test]
+    fn the_multi_channel_switch_round_trips_to_the_effective_model() {
+        let mut cfg = test_config();
+        cfg.normalize_providers();
+        // A fresh profile is conservative.
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                providers: Some(ProvidersPatch {
+                    upsert: vec![ProviderPatch {
+                        id: "gateway".into(),
+                        name: Some("Gateway".into()),
+                        models: Some(vec![ModelEntry::new("model-a")]),
+                        ..ProviderPatch::default()
+                    }],
+                    delete: Vec::new(),
+                }),
+                active: Some(ActivePatch {
+                    provider: Some("gateway".into()),
+                    model: Some("model-a".into()),
+                }),
+                ..ConfigPatch::default()
+            },
+        )
+        .unwrap();
+        assert!(!cfg.active_profile().unwrap().aggregator);
+        assert!(
+            !cfg.effective_model().aggregator,
+            "the retry policy reads the effective model"
+        );
+        // It is in the browser's view, so the switch can render its state.
+        assert_eq!(
+            cfg.active_profile().unwrap().public_view()["aggregator"],
+            serde_json::json!(false)
+        );
+
+        // Flipping it is one field in one patch, and it survives the mirror.
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                providers: Some(ProvidersPatch {
+                    upsert: vec![ProviderPatch {
+                        id: "gateway".into(),
+                        aggregator: Some(true),
+                        ..ProviderPatch::default()
+                    }],
+                    delete: Vec::new(),
+                }),
+                ..ConfigPatch::default()
+            },
+        )
+        .unwrap();
+        assert!(cfg.active_profile().unwrap().aggregator);
+        assert!(cfg.effective_model().aggregator);
+        // Nothing else about the profile was touched.
+        assert_eq!(cfg.active_profile().unwrap().models.len(), 1);
+        assert_eq!(
+            cfg.active_profile().unwrap().public_view()["aggregator"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]

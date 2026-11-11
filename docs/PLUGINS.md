@@ -736,7 +736,7 @@ code is the normal case, not a special one.
 | Slot | Where it is drawn |
 | --- | --- |
 | `composer.toolbar` | the composer's action row, beside the model controls |
-| `inspector.header` | the results dock header, beside **Context** |
+| `inspector.header` | the results panel's own header |
 | `session.header` | the session header, before the built-in chips |
 
 **Keybindings** — a `keybinding` is not drawn anywhere; the app matches it:
@@ -767,7 +767,7 @@ code is the normal case, not a special one.
 | `inspector.tab.changes` | the **Git** tab |
 | `inspector.tab.session` | the **Session usage** tab |
 | `inspector.tab.agents` | the **Agents** tab |
-| `inspector.context` | the **Context** button in the results header |
+| `inspector.context` | the **Context** button in the session header |
 
 Hiding is **app-wide** (every session, every project) and it is an allowlist on
 both sides: the host refuses anything else, and the browser refuses it again. A

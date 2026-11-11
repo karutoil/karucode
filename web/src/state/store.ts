@@ -67,6 +67,7 @@ export type AgentFilter = 'all' | AgentStatus;
 
 const RAIL_KEY = 'karucode.railCollapsed';
 const INSPECTOR_KEY = 'karucode.inspectorCollapsed';
+const INSPECTOR_MODE_KEY = 'karucode.inspectorMode';
 const LAST_SESSION_KEY = 'karucode.lastSession';
 const LAST_PROJECT_KEY = 'karucode.lastProject';
 /** Browser-side notification preferences. Server-side routing lives in config. */
@@ -115,6 +116,35 @@ export function persistBool(key: 'rail' | 'inspector', value: boolean): void {
   } catch {
     // Storage may be disabled; the in-memory signal still works for this tab.
   }
+}
+
+/**
+ * How the results inspector is presented.
+ *
+ * `docked` is the shared layout: the panel is a column beside the conversation
+ * and the separator belongs to that split. `popout` takes it out of the layout
+ * entirely — the conversation keeps the whole pane and Results arrives as an
+ * overlay card on demand, the way Context does. It is a per-browser presentation
+ * choice (like the theme), not a server setting.
+ */
+export type InspectorMode = 'docked' | 'popout';
+
+const INSPECTOR_MODES: readonly InspectorMode[] = ['docked', 'popout'];
+
+export function readInspectorMode(): InspectorMode {
+  try {
+    if (typeof localStorage === 'undefined') return 'docked';
+    const stored = localStorage.getItem(INSPECTOR_MODE_KEY);
+    // An older or hand-edited value is not a reason to guess: docked is the
+    // layout this build has always had.
+    return INSPECTOR_MODES.includes(stored as InspectorMode) ? (stored as InspectorMode) : 'docked';
+  } catch {
+    return 'docked';
+  }
+}
+
+export function persistInspectorMode(mode: InspectorMode): void {
+  writeString(INSPECTOR_MODE_KEY, mode);
 }
 
 export function readLastSessionId(): string | null {
@@ -279,6 +309,7 @@ export const narrowViewport = signal<boolean>(
 
 export const railCollapsed = signal(readBool(RAIL_KEY, false));
 export const inspectorCollapsed = signal(readBool(INSPECTOR_KEY, false));
+export const inspectorMode = signal<InspectorMode>(readInspectorMode());
 export const mobileSheet = signal<MobileSheet>(null);
 export const inspectorTab = signal<InspectorTab>('workspace');
 /**

@@ -290,6 +290,13 @@ impl StreamState {
                 .map(text_of)
                 .any(|kind| transient_error_kind(&kind));
             let message = redact(&format!("provider error: {message}"), &self.secrets);
+            // A gateway can also put the verdict in the *prose* and leave the
+            // structured fields empty: `[403]: ... (reset after 3s)`,
+            // `[402]: no provider's ask matches your max-per-mtok bid
+            // (reset after 2m)`. Without this, an in-stream rate limit is
+            // forwarded as `retryable: false` and the run ends over a twenty
+            // second window.
+            let retryable = retryable || crate::errors::is_transient_refusal(&message);
             // The message is over. Anything the DSML scanner still holds is
             // text, and it has to be queued ahead of the error so the partial
             // answer is not lost with it.

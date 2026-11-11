@@ -250,6 +250,14 @@
 //   `interrupted`.
 // * A subagent runs on its session's pinned model, not the install-wide default:
 //   pinning a session to a small model makes its subagents cheap too.
+// * The `model` argument overrides that for one child, and it is checked against
+//   the models this install actually offers **before** the child starts. An id
+//   the endpoint does not know (`sonnet`, `gpt-5`, or - the common mistake - the
+//   *name* of the agent you are spawning) is refused as a tool error naming real
+//   ids, so you can fix it in the same turn. Omit `model` to inherit the
+//   session's. The check needs a catalog: a profile that declares fewer than two
+//   models refuses nothing, because it says nothing about which other ids the
+//   endpoint accepts.
 // * A subagent that keeps working without progress burns tokens until
 //   `timeout_secs`. Keep it pointed at one task; split unrelated work into
 //   separate subagents instead of widening one.
@@ -932,12 +940,34 @@ async fn spawn_batch(
         .await;
     let limits = inner.deps.settings.limits().await;
     let policy = inner.deps.settings.approval_policy().await;
+    // A spawn's `model` is free text the caller typed; nothing downstream checks
+    // it, and an id the endpoint cannot resolve kills the child on its *first*
+    // provider call - after a slot, a claim and a transcript were spent. Ask the
+    // settings what this install can actually send, once, before any of that.
+    // An empty answer means "no catalog to judge against" and refuses nothing.
+    let known_models = inner
+        .deps
+        .settings
+        .known_models(session_selection.as_ref())
+        .await;
 
     let mut started: Vec<Arc<LiveAgent>> = Vec::with_capacity(tasks.len());
     let mut warnings: Vec<String> = Vec::new();
     let mut refusals: Vec<String> = Vec::new();
 
     for (index, spawn) in tasks.iter().enumerate() {
+        // Refuse an unusable `model` override before the slot, the claim and the
+        // transcript: the caller can fix this in the same turn, and the tool
+        // result is the only place it will read why.
+        if let Some(reason) = spawn
+            .model
+            .as_deref()
+            .and_then(|requested| unknown_model_refusal(&known_models, requested))
+        {
+            refusals.push(format!("{}: {reason}", spawn.label(index)));
+            continue;
+        }
+
         // Background and nested blocking spawns take a slot only when one is
         // immediately available. In particular, a nested blocking waiter holds
         // an ancestor's permit until its own child returns, so waiting for a full
@@ -1163,6 +1193,61 @@ fn first_line(text: &str) -> String {
     } else {
         line.to_string()
     }
+}
+
+/// Why a spawn's `model` argument cannot be used, if it cannot.
+///
+/// This is the one id in the whole runtime that nothing derived: the caller
+/// typed it into `spawn_agent`. `spawn_batch` copies it straight into the
+/// resolved model (the profile's endpoint, key and limits stay), so an id the
+/// endpoint does not know fails the child on its first provider call with a 400
+/// like *"Unable to determine provider for model `database-audit`"* - after the
+/// slot, the claims and the transcript were already spent, and with no hint that
+/// the argument was the problem. On this install that was 47 of 152 failed
+/// subagents, and most of the ids were the *name of the agent being spawned*.
+///
+/// A session model pin cannot fail this way: it resolves through
+/// `Settings::resolve_model`, which validates against the same profile list.
+///
+/// Refusing returns the reason as tool output the caller can act on in the same
+/// turn, which is strictly better than a dead subagent it has to guess about.
+/// `known` being empty means the profile declares no catalog, and then nothing is
+/// refused: an install that accepts free-form ids today keeps working.
+fn unknown_model_refusal(known: &[String], requested: &str) -> Option<String> {
+    let requested = requested.trim();
+    if known.is_empty() {
+        return None;
+    }
+    if requested.is_empty() {
+        return Some(
+            "the `model` override is empty: omit it to inherit the session's model, or name one \
+             of this install's models"
+                .to_string(),
+        );
+    }
+    if known.iter().any(|id| id == requested) {
+        return None;
+    }
+    // Enough to choose from without turning a refusal into a wall of ids: the
+    // caller only needs the shape of a real id, not the whole catalog.
+    const SHOWN: usize = 8;
+    let shown = known
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = known.len().saturating_sub(SHOWN);
+    let tail = if more > 0 {
+        format!("{shown} (and {more} more)")
+    } else {
+        shown
+    };
+    Some(format!(
+        "unknown model `{requested}`: this install offers {} model(s) and none has that id. \
+         Omit `model` to inherit the session's model, or pass one of: {tail}",
+        known.len()
+    ))
 }
 
 /// Owns a persisted child until its real loop is spawned.
@@ -4131,5 +4216,35 @@ mod tests {
             parse_spawn_options(&request(serde_json::json!({ "background": true }))).unwrap();
         assert!(options.background);
         assert!(parse_spawn_options(&request(serde_json::json!({ "background": "yes" }))).is_err());
+    }
+
+    #[test]
+    fn an_unknown_model_override_is_refused_with_a_usable_alternative() {
+        let known = vec!["gateway/model-a".to_string(), "gateway/model-b".to_string()];
+        // A listed id is fine, including one with surrounding whitespace.
+        assert!(unknown_model_refusal(&known, " gateway/model-b ").is_none());
+        // The shapes actually seen in the database: a bare family name, and the
+        // name of the agent being spawned.
+        for bad in ["sonnet", "gpt-5", "database-audit", "default"] {
+            let reason = unknown_model_refusal(&known, bad).expect("must refuse");
+            assert!(reason.contains(&format!("`{bad}`")), "{reason}");
+            assert!(reason.contains("gateway/model-a"), "{reason}");
+            assert!(reason.contains("Omit `model`"), "{reason}");
+        }
+        // An empty override is refused too: it would send an empty model id.
+        assert!(unknown_model_refusal(&known, "   ").is_some());
+        // No catalog means no judgement. This is what keeps a profile that
+        // declares no models (every free-form endpoint) working unchanged.
+        assert!(unknown_model_refusal(&[], "anything-goes").is_none());
+    }
+
+    #[test]
+    fn a_long_catalog_is_summarised_instead_of_dumped() {
+        let known: Vec<String> = (0..40).map(|i| format!("gateway/model-{i}")).collect();
+        let reason = unknown_model_refusal(&known, "sonnet").unwrap();
+        assert!(reason.contains("40 model(s)"), "{reason}");
+        assert!(reason.contains("model-7"), "{reason}");
+        assert!(!reason.contains("model-8,"), "only the first few are listed: {reason}");
+        assert!(reason.contains("(and 32 more)"), "{reason}");
     }
 }

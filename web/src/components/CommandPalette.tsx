@@ -1,13 +1,14 @@
 import { Fragment, type JSX } from 'preact';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { relativeTime } from '../lib/format';
+import { matchSegments } from '../lib/paletteMatch';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { Dialog } from './Dialog';
 import {
   ArrowRightIcon,
   BellIcon,
-  FileIcon,
+  ChatIcon,
   PanelIcon,
   PlusIcon,
   pluginPanelIcon,
@@ -23,6 +24,26 @@ interface PaletteAction {
   hint?: string;
   icon: JSX.Element;
   run: () => void;
+}
+
+/**
+ * The part of `text` the query matched, in the accent as ink.
+ *
+ * A palette that filters without saying *why* a row survived leaves the reader
+ * guessing — "sess" matches three rows for three different reasons. Marking the
+ * run is the answer, and it is the same substring the filter tested, so the two
+ * can never disagree.
+ */
+function matched(text: string, query: string): JSX.Element | string {
+  const segments = matchSegments(text, query);
+  if (!segments.some((segment) => segment.hit)) return text;
+  return (
+    <>
+      {segments.map((segment) =>
+        segment.hit ? <mark class="palette-mark">{segment.text}</mark> : segment.text,
+      )}
+    </>
+  );
 }
 
 export function CommandPalette(): JSX.Element | null {
@@ -69,7 +90,9 @@ export function CommandPalette(): JSX.Element | null {
             ? 'Show workspace results'
             : 'Hide workspace results',
         group: 'Actions',
-        hint: 'Results',
+        // No hint: the trailing column holds a chord, an age or a count, and this
+        // row has none of the three. It used to read "Results", which restated the
+        // label it sat beside.
         icon: <PanelIcon size={15} />,
         run: actions.toggleInspector,
       },
@@ -99,7 +122,7 @@ export function CommandPalette(): JSX.Element | null {
         label: session.title || 'Untitled session',
         group: 'Sessions',
         hint: `${relativeTime(session.updated_at, now)}${session.running ? ' · running' : ''}`,
-        icon: <FileIcon size={15} />,
+        icon: <ChatIcon size={15} />,
         run: () => actions.switchSession(session.id),
       });
     }
@@ -143,6 +166,11 @@ export function CommandPalette(): JSX.Element | null {
       `${action.group} ${action.label} ${action.hint ?? ''}`.toLowerCase().includes(needle),
     );
   }, [actionsList, query]);
+
+  // How many rows of each group survived the filter: the heading's count is a
+  // reading of the list in front of the reader, not of the catalog behind it.
+  const groupCounts = new Map<string, number>();
+  for (const row of filtered) groupCounts.set(row.group, (groupCounts.get(row.group) ?? 0) + 1);
 
   useEffect(() => {
     setActiveIndex((current) => Math.min(current, Math.max(0, filtered.length - 1)));
@@ -205,7 +233,7 @@ export function CommandPalette(): JSX.Element | null {
             }
           }}
         />
-        <kbd class="palette-esc">ESC</kbd>
+        <kbd class="palette-esc">Esc</kbd>
       </div>
 
       <p class="sr-only" aria-live="polite">
@@ -215,7 +243,11 @@ export function CommandPalette(): JSX.Element | null {
       <ul class="palette-list" id="palette-list" role="listbox" aria-label="Commands">
         {filtered.length === 0 ? (
           <li class="palette-empty" role="presentation">
-            No matching commands.
+            <SearchIcon size={18} />
+            <p class="palette-empty-title">No matching commands</p>
+            <p class="palette-empty-copy">
+              Nothing in a name, a group or a shortcut matched. Try a shorter word.
+            </p>
           </li>
         ) : (
           filtered.map((action, index) => {
@@ -223,8 +255,13 @@ export function CommandPalette(): JSX.Element | null {
             return (
               <Fragment key={action.id}>
                 {showGroup ? (
-                  <li class="palette-group-label" role="presentation" aria-hidden="true">
+                  <li
+                    class="session-group-label palette-group-label"
+                    role="presentation"
+                    aria-hidden="true"
+                  >
                     {action.group}
+                    <span>{groupCounts.get(action.group) ?? 0}</span>
                   </li>
                 ) : null}
                 <li
@@ -238,7 +275,7 @@ export function CommandPalette(): JSX.Element | null {
                   <span class="palette-item-icon" aria-hidden="true">
                     {action.icon}
                   </span>
-                  <span class="palette-label">{action.label}</span>
+                  <span class="palette-label">{matched(action.label, query)}</span>
                   {action.hint ? (
                     <span class="palette-hint">{action.hint}</span>
                   ) : (
@@ -253,16 +290,26 @@ export function CommandPalette(): JSX.Element | null {
         )}
       </ul>
 
+      {/* One hint line: what the keys do on the left, how many rows are in front
+       * of you on the right. The count is aria-hidden because the live region
+       * above already announces it — a screen reader must not hear it twice. */}
       <footer class="palette-footer">
-        <span>
-          <kbd>↑</kbd>
-          <kbd>↓</kbd> navigate
+        <span class="palette-keys">
+          <span>
+            <kbd>↑</kbd>
+            <kbd>↓</kbd> move
+          </span>
+          <span>
+            <kbd>Enter</kbd> run
+          </span>
+          <span>
+            <kbd>Esc</kbd> close
+          </span>
         </span>
-        <span>
-          <kbd>Enter</kbd> run
-        </span>
-        <span>
-          <kbd>Esc</kbd> close
+        <span class="palette-count" aria-hidden="true">
+          {filtered.length === actionsList.length
+            ? `${filtered.length} result${filtered.length === 1 ? '' : 's'}`
+            : `${filtered.length} of ${actionsList.length}`}
         </span>
       </footer>
     </Dialog>

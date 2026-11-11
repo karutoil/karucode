@@ -295,7 +295,10 @@ async fn plain_text_run_persists_messages_and_completes() {
 
 #[tokio::test]
 async fn a_session_run_uses_its_own_model_selection() {
+    // Each run gets exactly one scripted request, so the slow retry layer is off:
+    // this test is about which model a run asks, not about how often it asks.
     let mut h = HarnessBuilder::new(vec![Script::text("done")])
+        .settings(without_turn_retries())
         .build()
         .await;
 
@@ -3658,6 +3661,7 @@ async fn a_wait_mixed_with_a_repeated_read_is_still_stopped() {
 #[tokio::test]
 async fn provider_failure_marks_the_run_failed_with_a_visible_error() {
     let mut h = HarnessBuilder::new(vec![Script::Fail("connection refused".into())])
+        .settings(without_turn_retries())
         .build()
         .await;
 
@@ -3704,6 +3708,7 @@ async fn provider_error_chunk_keeps_the_partial_assistant_text() {
             retryable: true,
         },
     ])])
+    .settings(without_turn_retries())
     .model(restarts(0))
     .build()
     .await;
@@ -3711,7 +3716,7 @@ async fn provider_error_chunk_keeps_the_partial_assistant_text() {
     let events = h.run_to_finish("fail partially").await;
     assert_eq!(finished_status(&events), "failed");
     assert!(count(&events, "error") == 1);
-    assert_eq!(count(&events, "stream_retry"), 0);
+    assert_eq!(count(&events, "stream_retry"), 0, "{:?}", kinds(&events));
 
     let messages = h.session_messages().await;
     let assistant = messages
@@ -3734,6 +3739,7 @@ async fn a_failed_turn_keeps_the_reasoning_it_had_already_streamed() {
             retryable: true,
         },
     ])])
+    .settings(without_turn_retries())
     .model(restarts(0))
     .build()
     .await;
@@ -3762,6 +3768,33 @@ fn restarts(max_restarts: u32) -> ModelConfig {
         retry_max_delay_ms: 2,
         ..ModelConfig::default()
     }
+}
+
+/// Settings with the *slow* turn-retry layer off.
+///
+/// A test that pins what one retry layer does should not also be a test of the
+/// other: `restarts(n)` budgets attempts in the same second, `max_turn_retries`
+/// waits and asks again after the fast budget is spent. Without this, "the turn
+/// fails and keeps its partial text" silently becomes "the turn fails after two
+/// more waits".
+///
+/// Note the builder order: `.settings()` replaces the whole `FakeSettings`, so it
+/// has to come *before* `.model(...)`, which writes one field of it.
+fn without_turn_retries() -> FakeSettings {
+    FakeSettings::default().with_limits(Limits {
+        max_turn_retries: 0,
+        ..Limits::default()
+    })
+}
+
+/// Settings with `retries` slow turn retries, a millisecond wait, and the
+/// product's other defaults.
+fn turn_retries(retries: u32) -> FakeSettings {
+    FakeSettings::default().with_limits(Limits {
+        max_turn_retries: retries,
+        turn_retry_delay_ms: 1,
+        ..Limits::default()
+    })
 }
 
 /// The failure this feature exists for: the gateway streams some reasoning and
@@ -3860,6 +3893,7 @@ async fn mid_stream_restarts_are_bounded_and_the_last_error_is_reported() {
         })
         .collect();
     let mut h = HarnessBuilder::new(scripts)
+        .settings(without_turn_retries())
         .model(restarts(2))
         .build()
         .await;
@@ -3888,6 +3922,112 @@ async fn mid_stream_restarts_are_bounded_and_the_last_error_is_reported() {
         .collect();
     assert_eq!(assistants.len(), 1);
     assert_eq!(assistants[0].content, "attempt 2");
+}
+
+/// The layer this file's slow budget exists for: the provider spent its whole
+/// attempt budget on a channel that was down, which used to end the run. The turn
+/// retry waits and asks the same question again - what the operator was doing by
+/// hand 26 times in two weeks on one install.
+#[tokio::test]
+async fn a_turn_the_provider_gave_up_on_is_asked_again_after_a_wait() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::Fail(
+            "provider error: upstream provider error (503 Service Unavailable) [http 503] \
+             (gave up after 50 attempts)"
+                .into(),
+        ),
+        Script::text("answered the second time"),
+    ])
+    .settings(turn_retries(1))
+    .model(restarts(0))
+    .build()
+    .await;
+
+    assert_eq!(
+        h.settings.limits.max_turn_retries,
+        1,
+        "the harness must hand the loop the budget this test is about"
+    );
+    let events = h.run_to_finish("answer").await;
+    let err = events.iter().find_map(|e| match &e.event {
+        Event::Error { message, .. } => Some(message.clone()),
+        _ => None,
+    });
+    assert_eq!(finished_status(&events), "completed", "{:?} err={err:?}", kinds(&events));
+    assert_eq!(h.factory.requests().len(), 2, "the same turn, asked twice");
+
+    // Announced twice over: the event is what makes a live client drop anything
+    // the failed attempt rendered, the notice is what tells the reader why the
+    // answer is late.
+    let (attempt, max_attempts, reason) = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::StreamRetry {
+                attempt,
+                max_attempts,
+                reason,
+            } => Some((*attempt, *max_attempts, reason.clone())),
+            _ => None,
+        })
+        .expect("a stream_retry announcing the wait");
+    assert_eq!(attempt, 1);
+    assert_eq!(max_attempts, 2, "no fast restarts + one slow retry");
+    assert!(reason.contains("503"), "{reason}");
+
+    let notice = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::Notice { level, message } if level == "warn" => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a warning notice");
+    assert!(
+        notice.contains("turn retry 1 of 1"),
+        "the notice names the retry budget: {notice}"
+    );
+    assert!(
+        notice.contains("limits.max_turn_retries"),
+        "the notice names the setting: {notice}"
+    );
+
+    // Nothing of the failed attempt is in the transcript, so a retry can never
+    // duplicate an answer.
+    let assistants: Vec<_> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|m| m.role == "assistant")
+        .collect();
+    assert_eq!(assistants.len(), 1);
+    assert_eq!(assistants[0].content, "answered the second time");
+}
+
+/// The other half of the contract: a failure that is a judgement about the request
+/// must not burn two more generations finding out. A revoked key, a content
+/// refusal and a request the endpoint rejected all say the same thing twice.
+#[tokio::test]
+async fn a_permanent_failure_is_not_asked_again_after_a_wait() {
+    // A context overflow is not in this list on purpose: it is retried by the
+    // compaction path (which changes the request), not by this layer.
+    for message in [
+        "provider error: No active credentials for provider: t3-web. [http 401]",
+        "provider rejected the request (400 Bad Request) [http 400] [permanent]",
+        "provider access denied (403 Forbidden) [http 403]",
+    ] {
+        let mut h = HarnessBuilder::new(vec![
+            Script::Fail(message.into()),
+            Script::text("an extra generation that must never happen"),
+        ])
+        .settings(turn_retries(2))
+        .model(restarts(0))
+        .build()
+        .await;
+
+        let events = h.run_to_finish("answer").await;
+        assert_eq!(finished_status(&events), "failed", "{message}");
+        assert_eq!(h.factory.requests().len(), 1, "{message}");
+        assert_eq!(count(&events, "stream_retry"), 0, "{message}");
+    }
 }
 
 #[tokio::test]
@@ -4167,6 +4307,7 @@ async fn a_stream_that_ends_without_a_finish_reason_fails_visibly() {
     let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![ProviderChunk::Text(
         "partial".into(),
     )])])
+    .settings(without_turn_retries())
     .model(restarts(0))
     .build()
     .await;
@@ -4205,6 +4346,7 @@ async fn a_stream_that_ends_with_the_providers_eof_reason_is_not_success() {
             reason: "eof".into(),
         },
     ])])
+    .settings(without_turn_retries())
     .model(restarts(0))
     .build()
     .await;
@@ -4944,6 +5086,8 @@ async fn subagent_failure_is_isolated_from_the_parent_run() {
         Script::Fail("subagent model exploded".into()),
         Script::text("parent carried on"),
     ])
+    // One script per actor: a retried child would eat the parent's turn.
+    .settings(without_turn_retries())
     .build()
     .await;
 
@@ -5219,6 +5363,47 @@ async fn subagent_model_override_is_used_for_the_child_request() {
     assert_eq!(requests[0].model, "fake-model");
     assert_eq!(requests[1].model, "cheap-model");
     assert_eq!(h.store.agents()[0].model, "cheap-model");
+}
+
+/// The `model` argument of a spawn is the one model id nobody derived, and an id
+/// the endpoint cannot resolve used to kill the child on its first provider call.
+/// It must be refused up front, in the tool result, naming a real alternative.
+#[tokio::test]
+async fn an_unknown_subagent_model_is_refused_before_the_child_is_started() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[(
+            "call_spawn",
+            SPAWN_AGENT_TOOL,
+            &serde_json::json!({ "task": "child work", "model": "sonnet" }).to_string(),
+        )]),
+        Script::text("parent done"),
+    ])
+    .settings(FakeSettings::default().with_known_models(&["fake-model", "cheap-model"]))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("delegate").await;
+    // A refusal is a tool error, not a failed run: the caller can fix it now.
+    assert_eq!(finished_status(&events), "completed");
+    let outputs: Vec<String> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::ToolCallFinished { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .collect();
+    let refusal = outputs
+        .iter()
+        .find(|output| output.contains("unknown model"))
+        .unwrap_or_else(|| panic!("expected a refusal naming the id: {outputs:?}"));
+    assert!(refusal.contains("`sonnet`"), "{refusal}");
+    // The alternative it names is one the caller can actually pass.
+    assert!(refusal.contains("cheap-model"), "{refusal}");
+    // Nothing was started, so nothing was persisted and no provider call was
+    // made with the bad id: the two requests are the parent's own two turns.
+    assert!(h.store.agents().is_empty(), "{:?}", h.store.agents());
+    let models: Vec<String> = h.factory.requests().iter().map(|r| r.model.clone()).collect();
+    assert_eq!(models, vec!["fake-model".to_string(); 2], "{models:?}");
 }
 
 #[tokio::test]

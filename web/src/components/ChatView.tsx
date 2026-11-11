@@ -11,7 +11,7 @@ import type { TreeLoader } from '../lib/mentions';
 import { getGitStatus } from '../api/endpoints';
 import * as actions from '../state/actions';
 import * as terminalState from '../state/terminals';
-import { contextUsage, formatContextPercent, totalUsage } from '../state/selectors';
+import { contextTone, contextUsage, formatContextPercent, totalUsage } from '../state/selectors';
 import * as store from '../state/store';
 import * as workbench from '../state/workbench';
 import * as workspaceTabs from '../state/workspaceTabs';
@@ -27,7 +27,7 @@ import { ContextDrawer } from './ContextDrawer';
 import { WorkbenchTaskMenu } from './WorkbenchTaskMenu';
 import { LiveAnnouncer } from './LiveAnnouncer';
 import { PluginSlot } from './PluginSlot';
-import { UI_SLOT_SESSION_HEADER } from './uiContributions';
+import { isUiHidden, UI_HIDE_CONTEXT_BUTTON, UI_SLOT_SESSION_HEADER } from './uiContributions';
 import { Tabs, type TabItem } from './Tabs';
 import { TerminalTab } from './TerminalTab';
 import {
@@ -39,6 +39,7 @@ import {
   FileCodeIcon,
   GitIcon,
   MenuIcon,
+  PanelIcon,
   RefreshIcon,
   SearchIcon,
   TerminalIcon,
@@ -203,15 +204,56 @@ function ChatSkeleton(): JSX.Element {
   );
 }
 
+/**
+ * The session header's context reading: a ring that fills with the newest
+ * provider-reported prompt, so the only words left in the button are the number.
+ *
+ * The ring is decorative (the button carries the accessible name), and with no
+ * reading it draws an empty track rather than a fabricated fill.
+ */
+function ContextUsageRing({ fraction }: { fraction: number | null }): JSX.Element {
+  const radius = 8;
+  const circumference = 2 * Math.PI * radius;
+  const filled = fraction === null ? 0 : Math.min(1, Math.max(0, fraction));
+  return (
+    <svg
+      class="context-header-ring"
+      width={16}
+      height={16}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2.4"
+      stroke-linecap="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle class="context-header-ring-track" cx="12" cy="12" r={radius} />
+      <circle
+        class="context-header-ring-fill"
+        cx="12"
+        cy="12"
+        r={radius}
+        stroke-dasharray={circumference}
+        stroke-dashoffset={circumference * (1 - filled)}
+        transform="rotate(-90 12 12)"
+      />
+    </svg>
+  );
+}
+
 function SessionHeader({
   view,
   onShowChanges,
   onSelectView,
+  onToggleResults,
   controlPlane,
 }: {
   view: WorkspaceView;
   onShowChanges: () => void;
   onSelectView: (next: WorkspaceView) => void;
+  /** Open or close the popped-out results panel from the header. */
+  onToggleResults: () => void;
   controlPlane: boolean;
 }): JSX.Element {
   const session = store.activeSession.value;
@@ -225,6 +267,12 @@ function SessionHeader({
   const railExpanded = narrow ? store.mobileSheet.value === 'sessions' : !store.railCollapsed.value;
   const contextExpanded = workbench.contextOpen.value;
   const usage = contextUsage(store.chat.value, store.activeContextWindow.value);
+  // A popped-out Results panel has no header of its own on screen while it is
+  // closed, so the way in has to live here. Docked, the panel's own header owns
+  // that control and this one would be a second way to do the same thing.
+  const resultsPopout = !controlPlane && !narrow && store.inspectorMode.value === 'popout';
+  const resultsOpen = !store.inspectorCollapsed.value;
+  const contextHidden = isUiHidden(store.pluginUi.value, UI_HIDE_CONTEXT_BUTTON);
 
   // A file tab is the document the reader is looking at, so the breadcrumb names
   // the file rather than the session behind it.
@@ -317,24 +365,38 @@ function SessionHeader({
             </span>
           ) : null}
         </button>
-        {!controlPlane ? (
+        {!controlPlane && !contextHidden ? (
           <button
             type="button"
             class="head-btn context-header-btn"
+            data-tone={usage ? contextTone(usage.fraction) : undefined}
             onClick={() => workbench.openContext('now')}
             aria-label={usage ? `Session context — ${formatContextPercent(usage.fraction)} of the window used` : 'Session context'}
             aria-expanded={contextExpanded}
             aria-haspopup={narrow ? 'dialog' : undefined}
             aria-controls="workbench-context"
-            title={`Session context, usage and access — ${modKey()}+J`}
+            title={
+              usage
+                ? `Context window ${formatContextPercent(usage.fraction)} full — usage and access (${modKey()}+J)`
+                : `Session context, usage and access — ${modKey()}+J`
+            }
           >
-            {usage ? (
-              <span class="context-header-meter" aria-hidden="true">
-                <span style={{ width: `${Math.max(2, usage.fraction * 100)}%` }} />
-              </span>
-            ) : null}
-            <span class="context-header-label">Context</span>
+            <ContextUsageRing fraction={usage?.fraction ?? null} />
             {usage ? <span class="context-header-value">{formatContextPercent(usage.fraction)}</span> : null}
+          </button>
+        ) : null}
+        {resultsPopout ? (
+          <button
+            type="button"
+            class="head-btn head-icon results-head-btn"
+            onClick={onToggleResults}
+            aria-label={resultsOpen ? 'Close results' : 'Open results'}
+            aria-expanded={resultsOpen}
+            aria-haspopup="dialog"
+            aria-controls="workbench-results"
+            title={resultsOpen ? 'Close the results panel' : 'Open Files, Git, Session usage and Agents'}
+          >
+            <PanelIcon size={15} />
           </button>
         ) : null}
         <button
@@ -515,6 +577,16 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
     setView('chat');
     workbench.closeContext();
   }, []);
+  // The header's results control. Opening a popped-out panel is a navigation: a
+  // full-width view (Source control, Terminal, a file) hides the inspector, so the
+  // panel has to be asked for from the conversation it floats over.
+  const toggleResults = useCallback((): void => {
+    if (store.inspectorCollapsed.value) {
+      setView('chat');
+      workbench.closeContext();
+    }
+    actions.toggleInspector();
+  }, []);
   // Lazy panel: Changes mounts its git probe only after the user asks for it.
   const [changesMounted, setChangesMounted] = useState(false);
   // The terminal list is needed to decide whether the tab exists at all, so it
@@ -601,13 +673,26 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
 
   const showLoading = store.chatLoading.value && currentId !== null;
   const hasItems = chat.items.length > 0;
+  // A pop-out is not part of the layout: on a desktop it floats over the
+  // conversation, so the side-by-side split (and its separator) only exists when
+  // the panel is docked. A phone has no docked layout at all - its inspector is a
+  // sheet - so the mode must never take that sheet contract away there.
+  const resultsPopout = isWorkbench && store.inspectorMode.value === 'popout' && !store.narrowViewport.value;
+  const dockedResults =
+    isWorkbench && view === 'chat' && !store.inspectorCollapsed.value && !resultsPopout;
   return (
     <main class={`chat-main${isWorkbench ? ' is-workbench' : ''}`} id="chat-main" aria-label="Workspace" tabIndex={-1} data-workspace-mode={mode}>
-      <SessionHeader view={view} onShowChanges={showChanges} onSelectView={selectView} controlPlane={!isWorkbench} />
+      <SessionHeader
+        view={view}
+        onShowChanges={showChanges}
+        onSelectView={selectView}
+        onToggleResults={toggleResults}
+        controlPlane={!isWorkbench}
+      />
 
       <div
         ref={centerBodyRef}
-        class={`center-body${isWorkbench && view === 'chat' && !store.inspectorCollapsed.value ? ' has-result' : ''}`}
+        class={`center-body${dockedResults ? ' has-result' : ''}`}
         data-view={view}
         data-workspace-mode={mode}
       >
@@ -789,6 +874,7 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
                 containerRef={centerBodyRef}
                 projectId={store.currentProject.value?.id ?? null}
                 preferredWidth={store.currentProject.value?.result_panel_width}
+                variant={resultsPopout ? 'popout' : 'dock'}
               />
             ) : null}
             <ErrorBoundary scope="The inspector">

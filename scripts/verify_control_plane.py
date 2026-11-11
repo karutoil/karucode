@@ -19,6 +19,10 @@ What this proves, which the unit tests cannot:
     `agentsForControlChat`, and the agent API agrees;
   * `GET /api/control/overview` is one snapshot that matches what the hero
     counters draw, and control chats are excluded from its project-session lists;
+  * the plane can be **left**: the rail head's *Back to sessions* is on screen and
+    hit-testable at 1280 and at 390 (where the project rail that exits it on a
+    desktop is `display: none`), and on a phone it lands on the sessions sheet the
+    plane was entered from;
   * nothing overflows at 1280 px or 390 px.
 
 Uses only a temporary workspace, database, config, browser profile and free
@@ -746,6 +750,176 @@ def main() -> int:
             'the plane does not overflow at 1280px',
             metrics['scroll'] <= metrics['client'] + 1,
             overflow,
+        )
+
+        # ------------------------------------------------ 7. leaving the plane
+        # The plane replaces the whole workspace. A desktop could always leave it
+        # by clicking a project tile, which also switches project; a phone could
+        # not leave it at all, because `.project-rail` is `display: none` below
+        # 1024px and nothing else closed it. The rail head's **Back to sessions**
+        # is that exit on both.
+        def exit_box() -> str:
+            return js(
+                "const b=[...document.querySelectorAll('button')]"
+                ".find(x => (x.getAttribute('aria-label')||'') === 'Back to sessions');"
+                "if(!b) return JSON.stringify({present:false});"
+                "const r=b.getBoundingClientRect();"
+                "const hit=document.elementFromPoint(Math.round(r.left+r.width/2), Math.round(r.top+r.height/2));"
+                "const shown=!!b.getClientRects().length && getComputedStyle(b).visibility !== 'hidden';"
+                "return JSON.stringify({present:true, shown,"
+                " inViewport: r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth,"
+                " hit: !!(hit && (hit === b || b.contains(hit))),"
+                " w: Math.round(r.width), h: Math.round(r.height)});"
+            )
+
+        def exit_ok(raw: str) -> bool:
+            state = json.loads(raw)
+            return (
+                state.get('present') is True
+                and state.get('shown') is True
+                and state.get('inViewport') is True
+                and state.get('hit') is True
+            )
+
+        def workbench_state() -> str:
+            # `list` is the workbench's own session list region, not a guess from a
+            # row count: leaving from a control chat lands on a project that may have
+            # no sessions, and an honest empty list is still the list.
+            return js(
+                "const rail=document.querySelector('.rail');"
+                "const sheet=!!(rail && getComputedStyle(rail).display !== 'none'"
+                "  && !!(rail.getClientRects().length));"
+                "return JSON.stringify({plane: !!document.querySelector('.control-plane.cp'),"
+                " sheetOpen: !!(rail && rail.classList.contains('is-open')),"
+                " sheetRole: rail ? rail.getAttribute('role') : null,"
+                " rail: sheet,"
+                " list: !!(rail && rail.querySelector('.session-nav[aria-label=\"Session list\"]')),"
+                " rows: document.querySelectorAll('.rail .session-row').length});"
+            )
+
+        def sheet_rows(timeout: float = 10.0) -> int:
+            """Row count once the workbench's own list read has landed."""
+            deadline = time.monotonic() + timeout
+            rows = 0
+            while time.monotonic() < deadline:
+                state = json.loads(workbench_state())
+                rows = state['rows']
+                if rows > 0:
+                    return rows
+                time.sleep(0.2)
+            return rows
+
+        # A chat is open from the section above, so the overview comes first: the
+        # chat's own header offers Back to overview, then the rail head is on
+        # screen with the exit in it.
+        click('Back to overview')
+        wait("return !!document.querySelector('[aria-label=\"Workspace summary\"]');")
+        desktop_exit = exit_box()
+        check(
+            'a 1280px plane offers Back to sessions in its rail head',
+            exit_ok(desktop_exit),
+            desktop_exit,
+        )
+        click('Back to sessions')
+        wait("return !document.querySelector('.control-plane.cp');", 10)
+        left = json.loads(workbench_state())
+        check(
+            'the desktop leaves to the workbench rail, not to a phone sheet',
+            left['plane'] is False
+            and left['sheetOpen'] is False
+            and left['rail'] is True
+            and left['list'] is True,
+            workbench_state(),
+        )
+
+        # Now the reported case: a phone, where the plane is entered from the
+        # sessions sheet - so that is what it has to come back to.
+        viewport(390, 844, mobile=True)
+        # A phone's only route in is the sheet's Control plane row; the desktop
+        # rail's button is not rendered at this width.
+        click('Toggle session list')
+        click('Control plane')
+        wait("return !!document.querySelector('.control-plane.cp');")
+        wait("return !!document.querySelector('.cp-browser .side-head');")
+        phone_exit = exit_box()
+        check(
+            'a 390px phone offers Back to sessions in the rail head',
+            exit_ok(phone_exit),
+            phone_exit,
+        )
+        click('Back to sessions')
+        wait("return !document.querySelector('.control-plane.cp');", 10)
+        back = json.loads(workbench_state())
+        check(
+            'the phone leaves the plane onto its sessions sheet',
+            back['plane'] is False
+            and back['sheetOpen'] is True
+            and back['sheetRole'] == 'dialog'
+            and back['list'] is True,
+            workbench_state(),
+        )
+        # The entry the reader came through still works, and an open chat keeps a
+        # visible way back: with the rail dropped at phone width, Back to overview
+        # is the first step and the rail head's exit is the second. The session
+        # opened here is a *project* session, so the sheet it lands on has a row.
+        click('Control plane')
+        wait("return !!document.querySelector('.control-plane.cp');")
+        # The rail's own read has to land before a row exists to open.
+        wait("return !!document.querySelector('[aria-label=\"Sessions\"] .session-row .session-open');", 20)
+        js(
+            "const b=document.querySelector('[aria-label=\"Sessions\"] .session-row .session-open');"
+            "if(b) b.click();"
+            "return true;"
+        )
+        wait("return !!document.querySelector('#composer-input');", 20)
+        hidden = json.loads(exit_box())
+        chat_back = js(
+            "const b=[...document.querySelectorAll('button')]"
+            ".find(x => (x.getAttribute('aria-label')||'') === 'Back to overview');"
+            "return !!(b && b.getClientRects().length);"
+        )
+        check(
+            'an open chat on a phone is one Back from the exit',
+            hidden.get('present') is True and chat_back is True,
+            exit_box(),
+        )
+        click('Back to overview')
+        wait("return !!document.querySelector('.cp-browser')?.getClientRects().length;")
+        again = exit_box()
+        check(
+            'Back to overview puts the exit back on screen',
+            exit_ok(again),
+            again,
+        )
+        click('Back to sessions')
+        wait("return !document.querySelector('.control-plane.cp');", 10)
+        final = json.loads(workbench_state())
+        final_rows = sheet_rows()
+        check(
+            'a phone that leaves a project session lands on that project’s list',
+            final['plane'] is False
+            and final['sheetOpen'] is True
+            and final_rows > 0,
+            workbench_state(),
+        )
+
+        # The destination is chosen when the exit is pressed, not when the plane
+        # opened: a window dragged from the phone tier up to a desktop one must not
+        # get a sheet that its layout has no room for.
+        click('Control plane')
+        wait("return !!document.querySelector('.control-plane.cp');")
+        session.cdp('Emulation.clearDeviceMetricsOverride')
+        time.sleep(0.4)
+        click('Back to sessions')
+        wait("return !document.querySelector('.control-plane.cp');", 10)
+        time.sleep(0.3)
+        resized = json.loads(workbench_state())
+        check(
+            'a window resized to desktop leaves without a phone sheet',
+            resized['plane'] is False
+            and resized['sheetOpen'] is False
+            and resized['rail'] is True,
+            workbench_state(),
         )
 
         print(flush=True)

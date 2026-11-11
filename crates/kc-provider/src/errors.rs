@@ -53,6 +53,94 @@ pub fn is_context_overflow_error(err: &Error) -> bool {
     kc_core::error::is_context_overflow_error(err)
 }
 
+/// Does this refusal name a condition that clears by itself?
+///
+/// A thin delegate to [`kc_core::error::is_transient_refusal`], which owns the
+/// phrase list: the runtime's turn-retry layer needs the same answer and
+/// `kc-runtime` does not depend on this crate. The shapes that motivated it -
+/// a membership RPM limit in a `400`, a bid floor in a `402`, a per-channel
+/// cooldown in a `403` - are documented there.
+///
+/// A caller must still honour an explicit [`is_permanent`] verdict and a
+/// [`is_context_overflow`]: those are judgements about *this* request, not about
+/// the upstream's mood.
+pub fn is_transient_refusal(message: &str) -> bool {
+    kc_core::error::is_transient_refusal(message)
+}
+
+/// The provider's own "try again in N" hint, when its message carries one.
+///
+/// A cooldown is not a backoff. Two 429s in this install's database say
+/// `"reset_seconds": 1024` and `13259`; a 500 ms→30 s exponential inside a 300 s
+/// budget cannot reach either, so the old behaviour was 17–18 billed attempts,
+/// five minutes of waiting, and the same failure. With the hint:
+///
+/// * it fits the remaining budget → wait it out, and the run continues (this is
+///   what makes a two-minute bid floor survivable);
+/// * it does not → stop at once and say why, instead of pretending to retry.
+///
+/// Understands `reset_seconds` (the field several gateways emit next to
+/// `retry_after`) and prose: `reset after 2m`, `retry after 30s`,
+/// `try again in 90`.
+pub fn retry_after_hint(message: &str) -> Option<Duration> {
+    // ASCII-only lowering keeps every byte offset valid for slicing, and the
+    // keywords are ASCII even in a body that is otherwise CJK.
+    let haystack = message.to_ascii_lowercase();
+    for key in ["reset_seconds", "reset seconds"] {
+        if let Some(rest) = value_after(&haystack, key) {
+            if let Some(seconds) = leading_number(rest) {
+                return Some(clamped_secs(seconds));
+            }
+        }
+    }
+    for key in ["reset after", "retry after", "retry in", "try again in"] {
+        if let Some(rest) = value_after(&haystack, key) {
+            if let Some(duration) = leading_duration(rest) {
+                return Some(duration);
+            }
+        }
+    }
+    None
+}
+
+/// Text after `key`, with the punctuation a JSON field or a sentence puts
+/// between a label and its value skipped.
+fn value_after<'a>(haystack: &'a str, key: &str) -> Option<&'a str> {
+    let start = haystack.find(key)? + key.len();
+    let rest = haystack[start..].trim_start_matches(['"', '\'', ':', '=', ' ', '\t']);
+    Some(rest)
+}
+
+/// A run of ASCII digits at the start of `text`, as seconds.
+fn leading_number(text: &str) -> Option<u64> {
+    let digits: String = text.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// `90`, `30s`, `2m`, `1h` — the unit-less form is seconds, which is what every
+/// gateway means by `retry_after: 30`.
+fn leading_duration(text: &str) -> Option<Duration> {
+    let seconds = leading_number(text)?;
+    let unit = text
+        .chars()
+        .find(|c| !c.is_ascii_digit())
+        .map(|c| c.to_ascii_lowercase());
+    let seconds = match unit {
+        Some('m') => seconds.saturating_mul(60),
+        Some('h') => seconds.saturating_mul(3600),
+        Some('d') => seconds.saturating_mul(86_400),
+        _ => seconds,
+    };
+    Some(clamped_secs(seconds))
+}
+
+/// A hint is a hint, not a scheduler: anything past a day is treated as a day so
+/// a nonsense value cannot park a run, and it is compared against a 300 s budget
+/// anyway.
+fn clamped_secs(seconds: u64) -> Duration {
+    Duration::from_secs(seconds.min(86_400))
+}
+
 /// Map a transport-level failure. Timeouts become [`Error::Timeout`]; everything
 /// else becomes a provider error naming the URL (never the credentials).
 pub(crate) fn map_reqwest_error(
@@ -445,5 +533,81 @@ mod tests {
         assert_eq!(http_status_of("boom [http 503] tail"), Some(503));
         assert_eq!(http_status_of("boom"), None);
         assert_eq!(http_status_of("[http not-a-number]"), None);
+    }
+
+    // The three bodies below are verbatim from this install's database: each one
+    // killed a run or a subagent because its status said "your request is wrong".
+    #[test]
+    fn a_rate_limit_inside_a_refusal_status_is_transient() {
+        let bodies = [
+            "provider rejected the request (400 Bad Request): the endpoint refused our payload \
+             (response body: {\"error\":{\"message\":\"[400]: [code=tier_limit_exceeded] membership \
+             rpm limit exceeded: 101/100 resets 2026-11-09T22:00:00Z\",\"type\":\"invalid_request_error\"}}) \
+             [http 400]",
+            "provider rejected the request (402 Payment Required): (response body: {\"error\":\
+             {\"message\":\"[402]: no provider's ask matches your max-per-mtok bid (reset after 2m)\"}}) \
+             [http 402]",
+            "provider error: the API key has no subscription quota or balance available for this \
+             request; ... (reset after 3s)",
+            "provider error: All credentials for model hy4-codefast/hy4 are cooling down",
+            "provider rate limit hit (429 Too Many Requests) [http 429]",
+        ];
+        for body in bodies {
+            assert!(is_transient_refusal(body), "not transient: {body}");
+        }
+    }
+
+    #[test]
+    fn recharging_and_judgements_are_not_transient() {
+        for body in [
+            // Needs an operator, not another attempt.
+            "provider rejected the request: insufficient_quota [http 400]",
+            "provider error: You exceeded your current quota, please check your plan and billing",
+            // A per-key spend limit that does not reset.
+            "provider access denied (403): Key limit exceeded (total limit) $10.51 of $10.00 used; \
+             does not reset.",
+            // A real request problem.
+            "provider rejected the request (400 Bad Request): model `sonnet` is not supported [http 400]",
+            "provider rejected the request: context_length_exceeded [http 400]",
+            "",
+        ] {
+            assert!(!is_transient_refusal(body), "wrongly transient: {body}");
+        }
+    }
+
+    #[test]
+    fn the_reset_window_is_read_out_of_the_body() {
+        assert_eq!(
+            retry_after_hint("{\"reset_seconds\": 1024, \"retry_after\":\"2026-11-10T02:15:31Z\"}"),
+            Some(Duration::from_secs(1024))
+        );
+        assert_eq!(
+            retry_after_hint("membership rpm limit exceeded (reset after 2m)"),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            retry_after_hint("no provider's ask matches your max-per-mtok bid (reset after 2m)"),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            retry_after_hint("slow down (retry after 30)"),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            retry_after_hint("try again in 90s"),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(
+            retry_after_hint("reset_seconds: 3600"),
+            Some(Duration::from_secs(3600))
+        );
+        // Absurd values cannot park a run for a year.
+        assert_eq!(
+            retry_after_hint("\"reset_seconds\": 999999999"),
+            Some(Duration::from_secs(86_400))
+        );
+        // No hint is not a zero-length hint: the caller falls back to backoff.
+        assert_eq!(retry_after_hint("provider rejected the request (400)"), None);
+        assert_eq!(retry_after_hint("reset_seconds: none"), None);
     }
 }

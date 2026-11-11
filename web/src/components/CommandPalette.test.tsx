@@ -45,6 +45,90 @@ function openPaletteWithCommand(): void {
   render(<CommandPalette />);
 }
 
+describe('the palette chrome', () => {
+  /* The palette is a list of controls, and its chrome is the design system's, not
+   * its own: a shared group heading with its count, a marked match, one hint line.
+   * These are the behaviours a reader notices when they are missing — "why is this
+   * row here?", "how many are there?" — so they are tested here rather than left to
+   * a screenshot. */
+
+  beforeEach(() => {
+    resetAppState();
+  });
+
+  afterEach(() => {
+    cleanup();
+    resetAppState();
+  });
+
+  function openPalette(): HTMLInputElement {
+    store.paletteOpen.value = true;
+    render(<CommandPalette />);
+    return screen.getByRole('combobox', { name: 'Search commands' }) as HTMLInputElement;
+  }
+
+  it('marks the run the filter matched, so a surviving row explains itself', async () => {
+    const input = openPalette();
+    fireEvent.input(input, { target: { value: 'settings' } });
+
+    await waitFor(() =>
+      expect(screen.queryByRole('option', { name: /New session/ })).toBeNull(),
+    );
+    const row = screen.getByRole('option', { name: /Open settings/ });
+    const mark = row.querySelector('.palette-mark');
+    expect(mark?.textContent).toBe('settings');
+    // Everything outside the match stays plain text: the mark is a reading aid,
+    // not a restyled label.
+    expect(row.textContent).toContain('Open ');
+  });
+
+  it('counts each group in its heading, and the whole list in the footer', async () => {
+    const input = openPalette();
+
+    const heading = screen.getByText('Actions');
+    expect(heading.querySelector('span')?.textContent).toBe('5');
+    expect(document.querySelector('.palette-count')?.textContent).toBe('5 results');
+
+    fireEvent.input(input, { target: { value: 'open' } });
+    await waitFor(() =>
+      expect(document.querySelector('.palette-count')?.textContent).toBe('2 of 5'),
+    );
+    // The heading counts what is in front of the reader, not the catalog.
+    expect(screen.getByText('Actions').querySelector('span')?.textContent).toBe('2');
+  });
+
+  it('explains an empty result instead of showing a bare line', async () => {
+    const input = openPalette();
+    fireEvent.input(input, { target: { value: 'zzzz' } });
+
+    await waitFor(() => expect(document.querySelector('.palette-empty')).toBeTruthy());
+    expect(screen.getByText('No matching commands')).toBeTruthy();
+    expect(screen.getByText(/Nothing in a name, a group or a shortcut matched/)).toBeTruthy();
+    expect(document.querySelector('.palette-count')?.textContent).toBe('0 of 5');
+  });
+
+  it('lists a session with its age under the Sessions heading', () => {
+    store.sessions.value = [
+      {
+        id: 's_1',
+        title: 'Search palette redesign',
+        workspace: '/w',
+        project_id: 'p_1',
+        created_at: store.clock.value,
+        updated_at: store.clock.value,
+        message_count: 2,
+        running: false,
+      },
+    ];
+    openPalette();
+
+    const row = screen.getByRole('option', { name: /Search palette redesign/ });
+    // The age is the row's trailing meta; `just now` is what a fresh session is.
+    expect(row.textContent).toContain('just now');
+    expect(screen.getByText('Sessions').querySelector('span')?.textContent).toBe('1');
+  });
+});
+
 describe('plugin commands in the palette', () => {
   beforeEach(() => {
     resetAppState();

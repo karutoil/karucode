@@ -42,8 +42,8 @@
 
 /* --------------------------------------------------------------------- head */
 
-/* `.side-head` owns the padding; the plane's head is a brand line plus one
- * action, so it only needs the row arrangement. */
+/* `.side-head` owns the padding; the plane's head is a brand line plus two
+ * actions (Back to sessions, refresh), so it only needs the row arrangement. */
 .side-head.cp-head {
   display: flex;
   align-items: center;

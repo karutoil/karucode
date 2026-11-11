@@ -18,8 +18,6 @@ import { PluginPanelView } from './PluginPanelView';
 import { PluginSlot } from './PluginSlot';
 import { uniqueHostedPanels } from './pluginPanels';
 import {
-  isUiHidden,
-  UI_HIDE_INSPECTOR_CONTEXT,
   UI_HIDE_INSPECTOR_TAB_AGENTS,
   UI_HIDE_INSPECTOR_TAB_CHANGES,
   UI_HIDE_INSPECTOR_TAB_SESSION,
@@ -27,7 +25,7 @@ import {
   UI_SLOT_INSPECTOR_HEADER,
   visibleTabs,
 } from './uiContributions';
-import { BranchIcon, CircleCheckIcon, CloseIcon, LayersIcon, PanelIcon, pluginPanelIcon } from './icons';
+import { BranchIcon, CircleCheckIcon, CloseIcon, PanelIcon, pluginPanelIcon } from './icons';
 
 /**
  * The hide target of a built-in inspector tab, or null for a plugin tab.
@@ -120,6 +118,9 @@ export function Inspector(): JSX.Element {
   const isNarrow = store.narrowViewport.value;
   const inspectorRef = useRef<HTMLElement>(null);
   const contextOpen = workbench.contextOpen.value;
+  // A popped-out panel is an overlay that is closed as often as it is open, so
+  // its only close control is an explicit one. On a phone the sheet always closes.
+  const popout = !isNarrow && store.inspectorMode.value === 'popout';
   const contextSuppressesSheet = isNarrow && isSheetOpen && contextOpen;
   // Context is the top phone surface. The result sheet remains mounted, but must
   // not run a second focus trap or expose its controls behind the drawer.
@@ -169,9 +170,10 @@ export function Inspector(): JSX.Element {
       aria-label="Workspace inspector"
       aria-hidden={contextSuppressesSheet ? 'true' : undefined}
       inert={contextSuppressesSheet ? true : undefined}
-      role={isSheetOpen ? 'dialog' : undefined}
+      role={isSheetOpen || popout ? 'dialog' : undefined}
       aria-modal={isSheetOpen && !contextOpen ? 'true' : undefined}
       data-context-open={contextOpen ? 'true' : 'false'}
+      data-results-popout={popout ? 'true' : undefined}
     >
       <div class="inspector-inner">
         <div class="inspector-top">
@@ -179,30 +181,25 @@ export function Inspector(): JSX.Element {
             <span class="inspector-label">Results</span>
           </div>
           <div class="inspector-head-actions">
-            {/* Controls plugins contributed beside Context. */}
+            {/* Controls plugins contributed to the results header. Context is not
+              * one of them: it lives in the session header, so it stays reachable
+              * whether this panel is docked, popped out or closed. */}
             <PluginSlot slot={UI_SLOT_INSPECTOR_HEADER} />
-            {isUiHidden(ui, UI_HIDE_INSPECTOR_CONTEXT) ? null : (
-              <button
-                type="button"
-                class="button button-small inspector-context-button"
-                onClick={() => workbench.openContext('now')}
-                aria-haspopup="dialog"
-                aria-expanded={contextOpen}
-                title="Current workspace, session, usage and access"
-              >
-                <LayersIcon size={13} />
-                <span>Context</span>
-              </button>
-            )}
             <button
               type="button"
               class="icon-button inspector-quick"
               onClick={actions.toggleInspector}
-              aria-label={isNarrow ? 'Close inspector' : 'Collapse inspector'}
-              title={isNarrow ? 'Close the results sheet' : 'Show or hide the results dock'}
+              aria-label={isNarrow ? 'Close inspector' : popout ? 'Close results panel' : 'Collapse inspector'}
+              title={
+                isNarrow
+                  ? 'Close the results sheet'
+                  : popout
+                    ? 'Close the results panel'
+                    : 'Show or hide the results dock'
+              }
               data-autofocus={isNarrow && isSheetOpen && !contextOpen ? true : undefined}
             >
-              {isNarrow ? <CloseIcon /> : <PanelIcon />}
+              {isNarrow || popout ? <CloseIcon /> : <PanelIcon />}
             </button>
           </div>
         </div>

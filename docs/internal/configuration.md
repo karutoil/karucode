@@ -7,7 +7,7 @@
 
 - **Slug:** `configuration`
 - **Tags:** config, settings, configuration, toml, env
-- **Applies to:** `env:KARUCODE_MALLOC_ARENA_MAX`, `env:KARUCODE_MALLOC_TRIM_SECS`, `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_PARALLEL_TOOL_CALLS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_concurrent`, `config:subagents.max_iterations`, `config:subagents.max_depth`, `config:subagents.timeout_secs`, `config:[notifications]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `config:limits.parallel_tool_calls`, `config:notifications.enabled`, `config:notifications.min_run_secs`, `config:[access]`, `config:access.enabled`, `config:access.public_url`, `config:access.session_days`, `config:access.tunnel`, `config:access.trusted_proxies`, `env:KARUCODE_ACCESS_ENABLED`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_SESSION_DAYS`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`, `config:[updates]`, `config:updates.check`, `config:updates.check_secs`, `config:updates.manifest_url`, `config:updates.auto_apply`, `env:KARUCODE_UPDATE_CHECK`, `env:KARUCODE_UPDATE_CHECK_SECS`, `env:KARUCODE_UPDATE_MANIFEST_URL`, `env:KARUCODE_UPDATE_AUTO_APPLY`, `route:GET /api/update`, `route:POST /api/update/check`, `route:POST /api/update/apply`, `ui:Settings > Updates`
+- **Applies to:** `env:KARUCODE_MALLOC_ARENA_MAX`, `env:KARUCODE_MALLOC_TRIM_SECS`, `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_PARALLEL_TOOL_CALLS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_concurrent`, `config:subagents.max_iterations`, `config:subagents.max_depth`, `config:subagents.timeout_secs`, `config:[notifications]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `config:limits.parallel_tool_calls`, `config:limits.max_turn_retries`, `config:limits.turn_retry_delay_ms`, `config:notifications.enabled`, `config:notifications.min_run_secs`, `config:[access]`, `config:access.enabled`, `config:access.public_url`, `config:access.session_days`, `config:access.tunnel`, `config:access.trusted_proxies`, `env:KARUCODE_ACCESS_ENABLED`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_SESSION_DAYS`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`, `config:[updates]`, `config:updates.check`, `config:updates.check_secs`, `config:updates.manifest_url`, `config:updates.auto_apply`, `env:KARUCODE_UPDATE_CHECK`, `env:KARUCODE_UPDATE_CHECK_SECS`, `env:KARUCODE_UPDATE_MANIFEST_URL`, `env:KARUCODE_UPDATE_AUTO_APPLY`, `route:GET /api/update`, `route:POST /api/update/check`, `route:POST /api/update/apply`, `ui:Settings > Updates`
 - **Source:** `crates/kc-server/src/settings.rs:14`
 
 ---
@@ -241,6 +241,37 @@ transcript to explain it. Subagents run under the same rules with their own
 numbers: `subagents.max_iterations` (0 = no ceiling) and
 `subagents.timeout_secs`.
 
+### A turn the provider gave up on is asked again, after a wait
+
+Two retry layers already sit under a turn, both counting *attempts in the same
+second*: `[model] retry_max_retries` before any content arrives, and
+`[model] retry_max_stream_restarts` for an answer that dies mid-stream. When
+both are spent the run used to end, and the only recovery was a human typing
+the prompt again - which is what happened 26 times in two weeks on one install,
+every time for a condition that cleared by itself.
+
+```toml
+[limits]
+max_turn_retries = 2        # 0 disables the layer; each retry is a generation
+turn_retry_delay_ms = 30000 # first wait; doubles per retry, capped at 8x
+```
+
+This layer spends *time* instead of attempts. After the fast budgets are gone,
+the same turn is asked again once the upstream has had 30 s, then 60 s, to
+recover. It only engages for a failure a wait can fix: a transient status
+(408/409/425/429/5xx), a body naming a rate limit, cooldown or reset window, or
+a transport death with no status at all. A dead key (401), a content refusal, a
+request the endpoint judged (`[permanent]`) and a context overflow still end the
+run at once with their real reason - those are statements about the request, and
+two more generations only buy the same answer.
+
+Every retry is announced, because a run that pauses for a minute otherwise looks
+hung: a `stream_retry` event (a live client drops anything the failed attempt
+rendered) and a warning notice naming the attempt, the wait and this key's name.
+Nothing of a failed attempt is persisted, so a retry can never duplicate an
+answer, and the run's own wall clock still applies: if the next wait would run
+past `max_run_secs`, the run fails now instead.
+
 Environment: `KARUCODE_MAX_ITERATIONS`, `KARUCODE_MAX_RUN_SECS`,
 `KARUCODE_CONTEXT_MAX_CHARS`, `KARUCODE_PARALLEL_TOOL_CALLS`.
 
@@ -327,7 +358,8 @@ tool processes is unwelcome, or when a provider or plugin misbehaves under
 concurrent calls.
 
 This key is **not** `model.parallel_tool_calls`: that one asks the endpoint to
-let the model emit several calls in one turn, and it lives on the Models tab.
+let the model emit several calls in one turn, and it lives in the **Models &
+providers** section of Settings.
 This one decides how the calls the model did emit are run. Anything the
 runtime cannot prove independent of its siblings always runs in call order -
 `run_command` (a shell can touch anything), plugin and MCP tools, subagent

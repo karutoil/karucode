@@ -23,6 +23,12 @@ interface ResultResizerProps {
   containerRef: RefObject<HTMLDivElement>;
   projectId: string | null;
   preferredWidth?: number;
+  /**
+   * Which layout this track belongs to. `dock` is the side-by-side split's
+   * separator; `popout` is the same gesture on the left edge of the overlay card,
+   * where the ceiling is measured against the covered conversation instead.
+   */
+  variant?: 'dock' | 'popout';
 }
 
 interface DragState {
@@ -33,14 +39,22 @@ interface DragState {
 }
 
 /**
- * The separator between Conversation and Results in the wide Workbench split.
+ * The separator between Conversation and Results in the wide Workbench split, and
+ * the same gesture on the left edge of the pop-out card.
  *
  * Pointer Events provide one path for mouse, pen and touch. Visual resizes stay
  * local; only pointerrelease or a quiet keyboard burst writes to the project.
- * CSS hides this track in the intermediate overlay and phone sheet, where a
- * horizontal split would be harmful rather than merely small.
+ * CSS hides the docked track in the intermediate overlay and phone sheet, where a
+ * horizontal split would be harmful rather than merely small; the pop-out variant
+ * only exists in the desktop card, which is dragged from its own edge.
  */
-export function ResultResizer({ containerRef, projectId, preferredWidth }: ResultResizerProps): JSX.Element {
+export function ResultResizer({
+  containerRef,
+  projectId,
+  preferredWidth,
+  variant = 'dock',
+}: ResultResizerProps): JSX.Element {
+  const popout = variant === 'popout';
   // Native repeats/pointer gaps can run before a render. The latest local choice
   // needs one authoritative synchronous record; the version only requests a draw.
   const local = useRef<{ projectId: string | null; width: number } | null>(null);
@@ -58,6 +72,10 @@ export function ResultResizer({ containerRef, projectId, preferredWidth }: Resul
     const container = containerRef.current;
     if (!container) return { automatic: null, maximum: MAX_RESULT_PANEL_WIDTH };
     const box = container.getBoundingClientRect();
+    // One ceiling for both presentations: a dragged edge may not leave the
+    // conversation narrower than its floor, and a floating card may not cover more
+    // of it than the docked split could take. Switching modes therefore never
+    // changes how much conversation is visible.
     const availableMaximum = box.width > 0
       ? boundedWidth(box.width - MIN_CONVERSATION_WIDTH - RESULT_SEPARATOR_WIDTH, MAX_RESULT_PANEL_WIDTH)
       : MAX_RESULT_PANEL_WIDTH;
@@ -90,12 +108,15 @@ export function ResultResizer({ containerRef, projectId, preferredWidth }: Resul
   useLayoutEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    if (selected === null) container.style.removeProperty('--workbench-result-w');
+    // The docked split only pins a width once the reader (or their saved project
+    // preference) chose one; the pop-out always needs a concrete width, because
+    // its card and this handle's fixed offset both read the same variable.
+    if (selected === null && !popout) container.style.removeProperty('--workbench-result-w');
     else container.style.setProperty('--workbench-result-w', `${currentWidth}px`);
     return () => {
       if (containerRef.current === container) container.style.removeProperty('--workbench-result-w');
     };
-  }, [containerRef, currentWidth, selected]);
+  }, [containerRef, currentWidth, selected, popout]);
 
   const flushSave = (): void => {
     if (saveTimer.current !== null) {
@@ -185,7 +206,7 @@ export function ResultResizer({ containerRef, projectId, preferredWidth }: Resul
 
   return (
     <div
-      class="result-resizer"
+      class={popout ? 'result-resizer result-resizer-popout' : 'result-resizer'}
       role="separator"
       tabIndex={0}
       aria-label="Resize results panel"

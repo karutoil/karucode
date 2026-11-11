@@ -162,7 +162,25 @@ body
   margin-top: var(--space-8);
 }
 
-/* ---------- command palette ------------------------------------------- */
+/* ---------- command palette -------------------------------------------
+ *
+ * The palette is a way in to the app, so it is built out of the app's own
+ * vocabulary rather than a second one:
+ *
+ *  - the row Enter will run takes `.session-row.is-active`'s recipe (accent
+ *    tint + a 2px accent rail + `--text` label). It used to ink the whole row
+ *    with `--accent-on-tint`, which painted amber on amber — a bronze block that
+ *    read as a pressed button, and in Daybreak turned the label the colour of a
+ *    warning. The rail is what says "this one", exactly as it does in the rail;
+ *  - a group heading is `.session-group-label` with its count in a mono span, the
+ *    same row the session list and the control plane draw (§5A);
+ *  - every key is the shared `kbd` recipe from `base.css` — one keycap for the
+ *    search field, the footer and the composer — instead of the two private
+ *    variants (an 18px outlined chip and a 16px filled one) that stood here;
+ *  - the trailing column is one thing: a hint, or nothing. The `→` used to stand
+ *    in for a missing hint, which drew a column of arrows down the whole list and
+ *    left the right edge ragged.
+ */
 
 .dialog-palette {
   align-self: start;
@@ -172,6 +190,9 @@ body
   border-radius: var(--radius);
 }
 
+/* The field *is* the top bar, and it paints no fill of its own: the dialog's own
+ * edge is its frame and a hairline is the only thing under it, the way the file
+ * toolbar separates itself from the document it sits over. */
 .palette-search {
   display: flex;
   align-items: center;
@@ -180,7 +201,9 @@ body
   min-height: 56px;
   padding: 0 var(--space-8);
   border-bottom: 1px solid var(--line-soft);
-  color: var(--text-caption);
+  /* The glyph is decoration (§4): `--faint` is the role for it, and it is what
+   * the rail's own search field uses. */
+  color: var(--faint);
 }
 
 .palette-input {
@@ -199,10 +222,12 @@ body
   outline-offset: var(--focus-ring-offset);
 }
 
-/* The underline is an extra cue on the whole row, not the only one. */
+/* The field is the only input in the dialog and it is focused whenever the
+ * palette is open, so its focus cue is the divider itself changing colour — one
+ * hairline, not a second 2px rule stacked on the first. Two of those made the
+ * top of the dialog read as a banner. */
 .palette-search:focus-within {
   border-bottom-color: var(--accent);
-  box-shadow: inset 0 -1px 0 var(--accent);
 }
 
 .palette-input::placeholder {
@@ -216,31 +241,55 @@ body
   margin: 0;
   padding: var(--space-5);
   overflow-y: auto;
+  /* The list is the only scroller in the dialog; a wheel that reaches its end
+   * must not carry on into the workspace behind the veil. */
+  overscroll-behavior: contain;
   list-style: none;
   scrollbar-gutter: stable;
 }
 
+/* The heading is the shared `.session-group-label` (kicker, tracking, ink) plus
+ * the count in its mono span — the only thing this variant owns is the padding,
+ * because the list around it is already inset by `--space-5` and the label has to
+ * start where the row icons do. The search field and the control plane's lists
+ * spell this row the same way. */
 .palette-group-label {
-  padding: var(--space-4) var(--space-6) var(--space-3);
-  color: var(--text-kicker);
-  font-size: var(--fs-micro);
-  font-weight: var(--weight-kicker);
-  letter-spacing: var(--tracking-kicker);
-  text-transform: uppercase;
+  margin: 0;
+  padding: var(--space-5) var(--space-6) var(--space-2);
 }
 
 .palette-item {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: var(--space-6);
+  gap: var(--space-5);
   width: 100%;
-  min-height: 40px;
+  min-height: 38px;
   padding: 0 var(--space-6);
   border-radius: var(--radius-sm);
   color: var(--text-body);
   font-size: var(--fs-label);
+  line-height: 1.5;
   text-align: left;
   cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+/* The rail, let in at the left edge: transparent until this row is the one Enter
+ * will run. Same geometry as `.session-row::before` — 2px, inset off the top and
+ * bottom, `--radius-xs` — so the palette and the rail say "you are here" with one
+ * mark instead of two different ones. */
+.palette-item::before {
+  content: '';
+  position: absolute;
+  top: var(--space-3);
+  bottom: var(--space-3);
+  left: 0;
+  width: 2px;
+  border-radius: var(--radius-xs);
+  background: transparent;
 }
 
 .palette-item:hover {
@@ -248,12 +297,15 @@ body
   color: var(--text);
 }
 
-/* The row Enter will run. The ink is the accent's *text* half, not the accent
- * itself: `--row-selected-text` anchors to the accent fill and measured 3.61:1
- * in Daybreak (DESIGN-AUDIT overlays B4). */
+/* The row Enter will run. `--accent-bg` is §2's one active-state tint, the label
+ * stays `--text` (it is read, not decorated), and the rail carries the accent. */
 .palette-item.is-active {
-  background: var(--row-selected-bg);
-  color: var(--accent-on-tint);
+  background: var(--accent-bg);
+  color: var(--text);
+}
+
+.palette-item.is-active::before {
+  background: var(--accent);
 }
 
 .palette-item-icon {
@@ -261,22 +313,15 @@ body
   place-items: center;
   flex: 0 0 auto;
   width: 16px;
-  color: inherit;
+  color: var(--muted);
+}
+
+.palette-item.is-active .palette-item-icon {
+  color: var(--accent-on-tint);
 }
 
 .palette-esc {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   flex: 0 0 auto;
-  height: 18px;
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-xs);
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  line-height: 1;
 }
 
 .palette-label {
@@ -287,56 +332,128 @@ body
   white-space: nowrap;
 }
 
+.palette-item.is-active .palette-label {
+  /* The rail bolds the title of the session you are on; the palette's cursor is
+   * the same statement, so it is the same weight. */
+  font-weight: 500;
+}
+
+/* Why this row is in the list: the substring the query matched, in the accent as
+ * ink. On the tinted row that ink is `--accent-on-tint`, because the tint lifts
+ * the ground under a canvas-tuned accent (§5, rule 8). `<mark>`'s UA yellow is
+ * neutralised: the emphasis here is the ink, not a second fill under the tint. */
+.palette-mark {
+  background: none;
+  color: var(--accent-fill);
+  font-weight: 600;
+}
+
+.palette-item.is-active .palette-mark {
+  color: var(--accent-on-tint);
+}
+
+/* Trailing meta: one right-aligned mono column, so a run of rows has one right
+ * edge whether the hint is a chord, an age or a count. `tabular-nums` keeps the
+ * ages from jittering row to row. */
 .palette-hint {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 46%;
+  overflow: hidden;
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: var(--fs-tiny);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* `--text-secondary` rather than `--muted`: the ink floor in §4.1 is measured
+ * against the nearest *surface*, and a row that has the accent tint under it is
+ * not that surface. */
 .palette-item.is-active .palette-hint {
-  color: inherit;
+  color: var(--text-secondary);
 }
 
+/* The arrow is an affordance, not decoration: it belongs to the row Enter will
+ * run and says "this one goes somewhere". On every unhinted row it was a column
+ * of identical glyphs, so it now exists only where it means something. */
+.palette-arrow {
+  display: none;
+  place-items: center;
+  flex: 0 0 auto;
+}
+
+.palette-item.is-active .palette-arrow {
+  display: inline-grid;
+  color: var(--accent-on-tint);
+}
+
+/* The empty state echoes the app's `.empty-*` hierarchy — symbol, title, one line
+ * of copy — at dialog scale. It is not the shared block: that one is a page-level
+ * hero (520px tall, a 52px symbol, a 20px title), and shrinking it here would
+ * re-set every property it owns, which §5A counts as drawing the role twice. */
 .palette-empty {
-  padding: var(--space-7);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-10) var(--space-7);
   color: var(--muted);
-  font-size: var(--fs-label);
+  text-align: center;
 }
 
+.palette-empty svg {
+  color: var(--faint);
+}
+
+.palette-empty-title {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-label);
+  font-weight: 600;
+}
+
+.palette-empty-copy {
+  margin: 0;
+  font-size: var(--fs-tiny);
+  line-height: 1.5;
+}
+
+/* One hint line, not a second bar: the keys are the shared keycaps, the words
+ * after them are `--fs-tiny` prose, and the match count holds the right edge in
+ * mono. It used to be three groups spread across the full width, which read as
+ * three separate controls. The horizontal inset is the search field's, so the
+ * two rows of the dialog share one left and one right edge. */
 .palette-footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-7);
+  gap: var(--space-6);
   flex: 0 0 auto;
-  padding: var(--space-5) var(--space-7);
+  padding: var(--space-4) var(--space-8);
   border-top: 1px solid var(--line-soft);
-  color: var(--text-menu-title);
+  color: var(--muted);
   font-size: var(--fs-tiny);
 }
 
-.palette-footer span {
+.palette-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+}
+
+.palette-keys > span {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
 }
 
-.palette-footer kbd {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 var(--space-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-xs);
-  background: var(--chip-surface);
-  color: var(--muted);
+.palette-count {
+  margin-left: auto;
   font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* ---------- settings sheet -------------------------------------------- */
@@ -1008,6 +1125,17 @@ body
     min-height: 44px;
   }
 
+  /* A thumb-sized row plus three key hints fill a 390px-wide dialog exactly. Below
+   * that the keys are the part worth keeping — they teach the keyboard contract —
+   * so the count, which the live region already announces, is the row that gives
+   * way. Measured at 320x700: without this the footer's count ran 13px past the
+   * dialog's edge. */
+  @media (max-width: 374px) {
+    .palette-count {
+      display: none;
+    }
+  }
+
   .toast-region {
     top: calc(64px + env(safe-area-inset-top, 0px));
     right: 12px;
@@ -1053,15 +1181,6 @@ body
     animation: none;
   }
 }
-/* Trailing affordance on a palette row that has no keycap hint (mock: `arrow`). */
-.palette-arrow {
-  display: inline-grid;
-  place-items: center;
-  flex: 0 0 auto;
-  color: inherit;
-  opacity: 0.55;
-}
-
 /* ---------- rewind dialog ---------------------------------------------- */
 
 .dialog-rewind {

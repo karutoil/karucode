@@ -68,6 +68,7 @@ export const configFixture: Config = {
       models: [{ id: 'gpt-4o-mini', name: 'GPT-4o mini', context_window: 128000 }],
       request_timeout_secs: 300,
       api_key_set: true,
+      aggregator: false,
     },
   ],
   active: { provider: 'default', model: 'gpt-4o-mini' },
@@ -82,6 +83,8 @@ export const configFixture: Config = {
     search_max_results: 200,
     context_max_chars: 240000,
     max_tool_calls_per_turn: 8,
+    max_turn_retries: 2,
+    turn_retry_delay_ms: 30000,
     parallel_tool_calls: true,
   },
   approvals: {
@@ -356,6 +359,7 @@ export function resetAppState(): void {
   store.connection.value = { api: 'unknown', stream: 'idle', lastError: null, checkedAt: null };
   store.railCollapsed.value = false;
   store.inspectorCollapsed.value = false;
+  store.inspectorMode.value = 'docked';
   store.mobileSheet.value = null;
   store.inspectorTab.value = 'workspace';
   store.settingsOpen.value = false;

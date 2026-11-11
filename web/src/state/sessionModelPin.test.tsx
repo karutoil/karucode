@@ -75,6 +75,7 @@ function testConfig(): Config {
         ],
         request_timeout_secs: 300,
         api_key_set: true,
+        aggregator: false,
       },
       {
         id: 'local',
@@ -84,6 +85,7 @@ function testConfig(): Config {
         models: [{ id: 'tiny', name: 'Tiny', reasoning: false }],
         request_timeout_secs: 120,
         api_key_set: false,
+        aggregator: false,
       },
     ],
     active: { provider: 'gateway', model: 'model-b' },

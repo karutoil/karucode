@@ -108,14 +108,17 @@
   color: var(--icon-quiet);
 }
 
+/* Context is one icon and one number: the ring is the reading, so the word that
+ * used to sit beside it is gone. That is what lets it live in the header row
+ * with the bell, the branch and the palette at every width. */
 .chat-main.is-workbench .context-header-btn {
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-4);
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   border-color: var(--line);
   background: transparent;
   color: var(--text-secondary);
-  font-family: var(--font-ui);
-  font-size: var(--fs-tiny);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .chat-main.is-workbench .context-header-btn:hover,
@@ -125,24 +128,45 @@
   color: var(--text);
 }
 
-.context-header-meter {
-  width: var(--space-9);
-  height: var(--space-2);
-  overflow: hidden;
-  border-radius: var(--radius-pill);
-  background: var(--line);
+/* `.head-btn svg` pins every glyph at 13px; the ring is a reading, not a glyph,
+ * and needs enough circumference to show a fraction. */
+.chat-main.is-workbench .context-header-btn > svg {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
 }
 
-.context-header-meter > span {
-  display: block;
-  height: 100%;
-  background: var(--accent);
+.context-header-ring-track {
+  stroke: var(--line-strong);
+}
+
+.context-header-ring-fill {
+  stroke: var(--accent);
+  transition: stroke-dashoffset var(--transition-fast);
+}
+
+.context-header-btn[data-tone='warn'] .context-header-ring-fill {
+  stroke: var(--warn);
+}
+
+.context-header-btn[data-tone='hot'] .context-header-ring-fill {
+  stroke: var(--danger);
 }
 
 .context-header-value {
   color: var(--muted);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+.chat-main.is-workbench .results-head-btn {
+  color: var(--text-secondary);
+}
+
+.chat-main.is-workbench .results-head-btn[aria-expanded='true'] {
+  border-color: var(--line-strong);
+  background: var(--surface);
+  color: var(--text);
 }
 
 /* A secondary menu is not another permanent rail. */
@@ -445,13 +469,86 @@
   }
 }
 
-@container workbench (max-width: 780px) {
-  .chat-main.is-workbench .breadcrumb > strong,
-  .chat-main.is-workbench .head-activity {
+/* ---------- popped-out results ----------
+ *
+ * `Results panel: Pop out` (Settings -> Appearance) takes the inspector out of
+ * the layout entirely: the conversation keeps the whole pane - no `has-result`,
+ * so no split and no reading measure - and Results arrives as an overlay card
+ * the way Context does. It is the same card in the same place as Context, its
+ * left edge is the same 24px drag handle the docked split uses, and its width is
+ * the same saved project preference (`--workbench-result-w`), so a reader who
+ * resizes one layout finds the other the size they left it. Its ceiling is the
+ * dock's too (`ResultResizer` measures both against MIN_CONVERSATION_WIDTH): a
+ * floating card may never cover more conversation than the split could take.
+ *
+ * Desktop only. Below 1024px the inspector is already a slide-over sheet with
+ * its own trap, and it must keep that contract whatever this preference says.
+ */
+@media (min-width: 1024px) {
+  .app[data-inspector-mode='popout'] .chat-main.is-workbench .center-body > .inspector {
+    position: fixed;
+    z-index: 55;
+    top: var(--space-6);
+    right: var(--space-6);
+    bottom: var(--space-6);
+    left: auto;
+    flex: 0 0 auto;
+    width: min(var(--workbench-result-w, 560px), calc(100vw - var(--space-10)));
+    height: auto;
+    overflow: hidden;
+    border: 1px solid var(--line-overlay);
+    border-radius: var(--radius-lg);
+    background: var(--inspector);
+    box-shadow: var(--shadow-overlay);
+    visibility: visible;
+    transition-property: border-color;
+  }
+
+  /* Closed means gone. The docked collapse contract is "0 width, hidden" because
+   * a column can shrink; a card that kept its box would still cover the
+   * conversation it is supposed to be floating over. */
+  .app[data-inspector-mode='popout'][data-inspector-collapsed='true']
+    .chat-main.is-workbench .center-body > .inspector {
     display: none;
   }
 
-  .chat-main.is-workbench .context-header-label {
+  /* The dock gives the inner box its own rail width; the card has to follow the
+   * card, or its tabs would stop at 342px in a 700px overlay. */
+  .app[data-inspector-mode='popout']
+    .chat-main.is-workbench
+    .center-body
+    > .inspector
+    > .inspector-inner {
+    width: 100%;
+  }
+
+  /* The card's left edge is the drag handle, pinned to the same geometry the card
+   * uses so that a resize can never leave the two apart. */
+  .app[data-inspector-mode='popout'] .chat-main.is-workbench .center-body > .result-resizer {
+    position: fixed;
+    z-index: 56;
+    top: var(--space-6);
+    bottom: var(--space-6);
+    right: calc(
+      var(--space-6) + min(var(--workbench-result-w, 560px), calc(100vw - var(--space-10))) -
+        (var(--workbench-resizer-w) / 2)
+    );
+    left: auto;
+    width: var(--workbench-resizer-w);
+    height: auto;
+    margin: 0;
+    background: transparent;
+  }
+
+  /* On the card the rule *is* the edge, so it carries the card's own radius. */
+  .app[data-inspector-mode='popout'] .chat-main.is-workbench .center-body > .result-resizer::before {
+    border-radius: var(--radius-pill);
+  }
+}
+
+@container workbench (max-width: 780px) {
+  .chat-main.is-workbench .breadcrumb > strong,
+  .chat-main.is-workbench .head-activity {
     display: none;
   }
 }
@@ -520,6 +617,11 @@
   .chat-main.is-workbench .context-header-btn {
     min-width: 30px;
     padding: var(--space-2);
+  }
+
+  /* The ring carries the reading on a phone; the number would push the row. */
+  .chat-main.is-workbench .context-header-value {
+    display: none;
   }
 
   .workbench-task-menu-popover {

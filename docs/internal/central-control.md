@@ -19,6 +19,11 @@ the same entry). It lists every session on the server across projects, with
 search and status filters; selecting one switches to its project and opens the
 ordinary conversation, where the usual composer steers or follows up.
 
+Leave it with **Back to sessions** in the plane's rail head. That closes the
+plane without switching project, and on a phone - where the project rail this
+screen replaces is hidden - it reopens the sessions sheet, so you land back on
+the list you opened the plane from.
+
 **Control chats** are listed above those sessions and there is no limit: use
 "New" to start another, and they run alongside each other.
 

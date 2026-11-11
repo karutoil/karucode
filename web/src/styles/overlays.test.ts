@@ -78,6 +78,81 @@ describe('file viewer preview surface', () => {
   });
 });
 
+describe('command palette vocabulary', () => {
+  /* The palette is the one overlay that is a *list*, so it is the one most
+   * tempted to grow a private row, heading and keycap. It did: an amber-on-amber
+   * selected row, a group label that re-authored the kicker, two keycap recipes
+   * and an arrow on every row that had no hint. These pins are what keep it on
+   * the workbench's vocabulary (DESIGN-SYSTEM §5A). */
+  const paletteSource = readFileSync(new URL('../components/CommandPalette.tsx', import.meta.url), 'utf8');
+
+  it('marks the row Enter will run with the rail, not with amber ink', () => {
+    const active = declarations('.palette-item.is-active');
+    // `--text` on `--accent-bg` is the pair `.session-row.is-active` already uses
+    // (`--text` is the label; the tint says which row). An accent-coloured label
+    // on an accent tint measured 3.62:1 in Daybreak.
+    expect(active['background']).toBe('var(--accent-bg)');
+    expect(active['color']).toBe('var(--text)');
+    expect(declarations('.palette-item.is-active::before')['background']).toBe('var(--accent)');
+    // The rail is a 2px mark inset off the row's own ends, the same shape the
+    // session rail draws.
+    expect(declarations('.palette-item::before')['width']).toBe('2px');
+  });
+
+  it('inks the hint with a floored role, because the tint is not a surface', () => {
+    // §4.1's floor is measured against the nearest *surface*; a row with an accent
+    // tint under it is not one, so `--muted` (4.5:1 on the surface) is not enough.
+    expect(declarations('.palette-item.is-active .palette-hint')['color']).toBe(
+      'var(--text-secondary)',
+    );
+  });
+
+  it('re-uses the shared keycap instead of authoring a third one', () => {
+    // base.css styles `kbd` (10px mono, `--line-keycap`, no fill). The palette used
+    // to override it twice — an 18px outlined chip in the search row and a 16px
+    // filled one in the footer — so the same key looked like two controls.
+    expect(declarations('.palette-esc')).toEqual({ 'flex': '0 0 auto' });
+    expect(css).not.toMatch(/\.palette-footer kbd\s*\{/);
+    expect(css).not.toMatch(/\.palette-esc\s*\{[^}]*background:/);
+  });
+
+  it('draws a group heading with the shared label and its mono count', () => {
+    expect(paletteSource).toContain('class="session-group-label palette-group-label"');
+    // The variant owns padding only: the ink, size, tracking and the count span
+    // come from `.session-group-label` in layout.css.
+    expect(declarations('.palette-group-label')).toEqual({
+      'margin': '0',
+      'padding': 'var(--space-5) var(--space-6) var(--space-2)',
+    });
+  });
+
+  it('gives the arrow to the active row only', () => {
+    // A column of `→` down every unhinted row is decoration; on the row Enter will
+    // run it is the affordance that says the row goes somewhere.
+    expect(declarations('.palette-arrow')['display']).toBe('none');
+    expect(declarations('.palette-item.is-active .palette-arrow')['display']).toBe('inline-grid');
+  });
+
+  it('keeps the footer one line with the match count on the right', () => {
+    expect(declarations('.palette-footer')['justify-content']).toBeUndefined();
+    expect(declarations('.palette-count')['margin-left']).toBe('auto');
+    // The count is a visual reading of the live region above it, never a second
+    // announcement.
+    expect(paletteSource).toMatch(/class="palette-count"\s+aria-hidden="true"/);
+  });
+
+  it('highlights the run the filter actually tested', () => {
+    // The filter and the highlight must agree, or the palette explains the wrong
+    // substring; `lib/paletteMatch.ts` is the single definition of that split.
+    expect(paletteSource).toContain("import { matchSegments } from '../lib/paletteMatch';");
+    expect(paletteSource).toContain('<mark class="palette-mark">');
+    expect(declarations('.palette-mark')['color']).toBe('var(--accent-fill)');
+    expect(declarations('.palette-item.is-active .palette-mark')['color']).toBe(
+      'var(--accent-on-tint)',
+    );
+  });
+});
+
 describe('file viewer chrome', () => {
   /* The file panel used to stack three grey rows above the document - a path
    * header (`.file-view-head`), a metadata toolbar and a Preview/Source band -

@@ -35,7 +35,7 @@ const TARGET_LABEL: Record<string, string> = {
   'inspector.tab.changes': 'the Git tab',
   'inspector.tab.session': 'the Session usage tab',
   'inspector.tab.agents': 'the Agents tab',
-  'inspector.context': 'the Context button in the results header',
+  'inspector.context': 'the Context button in the session header',
 };
 
 /** Where a contributed control appears, in words. */

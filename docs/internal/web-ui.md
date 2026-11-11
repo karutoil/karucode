@@ -7,7 +7,7 @@
 
 - **Slug:** `web-ui`
 - **Tags:** ui, web, frontend, workbench, panels, context, shortcuts, preact, plugins, buttons
-- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `ui:mobile-touch-target`, `ui:mobile-keyboard-inset`, `env:interactive-widget`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:RailPeek`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:ResultResizer`, `route:PATCH /api/projects/:id/preferences`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:notification-bell`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `route:POST /api/plugins/:name/ui/actions/:action`, `config:plugin_ui`, `config:ui`, `file:web/src/components/PluginSlot.tsx`, `file:web/src/components/uiContributions.ts`, `file:web/src/components/PluginControls.tsx`, `file:web/src/state/pluginUiPreferences.ts`, `file:web/src/components/PluginViews.tsx`, `file:web/src/components/viewPanelRegister.ts`, `file:web/src/styles/plugin-views.css`, `dir:plugins/demos`, `file:plugins/demos/README.md`, `file:scripts/verify_plugin_demos.py`, `cmd:python3 scripts/verify_plugin_demos.py`, `file:web/src/styles/plugin-slots.css`, `file:scripts/verify_plugin_ui.py`, `cmd:python3 scripts/verify_plugin_ui.py`, `fn:matchUiKeybinding`, `fn:applyUiPreferences`, `ui:keybinding`, `ui:plugin-controls`, `fn:registerPluginPanelRenderer`, `ui:PluginSlot`, `ui:plugin-slot-button`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/state/railPeek.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/components/SessionsRail.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `file:web/src/lib/viewportInset.ts`, `file:web/src/lib/menu.tsx`, `ui:context-menu`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`, `ui:GitManager`, `ui:GitChanges`, `ui:GitCommitBox`, `ui:GitBranchDialog`, `ui:GitHistory`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `file:web/src/components/git/GitManager.tsx`, `file:web/src/styles/git.css`, `ui:WorkbenchTaskMenu`, `ui:ContextDrawer`, `file:web/src/components/WorkbenchTaskMenu.tsx`, `file:web/src/components/ContextDrawer.tsx`, `file:web/src/state/workbench.ts`, `file:web/src/lib/approvalCopy.ts`, `file:web/src/styles/workbench.css`, `file:web/src/styles/workbench-navigation.css`, `file:scripts/verify_workbench_frontend.py`, `cmd:python3 scripts/verify_workbench_frontend.py`, `ui:ControlPlane`, `route:GET /api/control/overview`, `route:GET /api/control/sessions`, `file:web/src/state/controlPlane.ts`, `file:web/src/components/control-plane/ControlPlane.tsx`, `file:web/src/components/control-plane/ControlRail.tsx`, `file:web/src/components/control-plane/ControlOverview.tsx`, `file:web/src/components/control-plane/ControlSession.tsx`, `file:web/src/components/control-plane/controlModel.ts`, `file:web/src/styles/control-shared.css`, `file:web/src/styles/control-rail.css`, `file:web/src/styles/control-overview.css`, `file:web/src/styles/control-session.css`, `file:web/src/lib/historyLoader.ts`, `file:web/src/lib/virtualWindow.ts`, `file:web/src/components/ChatTranscript.tsx`, `file:web/src/state/chat.ts`, `file:web/src/lib/streamingMarkdown.ts`, `file:web/src/components/Markdown.tsx`, `file:web/src/components/ThinkingBlock.tsx`, `ui:streaming-render`, `file:web/src/api/sharedStream.ts`, `ui:shared-event-stream`, `route:GET /api/events`, `file:web/src/components/ToolCard.tsx`, `file:web/src/components/CommandCard.tsx`, `file:scripts/verify_tps_badge.py`, `cmd:python3 scripts/verify_tps_badge.py`, `file:web/src/state/draftSession.test.ts`, `file:scripts/verify_draft_session.py`, `cmd:python3 scripts/verify_draft_session.py`, `ui:AuthScreen`, `ui:Onboarding`, `route:GET /api/auth/status`, `route:POST /api/auth/login`, `route:POST /api/auth/logout`, `route:POST /api/auth/password`, `route:GET /api/auth/passkeys`, `route:POST /api/auth/passkeys`, `route:POST /api/auth/passkey/options`, `route:POST /api/auth/passkey/login`, `route:GET /api/onboarding`, `route:POST /api/onboarding/complete`, `file:web/src/components/AuthScreen.tsx`, `file:web/src/styles/auth.css`, `file:web/src/components/Onboarding.tsx`, `file:web/src/components/AccessSettings.tsx`, `file:web/src/styles/access-settings.css`, `ui:AccessSettings`, `ui:access-tab`, `ui:Updates`, `file:web/src/components/UpdateSettings.tsx`, `route:GET /api/update`, `route:POST /api/update/check`, `route:POST /api/update/apply`, `file:web/src/lib/passkey.ts`, `file:web/src/styles/onboarding.css`, `config:[access]`
+- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `ui:mobile-touch-target`, `ui:mobile-keyboard-inset`, `env:interactive-widget`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:RailPeek`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:ResultResizer`, `route:PATCH /api/projects/:id/preferences`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:notification-bell`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `route:POST /api/plugins/:name/ui/actions/:action`, `config:plugin_ui`, `config:ui`, `file:web/src/components/PluginSlot.tsx`, `file:web/src/components/uiContributions.ts`, `file:web/src/components/PluginControls.tsx`, `file:web/src/state/pluginUiPreferences.ts`, `file:web/src/components/PluginViews.tsx`, `file:web/src/components/viewPanelRegister.ts`, `file:web/src/styles/plugin-views.css`, `dir:plugins/demos`, `file:plugins/demos/README.md`, `file:scripts/verify_plugin_demos.py`, `cmd:python3 scripts/verify_plugin_demos.py`, `file:web/src/styles/plugin-slots.css`, `file:scripts/verify_plugin_ui.py`, `cmd:python3 scripts/verify_plugin_ui.py`, `fn:matchUiKeybinding`, `fn:applyUiPreferences`, `ui:keybinding`, `ui:plugin-controls`, `fn:registerPluginPanelRenderer`, `ui:PluginSlot`, `ui:plugin-slot-button`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/state/railPeek.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/components/SessionsRail.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `file:web/src/lib/viewportInset.ts`, `file:web/src/lib/menu.tsx`, `ui:context-menu`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`, `ui:GitManager`, `ui:GitChanges`, `ui:GitCommitBox`, `ui:GitBranchDialog`, `ui:GitHistory`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `file:web/src/components/git/GitManager.tsx`, `file:web/src/styles/git.css`, `ui:WorkbenchTaskMenu`, `ui:ContextDrawer`, `file:web/src/components/WorkbenchTaskMenu.tsx`, `file:web/src/components/ContextDrawer.tsx`, `file:web/src/state/workbench.ts`, `file:web/src/lib/approvalCopy.ts`, `file:web/src/styles/workbench.css`, `file:web/src/styles/workbench-navigation.css`, `file:scripts/verify_workbench_frontend.py`, `cmd:python3 scripts/verify_workbench_frontend.py`, `ui:ControlPlane`, `route:GET /api/control/overview`, `route:GET /api/control/sessions`, `file:web/src/state/controlPlane.ts`, `file:web/src/components/control-plane/ControlPlane.tsx`, `file:web/src/components/control-plane/ControlRail.tsx`, `file:web/src/components/control-plane/ControlOverview.tsx`, `file:web/src/components/control-plane/ControlSession.tsx`, `file:web/src/components/control-plane/controlModel.ts`, `file:web/src/styles/control-shared.css`, `file:web/src/styles/control-rail.css`, `file:web/src/styles/control-overview.css`, `file:web/src/styles/control-session.css`, `file:web/src/lib/historyLoader.ts`, `file:web/src/lib/virtualWindow.ts`, `file:web/src/components/ChatTranscript.tsx`, `file:web/src/state/chat.ts`, `file:web/src/lib/streamingMarkdown.ts`, `file:web/src/components/Markdown.tsx`, `file:web/src/components/ThinkingBlock.tsx`, `ui:streaming-render`, `file:web/src/api/sharedStream.ts`, `ui:shared-event-stream`, `route:GET /api/events`, `file:web/src/components/ToolCard.tsx`, `file:web/src/components/CommandCard.tsx`, `file:scripts/verify_tps_badge.py`, `cmd:python3 scripts/verify_tps_badge.py`, `file:web/src/state/draftSession.test.ts`, `file:scripts/verify_draft_session.py`, `cmd:python3 scripts/verify_draft_session.py`, `ui:AuthScreen`, `ui:Onboarding`, `route:GET /api/auth/status`, `route:POST /api/auth/login`, `route:POST /api/auth/logout`, `route:POST /api/auth/password`, `route:GET /api/auth/passkeys`, `route:POST /api/auth/passkeys`, `route:POST /api/auth/passkey/options`, `route:POST /api/auth/passkey/login`, `route:GET /api/onboarding`, `route:POST /api/onboarding/complete`, `file:web/src/components/AuthScreen.tsx`, `file:web/src/styles/auth.css`, `file:web/src/components/Onboarding.tsx`, `file:web/src/components/AccessSettings.tsx`, `file:web/src/styles/access-settings.css`, `ui:AccessSettings`, `ui:access-tab`, `ui:Updates`, `file:web/src/components/UpdateSettings.tsx`, `route:GET /api/update`, `route:POST /api/update/check`, `route:POST /api/update/apply`, `file:web/src/lib/passkey.ts`, `file:web/src/styles/onboarding.css`, `config:[access]`, `ui:results-popout`, `ui:results-head-btn`, `ui:context-header-btn`, `file:scripts/verify_results_popout.py`, `cmd:python3 scripts/verify_results_popout.py`, `file:web/src/components/CommandPalette.tsx`, `file:web/src/lib/paletteMatch.ts`, `file:web/src/lib/paletteMatch.test.ts`, `file:web/src/styles/overlays.css`
 - **Source:** `web/src/app.tsx:1`
 
 ---
@@ -103,11 +103,15 @@ deliberately outside the parent form's dirty state.
   empty state when the chat has delegated nothing. The inspector is a column
   from 1400px and stacks under the transcript below that; the rail hides behind
   the back button on a phone, and opening the plane moves focus into its rail.
-  The list refreshes every five seconds; leaving the plane (a project tile in
-  the k. rail, or the sessions rail's project switcher) re-reads the open
-  project's session list, the same read a project switch makes, so the
-  workbench rail never inherits a row the plane was showing for another project
-  or a control chat.
+  The list refreshes every five seconds; leaving the plane (its rail head's
+  **Back to sessions**, a project tile in the k. rail, or the sessions rail's
+  project switcher) re-reads the open project's session list, the same read a
+  project switch makes, so the workbench rail never inherits a row the plane
+  was showing for another project or a control chat. **Back to sessions** is the
+  one exit that does not also switch project, and the only one a phone has: a
+  phone hides the compact project rail outright and the plane replaces the
+  whole window there. On a phone it reopens the sessions sheet, so the reader
+  lands on the list the plane was opened from.
   See `central-control` for the tools, dispatch and approval semantics. Its
   embedded conversation is a real `ChatView` with `mode="control-plane"`: that
   mode does not mount the project-scoped Inspector or Context drawer. Composer
@@ -169,7 +173,7 @@ deliberately outside the parent form's dirty state.
   from the run row on reload so the reason survives a refresh.
   Full activity remains an
   explicit **Grouping → None** option; **Cards** remains the alternate presentation
-  in Settings → General → Transcript or Theme Studio, which also offers
+  in Settings → Appearance → Transcript or Theme Studio, which also offers
   **Working steps → Folded** for the terse view where a finished turn sits behind
   **Show the working**.
   Returned images stay visible above the output disclosure and open in the real
@@ -292,8 +296,9 @@ deliberately outside the parent form's dirty state.
   with their real changed-file/terminal counts, plus **one closable tab per open
   file** (see *File tabs* below). The standalone workspace strip is
   gone; when the container is constrained, the same tablist wraps to a second row
-  inside that header without dropping branch, notification, Context, command or
-  task actions. ChatView mounts Source control and Terminal on demand, then keeps
+  inside that header without dropping branch, notification, Context, Results
+  (popped out), command or task actions. ChatView mounts Source control and
+  Terminal on demand, then keeps
   an established view mounted while it is hidden, so switching views does not
   discard old work. Composer belongs to the Conversation view. Tab keys wrap with
   **Left/Right**, jump with **Home/End**, and scroll the selected tab into view;
@@ -336,6 +341,20 @@ deliberately outside the parent form's dirty state.
   keeps the app's content measure (the composer's own 820px box); the narrower
   70ch reading measure belongs to the side-by-side split alone, so hiding the
   dock never narrows the transcript.
+* **Results panel: docked or popped out** (Settings → Appearance → **Theme and
+  layout** → **Results panel**, stored per browser as `karucode.inspectorMode`). *Docked* is
+  the shared layout above: a column beside the conversation. *Pop out* takes the
+  panel out of the layout entirely — no `has-result`, so the conversation keeps
+  the full pane — and Results arrives on demand as an overlay card inset from the
+  workspace's right edge, the same shape as Context. In that mode the session
+  header grows an **Open results / Close results** button (the panel is closed as
+  often as it is open, so its own header cannot be the only way in), the card
+  carries a **Close results panel** button, and Escape closes it before the same
+  key could stop a run. Choosing the mode starts from a known state: a pop-out
+  begins closed and going back to docked shows the column. Opening Context closes
+  the pop-out first, so the two right-hand overlays never stack. Below 1024px the
+  preference changes nothing: the inspector is already a slide-over sheet with its
+  own focus trap, whichever mode is selected.
 * **Result resizing**: the wide split has a focusable 24px separator. Drag with a
   mouse or touch; **Left/Right** resize by 10px, **Shift+Left/Right** by 50px and
   **Home/End** choose the safe bounds. The preference is a project property saved
@@ -349,7 +368,10 @@ deliberately outside the parent form's dirty state.
   of leaving dead space beside its separator. On a wide user-resized split, the
   transcript matches the composer's box rather than filling the Conversation pane:
   assistant messages and tools stay left-anchored while compact user messages
-  remain on the right.
+  remain on the right. The popped-out card is dragged by the *same* handle on its
+  left edge, with the same keys, the same saved project width and the same
+  ceiling, so the two layouts never disagree about how much conversation stays
+  visible.
 * **Context drawer** (`Ctrl/Cmd+J`): a transient sibling overlay driven by
   `state/workbench.ts`, with **Now**, **Usage** and **Access**. It does not replace
   or unmount the Inspector, conversation, full Git or terminal below it. **Now**
@@ -358,7 +380,14 @@ deliberately outside the parent form's dirty state.
   tool-reachable workspace from prompt input: opening a panel attaches neither its
   contents nor a UI snapshot. Only the composed message and deliberately added
   attachments or @ paths become message input. Its Files / Source control /
-  Session usage / Agents / plugin links reveal the real result selection.
+  Session usage / Agents / plugin links reveal the real result selection. Its way
+  in is the session header's context button — an icon-only usage ring that fills
+  with the newest provider-reported prompt, its percentage beside it, the reading
+  as the accessible name — because Context must stay reachable whether the results
+  panel is docked, popped out or closed. The ring is drawn from the same
+  `contextUsage` the composer's Usage pill reads, tones calm/warn/hot at the same
+  thresholds, and shows an empty track rather than a invented fill when the
+  provider reported nothing.
 * **Context Usage and Access**: Usage reuses the server-backed `SessionInfoTab`
   (not transcript arithmetic), while Access renders the Composer's shared
   `describeApprovals` copy for the install's real mode and allowlist counts.
@@ -369,7 +398,8 @@ deliberately outside the parent form's dirty state.
 * **Responsive results**: `styles/workbench.css` splits Conversation and Results
   in wide Workbench containers, turns Results into a bounded overlay at
   intermediate container widths, and reuses the existing full-height inspector
-  sheet below 1024px. The separator is absent from both non-split modes. Context
+  sheet below 1024px. The separator is absent from both non-split modes, and the
+  pop-out card (with its own edge handle) exists only above 1024px. Context
   is likewise a bounded desktop drawer and a trapped
   full-height phone sheet. Closing phone Context restores the sheet beneath it;
   selecting a result or Conversation deliberately navigates to that real view.
@@ -500,22 +530,39 @@ deliberately outside the parent form's dirty state.
   built-in themes, per-token colours, density, transcript options and custom
   CSS, persisted in the browser. The `themes` topic covers the storage key and
   the shareable export format.
-* **Settings sheet** (modal): seven tabs, split by who owns the setting —
-  **General** (appearance: theme, density, colour mode, transcript layout, and
-  a door into the Theme studio), **Models** (provider profiles, their model
-  libraries, plus sampling under *Advanced*), **Agent** (approvals and
-  subagents; subagent budget, timeouts and raw limits under *Advanced*),
-  **Access** (sign-in, passkeys, the public address and the proxy policy),
-  **Notifications** (server routing, then this browser, with delivery tuning
-  under *Advanced*), **Plugins & MCP** (lifecycle and diagnostics) and
-  **Updates** (the running build, the newest release and the
-  check/install switches; see the `updates` topic). Each tab's *Advanced*
-  block is collapsed by default, because those are the knobs whose defaults
-  are right for nearly every install. A rejected field takes you to its tab
-  and opens the disclosure that holds it — the Save button is shared, so the
-  error could otherwise be off-screen. Panels stay mounted (merely `hidden`)
-  so switching tabs never discards what was typed.
-* **Command palette** (`Ctrl/Cmd+K`): sessions, projects, actions.
+* **Settings sheet** (drawer): two panes. A rail of seven sections on the
+  left — each with an icon, a name and a line saying what it holds — and the
+  settings beside it under a header that names the section, says who owns its
+  values (**This browser**, **This install**, **Install + browser**) and
+  carries the close button. The sections are **Appearance** (theme, density,
+  colour mode, the results panel's docked/pop-out presentation, transcript
+  layout, and a door into the Theme studio), **Models & providers** (provider
+  profiles, their model libraries, plus sampling under *Advanced*), **Agent**
+  (approvals and subagents; subagent budget, timeouts and raw limits under
+  *Advanced*), **Access & sign-in** (sign-in, passkeys, the public address and
+  the proxy policy), **Notifications** (server routing, then this browser, with
+  delivery tuning under *Advanced*), **Plugins & MCP** (lifecycle and
+  diagnostics) and **Updates** (the running build, the newest release and the
+  check/install switches; see the `updates` topic). Each section's *Advanced*
+  block is collapsed by default, because those are the knobs whose defaults are
+  right for nearly every install. The rail's search field matches the rendered
+  panels themselves — not a keyword list — so typing "timeout" leaves the
+  sections that own one and names what matched inside them; Enter opens the
+  first match, unfolds its *Advanced* block if that is where it lives, scrolls
+  it to the top and focuses it, and Escape clears the field before it closes
+  the sheet. A rejected field takes you to its section the same way — the Save
+  button is shared, so the error could otherwise be off-screen. Panels stay
+  mounted (merely `hidden`) so switching sections never discards what was
+  typed, and the footer says what Save commits for the section you are on.
+* **Command palette** (`Ctrl/Cmd+K`) — one search field over three groups:
+  **Actions** (New session, the sessions rail, workspace results, settings,
+  notifications), **Sessions** (switch to any session in the open project, with
+  its age and whether it is running) and **Plugins** (every command a plugin
+  contributed, under its plugin's name). Each group heading carries the number
+  of rows under it, a row whose label matched the query shows the matched run,
+  and the footer holds the keys and the match count. ArrowUp/ArrowDown/Home/End
+  move the cursor, Enter runs the row, Escape closes; the cursor row is the only
+  one that shows the trailing arrow.
 
 ## Notifications
 
@@ -752,7 +799,7 @@ The slots this build mounts:
 | Slot | Mount point |
 | --- | --- |
 | `composer.toolbar` | the composer's action row (`Composer`) |
-| `inspector.header` | beside **Context** in the results dock (`Inspector`) |
+| `inspector.header` | the results panel's own header (`Inspector`) |
 | `session.header` | before the built-in chips in the session header (`ChatView`) |
 
 Commands become ordinary palette rows under the **Plugins** group, so filtering,
@@ -776,7 +823,9 @@ plugin's answer as a toast, re-reads the panels it named, and opens the one
 shown as a failure and never as a success.
 
 Hiding is app-wide and allowlisted — `composer.attach`, the four inspector
-tabs, and the inspector's **Context** button. Nothing that stops a run or
+tabs, and the **Context** button in the session header (`inspector.context` in
+the wire payload; the control moved out of the results header so it survives the
+panel being closed or popped out). Nothing that stops a run or
 answers an approval is on the list, and the inspector refuses to hide its last
 remaining tab: it keeps the tab strip non-empty and moves the selection to a
 tab that still exists.
@@ -803,7 +852,7 @@ a slot with no contributions draws nothing at all, not an empty row.
 | `/` | focus the session search |
 | `Up`/`Down` | move through the `@`-mention suggestions |
 | `Enter`/`Tab` | insert the highlighted mention |
-| `Escape` | dismiss the local editor, menu, drawer or sheet first; only otherwise stop a running turn |
+| `Escape` | dismiss the local editor, menu, popped-out Results, drawer or sheet first; only otherwise stop a running turn |
 
 ## Mobile
 
@@ -813,7 +862,9 @@ carries project selection/management, New session, Control plane and Settings;
 the session header retains Sessions, Context, notifications, commands and Task
 actions. Results are also reachable from the command palette and Context's real
 result links. A narrow Source control or Terminal view uses the available
-workspace rather than leaving another result stack beside it.
+workspace rather than leaving another result stack beside it. The **Results
+panel** pop-out preference is a desktop presentation: a phone always reaches
+Results through its sheet, the palette or Context's result links.
 
 Context becomes the top full-height dialog, traps focus and makes the mounted
 result sheet inert behind it. Closing it restores the sheet that was underneath

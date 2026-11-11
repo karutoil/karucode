@@ -12,7 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import * as store from '../../state/store';
 import * as actions from '../../state/actions';
-import { resetControlPlane } from '../../state/controlPlane';
+import { controlPlaneOpen, resetControlPlane } from '../../state/controlPlane';
 import { apiRequest } from '../../api/client';
 import { getControlOverview, listAgents, listSessions } from '../../api/endpoints';
 import { ControlPlane } from './ControlPlane';
@@ -61,6 +61,11 @@ beforeEach(() => {
   // The snapshot lives in module signals; without this a previous test's
   // overview is still on screen when the next one mounts.
   resetControlPlane();
+  // The plane's own visibility and the workbench's sheet are module state; a test
+  // that left the plane must not hand the next one a closed plane or an open sheet.
+  controlPlaneOpen.value = false;
+  store.mobileSheet.value = null;
+  store.narrowViewport.value = false;
   store.projects.value = [
     { id: 'p1', name: 'One', path: '/p1', created_at: 0, updated_at: 0, session_count: 1 },
     { id: 'p2', name: 'Two', path: '/p2', created_at: 0, updated_at: 0, session_count: 1 },
@@ -104,6 +109,39 @@ beforeEach(() => {
 });
 
 /* --------------------------------------------------------------- navigation */
+
+describe('leaving the plane', () => {
+  /** Open the plane's rail and press its exit. */
+  async function pressLeave(): Promise<void> {
+    const browser = await screen.findByLabelText('Sessions across projects');
+    fireEvent.click(within(browser).getByRole('button', { name: 'Back to sessions' }));
+  }
+
+  it('closes the plane and leaves the workbench where it was', async () => {
+    controlPlaneOpen.value = true;
+    render(<ControlPlane />);
+    await pressLeave();
+    expect(controlPlaneOpen.value).toBe(false);
+    // A wide screen's session list is the workbench rail, already mounted and
+    // already on screen: leaving must not also pop a sheet over it.
+    expect(store.mobileSheet.value).toBeNull();
+    // Leaving is not navigating: no project switch, no session opened.
+    expect(actions.switchProject).not.toHaveBeenCalled();
+    expect(actions.openSession).not.toHaveBeenCalled();
+  });
+
+  it('lands a phone on the sessions sheet, which is where its list lives', async () => {
+    // The plane replaces the whole workspace on a phone and `.project-rail` is
+    // `display: none` there, so before this control the screen had no way back at
+    // all. The destination is the sheet the plane was opened from.
+    store.narrowViewport.value = true;
+    controlPlaneOpen.value = true;
+    render(<ControlPlane />);
+    await pressLeave();
+    expect(controlPlaneOpen.value).toBe(false);
+    expect(store.mobileSheet.value).toBe('sessions');
+  });
+});
 
 describe('opening conversations', () => {
   it('opens a control chat and shows the control intro', async () => {

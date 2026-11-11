@@ -20,6 +20,18 @@ let phoneSnapshotTaken = false;
 
 /** Open Context without changing session, chat, terminal or result selection. */
 export function openContext(section: ContextSection = 'now'): void {
+  // A popped-out Results panel and Context are both right-hand overlays. Stacking
+  // them would put one dialog's controls behind the other, so opening Context
+  // closes the pop-out first; the docked panel is a layout column and simply
+  // stays where it is underneath.
+  if (
+    !store.narrowViewport.value &&
+    store.inspectorMode.value === 'popout' &&
+    !store.inspectorCollapsed.value
+  ) {
+    store.inspectorCollapsed.value = true;
+    store.persistBool('inspector', true);
+  }
   if (store.narrowViewport.value) {
     if (!phoneSnapshotTaken && store.mobileSheet.value !== 'inspector') {
       phoneSheetBeforeContext = store.mobileSheet.value;

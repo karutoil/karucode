@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import * as store from '../../state/store';
 import * as actions from '../../state/actions';
-import { resetControlPlane } from '../../state/controlPlane';
+import { controlPlaneOpen, resetControlPlane } from '../../state/controlPlane';
 import { apiRequest } from '../../api/client';
 import { getControlOverview, listAgents, listSessions } from '../../api/endpoints';
 import { ControlPlane } from './ControlPlane';
@@ -50,6 +50,9 @@ beforeEach(() => {
   // The snapshot lives in module signals; without this a previous test's
   // overview is still on screen when the next one mounts.
   resetControlPlane();
+  // Exiting the plane flips this module signal; a test that clicked the exit must
+  // not leave the next one believing the plane is already closed.
+  controlPlaneOpen.value = false;
   store.projects.value = [
     { id: 'p1', name: 'One', path: '/p1', created_at: 0, updated_at: 0, session_count: 1 },
     { id: 'p2', name: 'Two', path: '/p2', created_at: 0, updated_at: 0, session_count: 1 },
@@ -427,6 +430,33 @@ describe('the rail draws icons, not text glyphs', () => {
     }
     // The control chat's tile is a mark, not an icon: `k.` is the plane's own.
     expect(browser.querySelector('.cp-tile-control')?.textContent).toBe('k.');
+  });
+});
+
+/* ------------------------------------------------------------------- the head */
+
+describe('the rail head is the way out of the plane', () => {
+  it('draws a Back to sessions control in the shared icon-button recipe', async () => {
+    const { browser } = await mountedRail();
+    const leave = within(browser).getByRole('button', { name: 'Back to sessions' });
+    expect(leave.classList.contains('icon-button')).toBe(true);
+    // No plane-local class: `scripts/verify_control_parity.py` measures the base
+    // `.icon-button` recipe, and an extra class opts the element out of that pair.
+    expect([...leave.classList]).toEqual(['icon-button']);
+    expect(leave.querySelector('svg')).toBeTruthy();
+    // First in the head, so it is what a reader meets at the top-left corner - a
+    // phone hides the project rail that would otherwise hold the exit.
+    const head = browser.querySelector('.side-head');
+    expect(head?.firstElementChild).toBe(leave);
+  });
+
+  it('leaves the plane instead of switching a project', async () => {
+    const { browser } = await mountedRail();
+    fireEvent.click(within(browser).getByRole('button', { name: 'Back to sessions' }));
+    expect(controlPlaneOpen.value).toBe(false);
+    // Leaving is not navigation: no project switch and no session opened.
+    expect(actions.switchProject).not.toHaveBeenCalled();
+    expect(actions.openSession).not.toHaveBeenCalled();
   });
 });
 

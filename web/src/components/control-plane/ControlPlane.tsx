@@ -338,12 +338,30 @@ export function ControlPlane(): JSX.Element {
 
   const back = (): void => { setSelected(null); setError(null); };
 
+  /**
+   * Leave the plane for the workbench's session list.
+   *
+   * On a phone the workbench's list is the sessions sheet (the rail is a sheet
+   * there, not a column), and that sheet is where the plane was opened from - so
+   * it is reopened on the way out and the reader lands on the list they asked
+   * for rather than on whichever conversation was behind it. On a wider screen
+   * the rail is already on screen, so closing the plane is the whole job.
+   *
+   * The destination is read at click time, not captured: a window resized across
+   * the phone breakpoint while the plane was open must not open a sheet on a
+   * desktop.
+   */
+  const leave = (): void => {
+    if (store.narrowViewport.value) store.mobileSheet.value = 'sessions';
+    controlPlaneOpen.value = false;
+  };
+
   return <div class={`control-plane cp${selected ? ' detail-open' : ''}`}>
     {/* `tabIndex={-1}` + the mount effect: opening the plane used to leave focus
         in the app's project rail, so the next nine tabs walked the rail behind
         this screen before reaching it. Focusing the region itself puts the
         reader (and the ring) inside the plane, and the first Tab then lands on
-        its own refresh button. */}
+        its head: Back to sessions, then refresh. */}
     <ControlRail
       railRef={browserRef}
       chats={chats}
@@ -357,6 +375,7 @@ export function ControlPlane(): JSX.Element {
       onQuery={setQuery}
       projectCount={projects.length}
       projectName={projectName}
+      onLeave={leave}
       onRefresh={() => void refresh()}
       onNewChat={() => void openControlSession(true)}
       onNavigate={navigate}

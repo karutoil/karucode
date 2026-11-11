@@ -107,6 +107,11 @@ export interface ProviderProfile {
   base_url: string;
   models: ModelEntry[];
   request_timeout_secs: number;
+  /**
+   * The endpoint fronts several upstream channels, so a 401/403/404 means "this
+   * channel's key is dead" and is worth another attempt.
+   */
+  aggregator: boolean;
   /** The key itself is write-only and never sent to the browser. */
   api_key_set: boolean;
 }
@@ -127,6 +132,8 @@ export interface ProviderPatch {
   /** Replaces the whole list when present. */
   models?: ModelEntry[];
   request_timeout_secs?: number;
+  /** Retry 401/403/404: the next attempt lands on another upstream channel. */
+  aggregator?: boolean;
 }
 
 export interface ProvidersPatch {
@@ -232,6 +239,13 @@ export interface Limits {
   search_max_results: number;
   context_max_chars: number;
   max_tool_calls_per_turn: number;
+  /**
+   * How many times a turn the provider gave up on is asked again, after a wait.
+   * `0` disables the layer. Each retry is a fresh generation.
+   */
+  max_turn_retries: number;
+  /** Wait before the first turn retry, in ms; doubles per retry, capped 8x. */
+  turn_retry_delay_ms: number;
   /**
    * Run a turn's independent tool calls at the same time. Off runs every call
    * one at a time, in order. Not the same key as `model.parallel_tool_calls`,

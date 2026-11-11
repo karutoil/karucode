@@ -243,7 +243,7 @@ def main() -> int:
         chrome_state = js(session, """
             return {
               tabs: [...document.querySelectorAll('[role=tab]')].map(t => t.textContent.trim()),
-              context: !!document.querySelector('.inspector-context-button'),
+              context: !!document.querySelector('.context-header-btn'),
               attach: !!document.querySelector('.compose-plus'),
               zenButton: !!document.querySelector('[data-plugin="zen"][data-contribution="zen"]'),
               header: !!document.querySelector('[data-plugin="zen"][data-contribution="zen"]')

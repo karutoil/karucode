@@ -12,6 +12,63 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Added
 
+- **A run no longer dies because the provider was briefly out.** Two retry budgets
+  already sat under a turn — `retry_max_retries` before any content arrives, and
+  `retry_max_stream_restarts` for an answer that dies mid-stream — and both spend
+  attempts in the same second. When they were spent the run simply ended, and the
+  only recovery was a human typing the prompt again: on this install that happened
+  26 times in two weeks, and every one of those runs *completed* when it was
+  resent. `[limits] max_turn_retries` (default `2`, `0` disables) adds the layer
+  that spends **time** instead: after the fast budgets are gone, the same turn is
+  asked again once the upstream has had `turn_retry_delay_ms` (default 30 s,
+  doubling to an 8× cap) to recover. It only engages for a failure a wait can fix
+  — a transient status (408/409/425/429/5xx), a body naming a rate limit, cooldown
+  or reset window, or a transport death with no status at all. A dead key (`401`),
+  a content refusal, a request the endpoint judged (`[permanent]`) and a context
+  overflow still end the run at once with their real reason, because two more
+  generations only buy the same answer. Every retry is announced — a `stream_retry`
+  event, so a live client drops anything the failed attempt rendered, plus a
+  warning notice naming the attempt, the wait and the setting — nothing of a
+  failed attempt is persisted (so a retry can never duplicate an answer), and a
+  wait that would run past `max_run_secs` fails the run now instead of sleeping
+  into the deadline. Both numbers are on the Agent tab's limits grid.
+- **"Multi-channel gateway" is a switch on the provider card.** The profile field
+  that makes a `401`/`403`/`404` retryable — correct for a proxy that fronts
+  several upstream channels, where that status usually means *this channel's* key
+  is dead — existed in the config and in the retry policy but no screen could set
+  it, and the profiles this install stores live in the database. Settings ->
+  Models & providers now shows it per profile, writing
+  `providers.upsert[].aggregator` through the same `PATCH /api/config` the rest of
+  the card uses; `GET /api/config` returns the field so the switch renders its
+  real state. On this install's own history the class it addresses — a dead
+  channel's key ending a run — accounts for 13 failed runs and 76 failed
+  subagents. It stays off by default: on a direct vendor API a revoked key stays
+  revoked, and retrying it 50 times turns a clear error into a hang.
+- **The results panel can pop out instead of owning a column.** Settings ->
+  General -> **Appearance -> Results panel** now chooses between *Docked* (the
+  shared layout: Files / Git / Session usage / Agents beside the conversation) and
+  *Pop out*: the conversation keeps the whole width, and Results arrives on demand
+  as an overlay card inset from the workspace's right edge, the way Context does.
+  The choice and the open/closed state live in this browser
+  (`karucode.inspectorMode`, `karucode.inspectorCollapsed`), so it needs no server
+  setting and follows neither the project nor the theme. In the pop-out the session
+  header grows an **Open results / Close results** button, the card closes with its
+  own **Close results panel** control or Escape (before that key could stop a run),
+  and opening Context closes the card first so the two right-hand overlays never
+  stack. The card is resized by the *same* 24px drag handle, the same
+  Left/Right/Shift/Home/End keys, the same saved project width
+  (`PATCH /api/projects/:id/preferences`) and the same ceiling as the docked
+  split, so switching modes never changes how wide Results is or how much
+  conversation stays visible. Below 1024px nothing changes:
+  the inspector is already a slide-over sheet with its own focus trap.
+- **Context is a usage ring in the session header.** The results header used to own
+  the **Context** button, which left Context unreachable whenever that panel was
+  collapsed, popped out or closed. The only way in is now the session header, drawn
+  as an icon-only ring that fills with the newest provider-reported prompt with its
+  percentage beside it (no "Context" word), toned calm/warn/hot at the same
+  thresholds as the composer's Usage pill, with an empty track when the provider
+  reported nothing. The plugin hide target keeps its wire name `inspector.context`,
+  so a plugin that already hides the Context button still does.
 - **A version that is the commit count, and an update system to go with it.**
   `crates/kc-server/build.rs` stamps `git rev-list --count HEAD` (plus the commit,
   its date, a dirty marker, the channel and the target triple) into the binary, so
@@ -291,6 +348,49 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Changed
 
+- **Settings is a two-pane window, and it can be searched.** Seven equal labels in a
+  strip said nothing about what was behind them, and the only way to find a setting
+  was to open each one in turn. The sheet is now `min(960px, 100vw)` with a section
+  rail on the left — an icon, a name and a line saying what is in there ("Approvals,
+  subagents, limits") — and the content beside it under a pane header that names the
+  section, says who owns its values (**This browser**, **This install**,
+  **Install + browser**) and carries the one close button. The rail's search matches
+  the *rendered* panels rather than a hand-kept keyword list, so a field added
+  tomorrow is findable the day it is added: typing filters the rail to the sections
+  that matched and names the sections inside them ("Subagents"), Enter opens the
+  first match — unfolding its *Advanced* block when the section lives behind one —
+  scrolls it to the top, focuses it and flashes it, and a section that a rejected
+  field belongs to is reached the same way. Escape clears the field before it closes
+  the sheet. The footer says what Save commits for the section on screen, the rail
+  and the pane header stay put while a long section scrolls under them, one control
+  height (32px) applies to every button beside a field, and below 780px the rail
+  becomes a scrolling strip above the content. **General** is now **Appearance**,
+  **Models** is **Models & providers** and **Access** is **Access & sign-in**; the
+  old first section, whose name the tab had taken, is **Theme and layout**. Provider
+  cards are cards on the input rung with their models as divided rows, not cards
+  inside a card. Verified in Chromium at 1440/1024/800/390 in both modes by
+  `scripts/verify_settings_tabs.py` (33 checks).
+
+- **The command palette speaks the workbench's language.** Three things in it were
+  drawn twice: the row Enter would run was an accent label on an accent tint (a
+  bronze block that read as a pressed button, and in Daybreak the label came out the
+  colour of a warning), the group headings re-authored the kicker instead of using
+  `.session-group-label`, and there were two private keycap recipes (an 18px
+  outlined chip in the search row, a 16px filled one in the footer) instead of the
+  shared `kbd` from `base.css`. The cursor row now takes
+  `.session-row.is-active`'s recipe — the accent tint, a 2px accent rail and
+  `--text` for the label — the headings are the shared label with their count in its
+  mono span, and both key rows are the shared keycap. The trailing column holds a
+  chord, an age or a count and nothing else: the `→` that used to stand in for a
+  missing hint belongs to the cursor row only, and the "Results" hint that restated
+  its own label is gone. A row that survived the filter shows the run that matched —
+  the same substring the filter tested, split once in `lib/paletteMatch.ts` — the
+  footer is one line (keys left, `3 of 5` right), the empty state says what was
+  searched instead of one grey line, and sessions carry a chat glyph rather than a
+  file glyph. Measured in Chromium in both modes: the worst text in the dialog is
+  5.0:1 in Daybreak and 5.8:1 in Ember, and at 320px the trailing count is what
+  gives way, so nothing runs off the dialog's edge.
+
 - **A run is one loop: no segments, no `[runtime checkpoint]` turn.** The
   iteration budget used to belong to a *segment* — 200 model turns — and when a
   segment ran out mid-task the runtime wrote a synthetic `user` turn
@@ -466,6 +566,62 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Fixed
 
+- **A subagent is no longer killed by a model id nothing validated.** The `model`
+  argument of `spawn_agent`/`spawn_agents` is free text the caller types, and it
+  was copied straight into the resolved model: the profile's endpoint and key
+  stayed, only the id changed. An id the endpoint does not know therefore failed
+  the child on its *first* provider call — after a slot, a claim and a transcript
+  were already spent — with a 400 ("Unable to determine provider for model
+  `database-audit`") that never hinted the argument was the problem. A session
+  model pin could not fail that way, because it resolves through
+  `resolve_model`, which checks the profile's catalog. Measured on this install's
+  14-day history: 88 of 152 failed subagents died on iteration 1, and **47 of
+  those were a model id that did not resolve** — `sonnet`, `gpt-5`, `default`,
+  and (the tell) the *name of the agent being spawned*. The spawn now checks each
+  override against `Settings::known_models()` before taking a slot, and refuses
+  that task with a tool error naming real ids and saying that omitting `model`
+  inherits the session's; the parent fixes it in the same turn and nothing is
+  written to `agents`. A profile that declares fewer than two models refuses
+  nothing — the flat `[model]` section synthesizes exactly one entry, and one
+  entry says nothing about which *other* ids a gateway accepts — so no working
+  setup starts failing.
+- **A rate limit hiding inside a 400 or 402 is retried.** Retries were classified
+  by HTTP status, which is right until a gateway puts a condition that clears by
+  itself inside a status that means "your request is wrong": a membership RPM
+  limit arrives as `400 [code=tier_limit_exceeded] ... resets
+  2026-11-09T22:00:00Z`, a bid floor as `402 no provider's ask matches your
+  max-per-mtok bid (reset after 2m)`, a per-model cooldown as a `403` whose body
+  ends `(reset after 3s)`. `status_retryable(400)` is `false`, so each of those
+  ended a run. A body naming a rate limit, a cooldown, an overloaded upstream or
+  a reset/retry window is now retried whatever status carried it, **including
+  in-stream**, where the prose is often the only verdict a gateway gives. An
+  explicit `[permanent]` tag and a context overflow still win over the wording,
+  because both are judgements about *this* request; quota and balance wording is
+  deliberately excluded, since `insufficient_quota` needs a recharge and 50
+  retries are 50 billed refusals.
+- **A provider's own reset window is honoured instead of crawled towards.** Two
+  429s in this install's history carry `"reset_seconds": 1024` and `13259`, and
+  the retry layer answered with a 500 ms→30 s backoff inside a 300 s budget: it
+  could never reach the reset, so it burned 17–18 billed attempts over five
+  minutes and failed the run anyway. `retry_after_hint()` reads `reset_seconds`,
+  `retry after 30s` and `reset after 2m` out of the body. When the window fits
+  the remaining budget the attempt waits exactly that long — a two-minute bid
+  floor is now waited out and the run continues. When it does not, the attempt
+  fails at once with *"the provider asked for a 1024s wait, longer than the 300s
+  retry budget left; a different model, or fewer parallel requests, would not be
+  waiting"*, which is actionable, instead of "gave up after 18 attempts", which
+  is not.
+- **A phone can leave the control plane.** The plane replaces the whole window,
+  and the compact project rail whose tiles were the desktop's exit is
+  `display: none` below 1024px, so on a phone the screen had no control that
+  closed it — the only ways out were the browser's own back button or a reload.
+  Its rail head now starts with **Back to sessions**: it closes the plane without
+  the project switch the rail tiles force, and on a phone it reopens the sessions
+  sheet the plane was opened from, so the reader lands on the list rather than on
+  whichever conversation was behind it. Measured in Chromium at 390x844 and
+  1280x900 by `scripts/verify_control_plane.py`: the control is on screen and
+  hit-testable in the rail state at both widths, an open phone chat is one *Back
+  to overview* from it, and both exits land on the session list.
 - **"Jump to latest" no longer flashes an empty transcript.** The scroll was moved
   to the tail and the windowed transcript only re-read its row set on the next
   animation frame, so for a frame the viewport sat inside the padding of the

@@ -233,6 +233,51 @@ describe('resolveApproval', () => {
     expect(item?.kind === 'approval' ? item.approval.status : null).toBe('expired');
   });
 });
+describe('the results panel presentation action', () => {
+  beforeEach(() => {
+    resetAppState();
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    resetAppState();
+    localStorage.clear();
+  });
+
+  it('remembers the choice in this browser and starts a pop-out closed', () => {
+    actions.setInspectorMode('popout');
+
+    expect(store.inspectorMode.value).toBe('popout');
+    expect(localStorage.getItem('karucode.inspectorMode')).toBe('popout');
+    // Nothing covers the conversation until the reader asks for it.
+    expect(store.inspectorCollapsed.value).toBe(true);
+    expect(localStorage.getItem('karucode.inspectorCollapsed')).toBe('true');
+
+    // The docked layout expects its column, so going back shows it.
+    actions.setInspectorMode('docked');
+    expect(store.inspectorMode.value).toBe('docked');
+    expect(localStorage.getItem('karucode.inspectorMode')).toBe('docked');
+    expect(store.inspectorCollapsed.value).toBe(false);
+    expect(localStorage.getItem('karucode.inspectorCollapsed')).toBe('false');
+  });
+
+  it('does nothing when the same mode is chosen again', () => {
+    store.inspectorCollapsed.value = false;
+    actions.setInspectorMode('docked');
+
+    // Re-selecting the current mode must not close a panel the reader just opened.
+    expect(store.inspectorCollapsed.value).toBe(false);
+  });
+
+  it('reads only a known mode back, falling back to docked', () => {
+    localStorage.setItem('karucode.inspectorMode', 'floating');
+    // The reader is not shown a layout this build cannot draw.
+    expect(store.readInspectorMode()).toBe('docked');
+    localStorage.setItem('karucode.inspectorMode', 'popout');
+    expect(store.readInspectorMode()).toBe('popout');
+  });
+});
+
 describe('the notification centre’s actions', () => {
   const entry = {
     id: 'run:r_9',

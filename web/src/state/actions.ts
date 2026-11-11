@@ -2503,6 +2503,24 @@ export function toggleInspector(): void {
   store.persistBool('inspector', next);
 }
 
+/**
+ * Change how Results is presented (docked column or pop-out overlay).
+ *
+ * The two modes are different layouts, so carrying one's open/closed state into
+ * the other would land the reader in a state neither asked for: a pop-out starts
+ * closed (the point of it is that nothing covers the conversation until asked),
+ * and going back to docked shows the panel that the docked layout expects. The
+ * choice and the open/closed state are both remembered per browser.
+ */
+export function setInspectorMode(mode: store.InspectorMode): void {
+  if (store.inspectorMode.value === mode) return;
+  store.inspectorMode.value = mode;
+  store.persistInspectorMode(mode);
+  const collapsed = mode === 'popout';
+  store.inspectorCollapsed.value = collapsed;
+  store.persistBool('inspector', collapsed);
+}
+
 export function closeSheets(): void {
   workbench.closeContext();
   store.mobileSheet.value = null;

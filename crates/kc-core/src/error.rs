@@ -151,17 +151,6 @@ pub fn http_status_of(message: &str) -> Option<u16> {
     rest[..end].trim().parse().ok()
 }
 
-/// Would another attempt at the *identical* request plausibly succeed?
-///
-/// Only the transient half of `kc_provider::retry::status_retryable` matters
-/// here, and it is duplicated rather than shared because `kc-core` cannot
-/// depend on `kc-provider`. The two are kept in step by the provider's own
-/// `transient_status_is_not_reclassified_by_context_wording` test and by
-/// `a_transient_status_is_never_an_overflow` here.
-fn status_is_transient(status: u16) -> bool {
-    matches!(status, 408 | 409 | 425 | 429) || (500..=599).contains(&status)
-}
-
 /// Does this message describe a prompt that overflowed the model's window?
 ///
 /// Deliberately a substring test over the lowercased text: providers word this
@@ -189,6 +178,123 @@ pub fn is_context_overflow(message: &str) -> bool {
 pub fn is_context_overflow_error(err: &Error) -> bool {
     match err {
         Error::Provider(message) => is_context_overflow(message),
+        _ => false,
+    }
+}
+
+/// Is this HTTP status one where the endpoint, not the request, is the problem?
+///
+/// The transient half of the provider's retry table: the endpoint is busy, the
+/// request raced, or the upstream is failing. Kept here so the provider retry
+/// layer and the runtime's turn-retry layer classify identically.
+pub fn status_is_transient(status: u16) -> bool {
+    matches!(status, 408 | 409 | 425 | 429) || (500..=599).contains(&status)
+}
+
+/// Words a gateway uses for a condition that clears by itself.
+///
+/// Deliberately narrow, and deliberately **not** containing quota or balance
+/// wording (`insufficient_quota`, `exceeded your current quota`, `余额`): those
+/// need the operator to recharge, and every retry is a billed refusal. What *is*
+/// here is the opposite: rate limits, cooldowns and "the upstream is busy",
+/// which another attempt (after the right wait) can satisfy.
+const TRANSIENT_MARKERS: &[&str] = &[
+    "rate limit",
+    "rate_limit",
+    "rate-limit",
+    "ratelimit",
+    "too many requests",
+    "tier_limit_exceeded",
+    "rpm limit",
+    "concurrency limit",
+    "cooling down",
+    "cooldown",
+    "temporarily unavailable",
+    "temporarily busy",
+    "service unavailable",
+    "upstream is busy",
+    "overloaded",
+    "try again later",
+    "please retry",
+    "retry after",
+    "reset after",
+    "reset_seconds",
+    "will reset",
+];
+
+/// Does this refusal name a condition that clears by itself?
+///
+/// The retry table classifies by HTTP status, which is right almost always and
+/// wrong exactly where gateways put a rate limit inside a status that means
+/// "your request is wrong". Three shapes from one install's own database:
+///
+/// ```text
+/// [400] {"code":"bad_request",
+///        "message":"[code=tier_limit_exceeded] membership rpm limit exceeded:
+///                   101/100 resets 2026-11-09T22:00:00Z"}
+/// [402] no provider's ask matches your max-per-mtok bid (reset after 2m)
+/// [403] the API key has no subscription quota or balance available
+///       for this request ... (reset after 3s)
+/// ```
+///
+/// [`kc_provider::is_transient_refusal`] is a delegate to this, so the provider
+/// retry layer and the runtime agree about what "transient" means.
+pub fn is_transient_refusal(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    TRANSIENT_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
+}
+
+/// Could another attempt at this request, *later*, plausibly succeed?
+///
+/// This is the question the runtime's turn-retry layer asks: the provider layer
+/// has already spent its own attempt budget on the identical request, so the
+/// only thing left that can change is time. Three ways to be "yes":
+///
+/// * the message carries a transient HTTP status (408/409/425/429/5xx);
+/// * the body names a rate limit, cooldown or reset window, whatever the status
+///   ([`is_transient_refusal`]);
+/// * there is no status at all — a connection reset, a body that died mid-decode,
+///   a splash page — which is transport-shaped by construction.
+///
+/// Two verdicts override all of that: an explicit `[permanent]` tag and a context
+/// overflow. Both are statements about *this request*, which another attempt
+/// repeats unchanged.
+///
+/// `[http 401]`, `[http 403]` and `[http 404]` are **not** transient here even on
+/// a multi-channel gateway: that opt-in (`ProviderProfile::aggregator`) belongs
+/// to the provider layer, which sees the profile. A run that ends on a dead key
+/// should tell the operator, not spend three more generations finding out.
+pub fn is_transient_provider_failure(message: &str) -> bool {
+    if is_permanent_tagged(message) || is_context_overflow(message) {
+        return false;
+    }
+    match http_status_of(message) {
+        Some(status) => status_is_transient(status) || is_transient_refusal(message),
+        None => true,
+    }
+}
+
+/// Does the message carry the provider's "another attempt cannot help" tag?
+/// Mirrors `kc_provider::errors::is_permanent`, which owns the constant.
+fn is_permanent_tagged(message: &str) -> bool {
+    message.contains("[permanent]")
+}
+
+/// [`is_transient_provider_failure`] for a whole error value.
+///
+/// The variant matters as much as the wording, and more than the absence of an
+/// HTTP status: only a provider or transport failure is something a wait can fix.
+/// A [`Error::Store`] refusal (a mission's attempt budget is spent), a bad request,
+/// a configuration error and a cancellation are local verdicts on *this* run, and
+/// retrying them would spend a generation to be told the same thing.
+pub fn is_transient_provider_failure_error(err: &Error) -> bool {
+    match err {
+        Error::Provider(message) => is_transient_provider_failure(message),
+        // A timeout is transport-shaped by definition, even though its message
+        // carries no status tag.
+        Error::Timeout(_) => true,
         _ => false,
     }
 }
@@ -296,5 +402,54 @@ mod tests {
         assert_eq!(http_status_of("[http not-a-number]"), None);
         // The gateway's own `[400]:` is not this tag: it carries no `http`.
         assert_eq!(http_status_of("provider error: [400]: too long"), None);
+    }
+
+    /// The question the runtime's slow turn-retry layer asks: is this a failure
+    /// another attempt, later, could survive?
+    #[test]
+    fn a_failure_a_wait_can_fix_is_recoverable() {
+        for message in [
+            // Transport-shaped: no status, nothing said about the request.
+            "provider request failed: error sending request for url (https://gw/v1)",
+            "provider stream failed: invalid response body: error decoding response body",
+            // A transient status.
+            "upstream provider error (503 Service Unavailable) [http 503] \
+             (gave up after 50 attempts)",
+            "provider rate limit hit (429 Too Many Requests) [http 429]",
+            // A rate limit wearing a permanent status.
+            "provider rejected the request (400): [code=tier_limit_exceeded] rpm limit exceeded \
+             [http 400]",
+            "provider rejected the request (402): no provider's ask matches your max-per-mtok \
+             bid (reset after 2m) [http 402]",
+        ] {
+            assert!(
+                is_transient_provider_failure(message),
+                "must be recoverable: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_judgement_on_the_request_is_not_recoverable() {
+        for message in [
+            // A dead key is the operator's job, not a wait: retrying it spends
+            // generations to learn nothing.
+            "provider request failed: authentication failed (401 Unauthorized) [http 401]",
+            "provider access denied (403 Forbidden) [http 403]",
+            "provider access denied (403 Forbidden): content safety policy [http 403]",
+            // A per-key spend limit that does not reset.
+            "provider access denied (403): Key limit exceeded (total limit) $10.51 of $10.00 \
+             used; does not reset [http 403]",
+            // The provider's own verdict, and a request that is too large.
+            "provider rejected the request [http 400] [permanent]",
+            "provider rejected the request: context_length_exceeded [http 400]",
+            // Ordinary 4xx from a direct API.
+            "provider rejected the request (422 Unprocessable Entity) [http 422]",
+        ] {
+            assert!(
+                !is_transient_provider_failure(message),
+                "must not be recoverable: {message}"
+            );
+        }
     }
 }

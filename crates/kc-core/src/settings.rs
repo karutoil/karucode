@@ -22,6 +22,21 @@ pub trait Settings: Send + Sync {
     async fn approval_policy(&self) -> ApprovalPolicy;
     async fn subagent_config(&self) -> SubagentConfig;
 
+    /// The model ids this install can actually send, for validating an id that
+    /// did not come from the config: the `model` argument of
+    /// `spawn_agent`/`spawn_agents`, which the caller types and nothing else
+    /// checks.
+    ///
+    /// `selection` is the session's pin, because a pinned session resolves
+    /// against *its* profile rather than the install-wide one. The default is
+    /// empty, which means "cannot judge, refuse nothing" - an embedding or a
+    /// test that keeps the single-model behaviour must not start failing spawns
+    /// because it has no catalog to check against.
+    async fn known_models(&self, selection: Option<&SessionModelSelection>) -> Vec<String> {
+        let _ = selection;
+        Vec::new()
+    }
+
     /// Live `[notifications]` settings.
     ///
     /// Defaulted to "everything on" so the test and embedding implementations that

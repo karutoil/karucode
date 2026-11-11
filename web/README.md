@@ -94,7 +94,7 @@ the frame metrics (`--rail-w`, `--header-h`, `--content-max`, …).
 properties with no React/Preact re-render.
 
 Theme Studio (Task actions → Theme studio, the project-rail palette button where
-that rail is present, `Ctrl/Cmd+Shift+T`, or Settings → General → Appearance) ships
+that rail is present, `Ctrl/Cmd+Shift+T`, or Settings → Appearance → Theme and layout) ships
 eight built-in themes and edits 18 palette colours, mode, density, fonts, corner
 radius, the transcript view options and custom CSS. The selection, saved custom themes and
 the unsigned draft persist in `localStorage` under `karucode.theme-studio.v3`; a
@@ -248,14 +248,34 @@ Agents tab).
   the ordinary project list. Constraint clamping is local to the current viewport,
   and failed writes keep the selected width in the open view with a visible warning.
   The separator and pane stay flush at the right edge during a drag, with no width
-  transition leaving a trailing gap.
+  transition leaving a trailing gap. A popped-out Results card (below) is dragged by
+  the same handle on its own left edge, with the same keys, the same saved
+  `result_panel_width` and the same `MIN_CONVERSATION_WIDTH` ceiling, so switching
+  presentations never changes how wide Results is or how much conversation is
+  visible.
+- **Results panel: docked or popped out:** Settings → Appearance → Theme and
+  layout → **Results panel** stores `karucode.inspectorMode` in this browser (`docked`
+  default, or `popout`). Docked is the split above. Pop out takes the panel out of
+  the layout — no `has-result`, so the conversation keeps the whole pane — and opens
+  it on demand as a fixed, rounded, elevated card inset from the workspace's right
+  edge, the same shape as Context. The session header then carries an
+  **Open results / Close results** button (the panel's own header is not on screen
+  while it is closed), the card closes from its own **Close results panel** control
+  or Escape before that key could reach a running turn, and opening Context closes
+  the card first so the two right-hand overlays never stack. Below 1024px the
+  preference changes nothing: the inspector is already a trapped slide-over sheet.
 - **Context:** `Ctrl/Cmd+J` toggles transient Now / Usage / Access state from
   `state/workbench.ts`. Now shows the actual session/model pin and separates the
   tool-reachable workspace from deliberately composed message content and
   attachments. Usage reuses server-backed `SessionInfoTab`; Access reuses the exact
   shared approval-policy copy and opens Settings. Results stay mounted across
   Context, and the existing result selection and persisted Inspector collapse
-  preference remain independent of that transient drawer.
+  preference remain independent of that transient drawer. Its only entry point is
+  the session header: an icon-only usage ring drawn from the same `contextUsage`
+  telemetry as the composer's Usage pill, filled with the newest reported prompt,
+  toned calm/warn/hot, with the percentage beside it and the reading as the
+  accessible name — so Context stays reachable while the results panel is docked,
+  popped out or closed.
 - **Shortcuts and responsive structure:** `Ctrl/Cmd+B` preserves the task-rail
   toggle and collapsed-desktop project peeking. Escape is handled locally first.
   `styles/workbench.css` makes Conversation and Results a split view in wide
@@ -313,8 +333,9 @@ Agents tab).
   (`GitManager`, `GitChanges`, `GitCommitBox`, `GitHistory`, `GitDiffPane`,
   `GitBranchDialog`, `useGitRepo`, pure `gitModel`), styled by `styles/git.css`.
 - Results Inspector: Files / Git / Session usage / Agents plus enabled plugin-panel
-  tabs, a lazy file tree and the file viewer (below). Context overlays rather than
-  replaces this tree. Session usage reads
+  tabs, a lazy file tree and the file viewer (below), presented as a docked column
+  or as a pop-out card (Settings → Appearance → **Results panel**). Context overlays
+  rather than replaces this tree. Session usage reads
   the session's counts and token totals (context fill, input/output/cached with
   a cache hit rate, prompts vs turns vs model calls vs tool calls, runs and
   working time, per-subagent usage, recent runs), and an Agents console
@@ -425,18 +446,22 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
     the token entry screen.
 12. **Settings lock**: `settings_locked` disables the form, and a 403 from PATCH is
     surfaced as a locked notice rather than a generic failure.
-13. **Settings tabs**: the sheet is seven tabs (General / Models / Agent /
-    Access / Notifications / Plugins & MCP / Updates) over one shared form and
-    one shared Save. Access, Notifications and Updates own their own sections and
-    PATCH their own settings; Updates also reads `GET /api/update` for the running
-    build and the newest release.
+13. **Settings panes**: the sheet is a two-pane window — a rail of seven sections
+    (Appearance / Models & providers / Agent / Access & sign-in / Notifications /
+    Plugins & MCP / Updates) beside one shared form and one shared Save. The rail
+    carries the search field, which matches the rendered panels rather than a
+    keyword list, so it cannot go stale; Enter opens the first match, unfolding a
+    disclosure when the section lives behind one. Access, Notifications and
+    Updates own their own sections and PATCH their own settings; Updates also
+    reads `GET /api/update` for the running build and the newest release.
     Panels are mounted together and merely `hidden` — a panel that unmounted
-    would discard what was typed, and the Models tab owns local state (key
-    drafts, the add-provider form). Because the Save is shared, a rejected field
-    can be on another tab, so `FIELD_LOCATIONS` maps every validated key to its
-    tab, its Advanced disclosure and its input id: a failed save switches tab,
-    opens the disclosure and focuses the field, and the footer summarizes the
-    count and the tabs involved. Notification switches are the exception — they
+    would discard what was typed, and the Models & providers panel owns local
+    state (key drafts, the add-provider form). Because the Save is shared, a
+    rejected field can be in another section, so `FIELD_LOCATIONS` maps every
+    validated key to its section, its Advanced disclosure and its input id: a
+    failed save switches section, opens the disclosure and focuses the field, and
+    the footer summarizes the count and the sections involved. Notification
+    switches are the exception — they
     PATCH immediately and have no Save of their own.
 14. **Sequence resets**: `seq` is assumed to be per-server-process/connection; the
     reducer does not enforce global monotonicity across reconnects.
@@ -519,3 +544,22 @@ artifact directory.
 
 This is a focused visual/integration harness, not a replacement for `npm test`,
 `npm run typecheck`, the production build, or the product and backend test suites.
+
+### Focused real-browser Results pop-out check
+
+The docked/pop-out presentation has its own disposable harness, run the same way:
+
+```bash
+(cd web && npm run build)
+cargo build -p kc-server --bin karucode
+python3 scripts/verify_results_popout.py
+```
+
+It drives the real Appearance setting (Settings → Appearance → **Results panel**), then
+measures the card: the split is gone and the conversation keeps the whole pane, the
+card is fixed/rounded/elevated and inset from the right edge, the drag handle sits on
+that edge and moves with it, Left/Right/Home/End resize the card with the dock's own
+keys and ceiling, Escape closes it instead of reaching the run, opening Context
+closes it, a 390px phone keeps its sheet (no header button, no card, no overflow),
+and choosing *Docked* again restores the split. Screenshots and `report.json` land in
+its artifact directory.

@@ -5,6 +5,7 @@ import type { ChatItem } from '../state/chat';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import * as terminalState from '../state/terminals';
+import * as workspaceTabs from '../state/workspaceTabs';
 import { configFixture, resetAppState } from '../test/fixtures';
 
 /* ------------------------------------------------------------------ *
@@ -576,6 +577,140 @@ describe('ChatView workspace tabs', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Collapse inspector' }));
     expect(screen.queryByRole('separator', { name: 'Resize results panel' })).toBeNull();
     expect(container.querySelector<HTMLElement>('.center-body')?.style.getPropertyValue('--workbench-result-w')).toBe('');
+  });
+
+  it('pops the results panel out on demand instead of splitting the conversation', () => {
+    // The Appearance preference: Results is not a column at all. The conversation
+    // keeps the whole pane, and the panel arrives as an overlay when asked for.
+    store.inspectorMode.value = 'popout';
+    store.inspectorCollapsed.value = true;
+    const { container } = renderChat();
+
+    const body = container.querySelector<HTMLDivElement>('.center-body');
+    expect(body?.classList.contains('has-result')).toBe(false);
+    expect(screen.queryByRole('separator', { name: 'Resize results panel' })).toBeNull();
+    const header = within(document.querySelector('.header-buttons') as HTMLElement);
+    const open = header.getByRole('button', { name: 'Open results' });
+    expect(open.getAttribute('aria-expanded')).toBe('false');
+    expect(open.getAttribute('aria-controls')).toBe('workbench-results');
+
+    fireEvent.click(open);
+
+    // Open is an overlay: still no split, but the card and its drag handle exist.
+    expect(store.inspectorCollapsed.value).toBe(false);
+    expect(body?.classList.contains('has-result')).toBe(false);
+    const panel = document.getElementById('workbench-results');
+    expect(panel?.getAttribute('data-results-popout')).toBe('true');
+    const separator = screen.getByRole('separator', { name: 'Resize results panel' });
+    expect(separator.classList.contains('result-resizer-popout')).toBe(true);
+    expect(separator.getAttribute('aria-controls')).toBe('workbench-results');
+    // The card needs a concrete width for its own geometry and the handle's.
+    expect(body?.style.getPropertyValue('--workbench-result-w')).toMatch(/^\d+px$/);
+
+    fireEvent.click(header.getByRole('button', { name: 'Close results' }));
+    expect(store.inspectorCollapsed.value).toBe(true);
+    expect(screen.queryByRole('separator', { name: 'Resize results panel' })).toBeNull();
+    expect(body?.style.getPropertyValue('--workbench-result-w')).toBe('');
+  });
+
+  it('gives the popped-out panel the docked panel’s saved width and keyboard resize', () => {
+    store.projects.value = [
+      {
+        id: 'p_karucode',
+        name: 'KaruCode',
+        path: '/home/me/project',
+        created_at: 1,
+        updated_at: 1,
+        session_count: 1,
+        result_panel_width: 640,
+      },
+    ];
+    store.currentProjectId.value = 'p_karucode';
+    store.inspectorMode.value = 'popout';
+    store.inspectorCollapsed.value = false;
+    const { container } = renderChat();
+
+    const separator = screen.getByRole('separator', { name: 'Resize results panel' });
+    expect(separator.classList.contains('result-resizer-popout')).toBe(true);
+    expect(separator.getAttribute('aria-valuenow')).toBe('640');
+    expect(container.querySelector<HTMLElement>('.center-body')?.style.getPropertyValue('--workbench-result-w')).toBe('640px');
+
+    // Same gesture as the dock: Left grows the right-hand pane by 10, Shift by 50,
+    // Home/End pick the bounds.
+    fireEvent.keyDown(separator, { key: 'ArrowLeft' });
+    expect(separator.getAttribute('aria-valuenow')).toBe('650');
+    fireEvent.keyDown(separator, { key: 'ArrowLeft', shiftKey: true });
+    expect(separator.getAttribute('aria-valuenow')).toBe('700');
+    fireEvent.keyDown(separator, { key: 'Home' });
+    expect(separator.getAttribute('aria-valuenow')).toBe('280');
+  });
+
+  it('returns to the conversation when results are opened from a full-width view', () => {
+    store.inspectorMode.value = 'popout';
+    store.inspectorCollapsed.value = true;
+    renderChat();
+
+    // Source control is a full-width view: the inspector is hidden behind it, so
+    // the header's way into Results has to bring the panel's surface back first.
+    fireEvent.click(screen.getByRole('tab', { name: /^Source control/ }));
+    const header = within(document.querySelector('.header-buttons') as HTMLElement);
+    fireEvent.click(header.getByRole('button', { name: 'Open results' }));
+
+    expect(store.inspectorCollapsed.value).toBe(false);
+    expect(screen.getByRole('tab', { name: /^Conversation/ }).getAttribute('aria-selected')).toBe('true');
+    expect(document.getElementById('workbench-results')?.getAttribute('data-results-popout')).toBe('true');
+    workspaceTabs.resetWorkspaceTabs();
+  });
+
+  it('keeps the docked split when the preference says docked', () => {
+    // The default must not drift: same markup, same split, no pop-out handle.
+    renderChat();
+    expect(store.inspectorMode.value).toBe('docked');
+    expect(document.querySelector('.center-body')?.classList.contains('has-result')).toBe(true);
+    const separator = screen.getByRole('separator', { name: 'Resize results panel' });
+    expect(separator.classList.contains('result-resizer-popout')).toBe(false);
+    expect(within(document.querySelector('.header-buttons') as HTMLElement).queryByRole('button', { name: 'Open results' })).toBeNull();
+  });
+
+  it('draws the context reading as a ring with no label, in the session header', () => {
+    store.chat.value = { ...store.chat.value, lastPromptTokens: 64_000 };
+    renderChat();
+
+    // Context lives in the header, not in the results panel's own header, so it is
+    // still there when that panel is closed.
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse inspector' }));
+    const button = screen.getByRole('button', { name: /Session context — 50\.0% of the window used/ });
+    expect(within(button).queryByText('Context')).toBeNull();
+    const fill = button.querySelector('.context-header-ring-fill');
+    expect(fill).not.toBeNull();
+    const circumference = 2 * Math.PI * 8;
+    // Half the window is used, so half the ring is drawn.
+    expect(Number(fill?.getAttribute('stroke-dashoffset'))).toBeCloseTo(circumference / 2, 3);
+    expect(within(button).getByText('50.0%')).not.toBeNull();
+    expect(button.getAttribute('data-tone')).toBe('calm');
+
+    fireEvent.click(button);
+    expect(document.getElementById('workbench-context')).not.toBeNull();
+  });
+
+  it('lets a plugin hide the session header’s Context button', () => {
+    renderChat();
+    act(() => {
+      store.config.value = {
+        ...configFixture,
+        plugin_ui: {
+          contributions: [],
+          hidden: [{ target: 'inspector.context', plugins: ['zen'] }],
+          slots: [],
+          hideable: [],
+        },
+      };
+    });
+
+    // `inspector.context` names this button now; the results header has no
+    // built-in control to lose, so the hide lands where the person can see it.
+    expect(screen.queryByRole('button', { name: /Session context/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Notifications' })).not.toBeNull();
   });
 
   it('gives every workspace tab a 15px glyph and shows the changed-file count', async () => {

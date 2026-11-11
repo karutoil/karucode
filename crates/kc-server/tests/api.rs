@@ -5639,8 +5639,11 @@ async fn mission_records_are_explicit_scoped_and_retryable() {
 
 #[tokio::test]
 async fn mission_retry_replays_reassigns_and_unblocks_dependencies() {
+    // The task's first attempt is a *judged* failure, not a transient one, so it
+    // reaches the mission's own retry instead of being re-asked by the runtime
+    // (limits.max_turn_retries).
     let h = HarnessBuilder::new(vec![
-        Script::Fail("first attempt failed".into()),
+        Script::Fail("first attempt failed [http 400] [permanent]".into()),
         text("retry succeeded"),
         text("dependent succeeded"),
     ])
@@ -5989,7 +5992,13 @@ async fn mission_revision_tool_obeys_coordinator_and_approval() {
 
 #[tokio::test]
 async fn mission_replan_api_validates_review_dag_and_releases_blocked_task() {
-    let h = HarnessBuilder::new(vec![Script::Fail("failure".into()), text("replanned")])
+    // `[permanent]` on purpose: this fixture means "the task fails", not "the
+    // provider was briefly out". A bare message is transport-shaped, and the
+    // runtime now waits and asks again for those (limits.max_turn_retries).
+    let h = HarnessBuilder::new(vec![
+        Script::Fail("failure [http 400] [permanent]".into()),
+        text("replanned"),
+    ])
         .build()
         .await;
     let project = h.get("/api/projects").await.json()["projects"][0]["id"]

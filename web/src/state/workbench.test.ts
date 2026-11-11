@@ -9,6 +9,7 @@ function resetTransientContext(): void {
   store.narrowViewport.value = false;
   store.mobileSheet.value = null;
   store.inspectorCollapsed.value = false;
+  store.inspectorMode.value = 'docked';
   store.inspectorTab.value = 'workspace';
   store.chat.value = emptyChatState(null);
   // Consume any snapshot left by a failed test before the next one begins.
@@ -109,5 +110,26 @@ describe('Workbench transient context state', () => {
     expect(workbench.contextOpen.value).toBe(false);
     expect(workbench.contextSection.value).toBe('usage');
     expect(store.inspectorTab.value).toBe('workspace');
+  });
+
+  it('closes a popped-out results card so the two right-hand overlays never stack', () => {
+    store.inspectorMode.value = 'popout';
+    store.inspectorCollapsed.value = false;
+
+    workbench.openContext('now');
+
+    expect(workbench.contextOpen.value).toBe(true);
+    expect(store.inspectorCollapsed.value).toBe(true);
+    expect(store.mobileSheet.value).toBeNull();
+
+    // Docked is a layout column, not an overlay: Context opens over it and the
+    // panel underneath keeps its state.
+    store.inspectorMode.value = 'docked';
+    store.inspectorCollapsed.value = false;
+    store.inspectorTab.value = 'session';
+    workbench.openContext('usage');
+    expect(workbench.contextOpen.value).toBe(true);
+    expect(store.inspectorCollapsed.value).toBe(false);
+    expect(store.inspectorTab.value).toBe('session');
   });
 });

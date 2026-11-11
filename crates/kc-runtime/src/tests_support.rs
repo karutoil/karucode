@@ -1542,6 +1542,10 @@ pub(crate) struct FakeSettings {
     pub policy: ApprovalPolicy,
     pub subagents: SubagentConfig,
     pub notifications: kc_core::config::NotificationsConfig,
+    /// What `known_models` answers. Empty (the default) means "no catalog to
+    /// judge against", which is the permissive behaviour a single-model
+    /// embedding has.
+    pub known_models: Vec<String>,
 }
 
 impl Default for FakeSettings {
@@ -1551,13 +1555,22 @@ impl Default for FakeSettings {
                 model: "fake-model".into(),
                 ..Default::default()
             },
-            limits: Limits::default(),
+            // The real defaults, except for the one number that is measured in
+            // wall-clock time: a turn retry sleeps `turn_retry_delay_ms` before
+            // asking again, and a suite that waits 30 s to prove it would be a
+            // suite nobody runs. Every other value is the product's own default,
+            // so a test exercises what an operator gets.
+            limits: Limits {
+                turn_retry_delay_ms: 5,
+                ..Limits::default()
+            },
             policy: ApprovalPolicy {
                 mode: kc_core::config::ApprovalMode::Auto,
                 ..Default::default()
             },
             subagents: SubagentConfig::default(),
             notifications: kc_core::config::NotificationsConfig::default(),
+            known_models: Vec::new(),
         }
     }
 }
@@ -1588,6 +1601,13 @@ impl FakeSettings {
         notifications: kc_core::config::NotificationsConfig,
     ) -> Self {
         self.notifications = notifications;
+        self
+    }
+
+    /// Declare the catalog this fake install can send, so a spawn's `model`
+    /// override can be checked against it.
+    pub(crate) fn with_known_models(mut self, models: &[&str]) -> Self {
+        self.known_models = models.iter().map(|m| m.to_string()).collect();
         self
     }
 }
@@ -1629,6 +1649,10 @@ impl Settings for FakeSettings {
 
     async fn notify_config(&self) -> kc_core::config::NotificationsConfig {
         self.notifications.clone()
+    }
+
+    async fn known_models(&self, _selection: Option<&SessionModelSelection>) -> Vec<String> {
+        self.known_models.clone()
     }
 }
 

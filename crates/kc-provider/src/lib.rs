@@ -9,7 +9,7 @@
 // @kc-title: Configure a model provider
 // @kc-summary: Point karucode at any OpenAI-compatible endpoint, by environment or as named profiles, and choose the active model.
 // @kc-tags: provider, model, config, setup, gateway, llm
-// @kc-applies-to: env:KARUCODE_BASE_URL, env:KARUCODE_API_KEY, env:KARUCODE_MODEL, env:OPENAI_BASE_URL, env:OPENAI_API_KEY, env:KARUCODE_TEMPERATURE, env:KARUCODE_MAX_TOKENS, env:KARUCODE_REQUEST_TIMEOUT_SECS, env:KARUCODE_MODELS_DEV_URL, env:KARUCODE_RETRY_MAX_RETRIES, env:KARUCODE_RETRY_BASE_DELAY_MS, env:KARUCODE_RETRY_MAX_DELAY_MS, env:KARUCODE_RETRY_MAX_STREAM_RESTARTS, env:KARUCODE_MODEL_SUPPORTS_IMAGES, config:[[providers]], config:active_provider, config:active_model, config:[model], config:model.supports_images, config:vision, config:retry_max_retries, config:retry_base_delay_ms, config:retry_max_delay_ms, config:retry_max_stream_restarts, event:stream_retry, event:text_replaced, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, request:messages[].name, internal:kc-runtime:context-digest, internal:kc-runtime:startup-recovery, ui:Settings
+// @kc-applies-to: env:KARUCODE_BASE_URL, env:KARUCODE_API_KEY, env:KARUCODE_MODEL, env:OPENAI_BASE_URL, env:OPENAI_API_KEY, env:KARUCODE_TEMPERATURE, env:KARUCODE_MAX_TOKENS, env:KARUCODE_REQUEST_TIMEOUT_SECS, env:KARUCODE_MODELS_DEV_URL, env:KARUCODE_RETRY_MAX_RETRIES, env:KARUCODE_RETRY_BASE_DELAY_MS, env:KARUCODE_RETRY_MAX_DELAY_MS, env:KARUCODE_RETRY_MAX_STREAM_RESTARTS, env:KARUCODE_MODEL_SUPPORTS_IMAGES, config:[[providers]], config:active_provider, config:active_model, config:[model], config:model.supports_images, config:vision, config:retry_max_retries, config:retry_base_delay_ms, config:retry_max_delay_ms, config:retry_max_stream_restarts, config:aggregator, config:limits.max_turn_retries, config:limits.turn_retry_delay_ms, event:stream_retry, event:text_replaced, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, request:messages[].name, internal:kc-runtime:context-digest, internal:kc-runtime:startup-recovery, ui:Settings
 //
 // # Fastest path: three environment variables
 //
@@ -191,6 +191,13 @@
 //   the budget runs out the last partial text is kept and the run fails with
 //   the upstream reason.
 //
+// Both of those spend attempts in the same second. A third layer spends **time**:
+// `[limits] max_turn_retries` (default 2) asks the same turn again after
+// `[limits] turn_retry_delay_ms` (default 30000, doubling), for a failure that
+// only a wait can fix. It is documented under `configuration`
+// (`docs/internal/configuration.md`) because it bounds a run rather than one
+// request; the classification it uses is the one below.
+//
 // ## What is retried, and what is not
 //
 // The attempt count is not the whole story: a request the endpoint has already
@@ -202,8 +209,9 @@
 // | 408, 409, 425, 429 | yes | the endpoint is busy or the request raced |
 // | 5xx | yes | the upstream is failing, not the request |
 // | 400, 413, 422 | **no** | a malformed or oversized request stays malformed |
-// | 401, 403, 404 | **no** | a revoked key or a missing model id is permanent here |
+// | 401, 403, 404 | **no**, unless `aggregator = true` | a revoked key or a missing model id is permanent for a direct vendor API |
 // | other 4xx | **no** | the endpoint refused the request |
+// | any status whose *body* names a rate limit, cooldown or reset window | yes | see "A rate limit wearing the wrong status" below |
 // | 3xx redirect | **no** | no redirected/repeated POST: update `base_url` explicitly |
 // | 200 + `application/json` | **no** | a buffered completion or an error object (`insufficient_quota`); the body's reason is surfaced |
 // | 200 + empty body (including close-delimited EOF) | **no** | the endpoint answered "nothing", and will answer it again |
@@ -221,12 +229,52 @@
 // mid-decode) are always retried. A context overflow is never retried: the
 // runtime has to compact first (see below).
 //
+// ## A rate limit wearing the wrong status
+//
+// The status is the first word, not the last. Gateways routinely put a
+// condition that clears by itself inside a status that means "your request is
+// wrong", and reading only the status ended runs over a two-minute window:
+//
+// ```text
+// [400] {"code":"bad_request","message":"[code=tier_limit_exceeded]
+//        membership rpm limit exceeded: 101/100 resets 2026-11-09T22:00:00Z"}
+// [402] no provider's ask matches your max-per-mtok bid (reset after 2m)
+// [403] ... no subscription quota or balance available ... (reset after 3s)
+// ```
+//
+// A body naming a rate limit, a cooldown, "temporarily unavailable", an
+// upstream that is busy, or a reset/retry window is retried **whatever status
+// carried it** - including in-stream, where the same wording is the only verdict
+// a gateway gives. Two verdicts still win over the wording: an explicit
+// permanent tag (a buffered 200 error body) and a context overflow, because both
+// are judgements about *this* request. Quota and balance wording is deliberately
+// not in the list: `insufficient_quota` needs a recharge, and 50 retries are 50
+// billed refusals.
+//
+// ## The provider's own reset window
+//
+// A cooldown is not a backoff. When the body carries `"reset_seconds": 1024`,
+// `retry after 30s` or `reset after 2m`, that window is used instead of the
+// exponential:
+//
+// * it fits the remaining `retry_max_total_secs` budget -> the attempt waits it
+//   out, and a two-minute bid floor no longer fails a run that had five minutes
+//   to spend;
+// * it does not -> the attempt fails at once with
+//   `the provider asked for a 1024s wait, longer than the 300s retry budget
+//   left`, instead of 18 billed attempts crawling a 30 s backoff towards a reset
+//   it can never reach.
+//
 // 401/403/404 are the one judgement call. Behind a multi-channel aggregator they
 // *are* transient - a rotated upstream key, a channel in failover - and retrying
-// them is what makes such a gateway usable. That needs an explicit opt-in
-// (`ProviderProfile::aggregator`, not implemented yet), so the default is
-// conservative: those statuses fail immediately. If you run a multi-channel
-// gateway and want the old behaviour, that flag is the change to ask for.
+// them is what makes such a gateway usable. Set `aggregator = true` on the
+// profile (`[model]` for the flat connection, or `[[providers]]` per endpoint) -
+// or flip **Multi-channel gateway** on that profile's card in Settings -> Models
+// & providers, which writes the same field. Turn it on when the endpoint in front
+// of you fronts several upstream channels: its own body will say so ("No active
+// credentials for provider: t3-web", "User not found"), and another channel
+// usually serves the same model. Left off, those statuses fail immediately, which
+// is the right reading of a direct vendor API.
 //
 // ## The wall-clock budget
 //
@@ -407,7 +455,10 @@ pub mod sse;
 mod stream;
 
 pub use dsml::strip_tool_markup;
-pub use errors::{is_context_overflow, is_context_overflow_error, CONTEXT_OVERFLOW_TAG};
+pub use errors::{
+    is_context_overflow, is_context_overflow_error, is_transient_refusal, retry_after_hint,
+    CONTEXT_OVERFLOW_TAG,
+};
 pub use request::{
     build_chat_body, build_chat_body_for, chat_completions_url, models_url,
     serialized_message_count,

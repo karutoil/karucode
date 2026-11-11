@@ -93,7 +93,7 @@ use crate::approvals::{ApprovalScope, RuntimeApprovalGate};
 use crate::context;
 use crate::events::EmitCtx;
 use crate::history::repair_history;
-use crate::restart::StreamRestarts;
+use crate::restart::{StreamRestarts, TurnRetries};
 use crate::{RunHandle, RunState, Runtime, RuntimeInner, HISTORY_LIMIT};
 use futures_util::{FutureExt, StreamExt};
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, AutoDecision};
@@ -225,17 +225,43 @@ impl LoopOutcome {
     }
 }
 
+/// A provider failure, cut to one readable line for the transcript.
+///
+/// The full message - status, endpoint, JSON body excerpt - goes to the log and,
+/// if the retries are exhausted too, to the run's stored error. A notice that
+/// repeats the whole body after every turn retry is noise the reader has to scroll
+/// past, so what reaches the transcript is one line.
+fn truncate_reason(reason: &str) -> String {
+    const MAX: usize = 160;
+    let collapsed = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= MAX {
+        return collapsed;
+    }
+    let cut: String = collapsed.chars().take(MAX - 1).collect();
+    format!("{cut}…")
+}
+
 enum StreamEnd {
     Complete,
     Cancelled,
     TimedOut,
-    /// The turn's answer did not arrive in full. `transient` says whether
-    /// another attempt could plausibly land on a healthy channel: a body that
-    /// died mid-flight or a stream that stopped without a `finish_reason` is
-    /// worth restarting, a request the endpoint rejected is not.
+    /// The turn's answer did not arrive in full. Two flags, because the two
+    /// retry layers ask different questions:
+    ///
+    /// * `transient` — another attempt *right now* could land on a healthy
+    ///   channel: a body that died mid-flight, or a stream that stopped without
+    ///   a `finish_reason`. This is what the fast restart budget
+    ///   (`retry_max_stream_restarts`) pays for.
+    /// * `recoverable` — a *later* attempt, after a real wait, could succeed,
+    ///   because the failure is upstream or transport-shaped rather than a
+    ///   judgement about this request. This is what
+    ///   `limits.max_turn_retries` pays for. A model that degenerated into a
+    ///   repetition loop is `transient` (retry now) but not `recoverable`:
+    ///   waiting will not stop it repeating.
     Failed {
         message: String,
         transient: bool,
+        recoverable: bool,
     },
 }
 
@@ -1346,14 +1372,24 @@ is {})",
             // client is told to drop what it rendered, and the identical request is
             // re-issued. See `crate::restart`.
             let restarts = StreamRestarts::from_config(&spec.model);
+            // The slow layer above it: `limits.max_turn_retries` waits of
+            // `limits.turn_retry_delay_ms` (doubling, capped) for a failure that
+            // only time can fix. Shared across this turn's attempts, not per
+            // stream: it is the turn that is being retried.
+            let turn_retries = TurnRetries::from_limits(&spec.limits);
+            let mut turn_retries_used: u32 = 0;
             let mut attempt: u32 = 0;
             let mut turn = loop {
                 attempt = attempt.saturating_add(1);
-                let stream = match provider
+                // The request itself failing and the stream dying mid-answer both
+                // land in `outcome`, because both have to reach the same retry
+                // decision: breaking out of the loop here would skip the slow
+                // layer, and a spent provider budget is exactly what it is for.
+                let mut outcome = match provider
                     .stream_chat(request.clone(), spec.cancel.clone())
                     .await
                 {
-                    Ok(stream) => stream,
+                    Ok(stream) => consume(&ctx, &spec.cancel, spec.deadline, stream).await,
                     Err(e) => {
                         // A cancel that lands before the request completes is still a
                         // cancellation, not a provider failure.
@@ -1366,28 +1402,34 @@ is {})",
                                 iterations,
                             );
                         }
-                        // Not restartable from here: the provider layer
+                        // Not restartable *now*: the provider layer
                         // (`RetryingProvider`) has already spent its own attempt
-                        // budget on this exact request, so re-sending it from this
-                        // level would only multiply the cost. The failure is handed
+                        // budget on this exact request, so re-sending it in the same
+                        // second would only multiply the cost. The failure is handed
                         // to the overflow check below instead, which changes the
                         // *request* rather than repeating it.
-                        break (
+                        (
                             String::new(),
                             None,
                             Vec::new(),
                             StreamEnd::Failed {
                                 message: format!("provider request failed: {e}"),
                                 transient: false,
+                                // ...but a *slow* retry is exactly the case this
+                                // exists for: the provider's own budget ran out
+                                // after 300 s of backoff, and nothing about the
+                                // request is wrong.
+                                recoverable:
+                                    kc_core::error::is_transient_provider_failure_error(&e),
                             },
                             None,
-                        );
+                        )
                     }
                 };
-
-                let mut outcome = consume(&ctx, &spec.cancel, spec.deadline, stream).await;
                 let restart = match &outcome.3 {
-                    StreamEnd::Failed { message, transient } => {
+                    StreamEnd::Failed {
+                        message, transient, ..
+                    } => {
                         *transient
                             && !spec.cancel.is_cancelled()
                             && attempt < restarts.max_attempts()
@@ -1410,7 +1452,86 @@ is {})",
                     _ => false,
                 };
                 if !restart {
-                    break outcome;
+                    // --- slow layer: wait out a condition that clears by itself ---
+                    // The fast budgets are spent. Before the run ends, ask the same
+                    // turn again once the upstream has had time to recover - that is
+                    // what an operator was doing by hand: 26 of 96 failed runs on one
+                    // install were fixed by an ordinary resend.
+                    let slow = match &outcome.3 {
+                        StreamEnd::Failed {
+                            message,
+                            recoverable: true,
+                            ..
+                        } if turn_retries.remaining(turn_retries_used).is_some()
+                            && !spec.cancel.is_cancelled() =>
+                        {
+                            let delay = turn_retries
+                                .remaining(turn_retries_used)
+                                .unwrap_or_default();
+                            if tokio::time::Instant::now() + delay < spec.deadline {
+                                Some((delay, message.clone()))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    let Some((delay, reason)) = slow else {
+                        break outcome;
+                    };
+                    turn_retries_used += 1;
+                    // One line, not the whole upstream body: the transcript keeps
+                    // this notice, and a 500-character JSON excerpt repeated after
+                    // every retry is noise the reader has to scroll past. The full
+                    // error is in the log (`tracing::warn!` below) and in the run's
+                    // stored error if the retries are exhausted too.
+                    let short = truncate_reason(&reason);
+                    tracing::warn!(
+                        attempt,
+                        turn_retry = turn_retries_used,
+                        max_turn_retries = turn_retries.max_retries(),
+                        delay_secs = delay.as_secs(),
+                        error = %reason,
+                        "provider gave up on this turn; waiting and asking again"
+                    );
+                    // The client has to drop whatever the failed attempt rendered:
+                    // nothing of it is persisted, and the retry re-streams the same
+                    // turn from the start. `attempt` counts every stream the turn has
+                    // spent, so the two layers read as one sequence.
+                    ctx.emit(Event::StreamRetry {
+                        attempt,
+                        max_attempts: restarts
+                            .max_attempts()
+                            .saturating_add(turn_retries.max_retries()),
+                        reason: short.clone(),
+                    });
+                    ctx.notice(
+                        "warn",
+                        format!(
+                            "the provider gave up on this turn ({short}) for a reason that \
+                             clears by itself. Nothing from the failed attempt was kept; the \
+                             same turn is retried after {}s (turn retry {} of {}, \
+                             limits.max_turn_retries).",
+                            delay.as_secs(),
+                            turn_retries_used,
+                            turn_retries.max_retries(),
+                        ),
+                    );
+                    tokio::select! {
+                        biased;
+                        _ = spec.cancel.cancelled() => {}
+                        _ = tokio::time::sleep_until(spec.deadline) => {}
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                    if spec.cancel.is_cancelled() {
+                        outcome.3 = StreamEnd::Cancelled;
+                        break outcome;
+                    }
+                    if Instant::now() >= spec.deadline {
+                        outcome.3 = StreamEnd::TimedOut;
+                        break outcome;
+                    }
+                    continue;
                 }
 
                 let delay = restarts.delay(attempt.saturating_sub(1));
@@ -1459,6 +1580,9 @@ is {})",
                              or declare the model's real `context_window` if it is set too high."
                             ),
                             transient: false,
+                            // A context overflow is a judgement on the request, not
+                            // a condition that clears: waiting repeats it.
+                            recoverable: false,
                         };
                         break 'request turn;
                     }
@@ -3174,6 +3298,10 @@ async fn consume(
                             // runtime *stream restart*. A pre-content retryable
                             // error is the provider layer's terminal result.
                             transient: retryable && content_seen,
+                            // A retryable verdict is exactly "ask again later":
+                            // the provider layer already spent its own budget, so
+                            // the turn retry is what is left.
+                            recoverable: retryable,
                         };
                         break;
                     }
@@ -3190,6 +3318,8 @@ async fn consume(
                         end = StreamEnd::Failed {
                             message: format!("provider stream failed: {e}"),
                             transient,
+                            recoverable:
+                                kc_core::error::is_transient_provider_failure_error(&e),
                         };
                         break;
                     }
@@ -3215,6 +3345,9 @@ async fn consume(
             message: "provider stream ended without a finish_reason; the response is incomplete"
                 .into(),
             transient: true,
+            // The body was cut by something between us and the model: time can
+            // fix that.
+            recoverable: true,
         };
     }
 
@@ -3233,6 +3366,9 @@ async fn consume(
                     "the model's reasoning repeated `{sample}` over and over; the turn was abandoned"
                 ),
                 transient: true,
+                // Not recoverable: this is the model's own behaviour, and waiting
+                // a minute will not stop it repeating.
+                recoverable: false,
             };
         }
         // Text that loops is trimmed above; the rest of the answer stands. The
@@ -3262,6 +3398,7 @@ async fn consume(
                     "a tool call's arguments grew past {chars} characters without ending; the turn was abandoned"
                 ),
                 transient: true,
+                recoverable: false,
             };
         }
         None => {}
@@ -3887,6 +4024,31 @@ mod current_runtime_regressions {
         }
     }
 
+    /// The slow turn-retry layer switched off: a test about multiplication in the
+    /// same instant does not also want a wait-and-retry on top of it.
+    fn slow_layer_off() -> FakeSettings {
+        FakeSettings::default().with_limits(kc_core::config::Limits {
+            max_turn_retries: 0,
+            ..kc_core::config::Limits::default()
+        })
+    }
+
+    #[test]
+    fn a_reason_is_cut_to_one_line_for_the_transcript() {
+        assert_eq!(truncate_reason("boom"), "boom");
+        assert_eq!(
+            truncate_reason("upstream   503\n  retry later"),
+            "upstream 503 retry later"
+        );
+        let long = "x".repeat(400);
+        let short = truncate_reason(&long);
+        assert_eq!(short.chars().count(), 160);
+        assert!(short.ends_with('…'));
+        // Multi-byte text is cut on a character boundary, not mid-emoji.
+        let emoji = "🦀".repeat(200);
+        assert_eq!(truncate_reason(&emoji).chars().count(), 160);
+    }
+
     #[test]
     fn streamed_argument_characters_are_incremental_and_saturating() {
         let mut count = ArgumentCharCount::default();
@@ -4005,6 +4167,7 @@ mod current_runtime_regressions {
             ),
             Script::text("an extra logical request that must never happen"),
         ])
+        .settings(slow_layer_off())
         .model(restart_model(3))
         .build()
         .await;
@@ -4024,6 +4187,7 @@ mod current_runtime_regressions {
                 message: "retry budget already spent upstream".into(),
                 retryable: true,
             }])])
+            .settings(slow_layer_off())
             .model(restart_model(3))
             .build()
             .await;

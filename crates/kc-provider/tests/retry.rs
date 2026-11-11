@@ -833,3 +833,106 @@ async fn transient_http_status_wins_over_context_wording() {
         assert_eq!(hit_count(&server), 2, "{label} must retry exactly once");
     }
 }
+
+// --- a transient refusal inside a permanent-looking status --------------------
+//
+// Gateways put rate limits in statuses whose meaning is "your request is wrong":
+// a membership RPM limit arrives as a 400 (`tier_limit_exceeded`), a bid floor as
+// a 402. Classified by status alone, each one ended a run over a condition that
+// clears in minutes.
+
+#[tokio::test]
+async fn a_rate_limit_inside_a_400_is_retried() {
+    let failure = response(
+        "400 Bad Request",
+        "application/json",
+        "{\"error\":{\"message\":\"[400]: [code=tier_limit_exceeded] membership rpm limit \
+         exceeded: 101/100 resets 2026-11-09T22:00:00Z\",\"type\":\"invalid_request_error\",\
+         \"code\":\"bad_request\"}}",
+    );
+    let server = flaky_server(1, failure).await;
+    let stream = retrying(&server, 2)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(texts(stream).await, "ok", "the 400 carried a rate limit");
+    assert_eq!(hit_count(&server), 2);
+}
+
+#[tokio::test]
+async fn a_bid_floor_in_a_402_is_retried() {
+    let failure = response(
+        "402 Payment Required",
+        "application/json",
+        "{\"error\":{\"message\":\"[402]: no provider's ask matches your max-per-mtok bid \
+         (reset after 1s)\"}}",
+    );
+    let server = flaky_server(1, failure).await;
+    let stream = retrying(&server, 2)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(texts(stream).await, "ok");
+    assert_eq!(hit_count(&server), 2);
+}
+
+// A cooldown is not a backoff: with `reset_seconds` in the body the layer waits
+// the window the provider named instead of crawling an exponential towards it.
+
+#[tokio::test]
+async fn a_reset_window_that_fits_the_budget_is_waited_out() {
+    let failure = response(
+        "429 Too Many Requests",
+        "application/json",
+        "{\"error\":{\"message\":\"All credentials for model mock-model are cooling down\",\
+         \"code\":\"model_cooldown\",\"reset_seconds\":1}}",
+    );
+    let server = flaky_server(1, failure).await;
+    let started = Instant::now();
+    let stream = retrying(&server, 2)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(texts(stream).await, "ok");
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "the provider's 1s window must be waited out, not the 5ms backoff: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(hit_count(&server), 2);
+}
+
+#[tokio::test]
+async fn a_reset_window_longer_than_the_budget_fails_fast_and_says_so() {
+    let failure = response(
+        "429 Too Many Requests",
+        "application/json",
+        "{\"error\":{\"message\":\"All credentials for model mock-model are cooling down\",\
+         \"code\":\"model_cooldown\",\"reset_seconds\":1024}}",
+    );
+    let server = flaky_server(usize::MAX, failure).await;
+    let policy = RetryPolicy::new(
+        50,
+        Duration::from_millis(5),
+        Duration::from_millis(20),
+    )
+    .with_max_total(Duration::from_secs(10));
+    let inner: Arc<dyn Provider> = Arc::new(OpenAiProvider::new(model_config(&server)).unwrap());
+    let mut stream = RetryingProvider::new(inner, policy)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+    let err = stream
+        .next()
+        .await
+        .expect("a terminal error item")
+        .expect_err("expected failure");
+    let text = err.to_string();
+    assert!(text.contains("1024s wait"), "{text}");
+    assert!(text.contains("retry budget"), "{text}");
+    assert_eq!(
+        hit_count(&server),
+        1,
+        "a window longer than the budget must not be retried at all"
+    );
+}

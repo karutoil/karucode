@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive the tabbed settings sheet in a real Chromium over raw CDP.
+"""Drive the two-pane settings sheet in a real Chromium over raw CDP.
 
 The chrome-devtools plugin cannot launch Chromium on this host (no usable
 sandbox), and plain background jobs die with the command's process group, so this
@@ -11,10 +11,13 @@ script does the three things that actually work here:
     built `web/dist` with `KARUCODE_WEB_DIR`;
   * speaks CDP over the WebSocket directly (Node 22 `fetch` + `WebSocket`).
 
-It asserts the behaviour the unit tests cannot: that the sheet really is tabbed
-in a browser, that only one panel is visible, that the Advanced blocks are
-collapsed and open on click, that the tab strip and the footer stay put while the
-panel scrolls, and that a rejected field brings its tab into view.
+It asserts the behaviour the unit tests cannot: that the sheet really is two
+panes in a browser (rail + content, with the pane header and the footer outside
+the scroller), that exactly one panel is in layout, that the Advanced blocks are
+collapsed and open on click, that the search filters the rail, lands on the
+section it names, opens the fold that holds it and focuses it, that Escape clears
+the field before it closes the sheet, that a rejected field brings its section
+into view, and that the phone tier stacks the panes with nothing overflowing.
 
 Usage: python3 scripts/verify_settings_tabs.py [--keep]
 """
@@ -318,28 +321,59 @@ def main() -> int:
             """,
         )
         check(
-            "the settings sheet opens with a tab strip",
+            "the settings sheet opens with a section rail",
             opened == "opened",
             "opened" if opened == "opened" else str(opened),
         )
         if opened != "opened":
             raise SystemExit(1)
 
-        tabs = session.evaluate(
+        rail = session.evaluate(
             """
-            const tabs = Array.from(document.querySelectorAll('[aria-label="Settings sections"] [role=tab]'));
-            return tabs.map((tab) => ({
-              label: (tab.textContent || '').trim(),
-              selected: tab.getAttribute('aria-selected'),
-              controls: tab.getAttribute('aria-controls'),
-            }));
+            const list = document.querySelector('[role=tablist][aria-label="Settings sections"]');
+            const tabs = Array.from(list.querySelectorAll('[role=tab]'));
+            return {
+              orientation: list.getAttribute('aria-orientation'),
+              search: !!document.querySelector('.settings-search input'),
+              labels: tabs.map((tab) => (tab.querySelector('.settings-nav-label') || {}).textContent || ''),
+              notes: tabs.map((tab) => (tab.querySelector('.settings-nav-note') || {}).textContent || ''),
+              selected: tabs.map((tab) => tab.getAttribute('aria-selected')),
+              tabIndex: tabs.map((tab) => tab.tabIndex),
+              controls: tabs.map((tab) => tab.getAttribute('aria-controls')),
+            };
             """,
         )
         check(
-            "five tabs, named for what they own",
-            [t["label"] for t in tabs]
-            == ["General", "Models", "Agent", "Notifications", "Plugins & MCP"],
-            ", ".join(t["label"] for t in tabs),
+            "the sheet opens with a vertical rail of seven sections",
+            rail["labels"]
+            == [
+                "Appearance",
+                "Models & providers",
+                "Agent",
+                "Access & sign-in",
+                "Notifications",
+                "Plugins & MCP",
+                "Updates",
+            ]
+            and rail["orientation"] == "vertical",
+            ", ".join(rail["labels"]),
+        )
+        check(
+            "every rail row says what it holds",
+            all(note.strip() for note in rail["notes"]),
+            " / ".join(rail["notes"]),
+        )
+        check(
+            "the rail carries a search field",
+            rail["search"] is True,
+            "search present" if rail["search"] else "no search field",
+        )
+        check(
+            "one section is selected, and it is the only one in the tab order",
+            rail["selected"].count("true") == 1
+            and rail["tabIndex"][0] == 0
+            and set(rail["tabIndex"][1:]) == {-1},
+            f'selected={rail["selected"].count("true")} tabIndex={rail["tabIndex"]}',
         )
 
         visible = session.evaluate(
@@ -354,35 +388,39 @@ def main() -> int:
         )
         check(
             "exactly one panel is visible at a time",
-            visible["count"] == 5 and len(visible["visible"]) == 1,
+            visible["count"] == 7 and len(visible["visible"]) == 1,
             f'{len(visible["visible"])} of {visible["count"]} visible',
         )
         check(
             "the hidden panels are really out of layout",
-            visible["display"].count("none") == 4,
+            visible["display"].count("none") == 6,
             str(visible["display"]),
         )
 
-        # Walking the tabs: each one shows its own content and nothing else.
+        # Walking the rail: each section shows its own content and nothing else.
         walked = session.evaluate(
             """
             const wanted = {
-              General: 'settings-appearance',
-              Models: 'settings-providers',
+              Appearance: 'settings-theme',
+              'Models & providers': 'settings-providers',
               Agent: 'settings-approvals',
+              'Access & sign-in': 'settings-access-signin',
               Notifications: 'settings-notifications',
               'Plugins & MCP': 'settings-plugins',
+              Updates: 'settings-update-build',
             };
             const results = [];
             for (const [label, anchor] of Object.entries(wanted)) {
-              const tab = Array.from(document.querySelectorAll('[role=tab]')).find(
-                (candidate) => (candidate.textContent || '').trim() === label,
+              const tab = Array.from((document.querySelector('[role=dialog]') || document).querySelectorAll('[role=tab]')).find(
+                (candidate) =>
+                  ((candidate.querySelector('.settings-nav-label') || {}).textContent || '').trim() === label,
               );
               tab.click();
               await new Promise((resolve) => setTimeout(resolve, 250));
               const panel = document.querySelector('.settings-panels > .tab-panel:not([hidden])');
               results.push({
                 label,
+                title: (document.querySelector('.settings-pane-title') || {}).textContent || '',
                 anchorFound: !!document.getElementById(anchor),
                 anchorInPanel: !!(panel && panel.querySelector('#' + anchor)),
                 panel: panel ? panel.id : null,
@@ -392,12 +430,17 @@ def main() -> int:
             """,
         )
         check(
-            "every tab shows the section it owns and only that one",
+            "every section shows the panel it owns and only that one",
             all(item["anchorFound"] and item["anchorInPanel"] for item in walked),
             "; ".join(f'{i["label"]}->{i["panel"]}' for i in walked),
         )
+        check(
+            "the pane header names the section on screen",
+            all(item["title"] == item["label"] for item in walked),
+            ", ".join(f'{i["label"]}: {i["title"]}' for i in walked),
+        )
 
-        # The Advanced blocks start collapsed, and opening one keeps the rest shut.
+        # The Advanced blocks start collapsed, and opening one relaid out its body.
         advanced = session.evaluate(
             """
             const out = {};
@@ -417,21 +460,22 @@ def main() -> int:
 
         toggled = session.evaluate(
             """
-            const tab = Array.from(document.querySelectorAll('[role=tab]')).find(
-              (candidate) => (candidate.textContent || '').trim() === 'Models',
+            const tab = Array.from((document.querySelector('[role=dialog]') || document).querySelectorAll('[role=tab]')).find(
+              (candidate) =>
+                ((candidate.querySelector('.settings-nav-label') || {}).textContent || '').trim() ===
+                'Models & providers',
             );
             tab.click();
             await new Promise((resolve) => setTimeout(resolve, 250));
             const details = document.querySelector('#settings-panel-models details.settings-advanced');
             const summary = details.querySelector('summary');
-            const hiddenBefore = details.querySelector('.field-grid')
-              ? details.querySelector('.field-grid').getBoundingClientRect().height
-              : -1;
             summary.click();
             await new Promise((resolve) => setTimeout(resolve, 250));
-            const openAfter = details.open;
-            const bodyHeight = details.querySelector('.settings-advanced-body').getBoundingClientRect().height;
-            return { openAfter, bodyHeight, hiddenBefore, summaryText: summary.textContent.trim() };
+            return {
+              openAfter: details.open,
+              bodyHeight: details.querySelector('.settings-advanced-body').getBoundingClientRect().height,
+              summaryText: summary.textContent.trim(),
+            };
             """,
         )
         check(
@@ -461,19 +505,16 @@ def main() -> int:
             f'{inset["left"]}px / {inset["right"]}px',
         )
 
-        # The tab strip and the footer must not scroll with the panel.
+        # The rail, the pane header and the footer must not scroll with a panel.
         #
         # The Agent tab's Advanced block is opened first, for the same reason a
         # reader opens it: every subagent field lives behind that fold, so a
-        # collapsed panel can fit the viewport exactly (611px of content in a
-        # 611px box here) and then nothing scrolls - which made this check assert
-        # "the panel scrolls" about a panel that had nothing to scroll. Opening the
-        # fold is what makes the content taller than the box, and that is the
-        # condition this check is about.
+        # collapsed panel can fit the viewport exactly and then nothing scrolls.
         pinned = session.evaluate(
             """
-            const agent = Array.from(document.querySelectorAll('[role=tab]')).find(
-              (candidate) => (candidate.textContent || '').trim() === 'Agent',
+            const agent = Array.from((document.querySelector('[role=dialog]') || document).querySelectorAll('[role=tab]')).find(
+              (candidate) =>
+                ((candidate.querySelector('.settings-nav-label') || {}).textContent || '').trim() === 'Agent',
             );
             agent.click();
             await new Promise((resolve) => setTimeout(resolve, 300));
@@ -483,12 +524,13 @@ def main() -> int:
               details.querySelector('summary').click();
               await new Promise((resolve) => setTimeout(resolve, 300));
             }
-            const strip = document.querySelector('.settings-tabs');
+            const rail = document.querySelector('.settings-nav');
+            const head = document.querySelector('.settings-pane-head');
             const footer = document.querySelector('.settings-footer');
             const before = {
-              strip: strip.getBoundingClientRect().top,
+              rail: rail.getBoundingClientRect().top,
+              head: head.getBoundingClientRect().top,
               footer: footer.getBoundingClientRect().top,
-              panelScroll: panel.scrollTop,
               scrollable: panel.scrollHeight > panel.clientHeight,
             };
             panel.scrollTop = 400;
@@ -496,7 +538,8 @@ def main() -> int:
             return {
               before,
               after: {
-                strip: strip.getBoundingClientRect().top,
+                rail: rail.getBoundingClientRect().top,
+                head: head.getBoundingClientRect().top,
                 footer: footer.getBoundingClientRect().top,
                 panelScroll: panel.scrollTop,
               },
@@ -505,67 +548,178 @@ def main() -> int:
         )
         check(
             "the panel is the thing that scrolls",
-            pinned["after"]["panelScroll"] > 0,
-            f'scrolled {pinned["after"]["panelScroll"]}px '
-            f'({pinned["before"]["scrollable"]=}, body {pinned["before"]["panelScroll"]})',
+            pinned["before"]["scrollable"] is True and pinned["after"]["panelScroll"] > 0,
+            f'scrolled {pinned["after"]["panelScroll"]}px',
         )
         check(
-            "the tab strip and the footer stay put while it does",
-            abs(pinned["after"]["strip"] - pinned["before"]["strip"]) < 1
+            "the rail, the pane header and the footer stay put while it does",
+            abs(pinned["after"]["rail"] - pinned["before"]["rail"]) < 1
+            and abs(pinned["after"]["head"] - pinned["before"]["head"]) < 1
             and abs(pinned["after"]["footer"] - pinned["before"]["footer"]) < 1,
-            f'strip {pinned["before"]["strip"]:.0f}->{pinned["after"]["strip"]:.0f}, '
+            f'head {pinned["before"]["head"]:.0f}->{pinned["after"]["head"]:.0f}, '
             f'footer {pinned["before"]["footer"]:.0f}->{pinned["after"]["footer"]:.0f}',
         )
 
-        # A rejected field pulls the sheet to its tab and opens its disclosure.
+        # Search: filter the rail, then land on the first match.
+        searched = session.evaluate(
+            """
+            const input = document.querySelector('.settings-search input');
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            const type = (value) => {
+              setter.call(input, value);
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+            };
+            type('max concurrent');
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            const afterType = Array.from(document.querySelectorAll('.settings-nav-label')).map(
+              (node) => node.textContent,
+            );
+            const note = (document.querySelector('.settings-nav-note') || {}).textContent || '';
+            const hint = (document.querySelector('.settings-nav-hint') || {}).textContent || '';
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+            await new Promise((resolve) => setTimeout(resolve, 600));
+            const panel = document.querySelector('.settings-panels > .tab-panel:not([hidden])');
+            const details = panel.querySelector('details.settings-advanced');
+            const found = panel.querySelector('.settings-section.is-found');
+            const tabs = Array.from((document.querySelector('[role=dialog]') || document).querySelectorAll('[role=tab]'));
+            return {
+              afterType,
+              note,
+              hint,
+              tabs: tabs.map((tab) => [
+                tab.getAttribute('aria-selected'),
+                (tab.querySelector('.settings-nav-label') || {}).textContent || tab.textContent,
+              ]),
+              selected: (tabs.find((tab) => tab.getAttribute('aria-selected') === 'true') || {})
+                .textContent || '',
+              advancedOpen: details ? details.open : false,
+              foundHeading: found ? (found.querySelector('h3') || {}).textContent : null,
+              focused: document.activeElement ? document.activeElement.className : null,
+            };
+            """,
+        )
+        check(
+            "typing filters the rail to the section that owns the match",
+            searched["afterType"] == ["Agent"],
+            str(searched["afterType"]),
+        )
+        check(
+            "the rail row names what inside it matched",
+            "Subagents" in searched["note"],
+            f'note "{searched["note"].strip()}"',
+        )
+        check(
+            "the search says how many sections match",
+            "1 section match" in searched["hint"],
+            searched["hint"].strip()[:60],
+        )
+        check(
+            "Enter opens the matching section and its disclosure",
+            "Agent" in searched["selected"]
+            and searched["advancedOpen"] is True
+            and searched["foundHeading"] == "Subagents",
+            f'selected={searched["selected"]} open={searched["advancedOpen"]} '
+            f'section={searched["foundHeading"]} tabs={searched["tabs"]}',
+        )
+        check(
+            "and focuses the section it landed on",
+            "settings-section" in (searched["focused"] or ""),
+            str(searched["focused"]),
+        )
+
+        escaped = session.evaluate(
+            """
+            const input = document.querySelector('.settings-search input');
+            input.focus();
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            const cleared = input.value === '';
+            const stillOpen = !!document.querySelector('[role=dialog]');
+            const labels = document.querySelectorAll('.settings-nav-label').length;
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            return {
+              cleared,
+              stillOpen,
+              labels,
+              closedAfterSecond: !document.querySelector('[role=dialog]'),
+            };
+          """,
+        )
+        check(
+            "Escape clears the search without closing the sheet",
+            escaped["cleared"] is True
+            and escaped["stillOpen"] is True
+            and escaped["labels"] == 7,
+            f'cleared={escaped["cleared"]} open={escaped["stillOpen"]} rows={escaped["labels"]}',
+        )
+        check(
+            "a second Escape closes the sheet",
+            escaped["closedAfterSecond"] is True,
+            "closed" if escaped["closedAfterSecond"] else "still open",
+        )
+
+        # Reopen for the rest of the checks.
+        reopened = session.evaluate(
+            """
+            const gear = Array.from(document.querySelectorAll('button')).find(
+              (button) => /open settings/i.test(button.getAttribute('aria-label') || ''),
+            );
+            gear.click();
+            await new Promise((resolve) => setTimeout(resolve, 700));
+            return !!document.querySelector('[role=tablist][aria-label="Settings sections"]');
+            """,
+        )
+        if not reopened:
+            check("the sheet reopens after Escape", False, "no tablist")
+            raise SystemExit(1)
+
+        # A rejected field pulls the sheet to its section and opens its disclosure.
         jumped = session.evaluate(
             """
-            const general = Array.from(document.querySelectorAll('[role=tab]')).find(
-              (candidate) => (candidate.textContent || '').trim() === 'General',
-            );
-            general.click();
+            const byLabel = (label) =>
+              Array.from((document.querySelector('[role=dialog]') || document).querySelectorAll('[role=tab]')).find(
+                (candidate) =>
+                  ((candidate.querySelector('.settings-nav-label') || {}).textContent || '').trim() === label,
+              );
+            byLabel('Appearance').click();
             await new Promise((resolve) => setTimeout(resolve, 200));
             const save = Array.from(document.querySelectorAll('button')).find(
               (button) => (button.textContent || '').trim() === 'Save changes',
             );
             // Plant a value the server bounds reject, in the Agent tab's fold.
-            const agent = Array.from(document.querySelectorAll('[role=tab]')).find(
-              (candidate) => (candidate.textContent || '').trim() === 'Agent',
-            );
-            agent.click();
+            byLabel('Agent').click();
             await new Promise((resolve) => setTimeout(resolve, 200));
             const details = document.querySelector('#settings-panel-agent details.settings-advanced');
             details.querySelector('summary').click();
             await new Promise((resolve) => setTimeout(resolve, 200));
-            const field = document.getElementById('subagent-continues');
+            const field = document.getElementById('subagent-iterations');
             const setter = Object.getOwnPropertyDescriptor(
               window.HTMLInputElement.prototype, 'value',
             ).set;
-            setter.call(field, '1001');
+            setter.call(field, '10001');
             field.dispatchEvent(new Event('input', { bubbles: true }));
             await new Promise((resolve) => setTimeout(resolve, 100));
             details.querySelector('summary').click();
             await new Promise((resolve) => setTimeout(resolve, 100));
-            general.click();
+            byLabel('Appearance').click();
             await new Promise((resolve) => setTimeout(resolve, 200));
             save.click();
             await new Promise((resolve) => setTimeout(resolve, 900));
-            const agentTab = Array.from(document.querySelectorAll('[role=tab]')).find(
-              (candidate) => (candidate.textContent || '').trim() === 'Agent',
-            );
             return {
-              selected: agentTab.getAttribute('aria-selected'),
+              selected: byLabel('Agent').getAttribute('aria-selected'),
+              title: (document.querySelector('.settings-pane-title') || {}).textContent || '',
               advancedOpen: document.querySelector('#settings-panel-agent details.settings-advanced').open,
               message: (document.querySelector('.settings-error-summary') || {}).textContent || '',
-              fieldError: (document.getElementById('subagent-continues-error') || {}).textContent || '',
+              fieldError: (document.getElementById('subagent-iterations-error') || {}).textContent || '',
               focused: document.activeElement ? document.activeElement.id : null,
             };
             """,
         )
         check(
-            "a rejected field switches the sheet to its tab",
-            jumped["selected"] == "true",
-            f'Agent selected={jumped["selected"]}',
+            "a rejected field switches the sheet to its section",
+            jumped["selected"] == "true" and jumped["title"] == "Agent",
+            f'Agent selected={jumped["selected"]} title={jumped["title"]}',
         )
         check(
             "and opens the disclosure the field lives behind",
@@ -579,15 +733,15 @@ def main() -> int:
         )
         check(
             "the failing input is focused, with its message",
-            jumped["focused"] == "subagent-continues"
-            and "0–1000" in (jumped["fieldError"] or ""),
+            jumped["focused"] == "subagent-iterations"
+            and "1–10000" in (jumped["fieldError"] or ""),
             f'focus={jumped["focused"]} error="{jumped["fieldError"].strip()}"',
         )
 
         # Restore the planted value so the check does not leave a broken form.
         session.evaluate(
             """
-            const field = document.getElementById('subagent-continues');
+            const field = document.getElementById('subagent-iterations');
             const setter = Object.getOwnPropertyDescriptor(
               window.HTMLInputElement.prototype, 'value',
             ).set;
@@ -597,11 +751,13 @@ def main() -> int:
             """,
         )
 
-        # Notifications still round-trip: the tab move must not have detached them.
+        # Notifications still round-trip: the section move must not have detached them.
         flipped = session.evaluate(
             f"""
-            const tab = Array.from(document.querySelectorAll('[role=tab]')).find(
-              (candidate) => (candidate.textContent || '').trim() === 'Notifications',
+            const tab = Array.from((document.querySelector('[role=dialog]') || document).querySelectorAll('[role=tab]')).find(
+              (candidate) =>
+                ((candidate.querySelector('.settings-nav-label') || {{}}).textContent || '').trim() ===
+                'Notifications',
             );
             tab.click();
             await new Promise((resolve) => setTimeout(resolve, 300));
@@ -617,7 +773,7 @@ def main() -> int:
             """,
         )
         check(
-            "a notification switch still PATCHes from its tab",
+            "a notification switch still PATCHes from its section",
             flipped.get("run_finished") is (not notifications_on),
             f'run_finished={flipped.get("run_finished")}',
         )
@@ -632,29 +788,43 @@ def main() -> int:
             """,
         )
 
-        # Layout sanity at a phone width: the strip scrolls, nothing overlaps.
-        phone = session.evaluate(
+        # Layout sanity at 1280px: the rail is a rail, and nothing overlaps.
+        wide = session.evaluate(
             """
-            const tabs = Array.from(document.querySelectorAll('.settings-tab'));
-            const strip = document.querySelector('.settings-tabs');
-            const overlapping = tabs.some((tab, index) => {
+            const sheet = document.querySelector('.dialog-settings');
+            const nav = document.querySelector('.settings-nav').getBoundingClientRect();
+            const content = document.querySelector('.settings-content').getBoundingClientRect();
+            const items = Array.from(document.querySelectorAll('.settings-nav-item'));
+            const overlapping = items.some((item, index) => {
               if (index === 0) return false;
-              const prev = tabs[index - 1].getBoundingClientRect();
-              const box = tab.getBoundingClientRect();
-              return box.left < prev.right - 1;
+              const prev = items[index - 1].getBoundingClientRect();
+              const box = item.getBoundingClientRect();
+              return box.top < prev.bottom - 1;
             });
             return {
               overlapping,
-              scrollable: strip.scrollWidth > strip.clientWidth + 1,
-              widths: tabs.map((tab) => Math.round(tab.getBoundingClientRect().width)),
-              tabFont: getComputedStyle(tabs[0]).fontSize,
+              navWidth: Math.round(nav.width),
+              contentWidth: Math.round(content.width),
+              sheetWidth: Math.round(sheet.getBoundingClientRect().width),
+              widths: items.map((item) => Math.round(item.getBoundingClientRect().width)),
+              searchHeight: Math.round(
+                document.querySelector('.settings-search').getBoundingClientRect().height,
+              ),
             };
             """,
         )
         check(
-            "no two tabs overlap at 1280px",
-            phone["overlapping"] is False,
-            str(phone["widths"]),
+            "the rail and the content split the sheet, and no two rows overlap",
+            wide["overlapping"] is False
+            and wide["navWidth"] >= 200
+            and wide["contentWidth"] > wide["navWidth"],
+            f'rail {wide["navWidth"]}px / content {wide["contentWidth"]}px '
+            f'of {wide["sheetWidth"]}px',
+        )
+        check(
+            "every rail row fills the rail",
+            len(set(wide["widths"])) == 1,
+            str(wide["widths"]),
         )
 
         session.cdp(
@@ -665,7 +835,7 @@ def main() -> int:
                 "deviceScaleFactor": 2,
                 "mobile": True,
                 # Without an explicit viewport the page keeps a 980px layout width
-                # and the 600px media query never fires, which would make the
+                # and the 780px media query never fires, which would make the
                 # phone check pass without testing anything.
                 "screenWidth": 390,
                 "screenHeight": 844,
@@ -674,53 +844,70 @@ def main() -> int:
         )
         narrow = session.evaluate(
             """
-            await new Promise((resolve) => setTimeout(resolve, 400));
-            const tabs = Array.from(document.querySelectorAll('.settings-tab'));
-            const strip = document.querySelector('.settings-tabs');
-            const overlapping = tabs.some((tab, index) => {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            const shell = document.querySelector('.settings-shell');
+            const list = document.querySelector('.settings-nav-list');
+            const items = Array.from(document.querySelectorAll('.settings-nav-item'));
+            const overlapping = items.some((item, index) => {
               if (index === 0) return false;
-              const prev = tabs[index - 1].getBoundingClientRect();
-              const box = tab.getBoundingClientRect();
+              const prev = items[index - 1].getBoundingClientRect();
+              const box = item.getBoundingClientRect();
               return box.left < prev.right - 1;
             });
             const footer = document.querySelector('.settings-footer').getBoundingClientRect();
+            const head = document.querySelector('.settings-pane-head').getBoundingClientRect();
             return {
+              shellDirection: getComputedStyle(shell).flexDirection,
               overlapping,
-              scrollable: strip.scrollWidth > strip.clientWidth + 1,
+              scrollable: list.scrollWidth > list.clientWidth + 1,
+              noteHidden: getComputedStyle(document.querySelector('.settings-nav-note')).display,
               footerVisible: footer.bottom <= window.innerHeight + 1 && footer.top >= 0,
+              headVisible: head.top >= 0 && head.bottom <= window.innerHeight,
               sheetWidth: document.querySelector('.dialog-settings').getBoundingClientRect().width,
               viewport: window.innerWidth,
-              tabFont: getComputedStyle(document.querySelector('.settings-tab')).fontSize,
             };
             """,
         )
         check(
-            "on a phone the tabs neither overlap nor run off the sheet",
-            narrow["overlapping"] is False and narrow["sheetWidth"] <= 391,
+            "on a phone the sheet stacks into one column",
+            narrow["shellDirection"] == "column"
+            and narrow["sheetWidth"] <= 391
+            and narrow["overlapping"] is False,
             f'viewport={narrow["viewport"]} sheet={round(narrow["sheetWidth"])} '
-            f'scrollable={narrow["scrollable"]}',
+            f'direction={narrow["shellDirection"]} scrollable={narrow["scrollable"]}',
         )
         check(
-            "and the narrow-width tier really applies",
-            narrow["tabFont"] != phone.get("tabFont"),
-            f'font {phone.get("tabFont")} -> {narrow["tabFont"]}',
+            "the phone rail scrolls sideways and drops its notes",
+            narrow["scrollable"] is True and narrow["noteHidden"] == "none",
+            f'scrollable={narrow["scrollable"]} note={narrow["noteHidden"]}',
         )
         check(
-            "and the Save button is still reachable",
-            narrow["footerVisible"] is True,
-            "footer in viewport",
+            "the pane header and the Save button are both reachable",
+            narrow["headVisible"] is True and narrow["footerVisible"] is True,
+            f'head={narrow["headVisible"]} footer={narrow["footerVisible"]}',
         )
         overflow = session.evaluate(
             """
             const sheet = document.querySelector('.dialog-settings');
+            const sheetRight = sheet.getBoundingClientRect().right;
+            // A child of a horizontal scroller is allowed to hang past the edge:
+            // that is what scrolling it means, and the strip is the phone rail's
+            // whole answer to seven labels in 390px.
+            const insideScroller = (el) => {
+              for (let node = el.parentElement; node && node !== sheet; node = node.parentElement) {
+                if (getComputedStyle(node).overflowX !== 'visible') return true;
+              }
+              return false;
+            };
             const wide = Array.from(sheet.querySelectorAll('*')).filter((el) => {
               const box = el.getBoundingClientRect();
-              return box.width > 0 && box.right > sheet.getBoundingClientRect().right + 1;
+              if (box.width <= 0 || box.right <= sheetRight + 1) return false;
+              return !insideScroller(el);
             });
             return {
               pageScrollWidth: document.documentElement.scrollWidth,
               viewport: window.innerWidth,
-              sheetWidth: Math.round(sheet.getBoundingClientRect().width),
+              sheetWidth: Math.round(sheetRight - sheet.getBoundingClientRect().left),
               overflowing: wide.length,
               firstOverflowing: wide.slice(0, 3).map((el) => el.className || el.tagName),
             };
@@ -734,11 +921,12 @@ def main() -> int:
             overflow["pageScrollWidth"] <= overflow["viewport"] + 1
             and overflow["overflowing"] == 0,
             f'page {overflow["pageScrollWidth"]}px / viewport {overflow["viewport"]}px, '
-            f'{overflow["overflowing"]} node(s) past the sheet',
+            f'{overflow["overflowing"]} node(s) past the sheet '
+            f'{overflow["firstOverflowing"]}',
         )
 
         # A phone screenshot too: the narrow tier is the one a desktop screenshot
-        # cannot show, and it is where the tab strip has to earn its keep.
+        # cannot show, and it is where the rail has to earn its keep.
         import base64
 
         shots_dir = tmp / "shots"
@@ -758,28 +946,39 @@ def main() -> int:
         )
         session.evaluate(
             """
-            const tab = Array.from(document.querySelectorAll('[role=tab]')).find(
-              (candidate) => (candidate.textContent || '').trim() === 'Agent',
+            const tab = Array.from((document.querySelector('[role=dialog]') || document).querySelectorAll('[role=tab]')).find(
+              (candidate) =>
+                ((candidate.querySelector('.settings-nav-label') || {}).textContent || '').trim() === 'Agent',
             );
             tab.click();
             await new Promise((resolve) => setTimeout(resolve, 500));
             return 'ready';
             """,
         )
-        (shots_dir / "6-phone-agent.png").write_bytes(
+        (shots_dir / "8-phone-agent.png").write_bytes(
             base64.b64decode(session.cdp("Page.captureScreenshot", {"format": "png"})["data"])
         )
 
-        # A screenshot of every tab, for a human to look at.
+        # A screenshot of every section, for a human to look at.
         session.cdp("Emulation.clearDeviceMetricsOverride")
         shots = shots_dir
         for index, label in enumerate(
-            ["General", "Models", "Agent", "Notifications", "Plugins & MCP"]
+            [
+                "Appearance",
+                "Models & providers",
+                "Agent",
+                "Access & sign-in",
+                "Notifications",
+                "Plugins & MCP",
+                "Updates",
+            ]
         ):
             session.evaluate(
                 f"""
-                const tab = Array.from(document.querySelectorAll('[role=tab]')).find(
-                  (candidate) => (candidate.textContent || '').trim() === {json.dumps(label)},
+                const tab = Array.from((document.querySelector('[role=dialog]') || document).querySelectorAll('[role=tab]')).find(
+                  (candidate) =>
+                    ((candidate.querySelector('.settings-nav-label') || {{}}).textContent || '').trim() ===
+                    {json.dumps(label)},
                 );
                 tab.click();
                 await new Promise((resolve) => setTimeout(resolve, 450));
@@ -787,9 +986,8 @@ def main() -> int:
                 """,
             )
             capture = session.cdp("Page.captureScreenshot", {"format": "png"})["data"]
-            (shots / f"{index + 1}-{label.replace(' ', '-').replace('&', 'and').lower()}.png").write_bytes(
-                base64.b64decode(capture)
-            )
+            slug = label.replace(" & ", "-and-").replace(" ", "-").lower()
+            (shots / f"{index + 1}-{slug}.png").write_bytes(base64.b64decode(capture))
         print(f"\nscreenshots: {shots}", flush=True)
 
         print(f"\n{len(PASS)} passed, {len(FAIL)} failed", flush=True)

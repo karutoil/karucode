@@ -72,6 +72,15 @@ supports_images = false
 # means "this channel's key is dead" and the next attempt lands elsewhere.
 # Retries stop as soon as real content has been streamed, so nothing is ever
 # duplicated.
+#
+# The body outvotes the status in one direction only: a refusal that names a rate
+# limit, a cooldown or a reset window ("tier_limit_exceeded", "reset after 2m",
+# `"reset_seconds": 1024`) is retried whatever status carried it, because that is
+# a condition which clears by itself. When the body names its window, the attempt
+# waits that long instead of the exponential — and when the window is longer than
+# `retry_max_total_secs`, it fails at once and says so rather than crawling a
+# backoff towards a reset it can never reach. Quota and balance wording is not in
+# that list: `insufficient_quota` needs a recharge, not another attempt.
 # retry_max_retries = 50      # attempts = retries + 1; 0 disables retries
 # retry_base_delay_ms = 500   # first delay; doubles per attempt (jittered)
 # retry_max_delay_ms = 30000  # backoff ceiling
@@ -172,6 +181,26 @@ search_max_results = 200
 context_max_chars = 0
 # Safety valve against a runaway tool batch, not a work budget.
 max_tool_calls_per_turn = 32
+# How many times a turn the provider gave up on is asked again, after a wait.
+#
+# The two retry budgets under [model] (retry_max_retries, and
+# retry_max_stream_restarts) both spend attempts in the same second. When they are
+# spent the run used to end, and the only recovery was typing the prompt again.
+# This layer spends time instead: the same turn is asked again once the upstream
+# has had a chance to recover. It only engages for a failure a wait can fix - a
+# transient status (408/409/425/429/5xx), a body naming a rate limit, cooldown or
+# reset window, or a transport death with no status at all. A dead key (401), a
+# content refusal, a request the endpoint judged and a context overflow still end
+# the run at once with their real reason.
+#
+# 2 by default; 0 disables the layer; the ceiling is 10. Each retry is a fresh
+# generation, and every one is announced (a stream_retry event plus a warning
+# notice naming the attempt and the wait). Nothing of a failed attempt is
+# persisted, so a retry can never duplicate an answer.
+max_turn_retries = 2
+# Wait before the first turn retry, in milliseconds. Doubles per retry, capped at
+# eight times this value (30 s, 60 s, 120 s by default).
+turn_retry_delay_ms = 30000
 # Run a turn's INDEPENDENT tool calls at the same time instead of one at a time.
 # On by default: reads, and file writes to different paths that the approval
 # policy would not ask about, overlap; results still land in the transcript in

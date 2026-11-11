@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { configFixture, resetAppState } from '../test/fixtures';
 import * as store from '../state/store';
 import * as workbench from '../state/workbench';
@@ -68,7 +68,10 @@ describe('Workbench result dock', () => {
 
     expect(screen.getByText('Results')).toBeTruthy();
     expect(screen.queryByText('Project context, always in reach')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Context' })).toBeTruthy();
+    // Context is not the results header's business any more: it lives in the
+    // session header, so it stays reachable while this panel is closed or popped
+    // out. ChatView.test.tsx owns that button's behaviour.
+    expect(screen.queryByRole('button', { name: 'Context' })).toBeNull();
     expect(screen.getByTestId('workspace-result')).toBeTruthy();
     expect(screen.queryByTestId('usage-result')).toBeNull();
     expect(screen.queryByRole('tab', { name: 'Plan' })).toBeNull();
@@ -143,12 +146,11 @@ describe('Workbench result dock', () => {
     render(<><Inspector /><ContextDrawer /></>);
     const result = screen.getByTestId('git-result');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Context' }));
+    act(() => workbench.openContext('now'));
     expect(workbench.contextOpen.value).toBe(true);
     expect(screen.getByRole('dialog', { name: 'Workspace context' })).toBeTruthy();
     expect(screen.getByTestId('git-result')).toBe(result);
     expect(document.querySelector('.inspector')?.hasAttribute('inert')).toBe(false);
-
     fireEvent.click(screen.getByRole('button', { name: 'Close context' }));
     expect(workbench.contextOpen.value).toBe(false);
     expect(screen.queryByRole('dialog', { name: 'Workspace context' })).toBeNull();
@@ -161,7 +163,7 @@ describe('Workbench result dock', () => {
     store.mobileSheet.value = null;
     store.inspectorTab.value = 'agents';
     const view = render(<><Inspector /><ContextDrawer /></>);
-    fireEvent.click(screen.getByRole('button', { name: 'Context' }));
+    act(() => workbench.openContext('now'));
 
     expect(workbench.contextOpen.value).toBe(true);
     expect(store.mobileSheet.value).toBe('inspector');
@@ -184,7 +186,7 @@ describe('Workbench result dock', () => {
     if (!inspector) throw new Error('Inspector did not render');
 
     expect(inspector.getAttribute('aria-modal')).toBe('true');
-    fireEvent.click(screen.getByRole('button', { name: 'Context' }));
+    act(() => workbench.openContext('now'));
     const drawer = screen.getByRole('dialog', { name: 'Workspace context' });
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close context' })));
 
@@ -243,7 +245,7 @@ describe('Workbench result dock', () => {
     expect(screen.getAllByRole('tab')).toHaveLength(4);
   });
 
-  it('carries plugin-contributed buttons in its header, and lets one hide Context', () => {
+  it('carries plugin-contributed buttons in its header without owning Context', () => {
     store.config.value = {
       ...configFixture,
       plugin_ui: {
@@ -267,8 +269,28 @@ describe('Workbench result dock', () => {
 
     const control = screen.getByRole('button', { name: 'Focus mode' });
     expect(control.getAttribute('data-plugin')).toBe('kc-focus');
-    // The built-in Context button is gone, so the header keeps one way in and one
-    // way to close — no layout with a missing control and a duplicated one.
+    // Hiding `inspector.context` no longer costs this header anything: the control
+    // it names moved to the session header (ChatView.test.tsx), so this panel keeps
+    // exactly one way to close itself and no built-in button to lose.
     expect(screen.queryByRole('button', { name: 'Context' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Collapse inspector' })).toBeTruthy();
+  });
+
+  it('closes like an overlay when the results panel is popped out', () => {
+    store.inspectorMode.value = 'popout';
+    render(<Inspector />);
+
+    // A card that is closed as often as it is open needs an explicit close, not
+    // the dock's "collapse the column" glyph.
+    expect(screen.queryByRole('button', { name: 'Collapse inspector' })).toBeNull();
+    const close = screen.getByRole('button', { name: 'Close results panel' });
+    const panel = document.querySelector('.inspector');
+    expect(panel?.getAttribute('data-results-popout')).toBe('true');
+    expect(panel?.getAttribute('role')).toBe('dialog');
+    // Non-modal: the conversation behind it stays usable while it is open.
+    expect(panel?.getAttribute('aria-modal')).toBeNull();
+
+    fireEvent.click(close);
+    expect(store.inspectorCollapsed.value).toBe(true);
   });
 });
