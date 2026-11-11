@@ -413,6 +413,8 @@ pub struct AppStateDeps {
     pub allowed_hosts: Option<String>,
     /// Web-UI credentials and sessions.
     pub web_auth: Arc<WebAuth>,
+    /// Application API keys: named, scoped, expiring bearer credentials.
+    pub api_keys: Arc<crate::api_keys::ApiKeyStore>,
 }
 
 pub struct AppStateInner {
@@ -447,6 +449,8 @@ pub struct AppStateInner {
         std::sync::Mutex<HashMap<String, Arc<crate::routes::missions::SchedulerWake>>>,
     /// Web-UI credentials and sessions (password, passkeys, cookies).
     pub web_auth: Arc<WebAuth>,
+    /// Application API keys (named, scoped, expiring bearer credentials).
+    pub api_keys: Arc<crate::api_keys::ApiKeyStore>,
     /// The trusted-proxy policy, rebuilt when `[access]` changes.
     pub proxy: RwLock<CachedProxy>,
     /// Update checking, staging and installing (`[updates]`).
@@ -505,6 +509,7 @@ impl AppState {
                 shutdown: CancellationToken::new(),
                 mission_schedulers: std::sync::Mutex::new(HashMap::new()),
                 web_auth,
+                api_keys: deps.api_keys,
                 proxy: RwLock::new(CachedProxy {
                     fingerprint: String::new(),
                     trust,
@@ -625,6 +630,11 @@ impl AppState {
     /// The web-UI credential store (password, passkeys, sessions).
     pub fn web_auth(&self) -> &Arc<WebAuth> {
         &self.inner.web_auth
+    }
+
+    /// The application API-key store (named, scoped, expiring bearer keys).
+    pub fn api_keys(&self) -> &Arc<crate::api_keys::ApiKeyStore> {
+        &self.inner.api_keys
     }
 
     /// The current `[access]` policy.

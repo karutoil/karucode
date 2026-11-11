@@ -7,7 +7,7 @@
 
 - **Slug:** `web-auth`
 - **Tags:** auth, authentication, password, passkey, webauthn, login, cookie, session, access, tunnel, cloudflare, proxy
-- **Applies to:** `route:GET /api/auth/status`, `route:POST /api/auth/login`, `route:POST /api/auth/logout`, `route:GET /api/auth/me`, `route:POST /api/auth/password`, `route:DELETE /api/auth/password`, `route:GET /api/auth/passkeys`, `route:POST /api/auth/passkeys`, `route:POST /api/auth/passkeys/options`, `route:PATCH /api/auth/passkeys/:id`, `route:DELETE /api/auth/passkeys/:id`, `route:POST /api/auth/passkey/options`, `route:POST /api/auth/passkey/login`, `route:GET /api/auth/sessions`, `route:DELETE /api/auth/sessions/:id`, `route:POST /api/auth/sessions/revoke-all`, `route:GET /api/onboarding`, `route:POST /api/onboarding/complete`, `config:[access]`, `config:access.enabled`, `config:access.public_url`, `config:access.session_days`, `config:access.tunnel`, `config:access.trusted_proxies`, `env:KARUCODE_ACCESS_ENABLED`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_SESSION_DAYS`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `env:KARUCODE_AUTH_TOKEN`, `ui:AuthScreen`, `ui:Onboarding`, `ui:Settings`, `file:crates/kc-server/src/web_auth.rs`, `file:crates/kc-server/src/webauthn.rs`
+- **Applies to:** `route:GET /api/auth/status`, `route:POST /api/auth/login`, `route:POST /api/auth/logout`, `route:GET /api/auth/me`, `route:POST /api/auth/password`, `route:DELETE /api/auth/password`, `route:GET /api/auth/passkeys`, `route:POST /api/auth/passkeys`, `route:POST /api/auth/passkeys/options`, `route:PATCH /api/auth/passkeys/:id`, `route:DELETE /api/auth/passkeys/:id`, `route:POST /api/auth/passkey/options`, `route:POST /api/auth/passkey/login`, `route:GET /api/auth/sessions`, `route:DELETE /api/auth/sessions/:id`, `route:POST /api/auth/sessions/revoke-all`, `route:GET /api/auth/api-keys`, `route:POST /api/auth/api-keys`, `route:PATCH /api/auth/api-keys/:id`, `route:DELETE /api/auth/api-keys/:id`, `route:POST /api/auth/api-keys/:id/rotate`, `route:GET /api/onboarding`, `route:POST /api/onboarding/complete`, `config:[access]`, `config:access.enabled`, `config:access.public_url`, `config:access.session_days`, `config:access.tunnel`, `config:access.trusted_proxies`, `env:KARUCODE_ACCESS_ENABLED`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_SESSION_DAYS`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_ADMIN_TOKEN`, `ui:AuthScreen`, `ui:Onboarding`, `ui:Settings`, `file:crates/kc-server/src/web_auth.rs`, `file:crates/kc-server/src/webauthn.rs`, `doc:docs/SECURITY.md`
 - **Source:** `crates/kc-server/src/routes/auth.rs:14`
 
 ---
@@ -130,6 +130,11 @@ mode, where Cloudflare connects to the origin from its own addresses.
   plain-`http://` origin does not, and the browser refuses the ceremony.
 * The bearer token keeps working with `[access]` on. `GET /metrics` is behind
   whichever credential is configured, so a token deployment can still scrape it.
+* **Application API keys** are the third credential and are managed from the
+  same Access tab: a named `kck_…` key with `read`/`write`/`admin` scopes, an
+  optional expiry, rotation and immediate revocation. They are for scripts and
+  integrations; the password and passkeys remain how a person signs in. See the
+  `api-keys` topic.
 * Signing out is `POST /api/auth/logout`; it deletes the session row, so the
   cookie cannot be replayed even from a copy.
 * `KARUCODE_LOCK_SETTINGS=1` makes `PATCH /api/config` answer `403`, but the

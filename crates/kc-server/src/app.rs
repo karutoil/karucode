@@ -17,7 +17,7 @@
 // @kc-title: Understand the security model
 // @kc-summary: What karucode protects by default, what it explicitly does not, and the recipe for safe remote access.
 // @kc-tags: security, auth, csrf, sandbox, remote, trust
-// @kc-applies-to: env:KARUCODE_AUTH_TOKEN, env:KARUCODE_ALLOWED_HOSTS, env:KARUCODE_PUBLIC_URL, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Client, header:Authorization, header:Cookie, config:auth_token, config:allow_temp_dir, config:[access], config:access.public_url, config:access.tunnel, config:access.trusted_proxies, config:[updates], config:updates.manifest_url, config:updates.auto_apply, env:KARUCODE_UPDATE_MANIFEST_URL, env:KARUCODE_UPDATE_AUTO_APPLY, route:GET /api/update, route:POST /api/update/apply, header:X-Karucode-Admin-Token, doc:docs/SECURITY.md, concept:approvals, concept:workspace containment, concept:sign-in, concept:update manifest
+// @kc-applies-to: env:KARUCODE_AUTH_TOKEN, env:KARUCODE_ALLOWED_HOSTS, env:KARUCODE_PUBLIC_URL, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, env:KARUCODE_ADMIN_TOKEN, header:X-Karucode-Client, header:Authorization, header:Cookie, config:auth_token, config:admin_token, config:allow_temp_dir, config:[access], config:access.public_url, config:access.tunnel, config:access.trusted_proxies, config:[updates], config:updates.manifest_url, config:updates.auto_apply, env:KARUCODE_UPDATE_MANIFEST_URL, env:KARUCODE_UPDATE_AUTO_APPLY, route:GET /api/update, route:POST /api/update/apply, route:GET /api/auth/api-keys, route:POST /api/auth/api-keys, route:PATCH /api/auth/api-keys/:id, route:DELETE /api/auth/api-keys/:id, route:POST /api/auth/api-keys/:id/rotate, header:X-Karucode-Admin-Token, doc:docs/SECURITY.md, concept:approvals, concept:workspace containment, concept:sign-in, concept:api key scope, concept:update manifest
 //
 // # Default posture
 //
@@ -52,6 +52,14 @@
 //   same rule gates a non-loopback bind, so the two ways to lock yourself out are
 //   both blocked at the door. See the `web-auth` topic for the settings, the
 //   lockout and what a passkey ceremony actually verifies.
+// * **Application API keys** - a named bearer credential for one integration
+//   (`kck_…`). It authenticates exactly where the master token does, but it
+//   carries `read`, `write` or `admin` scopes that the auth middleware enforces
+//   per request, and it can carry an expiry, be rotated (a new secret with the
+//   same identity) or be revoked without changing the password or the master
+//   token. Only a SHA-256 of it is stored. Creating a key needs sign-in to be on
+//   already; managing one needs `X-Karucode-Admin-Token` when that is configured.
+//   See the `api-keys` topic.
 // * **Transport surface** - the API is same-origin only. No `Access-Control-*`
 //   header is ever sent.
 // * **CSRF** - `POST`/`PATCH`/`PUT`/`DELETE` require
@@ -266,6 +274,12 @@ pub fn build_router(state: AppState) -> Router {
 /// Bearer auth. `?token=` is accepted **only** for the SSE endpoint, because a
 /// `ReadableStream` fetch can set headers but some clients cannot.
 ///
+/// Three credentials are accepted, in this order: the master bearer token, a
+/// web-UI session cookie (or an artifact's read capability), and an application
+/// API key. An API key is additionally checked against its scopes: a `read` key
+/// cannot mutate, and the credential/shell/config surfaces need `admin`. See
+/// [`crate::api_keys`] for the matrix.
+///
 /// Only `/api/...` and `/metrics` are gated. Everything else is the SPA shell and
 /// its static assets, which are served unauthenticated on purpose: a browser
 /// cannot attach an `Authorization` header to a top-level navigation or an
@@ -286,28 +300,106 @@ async fn auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let path = request.uri().path();
+    let path = request.uri().path().to_string();
     // The SPA shell and its assets are always served: the sign-in screen is part
     // of the shell, and a browser cannot put a credential on `<script src>`.
-    if !requires_auth(path) {
+    if !requires_auth(&path) {
         return next.run(request).await;
     }
     // Signing in cannot require being signed in.
-    if crate::routes::auth::is_public_path(path) {
+    if crate::routes::auth::is_public_path(&path) {
         return next.run(request).await;
     }
     // Nothing configured: the historical open loopback server.
     if !state.sign_in_required() {
         return next.run(request).await;
     }
-    if bearer_authorized(&request, state.auth_token().as_deref())
-        || session_authorized(&state, &request)
-        || artifact_capability_authorized(&state, &request)
-    {
-        next.run(request).await
-    } else {
-        ApiError::unauthorized().into_response()
+    // The master token. It is the one credential with no scopes: it can do
+    // everything, exactly as before this module grew API keys.
+    if bearer_authorized(&request, state.auth_token().as_deref()) {
+        return next.run(request).await;
     }
+    // A signed-in browser, or a chat artifact's one-document capability.
+    if session_authorized(&state, &request) || artifact_capability_authorized(&state, &request) {
+        return next.run(request).await;
+    }
+    // An application API key. It is checked after the cookie because a stale
+    // token in localStorage must not shadow a valid session.
+    if let Some(presented) = presented_bearer(&request) {
+        if presented.starts_with(crate::api_keys::TOKEN_PREFIX_WITH_SEPARATOR) {
+            match state.api_keys().authenticate(&presented) {
+                Ok(key) => {
+                    let needed = crate::api_keys::required_scope(&path, request.method());
+                    if !crate::api_keys::scopes_allow(&key.scopes, needed) {
+                        return ApiError::forbidden(format!(
+                            "this API key has the {} scope; {} {} requires the {} scope",
+                            scope_list(&key.scopes),
+                            request.method(),
+                            path,
+                            needed.as_str(),
+                        ))
+                        .into_response();
+                    }
+                    let peer = request
+                        .extensions()
+                        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
+                    state.api_keys().record_use(&key.id, peer).await;
+                    return next.run(request).await;
+                }
+                Err(rejection) if rejection.is_definitive() => {
+                    // The secret matched a real key, so naming the reason (expired,
+                    // revoked) helps an operator without helping a guesser.
+                    tracing::debug!(
+                        reason = rejection.message(),
+                        "rejected an application API key"
+                    );
+                    return ApiError::unauthorized_message(rejection.message()).into_response();
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    ApiError::unauthorized().into_response()
+}
+
+/// The scopes of a key, for a refusal message (`read+write`).
+fn scope_list(scopes: &[crate::api_keys::Scope]) -> String {
+    scopes
+        .iter()
+        .map(|scope| scope.as_str())
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// The bearer value a request presents, from `Authorization` or - only on the
+/// two endpoints that cannot send a header - `?token=`.
+fn presented_bearer(request: &Request<Body>) -> Option<String> {
+    let header_token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let (scheme, token) = value.split_once(' ')?;
+            if scheme.eq_ignore_ascii_case("bearer") {
+                Some(token.trim().to_string())
+            } else {
+                None
+            }
+        });
+    if header_token.is_some() {
+        return header_token;
+    }
+    // Only two endpoints accept the master `?token=`: the SSE stream (a
+    // `ReadableStream` fetch cannot always set headers) and the terminal websocket
+    // (a browser never can on a handshake). An artifact frame never receives this
+    // exemption: its inline JavaScript is untrusted and can read location.search.
+    // Its separately checked per-artifact capability is handled separately.
+    let path = request.uri().path();
+    if path == "/api/events" || (path.starts_with("/api/terminals/") && path.ends_with("/socket")) {
+        return query_param(request.uri().query(), "token");
+    }
+    None
 }
 
 /// Whether the request carries the configured bearer token (header, or `?token=`
@@ -316,37 +408,8 @@ fn bearer_authorized(request: &Request<Body>, expected: Option<&str>) -> bool {
     let Some(expected) = expected else {
         return false;
     };
-    let header_token = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            let (scheme, token) = value.split_once(' ')?;
-            if scheme.eq_ignore_ascii_case("bearer") {
-                Some(token.trim())
-            } else {
-                None
-            }
-        });
-    if let Some(token) = header_token {
-        if constant_time_eq(token.as_bytes(), expected.as_bytes()) {
-            return true;
-        }
-    }
-    // Only two endpoints accept the master `?token=`: the SSE stream (a
-    // `ReadableStream` fetch cannot always set headers) and the terminal websocket
-    // (a browser never can on a handshake). An artifact frame never receives this
-    // exemption: its inline JavaScript is untrusted and can read location.search.
-    // Its separately checked per-artifact capability is handled below.
-    let path = request.uri().path();
-    if path == "/api/events" || (path.starts_with("/api/terminals/") && path.ends_with("/socket")) {
-        if let Some(token) = query_param(request.uri().query(), "token") {
-            if constant_time_eq(token.as_bytes(), expected.as_bytes()) {
-                return true;
-            }
-        }
-    }
-    false
+    presented_bearer(request)
+        .is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()))
 }
 
 /// Whether the request carries a live web-UI session cookie.
@@ -370,6 +433,18 @@ fn session_authorized(state: &AppState, request: &Request<Body>) -> bool {
 /// though the router would send it to the SPA fallback: the decision fails closed
 /// even if a proxy or a future layer normalises the path before matching it.
 fn requires_auth(path: &str) -> bool {
+    let normalized = normalize_path(path);
+    normalized == "/metrics" || normalized == "/api" || normalized.starts_with("/api/")
+}
+
+/// Collapse repeated slashes and `.`/`..` segments into one canonical path with
+/// a leading slash.
+///
+/// Both the auth gate and the API-key scope check use it, so a request written
+/// as `//api/config` or `/x/../api/terminals` cannot be gated as one thing and
+/// scoped as another. It never fails: `..` past the root is dropped, which is
+/// what a router would do too.
+pub(crate) fn normalize_path(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for segment in path.split('/') {
         match segment {
@@ -380,8 +455,7 @@ fn requires_auth(path: &str) -> bool {
             other => parts.push(other),
         }
     }
-    let normalized = parts.join("/");
-    normalized == "metrics" || normalized == "api" || normalized.starts_with("api/")
+    format!("/{}", parts.join("/"))
 }
 
 /// A frame URL carries a random read grant for one artifact, never the master

@@ -499,6 +499,49 @@ export interface AuthSession {
   label: string;
 }
 
+/** What an application API key may do. `write` implies `read`. */
+export type ApiKeyScope = 'read' | 'write' | 'admin';
+
+/** `active`, `expired` or `revoked`; the server decides from the timestamps. */
+export type ApiKeyStatus = 'active' | 'expired' | 'revoked';
+
+/**
+ * One application API key, as `GET /api/auth/api-keys` lists it.
+ *
+ * The secret is never here: `prefix` is the leading `kck_<id>` and `last4` the
+ * tail of the secret, which is enough to match a key by eye.
+ */
+export interface ApiKeySummary {
+  id: string;
+  name: string;
+  prefix: string;
+  last4: string;
+  scopes: ApiKeyScope[];
+  created_at: number;
+  expires_at: number | null;
+  revoked_at: number | null;
+  last_used_at: number | null;
+  last_used_ip: string | null;
+  request_count: number;
+  status: ApiKeyStatus;
+}
+
+/** The create/rotate answer: metadata plus the one and only copy of the token. */
+export interface ApiKeyIssued {
+  api_key: ApiKeySummary;
+  token: string;
+  /** Present when the key never expires. */
+  warning: string | null;
+}
+
+export interface ApiKeyListResponse {
+  keys: ApiKeySummary[];
+  max_keys: number;
+  max_lifetime_days: number;
+  /** False on an open server, where creating a key is refused. */
+  sign_in_required: boolean;
+}
+
 /**
  * `GET /api/auth/status`: everything the sign-in screen and the onboarding
  * wizard need, and the only auth payload available without a credential.

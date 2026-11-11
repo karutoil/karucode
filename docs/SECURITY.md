@@ -25,6 +25,18 @@ WebSocket clients cannot reliably attach a header. Artifact frames instead use
 their random per-artifact `?capability=`, never the master token. Without a
 token, anyone who can reach the port can use the agent.
 
+**Application API keys.** A key is a named bearer credential stored as a SHA-256
+only; the raw token is shown once. It is scoped - `read`, `write` or `admin` - and
+the auth middleware checks the scope on every request. The credential surfaces
+(`/api/auth/password`, `/api/auth/passkeys…`, key management), the shell
+(`/api/terminals…`), approval decisions, mutating config, plugin reloads and
+`/api/update/apply` need `admin`; a `write` key cannot answer an approval or open
+a terminal. Keys can expire (at most ten years, and the server refuses to mint one
+on a server that requires no credential at all), can be rotated, and are revoked
+immediately. With `KARUCODE_ADMIN_TOKEN` set, key management needs that header as
+well, so a stolen bearer token cannot mint a long-lived credential that outlives
+it. A key never appears in `config.toml`, `GET /api/config` or a log line.
+
 **Browser-origin attacks (CSRF) and DNS rebinding.** Any state-changing request
 (POST/PATCH/DELETE) must include `X-Karucode-Client: web`. A request that carries
 an `Origin` header must have an origin whose authority matches the `Host` header

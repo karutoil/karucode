@@ -69,6 +69,19 @@ export function absoluteTime(at: number): string {
   });
 }
 
+/**
+ * Unix **seconds** to the milliseconds the formatters above take.
+ *
+ * The auth routes report `created_at` / `expires_at` / `last_used_at` in Unix
+ * seconds (the same unit as the session cookie), while everything timestamped by
+ * the runtime is in milliseconds. Passing seconds straight to `new Date` renders
+ * January 1970, so auth screens convert here rather than each formatting site
+ * inventing `* 1000`.
+ */
+export function fromUnixSeconds(at: number): number {
+  return Number.isFinite(at) && at > 0 ? at * 1000 : at;
+}
+
 export function formatDuration(ms: number | null): string {
   if (ms === null || !Number.isFinite(ms)) return '';
   // Sub-millisecond work (a small file read) reads as "0ms", which looks like a

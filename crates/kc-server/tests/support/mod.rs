@@ -535,6 +535,9 @@ impl HarnessBuilder {
         let web_auth = kc_server::web_auth::WebAuth::load(store.clone())
             .await
             .expect("web auth");
+        let api_keys = kc_server::api_keys::ApiKeyStore::load(store.clone())
+            .await
+            .expect("api keys");
 
         let state = AppState::new(AppStateDeps {
             settings,
@@ -550,6 +553,7 @@ impl HarnessBuilder {
             bind_host: self.bind_host,
             allowed_hosts,
             web_auth,
+            api_keys,
         });
         state.reload_tools().await;
         let router = build_router(state.clone());

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clockTime, formatDuration, relativeTime, truncate } from './format';
+import { clockTime, formatDuration, fromUnixSeconds, relativeTime, truncate } from './format';
 
 describe('formatDuration', () => {
   it('never renders a suspicious zero', () => {
@@ -25,6 +25,19 @@ describe('truncate', () => {
   it('leaves short text alone and marks cut text', () => {
     expect(truncate('short', 10)).toBe('short');
     expect(truncate('abcdefghij', 4)).toBe('abc…');
+  });
+});
+
+describe('fromUnixSeconds', () => {
+  it('scales seconds to the milliseconds the date formatters take', () => {
+    // The auth routes report 1731420000, not 1731420000000.
+    expect(fromUnixSeconds(1_731_420_000)).toBe(1_731_420_000_000);
+    expect(new Date(fromUnixSeconds(1_731_420_000)).getUTCFullYear()).toBe(2024);
+  });
+
+  it('leaves an absent timestamp alone so a caller can test it first', () => {
+    expect(fromUnixSeconds(0)).toBe(0);
+    expect(fromUnixSeconds(Number.NaN)).toBeNaN();
   });
 });
 

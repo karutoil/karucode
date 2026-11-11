@@ -7,7 +7,7 @@
 
 - **Slug:** `security`
 - **Tags:** security, auth, csrf, sandbox, remote, trust
-- **Applies to:** `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_ALLOWED_HOSTS`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `header:X-Karucode-Client`, `header:Authorization`, `header:Cookie`, `config:auth_token`, `config:allow_temp_dir`, `config:[access]`, `config:access.public_url`, `config:access.tunnel`, `config:access.trusted_proxies`, `config:[updates]`, `config:updates.manifest_url`, `config:updates.auto_apply`, `env:KARUCODE_UPDATE_MANIFEST_URL`, `env:KARUCODE_UPDATE_AUTO_APPLY`, `route:GET /api/update`, `route:POST /api/update/apply`, `header:X-Karucode-Admin-Token`, `doc:docs/SECURITY.md`, `concept:approvals`, `concept:workspace containment`, `concept:sign-in`, `concept:update manifest`
+- **Applies to:** `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_ALLOWED_HOSTS`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `env:KARUCODE_ADMIN_TOKEN`, `header:X-Karucode-Client`, `header:Authorization`, `header:Cookie`, `config:auth_token`, `config:admin_token`, `config:allow_temp_dir`, `config:[access]`, `config:access.public_url`, `config:access.tunnel`, `config:access.trusted_proxies`, `config:[updates]`, `config:updates.manifest_url`, `config:updates.auto_apply`, `env:KARUCODE_UPDATE_MANIFEST_URL`, `env:KARUCODE_UPDATE_AUTO_APPLY`, `route:GET /api/update`, `route:POST /api/update/apply`, `route:GET /api/auth/api-keys`, `route:POST /api/auth/api-keys`, `route:PATCH /api/auth/api-keys/:id`, `route:DELETE /api/auth/api-keys/:id`, `route:POST /api/auth/api-keys/:id/rotate`, `header:X-Karucode-Admin-Token`, `doc:docs/SECURITY.md`, `concept:approvals`, `concept:workspace containment`, `concept:sign-in`, `concept:api key scope`, `concept:update manifest`
 - **Source:** `crates/kc-server/src/app.rs:16`
 
 ---
@@ -45,6 +45,14 @@ the whole security story on a laptop.
   same rule gates a non-loopback bind, so the two ways to lock yourself out are
   both blocked at the door. See the `web-auth` topic for the settings, the
   lockout and what a passkey ceremony actually verifies.
+* **Application API keys** - a named bearer credential for one integration
+  (`kck_…`). It authenticates exactly where the master token does, but it
+  carries `read`, `write` or `admin` scopes that the auth middleware enforces
+  per request, and it can carry an expiry, be rotated (a new secret with the
+  same identity) or be revoked without changing the password or the master
+  token. Only a SHA-256 of it is stored. Creating a key needs sign-in to be on
+  already; managing one needs `X-Karucode-Admin-Token` when that is configured.
+  See the `api-keys` topic.
 * **Transport surface** - the API is same-origin only. No `Access-Control-*`
   header is ever sent.
 * **CSRF** - `POST`/`PATCH`/`PUT`/`DELETE` require

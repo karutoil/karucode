@@ -12,6 +12,30 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Added
 
+- **Application API keys: a scoped, expiring bearer credential for one
+  integration.** `KARUCODE_AUTH_TOKEN` is the master key and the web password is
+  for a person; a script, CI job or bot had no credential of its own, so the only
+  options were to hand it the master token or share a password. `POST
+  /api/auth/api-keys` now mints a named `kck_…` key and returns the secret once;
+  the database keeps only its SHA-256, plus a prefix and the last four characters
+  so a key is recognisable in the list. Every key carries `read`, `write` or
+  `admin` scopes, checked by the auth middleware on every request: a `read` key
+  gets `GET`/`HEAD`, a `write` key may mutate ordinary routes, and key
+  management, password/passkey changes, terminals, approvals, mutating config,
+  plugin reloads and `PATCH /api/config` need `admin` — so a request-only key
+  cannot answer its own approval or open a shell. `expires_in_days` or
+  `expires_at` sets a deadline (at most ten years; the default is no expiry, and
+  the response warns about it); an expired key answers `401` naming the reason,
+  dead rows stay listed for 30 days, and 100 live keys is the cap.
+  `POST /api/auth/api-keys/:id/rotate` swaps the secret while keeping the
+  identity, and `DELETE` revokes immediately. Keys work wherever the master token
+  works, including `?token=` on the event stream and the terminal socket, and
+  `GET /api/auth/me` identifies one (`principal: "api_key"`, its scopes and
+  expiry). Creation is refused while the server requires no credential (a key
+  would protect nothing), and with `KARUCODE_ADMIN_TOKEN` set, managing keys needs
+  that header as well so a stolen bearer token cannot mint a credential that
+  outlives it. Settings -> Access has the list, the one-time token panel, rotation
+  and revocation. Docs: the `api-keys` topic, `docs/API.md`, `docs/SECURITY.md`.
 - **A run no longer dies because the provider was briefly out.** Two retry budgets
   already sat under a turn — `retry_max_retries` before any content arrives, and
   `retry_max_stream_restarts` for an answer that dies mid-stream — and both spend

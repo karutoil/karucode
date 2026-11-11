@@ -37,6 +37,9 @@ message naming what to do instead; see **Version and updates** below.
   `GET /api/auth/status`, `POST /api/auth/login` and the two passkey sign-in steps
   are reachable while signed out. See **Web-UI sign-in** below and the `web-auth`
   doc topic.
+* Application API keys (`Authorization: Bearer kck_…`) are the third credential:
+  named, scoped and expiring. They authenticate wherever the bearer token does,
+  but the request must be inside the key's scope. See **API keys** below.
 
 ## Web-UI sign-in
 
@@ -89,6 +92,91 @@ POST /api/onboarding/complete   {skipped?}
 * Passkeys are ES256 only, and every ceremony is checked against a single-use
   challenge (5 minutes), the origin, the rp id hash and a non-decreasing signature
   counter. Attestation statements are not verified.
+
+## API keys
+
+An API key is a named bearer credential for one application (a CI job, a bot, a
+dashboard). It works like `KARUCODE_AUTH_TOKEN`, but it is scoped, can expire, and
+can be rotated or revoked without touching the web password or the master token.
+
+```http
+GET    /api/auth/api-keys                    # list (metadata only)
+POST   /api/auth/api-keys                    # {name, scopes?, expires_in_days? | expires_at?}
+PATCH  /api/auth/api-keys/:id                # {name? | expires_in_days? | clear_expiry?}
+DELETE /api/auth/api-keys/:id                # revoke; ?purge=true deletes the row
+POST   /api/auth/api-keys/:id/rotate          # new secret, same id/name/scopes/expiry
+```
+
+Creation answers with the only copy of the secret:
+
+```json
+{ "api_key": { "id": "a1b2c3d4e5f6a7b8", "name": "ci-runner",
+               "prefix": "kck_a1b2c3d4e5f6a7b8", "last4": "9xQ2",
+               "scopes": ["read", "write"], "created_at": 1731420000,
+               "expires_at": 1734012000, "revoked_at": null,
+               "last_used_at": null, "last_used_ip": null,
+               "request_count": 0, "status": "active" },
+  "token": "kck_a1b2c3d4e5f6a7b8_…",
+  "warning": null }
+```
+
+Use it exactly like the master token, and keep sending the CSRF header on
+mutations:
+
+```bash
+curl -s localhost:8787/api/sessions -H "Authorization: Bearer kck_…"
+curl -s -X POST localhost:8787/api/sessions/abc/messages \
+  -H "Authorization: Bearer kck_…" \
+  -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+  -d '{"content":"run the tests"}'
+```
+
+### Scopes
+
+| Scope | Allows |
+| --- | --- |
+| `read` | `GET`/`HEAD` on `/api` and `/metrics` |
+| `write` | reads **plus** ordinary mutations: sessions, messages, projects, files, git, missions, artifacts |
+| `admin` | everything, including the surfaces below |
+
+`write` implies `read`; `admin` implies both. Omitted `scopes` means
+`["read","write"]`. `admin` must be requested explicitly.
+
+These need `admin` even for a `GET`:
+
+* `/api/auth/api-keys…` (key management);
+* `/api/auth/password`, `/api/auth/passkeys…`, revoking a session or
+  `POST /api/auth/sessions/revoke-all`;
+* mutating `/api/config`, `/api/plugins…`, `/api/update/apply`, `/api/provider/test`;
+* every `/api/terminals…` route;
+* `POST /api/approvals/:id` - a request-only key must not click "allow".
+
+A refusal is `403 permission_denied`, and the message names the scope the route
+needs. `GET /api/auth/me` identifies the caller (`principal: "api_key"`, `label`,
+`api_key_id`, `scopes`, `expires_at`).
+
+### Expiry, rotation and storage
+
+* `expires_in_days` (1–3650) or `expires_at` (Unix seconds, at most 3650 days
+  away) sets a deadline; both together is `400`. Omitted means no expiry, and the
+  response carries a `warning`.
+* An expired key is `401 unauthorized` with a message that says it expired. A
+  revoked key is `401` and says it was revoked.
+* Rotation replaces the secret immediately; the old token is refused on its next
+  request. Rotation keeps the id, name, scopes and expiry and resets the usage
+  counters. A revoked or expired key cannot be edited or rotated; create a new
+  one instead.
+* A key can be created only when the server already requires a credential
+  (`KARUCODE_AUTH_TOKEN`, or `[access] enabled` with a password/passkey). On an
+  open server the request is `400`, because the key would protect nothing.
+* Only a SHA-256 of the token is stored, in the settings table. The list exposes a
+  prefix and the last four characters, never the secret. Up to 100 live keys are
+  allowed; revoked/expired rows are kept for 30 days.
+* With `KARUCODE_ADMIN_TOKEN` set, create/rotate/update/revoke additionally need
+  `X-Karucode-Admin-Token` (`403` otherwise). An `admin`-scoped key does not
+  substitute for that header and does not bypass `KARUCODE_LOCK_SETTINGS`.
+* `GET /api/events` and `/api/terminals/:id/socket` accept `?token=<key>` as well
+  as the header; the terminal socket needs the `admin` scope.
 
 ## Health / config
 

@@ -15,6 +15,7 @@ cargo run -p kc-docs -- --check   # what CI runs
 
 | Topic | What it covers | Source |
 | --- | --- | --- |
+| [`api-keys`](api-keys.md) | Mint scoped, expiring bearer keys for scripts and integrations, then rotate or revoke them without touching the web password. | `crates/kc-server/src/api_keys.rs:1` |
 | [`approval-expiry-recovery`](approval-expiry-recovery.md) | Each approval has an independent expiry scope, and its in-memory waiter survives until expiry is durable. | `crates/kc-runtime/src/approvals.rs:11` |
 | [`approvals`](approvals.md) | The four approval modes, the allowlists behind them, and how a pending approval is answered or times out. | `crates/kc-core/src/approval.rs:1` |
 | [`artifacts`](artifacts.md) | An agent can put a diagram, an HTML mock, a table or a document in its reply, and the web UI draws it as a card with a live Preview and the Source it came from. | `web/src/lib/artifacts.ts:4` |
@@ -47,4 +48,4 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`web-auth`](web-auth.md) | Put a password or a passkey in front of the web UI, choose the address it answers to, and understand what each sign-in method costs. | `crates/kc-server/src/routes/auth.rs:14` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-31 topic(s).
+32 topic(s).

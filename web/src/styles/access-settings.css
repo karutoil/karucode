@@ -164,6 +164,63 @@
   min-width: 0;
 }
 
+/* ---------- API keys ---------------------------------------------------- */
+
+/* The one-time token panel. Boxed like a warning because dismissing it loses
+ * the secret, but not red: nothing is wrong, this is the expected step. */
+.access-issued {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  background: var(--accent-bg);
+}
+
+/* A long `kck_…` token has no spaces, so it must be allowed to break anywhere
+ * instead of widening the sheet. `user-select: all` makes one click select the
+ * whole secret for a manual copy. */
+.access-key-token {
+  display: block;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+/* The three scope checkboxes, stacked so each description stays readable. */
+.access-scope-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.access-scope {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  cursor: pointer;
+}
+
+.access-scope input {
+  flex: 0 0 auto;
+  margin-top: var(--space-1);
+}
+
+.access-scope-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
 /* ---------- the proxy list --------------------------------------------- */
 
 /* `.input` is a 32px-high single line; a textarea has to undo that height and

@@ -660,6 +660,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let web_auth = crate::web_auth::WebAuth::load(Arc::clone(&store))
         .await
         .map_err(|e| anyhow!("could not load the web-UI credentials: {e}"))?;
+    let api_keys = crate::api_keys::ApiKeyStore::load(Arc::clone(&store))
+        .await
+        .map_err(|e| anyhow!("could not load the API keys: {e}"))?;
     check_remote_bind(&settings.snapshot(), &web_auth)?;
 
     let providers: Arc<dyn ProviderFactory> = Arc::new(ProviderFactoryImpl);
@@ -734,8 +737,15 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         bind_host: config.host.clone(),
         allowed_hosts: std::env::var(crate::host::ALLOWED_HOSTS_ENV).ok(),
         web_auth,
+        api_keys,
     });
     state.reload_tools().await;
+    if !state.sign_in_required() && !state.api_keys().is_empty() {
+        tracing::warn!(
+            "API keys exist but this server requires no credential: set KARUCODE_AUTH_TOKEN or \
+             enable [access] before relying on a key"
+        );
+    }
     for mission_id in state
         .store()
         .recover_mission_tasks()

@@ -16,6 +16,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { AccessSettings } from './AccessSettings';
 import type {
   AccessSettingsSummary,
+  ApiKeySummary,
   AuthSession,
   AuthStatus,
   ConfigPatch,
@@ -78,6 +79,27 @@ interface Harness {
   patches: ConfigPatch[];
   /** Every `/api/auth/password` write, so "no request" is checkable. */
   passwordWrites: { method: string; body: unknown }[];
+  /** Every `/api/auth/api-keys…` write: mint, rotate, revoke. */
+  keyWrites: { method: string; url: string; body: unknown; admin: string | null }[];
+}
+
+/** One key as the API lists it: Unix seconds, no secret. */
+function keyFixture(overrides: Partial<ApiKeySummary> = {}): ApiKeySummary {
+  return {
+    id: 'abcdef1234567890',
+    name: 'ci-runner',
+    prefix: 'kck_abcdef1234567890',
+    last4: 'abcd',
+    scopes: ['read', 'write'],
+    created_at: 1_731_420_000,
+    expires_at: 1_734_012_000,
+    revoked_at: null,
+    last_used_at: null,
+    last_used_ip: null,
+    request_count: 0,
+    status: 'active',
+    ...overrides,
+  };
 }
 
 /**
@@ -87,9 +109,15 @@ interface Harness {
  * Access summary comes from (`refreshAccessSettings`), and it is the only place
  * the password/passkey/session state is read.
  */
-function installFetch(access: AccessSettingsSummary): Harness {
+function installFetch(
+  access: AccessSettingsSummary,
+  apiKeys: ApiKeySummary[] = [],
+  signInRequired = true,
+): Harness {
   const patches: ConfigPatch[] = [];
   const passwordWrites: { method: string; body: unknown }[] = [];
+  const keyWrites: { method: string; url: string; body: unknown; admin: string | null }[] = [];
+  let keys = [...apiKeys];
 
   const onboarding: OnboardingState = {
     needed: false,
@@ -113,6 +141,58 @@ function installFetch(access: AccessSettingsSummary): Harness {
       return jsonResponse({
         sessions: access.sessions.length > 0 ? access.sessions : [CURRENT_SESSION],
         current: CURRENT_SESSION.id,
+      });
+    }
+    if (url === '/api/auth/api-keys' && method === 'GET') {
+      return jsonResponse({
+        keys,
+        max_keys: 100,
+        max_lifetime_days: 3650,
+        sign_in_required: signInRequired,
+      });
+    }
+    if (url === '/api/auth/api-keys' && method === 'POST') {
+      const body: Record<string, unknown> =
+        typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+      keyWrites.push({
+        method,
+        url,
+        body,
+        admin: new Headers(init?.headers).get('x-karucode-admin-token'),
+      });
+      const issued = {
+        api_key: keyFixture({
+          name: String(body.name ?? 'new-key'),
+          expires_at: body.expires_in_days === undefined ? null : 1_740_000_000,
+        }),
+        token: 'kck_abcdef1234567890_secretsecretsecretsecretsecretabcd',
+        warning: body.expires_in_days === undefined ? 'this key never expires' : null,
+      };
+      keys = [issued.api_key, ...keys];
+      return jsonResponse(issued);
+    }
+    if (url.startsWith('/api/auth/api-keys/') && method === 'DELETE') {
+      keyWrites.push({
+        method,
+        url,
+        body: null,
+        admin: new Headers(init?.headers).get('x-karucode-admin-token'),
+      });
+      const id = url.split('/')[4] ?? '';
+      keys = keys.filter((key) => key.id !== id);
+      return jsonResponse({ ok: true, id, purged: url.includes('purge=true') });
+    }
+    if (url.startsWith('/api/auth/api-keys/') && method === 'POST') {
+      keyWrites.push({
+        method,
+        url,
+        body: null,
+        admin: new Headers(init?.headers).get('x-karucode-admin-token'),
+      });
+      return jsonResponse({
+        api_key: keyFixture(),
+        token: 'kck_abcdef1234567890_rotatedrotatedrotatedrotatedrotabcd',
+        warning: null,
       });
     }
     if (url === '/api/auth/password') {
@@ -145,7 +225,7 @@ function installFetch(access: AccessSettingsSummary): Harness {
   });
 
   vi.stubGlobal('fetch', fetchMock);
-  return { patches, passwordWrites };
+  return { patches, passwordWrites, keyWrites };
 }
 
 beforeEach(() => {
@@ -325,5 +405,91 @@ describe('AccessSettings: the credential list is visible', () => {
 
     expect(await screen.findByText(/this server is open to anyone who can reach the port/)).not.toBeNull();
     expect(screen.getByRole('switch', { name: 'Require a password or passkey' })).not.toBeNull();
+  });
+});
+
+describe('AccessSettings: API keys', () => {
+  it('lists a key with its scope, recognisable prefix and expiry — never a secret', async () => {
+    installFetch(accessSummary(), [keyFixture()]);
+
+    render(<AccessSettings />);
+
+    expect(await screen.findByText('ci-runner')).not.toBeNull();
+    // Only the leading `kck_<id>` and the tail, so a key is recognisable without
+    // the credential being recoverable from the list.
+    expect(screen.getByText(/kck_abcdef1234567890…abcd/)).not.toBeNull();
+    const meta = screen.getByText(/kck_abcdef1234567890…abcd/).closest('.access-row-meta');
+    expect(meta?.textContent).toMatch(/read \+ write/);
+    expect(meta?.textContent).toMatch(/expires /);
+    expect(screen.queryByText(/secretsecret/)).toBeNull();
+  });
+
+  it('creates a key, sends the chosen expiry and shows the token once', async () => {
+    const harness = installFetch(accessSummary());
+
+    render(<AccessSettings />);
+
+    fireEvent.input(await screen.findByLabelText('Name', { selector: 'input' }), {
+      target: { value: 'ci-runner' },
+    });
+    fireEvent.input(screen.getByLabelText('Expires in (days)'), { target: { value: '14' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
+
+    const token = 'kck_abcdef1234567890_secretsecretsecretsecretsecretabcd';
+    expect(await screen.findByText(token)).not.toBeNull();
+    await waitFor(() => expect(harness.keyWrites).toHaveLength(1));
+    expect(harness.keyWrites[0]?.body).toEqual({
+      name: 'ci-runner',
+      scopes: ['read', 'write'],
+      expires_in_days: 14,
+    });
+
+    // Dismissing the panel is permanent: the secret is not stored anywhere in
+    // this component, so it cannot come back without a rotation.
+    fireEvent.click(screen.getByRole('button', { name: 'I have saved it' }));
+    expect(screen.queryByText(token)).toBeNull();
+  });
+
+  it('revokes only after the confirmation, and the request reaches the server', async () => {
+    const harness = installFetch(accessSummary(), [keyFixture()]);
+
+    render(<AccessSettings />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke ci-runner' }));
+    expect(harness.keyWrites).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke “ci-runner”' }));
+
+    await waitFor(() => expect(harness.keyWrites).toHaveLength(1));
+    expect(harness.keyWrites[0]?.method).toBe('DELETE');
+    expect(harness.keyWrites[0]?.url).toBe('/api/auth/api-keys/abcdef1234567890');
+    expect(await screen.findByText(/revoked\. It cannot authenticate again\./)).not.toBeNull();
+  });
+
+  it('sends the admin credential when one was typed', async () => {
+    const harness = installFetch(accessSummary());
+
+    render(<AccessSettings />);
+
+    fireEvent.input(await screen.findByLabelText('Name', { selector: 'input' }), {
+      target: { value: 'ci-runner' },
+    });
+    fireEvent.input(screen.getByLabelText('Admin token (only when configured)'), {
+      target: { value: 'admin-secret' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
+
+    await waitFor(() => expect(harness.keyWrites).toHaveLength(1));
+    expect(harness.keyWrites[0]?.admin).toBe('admin-secret');
+  });
+
+  it('explains why creation is refused on a server that requires no credential', async () => {
+    installFetch(accessSummary({ enabled: false, password_set: false }), [], false);
+
+    render(<AccessSettings />);
+
+    expect(await screen.findByText(/requires no credential yet/)).not.toBeNull();
+    const create = screen.getByRole('button', { name: 'Create key' }) as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
   });
 });

@@ -15,7 +15,7 @@
 // @kc-title: Sign in to the web UI
 // @kc-summary: Put a password or a passkey in front of the web UI, choose the address it answers to, and understand what each sign-in method costs.
 // @kc-tags: auth, authentication, password, passkey, webauthn, login, cookie, session, access, tunnel, cloudflare, proxy
-// @kc-applies-to: route:GET /api/auth/status, route:POST /api/auth/login, route:POST /api/auth/logout, route:GET /api/auth/me, route:POST /api/auth/password, route:DELETE /api/auth/password, route:GET /api/auth/passkeys, route:POST /api/auth/passkeys, route:POST /api/auth/passkeys/options, route:PATCH /api/auth/passkeys/:id, route:DELETE /api/auth/passkeys/:id, route:POST /api/auth/passkey/options, route:POST /api/auth/passkey/login, route:GET /api/auth/sessions, route:DELETE /api/auth/sessions/:id, route:POST /api/auth/sessions/revoke-all, route:GET /api/onboarding, route:POST /api/onboarding/complete, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, env:KARUCODE_AUTH_TOKEN, ui:AuthScreen, ui:Onboarding, ui:Settings, file:crates/kc-server/src/web_auth.rs, file:crates/kc-server/src/webauthn.rs
+// @kc-applies-to: route:GET /api/auth/status, route:POST /api/auth/login, route:POST /api/auth/logout, route:GET /api/auth/me, route:POST /api/auth/password, route:DELETE /api/auth/password, route:GET /api/auth/passkeys, route:POST /api/auth/passkeys, route:POST /api/auth/passkeys/options, route:PATCH /api/auth/passkeys/:id, route:DELETE /api/auth/passkeys/:id, route:POST /api/auth/passkey/options, route:POST /api/auth/passkey/login, route:GET /api/auth/sessions, route:DELETE /api/auth/sessions/:id, route:POST /api/auth/sessions/revoke-all, route:GET /api/auth/api-keys, route:POST /api/auth/api-keys, route:PATCH /api/auth/api-keys/:id, route:DELETE /api/auth/api-keys/:id, route:POST /api/auth/api-keys/:id/rotate, route:GET /api/onboarding, route:POST /api/onboarding/complete, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, env:KARUCODE_AUTH_TOKEN, env:KARUCODE_ADMIN_TOKEN, ui:AuthScreen, ui:Onboarding, ui:Settings, file:crates/kc-server/src/web_auth.rs, file:crates/kc-server/src/webauthn.rs, doc:docs/SECURITY.md
 //
 // # What sign-in is
 //
@@ -135,6 +135,11 @@
 //   plain-`http://` origin does not, and the browser refuses the ceremony.
 // * The bearer token keeps working with `[access]` on. `GET /metrics` is behind
 //   whichever credential is configured, so a token deployment can still scrape it.
+// * **Application API keys** are the third credential and are managed from the
+//   same Access tab: a named `kck_…` key with `read`/`write`/`admin` scopes, an
+//   optional expiry, rotation and immediate revocation. They are for scripts and
+//   integrations; the password and passkeys remain how a person signs in. See the
+//   `api-keys` topic.
 // * Signing out is `POST /api/auth/logout`; it deletes the session row, so the
 //   cookie cannot be replayed even from a copy.
 // * `KARUCODE_LOCK_SETTINGS=1` makes `PATCH /api/config` answer `403`, but the
@@ -142,9 +147,10 @@
 // * There is no username. One install has one principal; the "sessions" list is
 //   there so you can see and end a browser you no longer trust.
 
+use crate::api_keys::{CreateKeyRequest, UpdateKeyRequest};
 use crate::error::{ApiError, ApiResult};
-use crate::routes::{parse_body, parse_required};
-use crate::settings::{AccessPatch, ConfigPatch};
+use crate::routes::{parse_body, parse_required, query_str, QueryMap};
+use crate::settings::{AccessPatch, ConfigPatch, ADMIN_TOKEN_HEADER};
 use crate::state::AppState;
 use crate::web_auth::{
     LoginError, SessionMethod, WebAuth, CHALLENGE_TTL, MAX_PASSWORD_LEN, MIN_PASSWORD_LEN,
@@ -174,6 +180,17 @@ pub fn is_public_path(path: &str) -> bool {
             | "/api/auth/passkey/options"
             | "/api/auth/passkey/login"
     )
+}
+
+/// The bearer value from `Authorization`, if it is one.
+fn bearer_from(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        Some(token.trim())
+    } else {
+        None
+    }
 }
 
 /// The client address, when the transport supplies one.
@@ -392,6 +409,21 @@ pub async fn status(
 
 /// `GET /api/auth/me` - who this request is, for the signed-in UI.
 pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    // An application API key is a principal of its own, and the only one whose
+    // scope list the caller can see here.
+    if let Some(key) = bearer_from(&headers).and_then(|raw| state.api_keys().authenticate(raw).ok())
+    {
+        let scopes: Vec<&str> = key.scopes.iter().map(|scope| scope.as_str()).collect();
+        return Ok(Json(json!({
+            "signed_in": false,
+            "principal": "api_key",
+            "label": key.name,
+            "expires_at": key.expires_at,
+            "token": true,
+            "api_key_id": key.id,
+            "scopes": scopes,
+        })));
+    }
     let session = session_cookie_from(&headers).and_then(|token| state.web_auth().session(&token));
     Ok(Json(match session {
         Some(session) => json!({
@@ -923,6 +955,126 @@ pub async fn revoke_all_sessions(
     tracing::info!(removed, "every web-UI session was signed out");
     let response = Json(json!({ "ok": true, "removed": removed })).into_response();
     Ok(with_cookie(response, clear_cookie(secure)))
+}
+
+// ---------------------------------------------------------------------------
+// Application API keys
+// ---------------------------------------------------------------------------
+
+/// The admin gate for key management, when `KARUCODE_ADMIN_TOKEN` is set.
+///
+/// Listing keys is an ordinary authenticated read; minting, rotating, editing
+/// and revoking one is not, because a long-lived key minted with a stolen bearer
+/// token would outlive the token it came from.
+fn require_key_admin(state: &AppState, headers: &HeaderMap, what: &str) -> ApiResult<()> {
+    let config = state.settings().snapshot();
+    let presented = headers
+        .get(ADMIN_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    crate::settings::authorize_admin(&config, presented, what).map_err(ApiError::from)
+}
+
+/// `GET /api/auth/api-keys` - every retained key, newest first.
+pub async fn list_api_keys(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({
+        "keys": state.api_keys().list(),
+        "max_keys": crate::api_keys::MAX_KEYS,
+        "max_lifetime_days": crate::api_keys::MAX_LIFETIME_DAYS,
+        "sign_in_required": state.sign_in_required(),
+    })))
+}
+
+/// `POST /api/auth/api-keys` - mint a key. The token appears in this response
+/// only; the database stores its SHA-256 and nothing else.
+pub async fn create_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<Value>> {
+    require_key_admin(&state, &headers, "creating an API key")?;
+    if !state.sign_in_required() {
+        return Err(ApiError::bad_request(
+            "this server requires no credential, so an API key would add no protection: set \
+             KARUCODE_AUTH_TOKEN, or a password/passkey with [access] enabled = true, first",
+        ));
+    }
+    let request: CreateKeyRequest = parse_required(&body, "creating an API key")?;
+    let (view, token) = state
+        .api_keys()
+        .create(request)
+        .await
+        .map_err(ApiError::from)?;
+    tracing::info!(
+        key_id = %view.id,
+        name = %view.name,
+        scopes = ?view.scopes,
+        expires_at = ?view.expires_at,
+        "API key created"
+    );
+    let warning = if view.expires_at.is_none() {
+        Some("this key never expires; give it a lifetime so a leaked copy stops working")
+    } else {
+        None
+    };
+    Ok(Json(
+        json!({ "api_key": view, "token": token, "warning": warning }),
+    ))
+}
+
+/// `PATCH /api/auth/api-keys/:id` - rename a key or change its expiry.
+pub async fn update_api_key(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<Value>> {
+    require_key_admin(&state, &headers, "changing an API key")?;
+    let request: UpdateKeyRequest = parse_body(&body)?;
+    let view = state
+        .api_keys()
+        .update(&id, request)
+        .await
+        .map_err(ApiError::from)?;
+    tracing::info!(key_id = %view.id, name = %view.name, "API key updated");
+    Ok(Json(json!({ "api_key": view })))
+}
+
+/// `DELETE /api/auth/api-keys/:id` - revoke a key. `?purge=true` deletes the row
+/// instead of keeping the revoked record.
+pub async fn revoke_api_key(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<QueryMap>,
+) -> ApiResult<Json<Value>> {
+    require_key_admin(&state, &headers, "revoking an API key")?;
+    let purge = matches!(query_str(&query, "purge"), Some("true" | "1"));
+    state
+        .api_keys()
+        .revoke(&id, purge)
+        .await
+        .map_err(ApiError::from)?;
+    tracing::info!(key_id = %id, purge, "API key revoked");
+    Ok(Json(json!({ "ok": true, "id": id, "purged": purge })))
+}
+
+/// `POST /api/auth/api-keys/:id/rotate` - replace the secret, keep the identity.
+pub async fn rotate_api_key(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    require_key_admin(&state, &headers, "rotating an API key")?;
+    let (view, token) = state.api_keys().rotate(&id).await.map_err(ApiError::from)?;
+    tracing::info!(key_id = %view.id, name = %view.name, "API key rotated");
+    let warning = if view.expires_at.is_none() {
+        Some("this key never expires; give it a lifetime so a leaked copy stops working")
+    } else {
+        None
+    };
+    Ok(Json(
+        json!({ "api_key": view, "token": token, "warning": warning }),
+    ))
 }
 
 // ---------------------------------------------------------------------------

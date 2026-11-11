@@ -97,6 +97,18 @@ pub fn api_router() -> Router<AppState> {
             "/auth/sessions/:id",
             axum::routing::delete(auth::revoke_session),
         )
+        // Application API keys: named, scoped, expiring bearer credentials.
+        // `GET`/`POST` on the collection, then per-key verbs. The handlers apply
+        // the admin gate; the auth middleware applies the key scope.
+        .route(
+            "/auth/api-keys",
+            get(auth::list_api_keys).post(auth::create_api_key),
+        )
+        .route(
+            "/auth/api-keys/:id",
+            axum::routing::patch(auth::update_api_key).delete(auth::revoke_api_key),
+        )
+        .route("/auth/api-keys/:id/rotate", post(auth::rotate_api_key))
         .route("/onboarding", get(onboarding::get))
         .route("/onboarding/complete", post(onboarding::complete))
         .route("/models/catalog", get(models::catalog))

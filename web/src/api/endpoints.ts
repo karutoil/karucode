@@ -14,6 +14,10 @@ import type {
   AuthSession,
   AuthStatus,
   AccessPatch,
+  ApiKeyIssued,
+  ApiKeyListResponse,
+  ApiKeyScope,
+  ApiKeySummary,
   CatalogLookupResponse,
   CatalogResponse,
   Config,
@@ -72,6 +76,8 @@ export interface CallOptions {
   fetchImpl?: FetchLike;
   /** Override the stored bearer token (used by the auth screen). */
   token?: string | null;
+  /** Extra request headers (the API-key admin credential, for example). */
+  headers?: Record<string, string>;
 }
 
 /** `POST /api/sessions` body extras: the pin a draft chose before it existed. */
@@ -276,6 +282,92 @@ export function revokeAllAuthSessions(
     ...options,
     method: 'POST',
     body: {},
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Application API keys
+// ---------------------------------------------------------------------------
+
+/**
+ * The admin credential as a header, when the caller typed one.
+ *
+ * Key *management* needs `X-Karucode-Admin-Token` whenever
+ * `KARUCODE_ADMIN_TOKEN` is configured. The browser never stores it, so the
+ * Access tab asks for it the moment a management call needs it.
+ */
+function adminHeaders(
+  adminToken: string | undefined,
+  options: CallOptions,
+): Record<string, string> {
+  const headers = { ...options.headers };
+  const token = adminToken?.trim();
+  if (token) headers['X-Karucode-Admin-Token'] = token;
+  return headers;
+}
+
+export function listApiKeys(options: CallOptions = {}): Promise<ApiKeyListResponse> {
+  return apiRequest('/api/auth/api-keys', options);
+}
+
+export function createApiKey(
+  body: {
+    name: string;
+    scopes?: ApiKeyScope[];
+    expires_in_days?: number;
+    expires_at?: number;
+  },
+  adminToken?: string,
+  options: CallOptions = {},
+): Promise<ApiKeyIssued> {
+  return apiRequest('/api/auth/api-keys', {
+    ...options,
+    method: 'POST',
+    body,
+    headers: adminHeaders(adminToken, options),
+  });
+}
+
+export function updateApiKey(
+  id: string,
+  body: { name?: string; expires_in_days?: number; clear_expiry?: boolean },
+  adminToken?: string,
+  options: CallOptions = {},
+): Promise<{ api_key: ApiKeySummary }> {
+  return apiRequest(`/api/auth/api-keys/${encodeURIComponent(id)}`, {
+    ...options,
+    method: 'PATCH',
+    body,
+    headers: adminHeaders(adminToken, options),
+  });
+}
+
+export function revokeApiKey(
+  id: string,
+  purge: boolean,
+  adminToken?: string,
+  options: CallOptions = {},
+): Promise<{ ok: boolean; id: string; purged: boolean }> {
+  return apiRequest(
+    `/api/auth/api-keys/${encodeURIComponent(id)}${purge ? '?purge=true' : ''}`,
+    {
+      ...options,
+      method: 'DELETE',
+      headers: adminHeaders(adminToken, options),
+    },
+  );
+}
+
+export function rotateApiKey(
+  id: string,
+  adminToken?: string,
+  options: CallOptions = {},
+): Promise<ApiKeyIssued> {
+  return apiRequest(`/api/auth/api-keys/${encodeURIComponent(id)}/rotate`, {
+    ...options,
+    method: 'POST',
+    body: {},
+    headers: adminHeaders(adminToken, options),
   });
 }
 

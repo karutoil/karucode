@@ -27,8 +27,15 @@ import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { toErrorMessage } from '../api/client';
 import * as api from '../api/endpoints';
-import type { AccessSettingsSummary, AuthSession, TunnelKind } from '../api/types';
-import { absoluteTime, relativeTime } from '../lib/format';
+import type {
+  AccessSettingsSummary,
+  ApiKeyScope,
+  ApiKeySummary,
+  AuthSession,
+  TunnelKind,
+} from '../api/types';
+import { copyText } from '../lib/clipboard';
+import { absoluteTime, fromUnixSeconds, relativeTime } from '../lib/format';
 import { createPasskey, PasskeyError, passkeySupported } from '../lib/passkey';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
@@ -68,6 +75,35 @@ const MIN_PASSWORD_FALLBACK = 10;
 /** Bounds for `access.session_days`, mirroring `MIN/MAX_SESSION_DAYS` in kc-core. */
 const MIN_SESSION_DAYS = 1;
 const MAX_SESSION_DAYS = 365;
+
+/** Longest key lifetime the server accepts, mirroring `MAX_LIFETIME_DAYS`. */
+const MAX_KEY_LIFETIME_DAYS = 3650;
+
+/**
+ * The three API-key scopes, worded the way `crates/kc-server/src/api_keys.rs`
+ * defines them: `write` already includes `read`, and `admin` includes both.
+ */
+const API_KEY_SCOPES: { value: ApiKeyScope; label: string; description: string }[] = [
+  {
+    value: 'read',
+    label: 'Read',
+    description: 'GET and HEAD on the API and /metrics.',
+  },
+  {
+    value: 'write',
+    label: 'Write',
+    description: 'Reads plus ordinary mutations: sessions, messages, projects, files, git.',
+  },
+  {
+    value: 'admin',
+    label: 'Admin',
+    description:
+      'Everything, including key management, terminals, approvals, config and plugin reloads.',
+  },
+];
+
+/** What a new key gets unless the user chooses otherwise. */
+const DEFAULT_KEY_SCOPES: ApiKeyScope[] = ['read', 'write'];
 
 /** One inline result: `ok` decides whether it is a status or an alert. */
 interface Message {
@@ -158,6 +194,28 @@ export function AccessSettings(): JSX.Element {
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [sessionBusy, setSessionBusy] = useState<string | null>(null);
 
+  // API keys. `issuedKey` is the only place a secret ever lives in this
+  // component: the server shows it once, and dismissing the panel is permanent.
+  const [apiKeys, setApiKeys] = useState<ApiKeySummary[]>([]);
+  const [apiKeysError, setApiKeysError] = useState<string | null>(null);
+  const [keySignInRequired, setKeySignInRequired] = useState(true);
+  const [keyMax, setKeyMax] = useState(100);
+  const [keyBusy, setKeyBusy] = useState<string | null>(null);
+  const [keyMessage, setKeyMessage] = useState<Message | null>(null);
+  const [issuedKey, setIssuedKey] = useState<{
+    id: string;
+    name: string;
+    token: string;
+    warning: string | null;
+  } | null>(null);
+  const [newKeyName, setNewKeyName] = useState('');
+  const [newKeyScopes, setNewKeyScopes] = useState<ApiKeyScope[]>([...DEFAULT_KEY_SCOPES]);
+  const [newKeyExpiry, setNewKeyExpiry] = useState('30');
+  const [adminToken, setAdminToken] = useState('');
+  const [confirmRevokeKey, setConfirmRevokeKey] = useState<string | null>(null);
+  const [renamingKey, setRenamingKey] = useState<{ id: string; name: string } | null>(null);
+  const [copiedKey, setCopiedKey] = useState(false);
+
   const [enabledBusy, setEnabledBusy] = useState(false);
   const [signInMessage, setSignInMessage] = useState<Message | null>(null);
 
@@ -210,6 +268,16 @@ export function AccessSettings(): JSX.Element {
       } catch (error) {
         if (!cancelled) setSessionsError(toErrorMessage(error));
       }
+      try {
+        const list = await api.listApiKeys();
+        if (cancelled) return;
+        setApiKeys(list.keys);
+        setKeySignInRequired(list.sign_in_required);
+        setKeyMax(list.max_keys);
+        setApiKeysError(null);
+      } catch (error) {
+        if (!cancelled) setApiKeysError(toErrorMessage(error));
+      }
     })();
     return () => {
       cancelled = true;
@@ -244,6 +312,19 @@ export function AccessSettings(): JSX.Element {
       setSessionsError(null);
     } catch (error) {
       setSessionsError(toErrorMessage(error));
+    }
+  };
+
+  /** Re-read the key list (and whether this server may mint one at all). */
+  const refreshApiKeys = async (): Promise<void> => {
+    try {
+      const list = await api.listApiKeys();
+      setApiKeys(list.keys);
+      setKeySignInRequired(list.sign_in_required);
+      setKeyMax(list.max_keys);
+      setApiKeysError(null);
+    } catch (error) {
+      setApiKeysError(toErrorMessage(error));
     }
   };
 
@@ -311,6 +392,7 @@ export function AccessSettings(): JSX.Element {
       setPasswordErrors({});
       await reloadPolicy();
       await refreshSessions();
+      await refreshApiKeys();
       setPasswordMessage({
         ok: true,
         text: result.enabled_now
@@ -338,6 +420,7 @@ export function AccessSettings(): JSX.Element {
       setRemovingPassword(false);
       await reloadPolicy();
       await refreshSessions();
+      await refreshApiKeys();
       setPasswordMessage({
         ok: true,
         text:
@@ -367,6 +450,7 @@ export function AccessSettings(): JSX.Element {
         name: newPasskeyName(),
       });
       await reloadPolicy();
+      await refreshApiKeys();
       setPasskeyMessage({
         ok: true,
         text: result.enabled_now
@@ -412,6 +496,7 @@ export function AccessSettings(): JSX.Element {
       const result = await api.deletePasskey(id);
       setConfirmRemovePasskey(null);
       await reloadPolicy();
+      await refreshApiKeys();
       setPasskeyMessage({
         ok: true,
         text: result.enabled
@@ -460,6 +545,180 @@ export function AccessSettings(): JSX.Element {
     // Every session is gone, this one included, so the sign-in screen is the only
     // honest next thing to show.
     await actions.signOut();
+  };
+
+  // ---- API keys ---------------------------------------------------------
+
+  /** Add or remove one scope from the draft key. */
+  const toggleKeyScope = (scope: ApiKeyScope): void => {
+    setNewKeyScopes((current) =>
+      current.includes(scope)
+        ? current.filter((entry) => entry !== scope)
+        : [...current, scope],
+    );
+  };
+
+  /**
+   * Create a key and surface the one copy of its token.
+   *
+   * The expiry is a whole number of days or empty (never expires). The server is
+   * the authority on both bounds; the checks here exist so a typo is answered
+   * before a round trip, not so the form can disagree with it.
+   */
+  const createKey = async (): Promise<void> => {
+    if (keyBusy !== null) return;
+    const name = newKeyName.trim();
+    if (name === '') {
+      setKeyMessage({ ok: false, text: 'Give the key a name so you can recognise it later.' });
+      return;
+    }
+    const rawDays = newKeyExpiry.trim();
+    const days = rawDays === '' ? undefined : Number(rawDays);
+    if (
+      days !== undefined &&
+      (!Number.isInteger(days) || days < 1 || days > MAX_KEY_LIFETIME_DAYS)
+    ) {
+      setKeyMessage({
+        ok: false,
+        text: `Use a whole number of days from 1 to ${MAX_KEY_LIFETIME_DAYS}, or leave it empty for no expiry.`,
+      });
+      return;
+    }
+    if (newKeyScopes.length === 0) {
+      setKeyMessage({ ok: false, text: 'Choose at least one scope for the key.' });
+      return;
+    }
+    setKeyBusy('create');
+    setKeyMessage(null);
+    setCopiedKey(false);
+    try {
+      const issued = await api.createApiKey(
+        {
+          name,
+          scopes: newKeyScopes,
+          ...(days !== undefined ? { expires_in_days: days } : {}),
+        },
+        adminToken,
+      );
+      setIssuedKey({
+        id: issued.api_key.id,
+        name: issued.api_key.name,
+        token: issued.token,
+        warning: issued.warning,
+      });
+      setNewKeyName('');
+      await refreshApiKeys();
+      setKeyMessage({
+        ok: true,
+        text: `Key “${issued.api_key.name}” created. Copy the token now — it is not shown again.`,
+      });
+    } catch (error) {
+      setKeyMessage({ ok: false, text: toErrorMessage(error) });
+    } finally {
+      setKeyBusy(null);
+    }
+  };
+
+  const copyIssuedKey = async (): Promise<void> => {
+    if (issuedKey === null) return;
+    const copied = await copyText(issuedKey.token);
+    setCopiedKey(copied);
+    setKeyMessage(
+      copied
+        ? { ok: true, text: 'Token copied to the clipboard.' }
+        : { ok: false, text: 'The browser refused to copy it; select the token and copy it by hand.' },
+    );
+  };
+
+  const rotateKey = async (key: ApiKeySummary): Promise<void> => {
+    if (keyBusy !== null) return;
+    setKeyBusy(key.id);
+    setKeyMessage(null);
+    setCopiedKey(false);
+    try {
+      const issued = await api.rotateApiKey(key.id, adminToken);
+      setIssuedKey({
+        id: issued.api_key.id,
+        name: issued.api_key.name,
+        token: issued.token,
+        warning: issued.warning,
+      });
+      await refreshApiKeys();
+      setKeyMessage({
+        ok: true,
+        text: `Key “${issued.api_key.name}” rotated. The old secret stopped working; copy the new one now.`,
+      });
+    } catch (error) {
+      setKeyMessage({ ok: false, text: toErrorMessage(error) });
+    } finally {
+      setKeyBusy(null);
+    }
+  };
+
+  const revokeKey = async (key: ApiKeySummary): Promise<void> => {
+    if (keyBusy !== null) return;
+    setKeyBusy(key.id);
+    setKeyMessage(null);
+    try {
+      await api.revokeApiKey(key.id, false, adminToken);
+      setConfirmRevokeKey(null);
+      // A revoked key's token is dead; do not leave it on screen as if it were
+      // still usable.
+      if (issuedKey !== null && issuedKey.id === key.id) {
+        setIssuedKey(null);
+        setCopiedKey(false);
+      }
+      await refreshApiKeys();
+      setKeyMessage({
+        ok: true,
+        text: `Key “${key.name}” revoked. It cannot authenticate again.`,
+      });
+    } catch (error) {
+      setKeyMessage({ ok: false, text: toErrorMessage(error) });
+    } finally {
+      setKeyBusy(null);
+    }
+  };
+
+  /** Remove a revoked or expired key's row for good. */
+  const purgeKey = async (key: ApiKeySummary): Promise<void> => {
+    if (keyBusy !== null) return;
+    setKeyBusy(key.id);
+    setKeyMessage(null);
+    try {
+      await api.revokeApiKey(key.id, true, adminToken);
+      if (issuedKey !== null && issuedKey.id === key.id) {
+        setIssuedKey(null);
+        setCopiedKey(false);
+      }
+      await refreshApiKeys();
+      setKeyMessage({ ok: true, text: `Key “${key.name}” removed from the list.` });
+    } catch (error) {
+      setKeyMessage({ ok: false, text: toErrorMessage(error) });
+    } finally {
+      setKeyBusy(null);
+    }
+  };
+
+  const saveKeyRename = async (id: string, name: string): Promise<void> => {
+    const trimmed = name.trim();
+    if (trimmed === '') {
+      setKeyMessage({ ok: false, text: 'A key needs a name.' });
+      return;
+    }
+    if (keyBusy !== null) return;
+    setKeyBusy(id);
+    setKeyMessage(null);
+    try {
+      await api.updateApiKey(id, { name: trimmed }, adminToken);
+      setRenamingKey(null);
+      await refreshApiKeys();
+      setKeyMessage({ ok: true, text: `Key renamed to “${trimmed}”.` });
+    } catch (error) {
+      setKeyMessage({ ok: false, text: toErrorMessage(error) });
+    } finally {
+      setKeyBusy(null);
+    }
   };
 
   // ---- address and tunnel -----------------------------------------------
@@ -830,9 +1089,9 @@ export function AccessSettings(): JSX.Element {
                   <div class="access-row-main">
                     <span class="access-row-title">{passkey.name}</span>
                     <span class="access-row-meta">
-                      Added {absoluteTime(passkey.created_at)}
+                      Added {absoluteTime(fromUnixSeconds(passkey.created_at))}
                       {passkey.last_used_at !== null && passkey.last_used_at > 0
-                        ? ` · last used ${relativeTime(passkey.last_used_at)}`
+                        ? ` · last used ${relativeTime(fromUnixSeconds(passkey.last_used_at))}`
                         : ' · never used'}
                     </span>
                   </div>
@@ -992,8 +1251,8 @@ export function AccessSettings(): JSX.Element {
                     ) : null}
                   </span>
                   <span class="access-row-meta">
-                    Signed in with {session.method} · since {absoluteTime(session.created_at)} ·
-                    expires {absoluteTime(session.expires_at)}
+                    Signed in with {session.method} · since {absoluteTime(fromUnixSeconds(session.created_at))} ·
+                    expires {absoluteTime(fromUnixSeconds(session.expires_at))}
                   </span>
                 </div>
                 <div class="access-row-actions">
@@ -1029,6 +1288,343 @@ export function AccessSettings(): JSX.Element {
         {sessionsError ? (
           <p class="field-error" role="alert">
             {sessionsError}
+          </p>
+        ) : null}
+      </section>
+
+      <section class="settings-section" aria-labelledby="settings-access-api-keys">
+        <div class="settings-section-head">
+          <h3 id="settings-access-api-keys">API keys</h3>
+          <span class="settings-section-note">
+            {apiKeys.length === 0
+              ? 'None created'
+              : `${apiKeys.filter((key) => key.status === 'active').length} active`}
+          </span>
+        </div>
+
+        <p class="field-hint">
+          A key is a bearer credential for one application — a script, a CI job, a bot. It works
+          like the auth token, but it is scoped, can expire, and can be rotated or revoked without
+          changing your password. The full token is shown once, when it is created.
+        </p>
+
+        {!keySignInRequired ? (
+          <div class="access-warning">
+            <AlertIcon size={15} />
+            <span>
+              This server requires no credential yet, so a key would protect nothing and creation is
+              refused. Set a password above, or <code>KARUCODE_AUTH_TOKEN</code>, first.
+            </span>
+          </div>
+        ) : null}
+
+        {issuedKey !== null ? (
+          <div class="access-issued" role="group" aria-label={`Token for ${issuedKey.name}`}>
+            <span class="setting-name">Copy this token now</span>
+            <span class="field-hint">
+              It is not stored in the browser and will not be shown again. If it is lost, rotate the
+              key to get a new one.
+            </span>
+            <code class="access-key-token">{issuedKey.token}</code>
+            {issuedKey.warning ? <span class="field-hint">{issuedKey.warning}</span> : null}
+            <div class="access-inline-row">
+              <button
+                type="button"
+                class="button button-small"
+                onClick={() => void copyIssuedKey()}
+              >
+                {copiedKey ? 'Copied' : 'Copy token'}
+              </button>
+              <button
+                type="button"
+                class="button button-small"
+                onClick={() => {
+                  setIssuedKey(null);
+                  setCopiedKey(false);
+                }}
+              >
+                I have saved it
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {apiKeys.length === 0 ? (
+          <p class="field-hint">No API keys yet.</p>
+        ) : (
+          <ul class="access-list" aria-label="API keys">
+            {apiKeys.map((key) => {
+              const nameId = `access-api-key-name-${key.id}`;
+              const isRenaming = renamingKey !== null && renamingKey.id === key.id;
+              const isRemoving = confirmRevokeKey === key.id;
+              const dead = key.status !== 'active';
+              return (
+                <li class="access-row" key={key.id}>
+                  <div class="access-row-main">
+                    <span class="access-row-title">
+                      {key.name}
+                      {dead ? <span class="access-tag">{key.status}</span> : null}
+                    </span>
+                    <span class="access-row-meta">
+                      {key.prefix}…{key.last4} · {key.scopes.join(' + ')} · created{' '}
+                      {absoluteTime(fromUnixSeconds(key.created_at))} ·{' '}
+                      {key.expires_at === null
+                        ? 'never expires'
+                        : key.revoked_at !== null
+                          ? `revoked ${absoluteTime(fromUnixSeconds(key.revoked_at))}`
+                          : `expires ${absoluteTime(fromUnixSeconds(key.expires_at))}`}{' '}
+                      ·{' '}
+                      {key.last_used_at === null
+                        ? 'never used'
+                        : `last used ${relativeTime(fromUnixSeconds(key.last_used_at))}`}
+                      {key.request_count > 0
+                        ? ` · ${key.request_count} request${key.request_count === 1 ? '' : 's'}`
+                        : ''}
+                    </span>
+                  </div>
+
+                  {isRenaming && renamingKey !== null ? (
+                    <div class="access-inline-form">
+                      <label class="field-label" for={nameId}>
+                        Name for this key
+                      </label>
+                      <div class="access-inline-row">
+                        <input
+                          id={nameId}
+                          class="input"
+                          type="text"
+                          value={renamingKey.name}
+                          disabled={keyBusy !== null}
+                          onInput={(event) =>
+                            setRenamingKey({ id: key.id, name: event.currentTarget.value })
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              event.preventDefault();
+                              void saveKeyRename(key.id, renamingKey.name);
+                            }
+                            if (event.key === 'Escape') setRenamingKey(null);
+                          }}
+                        />
+                        <button
+                          type="button"
+                          class="button button-small"
+                          disabled={keyBusy !== null}
+                          onClick={() => void saveKeyRename(key.id, renamingKey.name)}
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          class="button button-small"
+                          disabled={keyBusy !== null}
+                          onClick={() => setRenamingKey(null)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : isRemoving ? (
+                    <div class="access-inline-form">
+                      <span class="field-hint">
+                        Revoke “{key.name}”? Anything using it stops working immediately; this
+                        cannot be undone.
+                      </span>
+                      <div class="access-inline-row">
+                        <button
+                          type="button"
+                          class="button button-small button-danger-ghost"
+                          disabled={keyBusy !== null}
+                          onClick={() => void revokeKey(key)}
+                        >
+                          {keyBusy === key.id ? 'Revoking…' : `Revoke “${key.name}”`}
+                        </button>
+                        <button
+                          type="button"
+                          class="button button-small"
+                          disabled={keyBusy !== null}
+                          onClick={() => setConfirmRevokeKey(null)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div class="access-row-actions">
+                      {dead ? (
+                        <button
+                          type="button"
+                          class="button button-small"
+                          disabled={keyBusy !== null}
+                          aria-label={`Remove ${key.name} from the list`}
+                          onClick={() => void purgeKey(key)}
+                        >
+                          Remove
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            class="button button-small"
+                            disabled={keyBusy !== null}
+                            aria-label={`Rename ${key.name}`}
+                            onClick={() => {
+                              setConfirmRevokeKey(null);
+                              setRenamingKey({ id: key.id, name: key.name });
+                            }}
+                          >
+                            Rename
+                          </button>
+                          <button
+                            type="button"
+                            class="button button-small"
+                            disabled={keyBusy !== null}
+                            aria-label={`Rotate ${key.name}`}
+                            onClick={() => void rotateKey(key)}
+                          >
+                            {keyBusy === key.id ? 'Rotating…' : 'Rotate'}
+                          </button>
+                          <button
+                            type="button"
+                            class="button button-small button-danger-ghost"
+                            disabled={keyBusy !== null}
+                            aria-label={`Revoke ${key.name}`}
+                            onClick={() => {
+                              setRenamingKey(null);
+                              setConfirmRevokeKey(key.id);
+                            }}
+                          >
+                            Revoke
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        <div class="settings-subhead">
+          <h4 id="access-api-key-new">Create a key</h4>
+          <span class="settings-section-note">
+            {apiKeys.filter((key) => key.status === 'active').length} of {keyMax} live
+          </span>
+        </div>
+
+        <div class="access-form" role="group" aria-labelledby="access-api-key-new">
+          <div class="field">
+            <label class="field-label" for="access-api-key-name-new">
+              Name
+            </label>
+            <input
+              id="access-api-key-name-new"
+              class="input"
+              type="text"
+              placeholder="ci-runner"
+              value={newKeyName}
+              disabled={keyBusy !== null || !keySignInRequired}
+              onInput={(event) => setNewKeyName(event.currentTarget.value)}
+            />
+            <p class="field-hint">So the list says who holds the key. Up to 64 characters.</p>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="access-api-key-days">
+              Expires in (days)
+            </label>
+            <input
+              id="access-api-key-days"
+              class="input mono"
+              type="number"
+              min={1}
+              max={MAX_KEY_LIFETIME_DAYS}
+              step="1"
+              placeholder="30"
+              value={newKeyExpiry}
+              disabled={keyBusy !== null || !keySignInRequired}
+              onInput={(event) => setNewKeyExpiry(event.currentTarget.value)}
+            />
+            <p class="field-hint">
+              Leave it empty for a key that never expires (not recommended). Up to{' '}
+              {MAX_KEY_LIFETIME_DAYS} days.
+            </p>
+          </div>
+
+          <div class="field">
+            <span class="field-label">Scopes</span>
+            <div class="access-scope-row">
+              {API_KEY_SCOPES.map((scope) => (
+                <label class="access-scope" key={scope.value}>
+                  <input
+                    type="checkbox"
+                    checked={newKeyScopes.includes(scope.value)}
+                    disabled={keyBusy !== null || !keySignInRequired}
+                    onChange={() => toggleKeyScope(scope.value)}
+                  />
+                  <span class="access-scope-text">
+                    <span class="setting-name">{scope.label}</span>
+                    <span class="setting-hint">{scope.description}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            <p class="field-hint">
+              <code>Write</code> includes <code>Read</code>; <code>Admin</code> includes both. Admin
+              can open terminals and answer approvals — grant it only to an integration you trust
+              with the whole machine.
+            </p>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="access-api-key-admin">
+              Admin token (only when configured)
+            </label>
+            <input
+              id="access-api-key-admin"
+              class="input"
+              type="password"
+              autoComplete="off"
+              value={adminToken}
+              disabled={keyBusy !== null || !keySignInRequired}
+              onInput={(event) => setAdminToken(event.currentTarget.value)}
+            />
+            <p class="field-hint">
+              With <code>KARUCODE_ADMIN_TOKEN</code> set, creating and revoking keys needs that
+              credential. It stays in this tab; the browser does not store it.
+            </p>
+          </div>
+
+          <div class="access-actions">
+            <button
+              type="button"
+              class="button button-small button-primary"
+              disabled={keyBusy !== null || !keySignInRequired}
+              onClick={() => void createKey()}
+            >
+              {keyBusy === 'create' ? 'Creating…' : 'Create key'}
+            </button>
+            <span class="field-hint">
+              The token is returned once. Send it as <code>Authorization: Bearer …</code>, and keep
+              sending <code>X-Karucode-Client: web</code> on mutations.
+            </span>
+          </div>
+        </div>
+
+        {keyMessage ? (
+          <p
+            class={keyMessage.ok ? 'access-saved' : 'field-error'}
+            role={keyMessage.ok ? 'status' : 'alert'}
+          >
+            {keyMessage.ok ? <CheckIcon size={13} /> : null}
+            {keyMessage.text}
+          </p>
+        ) : null}
+
+        {apiKeysError ? (
+          <p class="field-error" role="alert">
+            {apiKeysError}
           </p>
         ) : null}
       </section>

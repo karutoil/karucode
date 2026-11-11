@@ -125,6 +125,7 @@ include!(concat!(env!("OUT_DIR"), "/generated_docs.rs"));
 /// product, so it must also remove the slug here — the diff then shows the intent
 /// instead of silently dropping a capability's documentation.
 pub const REQUIRED_SLUGS: &[&str] = &[
+    "api-keys",
     "approvals",
     "artifacts",
     "builtin-tools",
