@@ -149,6 +149,10 @@ describe('phone chrome: every control is a thumb-sized target', () => {
     const body = coarse(composerCss);
     expect(body).toMatch(/\.compose-bottom \.button-stop,[\s\S]*?min-height: 40px/);
     expect(body).toMatch(/\.compose-plus \{[^}]*width: 40px;[^}]*height: 40px;/);
+    // The capsule around the queue options has to be tall enough to hold them:
+    // 32px options in a 30px capsule painted the active one outside its border
+    // (measured at 440x956 with touch emulation).
+    expect(body).toMatch(/\.queue-mode \{\s*\n\s*height: auto;[\s\S]*?min-height: 34px/);
     // The labelled pills only needed height: they are already 66-107px wide.
     expect(body).toMatch(/\.compose-approvals,[\s\S]*?min-height: 32px/);
   });
@@ -535,5 +539,20 @@ describe('phone results sheet: above the veil, not behind it', () => {
     // split layout: the overlay is a sibling of the conversation, not a sheet.
     const wide = workbenchCss.slice(0, workbenchCss.indexOf('@media (max-width: 1023px)'));
     expect(wide).not.toMatch(/z-index: 41/);
+  });
+});
+
+describe('the phone model sheet is a thumb surface', () => {
+  it('gives the reasoning choices the same 40px floor as the rest of the dock', () => {
+    // Checked at the iPhone 16 Pro Max viewport (440x956): the effort toggles
+    // measured 36px, four of them side by side, between "Low" and "Max" - two
+    // neighbours a thumb picks between. The dock's other controls already take
+    // `pointer: coarse` to 40px; these live in layout.css, so the rule does too.
+    const coarseStart = layoutCss.lastIndexOf('@media (pointer: coarse) {');
+    expect(coarseStart).toBeGreaterThan(-1);
+    const body = layoutCss.slice(coarseStart);
+    expect(body).toMatch(/\.reasoning-choice \{\s*\n\s*min-height: 40px/);
+    // ...without moving the pointer-fine row, which stays a compact popover.
+    expect(declarations(layoutCss, '.reasoning-choice')['min-height']).toBe('36px');
   });
 });

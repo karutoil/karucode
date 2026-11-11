@@ -1475,6 +1475,15 @@
     min-height: 40px;
   }
 
+  /* The queue-mode options take the 32px thumb floor above, so the capsule
+   * around them has to hold them: at its 30px desktop height the active option
+   * painted 1px outside the capsule's own border (measured at the iPhone 16 Pro
+   * Max viewport, 440x956, with touch emulation). */
+  .queue-mode {
+    height: auto;
+    min-height: 34px;
+  }
+
   /* Labelled pills are already 66-107px wide, so height alone was the miss. 32 is
    * enough to land a thumb on without turning the dock into a toolbar. */
   .context-pill,

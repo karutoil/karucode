@@ -922,11 +922,13 @@
 //
 // **Touch targets are finger-sized, on every pointer-coarse device.** The header
 // controls are 26-31px boxes 4px apart and the dock's attach/Stop/Send were
-// 24-28px; `@media (pointer: coarse)` raises them to 40x40 (labelled pills to 32px
-// tall) in `styles/workbench.css`, `styles/layout.css` and `styles/composer.css`.
-// The workbench header's floor lives in `workbench.css` because that file both owns
-// the 30px declaration and loads last. The transcript's row toggles keep their
-// density: they are full-width rows, not thumb-sized buttons.
+// 24-28px; `@media (pointer: coarse)` raises them to 40x40 (labelled pills to 32px)
+// in `styles/workbench.css`, `styles/layout.css` and `styles/composer.css`. The
+// model sheet's effort toggles take the same 40px floor, and the capsule around
+// them grows to hold them. The workbench header's floor lives in `workbench.css`
+// because that file both owns the 30px declaration and loads last. The
+// transcript's row toggles keep their density: they are full-width rows, not
+// thumb-sized buttons.
 //
 // ## Menus on a phone
 //

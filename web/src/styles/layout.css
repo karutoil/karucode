@@ -2245,4 +2245,12 @@
   .main-head .head-btn.head-icon {
     min-height: 40px;
   }
+
+  /* The model sheet's effort toggles sit four to a row between "Low" and "Max":
+   * 36px is a desktop popover row, not a thumb target. Measured at the iPhone 16
+   * Pro Max viewport (440x956) before this rule. The choices are styled in this
+   * file, so the floor lives here with the rest of the coarse-pointer controls. */
+  .reasoning-choice {
+    min-height: 40px;
+  }
 }
