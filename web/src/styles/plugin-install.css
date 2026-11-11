@@ -1,0 +1,174 @@
+/*
+ * PluginInstallSection: the "Install from a repository" block inside
+ * Settings → Plugins & MCP. Scoped by its section class; it borrows the
+ * shared settings-section chrome (`.settings-section`, `.button`,
+ * `.inline-error`) and the design tokens — no raw colours or radii, so the
+ * scale tests stay green and the theme engine restyles it for free.
+ */
+
+.plugin-install-section .settings-section-note {
+  margin-bottom: var(--space-5);
+}
+
+.plugin-install-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  margin-bottom: 12px;
+}
+
+.plugin-install-form label,
+.plugin-install-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-body);
+  color: var(--text-secondary);
+}
+
+.plugin-install-source input,
+.plugin-install-ref input,
+.plugin-install-admin input {
+  flex: 1;
+  margin-left: 8px;
+}
+
+.plugin-install-form .button {
+  align-self: flex-start;
+}
+
+.plugin-install-choose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.plugin-install-source-line {
+  margin: 0;
+  font-size: var(--fs-message);
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+.plugin-install-note {
+  margin: 0;
+  font-size: var(--fs-message);
+  color: var(--warn);
+  white-space: pre-wrap;
+}
+
+.plugin-install-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plugin-install-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.plugin-install-row:last-child {
+  border-bottom: none;
+}
+
+.plugin-install-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.plugin-install-name {
+  font-weight: 600;
+  font-size: var(--fs-body);
+}
+
+.plugin-install-description {
+  color: var(--text-secondary);
+  font-size: var(--fs-message);
+}
+
+.plugin-install-meta {
+  font-size: var(--fs-label);
+  color: var(--text-secondary);
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.plugin-install-options {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.plugin-install-options label {
+  font-size: var(--fs-message);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.plugin-install-actions {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.plugin-install-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.plugin-install-running {
+  margin: 0 0 6px;
+  font-size: var(--fs-body);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.plugin-install-event {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: var(--fs-label);
+  color: var(--text-secondary);
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.plugin-install-event:first-child {
+  color: var(--text);
+}
+
+.plugin-install-result {
+  margin: var(--space-4) 0 0;
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+
+.plugin-install-admin {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: var(--space-4);
+  font-size: var(--fs-message);
+}

@@ -48,9 +48,9 @@
 
 // @kc-doc: plugins
 // @kc-title: Write and install a plugin
-// @kc-summary: Build an out-of-process plugin that adds tools, hooks, inspector panels and UI controls (buttons, palette commands, keyboard shortcuts, hides), register it, and debug it when it fails to start.
+// @kc-summary: Build a plugin with the SDK, register it, install a plugin collection from a GitHub repository or a local directory, and debug it when it fails to start.
 // @kc-tags: plugins, extension, sdk, tools, hooks, jsonrpc, panels, ui, buttons, commands, shortcuts, notifications
-// @kc-applies-to: config:[[plugins]], file:~/.local/share/karucode/plugins/<name>/plugin.toml, dir:plugins/example-hello, tool:plugin__<plugin>__<tool>, cmd:cargo build -p example-hello, cmd:karucode plugin init, cmd:karucode plugin sdk, cmd:karucode plugin sdk --check, file:src/sdk.rs, file:src/protocol.rs, doc:docs/PLUGINS.md, env:KARUCODE_PLUGIN_NAME, env:KARUCODE_PLUGIN_PROTOCOL, env:KARUCODE_PLUGIN_PERMISSIONS, env:KARUCODE_PLUGIN_SETTINGS, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, config:panels, config:ui, config:plugins_watch, config:plugins_watch_secs, config:notifications.plugin, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:POST /api/plugins/:name/ui/actions/:action, config:plugin_panels, config:plugin_ui, method:notify, method:ui/action, hook:on_notify, hook:before_prompt, fn:PluginBuilder::panel, fn:PluginBuilder::button, fn:PluginBuilder::message_button, fn:PluginBuilder::command, fn:PluginBuilder::message_command, fn:PluginBuilder::keybinding, fn:PluginBuilder::message_keybinding, fn:PluginBuilder::hide, fn:PluginBuilder::on_ui_action, fn:PluginBuilder::on_notify, fn:notify, fn:normalise_ui_keys
+// @kc-applies-to: config:[[plugins]], file:~/.local/share/karucode/plugins/<name>/plugin.toml, file:index.toml, config:[install], config:install.build, config:install.build_timeout_secs, config:install.exclude, file:install.json, dir:plugins/example-hello, tool:plugin__<plugin>__<tool>, cmd:cargo build -p example-hello, cmd:karucode plugin init, cmd:karucode plugin sdk, cmd:karucode plugin sdk --check, cmd:karucode plugin install, cmd:karucode plugin install --list, cmd:karucode plugin install --force, cmd:karucode plugin install --ref, cmd:karucode plugin install --no-build, cmd:karucode plugin install --build-timeout-secs, cmd:karucode plugin install --data-dir, url:codeload.github.com/<owner>/<repo>/tar.gz/<ref>, env:GH_TOKEN, env:GITHUB_TOKEN, file:src/sdk.rs, file:src/protocol.rs, doc:docs/PLUGINS.md, env:KARUCODE_PLUGIN_NAME, env:KARUCODE_PLUGIN_PROTOCOL, env:KARUCODE_PLUGIN_PERMISSIONS, env:KARUCODE_PLUGIN_SETTINGS, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, config:panels, config:ui, config:plugins_watch, config:plugins_watch_secs, config:notifications.plugin, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:POST /api/plugins/install/preview, route:POST /api/plugins/install, route:GET /api/plugins/install/:id, route:POST /api/plugins/install/:id/cancel, route:GET /api/plugins/:name/panels/:panel, route:POST /api/plugins/:name/ui/actions/:action, config:plugin_panels, config:plugin_ui, method:notify, method:ui/action, hook:on_notify, hook:before_prompt, fn:PluginBuilder::panel, fn:PluginBuilder::button, fn:PluginBuilder::message_button, fn:PluginBuilder::command, fn:PluginBuilder::message_command, fn:PluginBuilder::keybinding, fn:PluginBuilder::message_keybinding, fn:PluginBuilder::hide, fn:PluginBuilder::on_ui_action, fn:PluginBuilder::on_notify, fn:notify, fn:normalise_ui_keys
 //
 // A plugin is a separate executable that speaks newline-delimited JSON-RPC 2.0 on
 // stdin/stdout, protocol version `1`. It never links the harness, so it can be
@@ -147,18 +147,95 @@
 // Status is `stopped`, `starting`, `ready`, `failed` or `disabled`. Enabling resets
 // the restart budget.
 //
-// # 4. Install, upgrade and remove a plugin without a restart
+// # 4. Install plugins from a GitHub repository
+//
+// `karucode plugin install` fetches a repository, builds what needs building
+// and places each plugin under `<data_dir>/plugins/<name>/` — the disk-manifest
+// source above, so the server picks it up with a rescan, no restart, and no git
+// checkout of your own:
+//
+// ```bash
+// karucode plugin install owner/plugin-repo           # every plugin it offers
+// karucode plugin install owner/plugin-repo wordy     # just these
+// karucode plugin install owner/plugin-repo@v0.2.0    # a tag, branch or commit
+// karucode plugin install https://github.com/owner/plugin-repo
+// karucode plugin install https://github.com/owner/plugin-repo/tree/main/wordy
+// karucode plugin install ./my-plugins                # a local directory, same layout
+// karucode plugin install owner/plugin-repo --list    # what does it offer?
+// ```
+//
+// A repository is one of three shapes, tried in this order:
+//
+// 1. a root `index.toml` — the curated list, and the only one `--list` shows:
+//
+//    ```toml
+//    [[plugins]]
+//    name = "wordy"                  # what `plugin install wordy` selects
+//    path = "wordy"                  # the plugin's directory, relative to the root
+//    description = "Counts words"
+//    ```
+//
+// 2. one directory per plugin at the root, each with a `plugin.toml`;
+// 3. a `plugin.toml` at the root itself — a single-plugin repository.
+//
+// Each plugin's `plugin.toml` is the same manifest as §2, plus one optional
+// table:
+//
+// ```toml
+// [install]
+// build = ["cargo", "build", "--release"]   # run in the plugin's directory
+// build_timeout_secs = 900                  # default 900
+// exclude = ["examples"]                    # extra dirs not to copy
+// ```
+//
+// What the installer does with the sources: downloads the tarball from
+// `codeload.github.com` (public without a token, private with `GH_TOKEN` or
+// `GITHUB_TOKEN`), extracts it in-process — absolute paths, `..` components,
+// symlinks and hardlinks are refused outright — runs `[install].build` in a
+// staging copy, then moves the result in with `command` rewritten to the
+// installed location. A manifest `command` that points outside the plugin's
+// own directory is refused: an installed plugin must be self-contained.
+// `target/`, `node_modules/`, `.git/`, `venv/` and friends are never copied.
+// An existing `<data_dir>/plugins/<name>/` is an error unless `--force`, which
+// swaps atomically and restores the old copy if the swap fails. Every install
+// writes an `install.json` beside `plugin.toml` recording where it came from
+// (`owner/repo@<sha>` or `local:<path>`), the tarball's sha256 and the final
+// command.
+//
+// A repository manifest may not grant itself operator power:
+// `permissions = ["*"]`, `settings.trust` and `settings.read_only_tools` are
+// stripped from the installed manifest with a warning (the same keys the host
+// ignores in a disk manifest — see the permissions section). Narrow
+// permissions such as `files.read` are copied as written; install the plugin
+// and add the operator-only key yourself in `config.toml` if you mean it.
+//
+// `--ref <ref>` overrides a ref carried by the URL; `--no-build` skips the
+// build; `--build-timeout-secs` overrides `[install]`;
+// `--data-dir`/`--config` choose the target like the server flags. The command
+// needs no running server, starts nothing, and touches nothing outside the
+// data directory.
+//
+// The same install runs from the browser: **Settings → Plugins & MCP →
+// Install from a repository** previews the source (names, declared
+// permissions, which plugins build), installs with a live progress log, and
+// rescans the host when the job lands so the plugin is *ready* without a
+// second click. On a server with `admin_token` configured the browser asks
+// for the admin credential the moment it is needed. The HTTP routes are
+// `POST /api/plugins/install/preview`, `POST /api/plugins/install`,
+// `GET /api/plugins/install/:id` and `POST /api/plugins/install/:id/cancel`.
+//
+// # 5. Install, upgrade and remove a plugin without a restart
 //
 // The host re-reads its sources on demand, so none of the three needs a server
 // restart:
 //
 // ```bash
-// # install: drop a manifest into the data dir, then apply it
+// # install: `karucode plugin install …` (§4) or drop a manifest into the data dir
 // curl -s -X POST localhost:8787/api/plugins/reload -H 'X-Karucode-Client: web' \
 //   -H 'Content-Type: application/json' -d '{}' | jq .report
 // # { "added": ["wordy"], "removed": [], "restarted": [], "unchanged": ["example-hello"] }
 //
-// # upgrade: rebuild the binary in place, then replace just that process
+// # upgrade: `karucode plugin install … --force`, or rebuild the binary in place
 // curl -s -X POST localhost:8787/api/plugins/wordy/reload -H 'X-Karucode-Client: web' \
 //   -H 'Content-Type: application/json' -d '{}' | jq .status
 //

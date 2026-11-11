@@ -123,6 +123,10 @@ stop it first. This is deliberate: a misclick must not delete source code.
   A control chat (or another project-less session) instead retains its recorded
   workspace. Uploads without an explicit `project` follow that record and never
   silently land in the default project.
+* A temporary (`ephemeral`) session never shows in any project's list, even
+  though it belongs to a project: `GET /api/sessions?project=…` excludes it.
+  It is a chat for a program (see the `ephemeral-sessions` topic), not a row
+  for the rail.
 * Symlinked project roots are canonicalised on insert, so the stored path is the
   real one.
 

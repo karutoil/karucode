@@ -268,6 +268,9 @@ pub struct HarnessBuilder {
     scripts: Vec<Script>,
     models: ModelsMode,
     auth_token: Option<String>,
+    /// `admin_token` in the config: the gate `POST /api/update/apply` and the
+    /// plugin-install routes demand via `X-Karucode-Admin-Token`.
+    admin_token: Option<String>,
     lock_settings: bool,
     web_dir: Option<PathBuf>,
     extra_tools: Vec<Arc<dyn Tool>>,
@@ -301,6 +304,7 @@ impl HarnessBuilder {
             scripts,
             models: ModelsMode::Ok(vec!["test-model".into()]),
             auth_token: None,
+            admin_token: None,
             lock_settings: false,
             web_dir: None,
             extra_tools: Vec::new(),
@@ -390,6 +394,13 @@ impl HarnessBuilder {
         self
     }
 
+    /// Configure `admin_token`, arming the admin gate for the routes that
+    /// require it (`X-Karucode-Admin-Token`).
+    pub fn admin_token(mut self, token: &str) -> Self {
+        self.admin_token = Some(token.to_string());
+        self
+    }
+
     pub fn lock_settings(mut self) -> Self {
         self.lock_settings = true;
         self
@@ -455,6 +466,7 @@ impl HarnessBuilder {
             workspace_root: workspace_dir.clone(),
             data_dir: data_dir.clone(),
             auth_token: self.auth_token,
+            admin_token: self.admin_token,
             lock_settings: self.lock_settings,
             web_dir: web_dir.clone(),
             // The settings snapshot is what a plugin reload re-reads, so it must

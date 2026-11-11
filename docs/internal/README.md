@@ -24,11 +24,12 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`configuration`](configuration.md) | The four config layers, which settings apply live, and how secrets and invalid values are handled. | `crates/kc-server/src/settings.rs:14` |
 | [`deployment`](deployment.md) | Install the binary and a hardened unit, keep it enabled across reboots, and upgrade or roll back without losing the paths it needs. | `crates/kc-server/src/main.rs:6` |
 | [`documentation`](documentation.md) | Doc blocks in the code compile into the built-in docs the agent reads; add, update and delete them with the code. | `crates/kc-docs/src/lib.rs:33` |
+| [`ephemeral-sessions`](ephemeral-sessions.md) | Create an ephemeral session for a program: it never appears in a session list and deletes itself once its work is over. | `crates/kc-server/src/routes/sessions.rs:3` |
 | [`http-api`](http-api.md) | Authenticate, send the CSRF header, and find the endpoint for sessions, config, approvals, files, git, plugins, MCP and the event stream. | `crates/kc-server/src/lib.rs:21` |
 | [`mcp`](mcp.md) | Add stdio or streamable-HTTP MCP servers to the config and use their tools through the same approval policy. | `crates/kc-mcp/src/lib.rs:18` |
 | [`missions`](missions.md) | Group explicitly started project-local sessions across projects in durable missions. | `crates/kc-server/src/routes/missions.rs:3` |
 | [`notifications`](notifications.md) | karucode pings you when a run settles, parks on an approval or fails — with a sound per kind, desktop notifications, an unread badge, and four independent ways to turn it off. | `crates/kc-core/src/notify.rs:24` |
-| [`plugins`](plugins.md) | Build an out-of-process plugin that adds tools, hooks, inspector panels and UI controls (buttons, palette commands, keyboard shortcuts, hides), register it, and debug it when it fails to start. | `crates/kc-plugin-sdk/src/lib.rs:49` |
+| [`plugins`](plugins.md) | Build a plugin with the SDK, register it, install a plugin collection from a GitHub repository or a local directory, and debug it when it fails to start. | `crates/kc-plugin-sdk/src/lib.rs:49` |
 | [`project-instructions`](project-instructions.md) | How karucode finds a workspace's instructions file, which name wins, how much of it reaches the system prompt, and why it cannot override your request. | `crates/kc-core/src/prompt.rs:95` |
 | [`projects`](projects.md) | How projects map to directories, how sessions are confined to one, and what happens when a project's directory moves or is deleted. | `crates/kc-server/src/state.rs:6` |
 | [`prompt-cache`](prompt-cache.md) | Why a long run can re-bill its whole context every turn, what karucode does to keep the cached prefix stable, and how to read the hit rate. | `crates/kc-runtime/src/context.rs:89` |
@@ -48,4 +49,4 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`web-auth`](web-auth.md) | Put a password or a passkey in front of the web UI, choose the address it answers to, and understand what each sign-in method costs. | `crates/kc-server/src/routes/auth.rs:14` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-32 topic(s).
+33 topic(s).

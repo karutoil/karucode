@@ -3944,8 +3944,7 @@ async fn a_turn_the_provider_gave_up_on_is_asked_again_after_a_wait() {
     .await;
 
     assert_eq!(
-        h.settings.limits.max_turn_retries,
-        1,
+        h.settings.limits.max_turn_retries, 1,
         "the harness must hand the loop the budget this test is about"
     );
     let events = h.run_to_finish("answer").await;
@@ -3953,7 +3952,12 @@ async fn a_turn_the_provider_gave_up_on_is_asked_again_after_a_wait() {
         Event::Error { message, .. } => Some(message.clone()),
         _ => None,
     });
-    assert_eq!(finished_status(&events), "completed", "{:?} err={err:?}", kinds(&events));
+    assert_eq!(
+        finished_status(&events),
+        "completed",
+        "{:?} err={err:?}",
+        kinds(&events)
+    );
     assert_eq!(h.factory.requests().len(), 2, "the same turn, asked twice");
 
     // Announced twice over: the event is what makes a live client drop anything
@@ -5365,6 +5369,73 @@ async fn subagent_model_override_is_used_for_the_child_request() {
     assert_eq!(h.store.agents()[0].model, "cheap-model");
 }
 
+/// The requested model may live on *another* profile of this install: the id
+/// is one we created and made available, so it passes the check - and the child
+/// must actually run on the profile that declares it, inheriting that
+/// profile's endpoint instead of the session's.
+#[tokio::test]
+async fn a_model_from_another_profile_routes_the_child_onto_that_profile() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[(
+            "call_spawn",
+            SPAWN_AGENT_TOOL,
+            &serde_json::json!({
+                "task": "child work on the other gateway",
+                "model": "od/deepseek-v4.1-flash",
+            })
+            .to_string(),
+        )]),
+        Script::text("child summary"),
+        Script::text("parent done"),
+    ])
+    .settings(
+        FakeSettings::default()
+            .with_known_models(&["fake-model", "cheap-model"])
+            .with_alt_profile(
+                "https://omniroute.example/v1",
+                &["od/deepseek-v4.1-flash", "od/other"],
+            ),
+    )
+    .build()
+    .await;
+
+    let _ = h.run_to_finish("delegate").await;
+    // The child's request carries the requested id, and its provider was
+    // built from the *other* profile's endpoint, not the session's.
+    let requests = h.factory.requests();
+    assert_eq!(requests[1].model, "od/deepseek-v4.1-flash");
+    let built = h.factory.built_configs();
+    assert!(
+        built
+            .iter()
+            .any(|(m, url)| m == "od/deepseek-v4.1-flash" && url == "https://omniroute.example/v1"),
+        "the child must run on the profile that declares the model: {built:?}"
+    );
+    assert_eq!(h.store.agents()[0].model, "od/deepseek-v4.1-flash");
+}
+
+/// An install with no declared catalog has no ground to refuse on: the
+/// override is used as typed, on the session's endpoint (pass-through).
+#[tokio::test]
+async fn an_uncatalogued_install_keeps_the_pass_through_override() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[(
+            "call_spawn",
+            SPAWN_AGENT_TOOL,
+            &serde_json::json!({ "task": "child work", "model": "whatever-free-form" }).to_string(),
+        )]),
+        Script::text("child summary"),
+        Script::text("parent done"),
+    ])
+    .build()
+    .await;
+
+    let _ = h.run_to_finish("delegate").await;
+    let requests = h.factory.requests();
+    assert_eq!(requests[1].model, "whatever-free-form");
+    assert_eq!(h.store.agents()[0].model, "whatever-free-form");
+}
+
 /// The `model` argument of a spawn is the one model id nobody derived, and an id
 /// the endpoint cannot resolve used to kill the child on its first provider call.
 /// It must be refused up front, in the tool result, naming a real alternative.
@@ -5402,7 +5473,12 @@ async fn an_unknown_subagent_model_is_refused_before_the_child_is_started() {
     // Nothing was started, so nothing was persisted and no provider call was
     // made with the bad id: the two requests are the parent's own two turns.
     assert!(h.store.agents().is_empty(), "{:?}", h.store.agents());
-    let models: Vec<String> = h.factory.requests().iter().map(|r| r.model.clone()).collect();
+    let models: Vec<String> = h
+        .factory
+        .requests()
+        .iter()
+        .map(|r| r.model.clone())
+        .collect();
     assert_eq!(models, vec!["fake-model".to_string(); 2], "{models:?}");
 }
 
@@ -5631,7 +5707,7 @@ async fn expiring_one_subagent_scope_keeps_a_sibling_approval_pending() {
     inner
         .deps
         .store
-        .create_session("s_scope", "scoped", "/w", None)
+        .create_session("s_scope", "scoped", "/w", None, false)
         .await
         .expect("session");
 
@@ -9557,4 +9633,95 @@ async fn a_child_keeps_the_coordination_tools_but_not_the_spawning_ones() {
 
     handle.release();
     let _ = h.collect_until_finished().await;
+}
+
+// ---------------------------------------------------------------------------
+// ephemeral sessions
+// ---------------------------------------------------------------------------
+
+/// A temporary session disappears when its run finishes: the teardown deletes
+/// the row, the transcript goes with it, and `session_deleted` is published.
+#[tokio::test]
+async fn an_ephemeral_session_retires_when_its_run_finishes() {
+    let mut h = HarnessBuilder::new(vec![Script::text("done")])
+        .ephemeral()
+        .build()
+        .await;
+
+    let events = h.run_to_finish("hi").await;
+    assert_eq!(finished_status(&events), "completed");
+    // The teardown runs after `run_finished`; wait for the loops to go, then
+    // drain the frames the teardown published.
+    assert!(h.wait_idle().await.is_empty());
+    let tail = h.collect_until_quiet().await;
+    let mut all = events;
+    all.extend(tail);
+    assert!(
+        all.iter().any(|e| matches!(&e.event, Event::SessionDeleted { session_id } if session_id.as_str() == h.session_id.as_str())),
+        "the retire must publish session_deleted: {all:?}"
+    );
+
+    // The row and its messages are gone.
+    assert!(h.store.get_session(&h.session_id).await.unwrap().is_none());
+    assert!(h.session_messages().await.is_empty());
+}
+
+/// A queued follow-up is work: the finishing run must leave the session alive
+/// for the follow-up it started, and the *last* run's teardown retires it.
+#[tokio::test]
+async fn a_queued_follow_up_defers_the_ephemeral_retire() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::Hang(vec![ProviderChunk::Text("busy".into())]),
+        Script::text("second answer"),
+    ])
+    .ephemeral()
+    .build()
+    .await;
+
+    // First run hangs; a follow-up queued while it runs must be run when it
+    // ends, and the session must survive the first teardown for it.
+    h.submit("first").await;
+    let _ = h.wait_idle().await;
+    h.runtime
+        .enqueue_follow_up(h.session(), "second")
+        .expect("a run is active, so the follow-up is accepted");
+
+    // Release the hang: cancel the first run, which (like finishing) ends in
+    // the same teardown, then the follow-up starts on its own.
+    h.runtime.cancel(h.session());
+    // Collect until everything is quiet: the first run's teardown, the
+    // follow-up's own whole run, and the second teardown that retires the row.
+    let tail = h.collect_until_quiet().await;
+    let statuses: Vec<&str> = tail
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::RunFinished { status, .. } => Some(status.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(statuses.len(), 2, "both runs must finish: {tail:?}");
+
+    // Both runs answered before the row went; the follow-up was not lost.
+    assert_eq!(h.factory.requests().len(), 2, "the follow-up must run");
+    assert!(
+        h.store.get_session(&h.session_id).await.unwrap().is_none(),
+        "the second (last) run's teardown must retire the session"
+    );
+    assert!(h.session_messages().await.is_empty());
+}
+
+/// The retire path refuses to touch a durable session, whatever calls it.
+#[tokio::test]
+async fn the_ephemeral_retire_leaves_durable_sessions_alone() {
+    let mut h = HarnessBuilder::new(vec![Script::text("done")])
+        .build()
+        .await;
+
+    let _ = h.run_to_finish("hi").await;
+    assert!(h.wait_idle().await.is_empty());
+    let deleted = h.runtime.retire_idle_ephemeral_session(&h.session_id).await;
+    assert!(!deleted, "a durable session is the user's record");
+    assert!(h.store.get_session(&h.session_id).await.unwrap().is_some());
+    let messages = h.session_messages().await;
+    assert_eq!(messages.len(), 2, "the transcript is untouched");
 }

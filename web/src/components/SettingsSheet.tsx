@@ -32,6 +32,7 @@ import type {
 } from '../theme';
 import { SettingsAdvanced } from './SettingsAdvanced';
 import { AccessSettings } from './AccessSettings';
+import { PluginInstallSection } from './PluginInstallSection';
 import { UpdateSettings } from './UpdateSettings';
 import { Dialog } from './Dialog';
 import {
@@ -3061,7 +3062,7 @@ export function SettingsSheet(): JSX.Element | null {
                             <h3 id="settings-limits">Limits</h3>
                             <span class="settings-section-note">Resource and context bounds</span>
                           </div>
-                          <div class="field-grid field-grid-compact">
+                          <div class="field-grid">
                             {LIMIT_FIELDS.map((field) => (
                               <Field
                                 key={field.key}
@@ -3250,6 +3251,14 @@ export function SettingsSheet(): JSX.Element | null {
                             </ul>
                           </div>
                         </div>
+
+                        {/* Installing from a repository is the other half of
+                            plugin lifecycle: this block owns its own calls,
+                            and after a successful job it bumps the same
+                            diagnostics key the Refresh button uses. */}
+                        <PluginInstallSection
+                          onInstalled={() => setDiagnosticsKey((key) => key + 1)}
+                        />
 
                         {/* What plugins added to the interface, and what they asked the
                           * app to hide. This is the person's side of that bargain: a

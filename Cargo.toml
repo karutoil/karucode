@@ -74,6 +74,10 @@ tower-http = { version = "0.6", features = ["fs", "trace", "cors", "compression-
 rust-embed = { version = "8", features = ["include-exclude", "debug-embed"] }
 mime_guess = "2"
 sha2 = "0.10"
+# Plugin installs (`karucode plugin install`): stream a GitHub tarball and
+# unpack it in-process. `tar` needs no extra feature flags for plain archives.
+tar = "0.4"
+flate2 = "1"
 
 [profile.release]
 opt-level = 2

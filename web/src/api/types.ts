@@ -701,6 +701,12 @@ export interface Session {
   model?: SessionModelSelection | null;
   /** Project the session runs in (null for a session created without one). */
   project_id: string | null;
+  /**
+   * True for a temporary session: never listed anywhere in the UI, and deleted
+   * by the server once its work is over. Sent as `false` for ordinary sessions
+   * and absent from payloads written before the field existed.
+   */
+  ephemeral?: boolean;
   created_at: number;
   updated_at: number;
 }

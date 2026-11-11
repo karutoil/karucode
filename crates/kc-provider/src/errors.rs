@@ -607,7 +607,10 @@ mod tests {
             Some(Duration::from_secs(86_400))
         );
         // No hint is not a zero-length hint: the caller falls back to backoff.
-        assert_eq!(retry_after_hint("provider rejected the request (400)"), None);
+        assert_eq!(
+            retry_after_hint("provider rejected the request (400)"),
+            None
+        );
         assert_eq!(retry_after_hint("reset_seconds: none"), None);
     }
 }

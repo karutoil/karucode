@@ -987,9 +987,14 @@ describe('ChatTranscript rerender cost', () => {
     const view = render(
       <ChatTranscript items={items()} resolvingApprovals={approvals} onApprovalDecision={onApprovalDecision} />,
     );
+    // The median of ten rerenders, not their mean: a scheduler stall or a GC
+    // pause inside the loop is one sample, and averaging it in makes the
+    // comparison depend on what else the machine was doing rather than on what a
+    // token costs. That is what made this test flake under a parallel run.
     const perToken = (): number => {
-      const start = performance.now();
+      const samples: number[] = [];
       for (let index = 0; index < 10; index += 1) {
+        const start = performance.now();
         content += 'token ';
         act(() => {
           view.rerender(
@@ -1000,8 +1005,10 @@ describe('ChatTranscript rerender cost', () => {
             />,
           );
         });
+        samples.push(performance.now() - start);
       }
-      return (performance.now() - start) / 10;
+      samples.sort((a, b) => a - b);
+      return samples[Math.floor(samples.length / 2)];
     };
 
     const early = perToken();

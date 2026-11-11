@@ -110,7 +110,8 @@ refused.
   never guess an id.
 - `control_list_sessions` (read-only): sessions across projects with status,
   project, message count and last update; optionally by `project_id`, `running`
-  or a title `query`.
+  or a title `query`. Temporary (`ephemeral`) sessions are never listed: they
+  exist for the API client that created them and vanish when their work ends.
 - `control_list_agents` (read-only): the subagents of any session - including a
   control chat's own - with status, model, iterations, latest `note` and
   `progress`. Pass `session_id` for one session, or narrow the whole server by

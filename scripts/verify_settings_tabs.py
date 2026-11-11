@@ -440,6 +440,76 @@ def main() -> int:
             ", ".join(f'{i["label"]}: {i["title"]}' for i in walked),
         )
 
+        # The organisation: a section is a card, and every option inside it has an
+        # edge of its own. jsdom cannot see any of this, and a new field added
+        # without the shared class would silently go back to blending in.
+        organised = session.evaluate(
+            """
+            const dlg = document.querySelector('[role=dialog]');
+            const sheet = dlg.closest('.dialog-settings') || dlg;
+            const sheetFill = getComputedStyle(sheet).backgroundColor;
+            const panels = dlg.querySelectorAll('.settings-panels > .tab-panel');
+            const out = [];
+            for (const panel of panels) {
+              for (const section of panel.querySelectorAll('.settings-section')) {
+                if (section.closest('details.settings-advanced')) continue;
+                const style = getComputedStyle(section);
+                const isOption = (el) =>
+                  el.matches('.field, .list-editor, .setting-row, .toggle-field');
+                // Every option, at any depth inside the card (fields live inside
+                // `.field-grid`, switches inside a `.field`), but not a nested one:
+                // a switch inside a field is part of that field's box.
+                const options = Array.from(
+                  section.querySelectorAll('.field, .list-editor, .setting-row, .toggle-field'),
+                )
+                  .filter((el) => !el.closest('details.settings-advanced'))
+                  .filter((el) => {
+                    for (let up = el.parentElement; up && up !== section; up = up.parentElement) {
+                      if (isOption(up)) return false;
+                    }
+                    return true;
+                  });
+                out.push({
+                  id: (section.querySelector('h3') || {}).id || '(unnamed)',
+                  fill: style.backgroundColor,
+                  edge: parseFloat(style.borderTopWidth),
+                  radius: parseFloat(style.borderTopLeftRadius),
+                  options: options.length,
+                  boxed: options.filter((el) => parseFloat(getComputedStyle(el).borderTopWidth) > 0)
+                    .length,
+                  optionsWithoutEdge: options
+                    .filter((el) => parseFloat(getComputedStyle(el).borderTopWidth) === 0)
+                    .map((el) => el.className),
+                });
+              }
+            }
+            return { sheetFill, sections: out };
+            """,
+        )
+        sections = organised["sections"]
+        check(
+            "every section is a card, not a heading over the sheet's own fill",
+            len(sections) > 0
+            and all(
+                item["edge"] >= 1
+                and item["radius"] >= 4
+                and item["fill"] != organised["sheetFill"]
+                for item in sections
+            ),
+            f'{len(sections)} section(s); fills {sorted({s["fill"] for s in sections})} '
+            f'on sheet {organised["sheetFill"]}',
+        )
+        unboxed = [item for item in sections if item["options"] and item["boxed"] != item["options"]]
+        check(
+            "every option inside a card has an edge of its own",
+            not unboxed,
+            "; ".join(
+                f'{item["id"]}: {item["boxed"]}/{item["options"]} boxed {item["optionsWithoutEdge"]}'
+                for item in unboxed
+            )
+            or f'{sum(s["options"] for s in sections)} option(s) boxed across {len(sections)} section(s)',
+        )
+
         # The Advanced blocks start collapsed, and opening one relaid out its body.
         advanced = session.evaluate(
             """

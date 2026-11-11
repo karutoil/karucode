@@ -613,10 +613,10 @@ per-session model pin (see below) and is **absent** when the session follows the
 install-wide default.
 
 `POST /api/sessions` body `{ "title": "optional", "project": "p_ab12",
-"model": { … } }` → `Session`
+"model": { … }, "ephemeral": true }` → `Session`
 ```json
 { "id": "s_ab12", "title": "New session", "workspace": "/w",
-  "project_id": "p_ab12", "created_at": 1710000000000,
+  "project_id": "p_ab12", "ephemeral": true, "created_at": 1710000000000,
   "updated_at": 1710000000000 }
 ```
 The body may be empty, which is what a client that predates projects sends:
@@ -624,6 +624,23 @@ title defaults to `"New session"` and the session is created in the default
 workspace with no project. An unknown `project` is `404 not_found`; `workspace` is
 that project's directory. The optional `model` pins the new session immediately
 (it is validated before anything is written; a bad pin is `400 bad_request`).
+
+`"ephemeral": true` (default `false`) creates a **temporary** session for a
+program rather than a person — see the built-in `ephemeral-sessions` topic for
+the whole contract. In short: it never appears in any session listing, it is
+never auto-titled, and it deletes itself once its work is over. The end of its
+life is announced with the same `session_deleted` event an ordinary delete
+sends. Three ways to end one early or in bulk:
+
+- `POST /api/sessions/:id/expire` → `{ "expired": true, "session_id": … }`.
+  `400 bad_request` on a durable session (use `DELETE`), `409 conflict` while
+  steers or follow-ups are still queued for it.
+- `DELETE /api/sessions` (no id) → `{ "deleted": N, "sessions": [ … ] }`:
+  retires every **idle** ephemeral session and never touches a durable one.
+- `DELETE /api/sessions/:id` still works and cancels any run in flight first.
+
+At startup, after interrupted runs are marked, ephemeral sessions with no work
+left are swept, so a restart cannot strand one.
 
 `GET /api/sessions/:id`
 ```json

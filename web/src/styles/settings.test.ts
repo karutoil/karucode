@@ -185,30 +185,84 @@ describe('settings sheet: the Advanced disclosure', () => {
     expect(summary['cursor']).toBe('pointer');
   });
 
-  it('insets the body to the summary gutter, and leaves the sections unpadded', () => {
-    // The sections inside bring their own vertical rhythm but no horizontal
-    // padding, so without an inset here their labels sit flush against the
-    // disclosure's border — visible in a browser, invisible to jsdom, hence the
-    // measured check in scripts/verify_settings_tabs.py as well.
+  it('is the same card as a section, with the body flattened inside it', () => {
+    // The fold used to bleed out of the panel gutter by a negative margin. It is
+    // now a card in the panel's own column (no margin, same radius as a section),
+    // and the sections inside it are flattened rather than becoming cards inside
+    // a card of the same fill.
+    const block = declarations('.settings-advanced');
+    expect(block['margin']).toBe('0');
+    expect(block['border-radius']).toBe('var(--radius)');
+
     const body = declarations('.settings-advanced-body');
-    // The block bleeds out by exactly this inset, so controls inside the fold
-    // share the panel's gutter with the controls outside it (DESIGN-AUDIT M3).
-    expect(body['padding']).toMatch(/^0 var\(--space-6\) /);
-    expect(declarations('.settings-advanced')['margin']).toMatch(
-      /calc\(-1 \* var\(--space-6\)\)/,
-    );
+    expect(body['padding']).toBe('var(--space-6) var(--space-7)');
     expect(body['display']).toBe('flex');
     expect(body['flex-direction']).toBe('column');
+
+    const inner = declarations('.settings-advanced-body > .settings-section');
+    expect(inner['border']).toBe('0');
+    expect(inner['padding']).toBe('0');
+    expect(inner['background']).toBe('transparent');
   });
 
-  it('draws no divider under the last section inside the fold', () => {
-    // The disclosure is the end of the panel, so the section divider that keeps
-    // unrelated sections apart has nothing to separate there.
-    expect(css).toContain('.settings-advanced-body .settings-section:last-of-type');
+  it('still rules one folded section off the next', () => {
+    // Two sections in one fold are transparent now, so the line between them has
+    // to be drawn by the fold itself.
+    expect(css).toMatch(
+      /\.settings-advanced-body > \.settings-section \+ \.settings-section \{[^}]*border-top: 1px solid var\(--line\)/,
+    );
   });
 
   it('rotates the chevron to point at the open body', () => {
     expect(css).toContain('.settings-advanced[open] > summary .settings-advanced-label svg');
+  });
+});
+
+describe('settings sheet: a section, and the options inside it', () => {
+  it('makes a section a card with a ruled title bar', () => {
+    // The pane was one flat column: a section was a heading over a field grid on
+    // the sheet's own fill, told apart from the next one by a single hairline.
+    const section = declarations('.settings-section');
+    expect(section['background']).toBe('var(--surface)');
+    expect(section['border']).toBe('1px solid var(--line)');
+    expect(section['border-radius']).toBe('var(--radius)');
+    expect(section['padding']).toBe('var(--space-6) var(--space-7)');
+
+    // …and the head is a title bar, so "what this group is" is separated from
+    // the options under it.
+    const head = declarations('.settings-section-head');
+    expect(head['border-bottom']).toBe('1px solid var(--line)');
+    expect(head['padding-bottom']).toBe('var(--space-4)');
+  });
+
+  it('boxes every option, whatever shape it takes', () => {
+    // One rule for the three shapes an option can have (a labelled field, a
+    // switch row, a name-plus-control row), scoped to the sheet body so a field
+    // in a dialog is not boxed twice.
+    expect(css).toMatch(
+      /\.settings-body \.field,\n\.settings-body \.list-editor,\n\.settings-body \.setting-row,\n\.settings-section > \.toggle-field \{/,
+    );
+    expect(css).toMatch(
+      /\.settings-body \.field,[\s\S]*?\{\n  padding: var\(--space-5\) var\(--space-6\);\n  border: 1px solid var\(--line\);\n  border-radius: var\(--radius-sm\);/,
+    );
+  });
+
+  it('spaces the grid without drawing a second frame around it', () => {
+    // The tiles carry the edges; the grid only spaces them, which is what keeps
+    // an odd last row from leaving a lit cell.
+    const grid = declarations('.field-grid');
+    expect(grid['gap']).toBe('var(--space-4)');
+    expect(grid['border']).toBeUndefined();
+    expect(grid['background']).toBeUndefined();
+  });
+
+  it('turns a section subheading into a kicker, not one more field label', () => {
+    // "Set a password" and "Which events" sat at the same size and weight as a
+    // `.field-label`, so a group heading read as another option.
+    const h4 = declarations('.settings-subhead h4');
+    expect(h4['text-transform']).toBe('uppercase');
+    expect(h4['font-size']).toBe('var(--fs-micro)');
+    expect(h4['color']).toBe('var(--text-kicker)');
   });
 });
 

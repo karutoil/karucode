@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 23;
+const SCHEMA_VERSION: i64 = 24;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -369,6 +369,15 @@ const MIGRATION_23: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_sessions_control_updated ON sessions(control, updated_at);
 "#;
 
+/// Schema v24: temporary sessions. `ephemeral` marks a session an API client
+/// asked to keep out of every listing and to delete when its work is over.
+/// The column lives in [`ADDED_COLUMNS`] (SQLite has no `ADD COLUMN IF NOT
+/// EXISTS`), and the batch is empty: no query needs an index on a flag whose
+/// rows are a handful, and the listings - which *exclude* the flag - keep
+/// their existing `idx_sessions_control_updated` / `idx_sessions_project_id`
+/// plans.
+const MIGRATION_24: &str = "";
+
 const MIGRATION_12: &str = r#"
 CREATE TABLE IF NOT EXISTS missions (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -481,6 +490,7 @@ const ADDED_COLUMNS: &[(i64, &str, &str, &str)] = &[
     ),
     (20, "sessions", "control", "INTEGER NOT NULL DEFAULT 0"),
     (22, "projects", "result_panel_width", "INTEGER"),
+    (24, "sessions", "ephemeral", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 pub struct SqliteStore {
@@ -708,6 +718,9 @@ fn map_session(row: &Row<'_>) -> rusqlite::Result<Session> {
         workspace: row.get("workspace")?,
         project_id: row.get("project_id")?,
         model: json_opt(row.get("model")?, "sessions.model"),
+        ephemeral: row
+            .get::<_, Option<i64>>("ephemeral")?
+            .is_some_and(|value| value == 1),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -759,6 +772,10 @@ fn map_session_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         control: row
             .get::<_, Option<i64>>("control")?
             .is_some_and(|value| value == 1),
+        // Same reasoning as `control`: a NULL from a pre-v24 row is "durable".
+        ephemeral: row
+            .get::<_, Option<i64>>("ephemeral")?
+            .is_some_and(|value| value == 1),
     })
 }
 
@@ -777,7 +794,7 @@ fn summarize_sessions(
 ) -> Result<Vec<SessionSummary>> {
     let base =
         "SELECT s.id, s.title, s.workspace, s.project_id, s.model, s.created_at, s.updated_at,
-                       s.control,
+                       s.control, s.ephemeral,
                        (SELECT COUNT(*) FROM messages m
                          WHERE m.session_id = s.id AND m.rewound_at IS NULL) AS message_count,
                        (SELECT r.status FROM runs r
@@ -786,13 +803,18 @@ fn summarize_sessions(
                        EXISTS(SELECT 1 FROM runs r
                                WHERE r.session_id = s.id AND r.status = 'running') AS running
                   FROM sessions s";
+    // A temporary session is never listed, in any scope: it exists for the API
+    // client that created it, which learns its end from the `session_deleted`
+    // event. The filter goes before the scope's own so both apply.
     let sql = match scope {
         SessionScope::Project(_) => {
-            format!("{base} WHERE s.project_id = ?1 ORDER BY s.updated_at DESC, s.id DESC")
+            format!("{base} WHERE s.ephemeral = 0 AND s.project_id = ?1 ORDER BY s.updated_at DESC, s.id DESC")
         }
-        SessionScope::All => format!("{base} ORDER BY s.updated_at DESC, s.id DESC"),
+        SessionScope::All => {
+            format!("{base} WHERE s.ephemeral = 0 ORDER BY s.updated_at DESC, s.id DESC")
+        }
         SessionScope::Control => {
-            format!("{base} WHERE s.control = 1 ORDER BY s.updated_at DESC, s.id DESC")
+            format!("{base} WHERE s.ephemeral = 0 AND s.control = 1 ORDER BY s.updated_at DESC, s.id DESC")
         }
     };
     let mut stmt = conn
@@ -1327,6 +1349,7 @@ impl SqliteStore {
                     21 => MIGRATION_21,
                     22 => MIGRATION_22,
                     23 => MIGRATION_23,
+                    24 => MIGRATION_24,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -2060,7 +2083,7 @@ impl Store for SqliteStore {
             )
             .map_err(|e| db_err("create control session", e))?;
             conn.query_row(
-                "SELECT id,title,workspace,project_id,model,created_at,updated_at FROM sessions WHERE id=?1",
+                "SELECT id,title,workspace,project_id,model,created_at,updated_at,ephemeral FROM sessions WHERE id=?1",
                 params![id],
                 map_session,
             )
@@ -2136,6 +2159,7 @@ impl Store for SqliteStore {
         title: &str,
         workspace: &str,
         project_id: Option<&str>,
+        ephemeral: bool,
     ) -> Result<Session> {
         let id = id.to_string();
         let title = title.to_string();
@@ -2144,15 +2168,14 @@ impl Store for SqliteStore {
         self.with(move |conn| {
             let now = now_ms();
             conn.execute(
-                "INSERT INTO sessions (id, title, workspace, project_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO sessions (id, title, workspace, project_id, created_at, updated_at, ephemeral)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(id) DO NOTHING",
-                params![id, title, workspace, project_id, now, now],
+                params![id, title, workspace, project_id, now, now, ephemeral as i64],
             )
             .map_err(|e| db_err("create_session", e))?;
             conn.query_row(
-                "SELECT id, title, workspace, project_id, model, created_at, updated_at
-                   FROM sessions WHERE id = ?1",
+                "SELECT id, title, workspace, project_id, model, created_at, updated_at, ephemeral FROM sessions WHERE id = ?1",
                 params![id],
                 map_session,
             )
@@ -2215,7 +2238,7 @@ impl Store for SqliteStore {
         let id = id.to_string();
         self.read(move |conn| {
             let mut stmt = conn
-                .prepare("SELECT id, title, workspace, project_id, model, created_at, updated_at FROM sessions WHERE id = ?1")
+                .prepare("SELECT id, title, workspace, project_id, model, created_at, updated_at, ephemeral FROM sessions WHERE id = ?1")
                 .map_err(|e| db_err("get_session prepare", e))?;
             let mut rows = stmt.query_map(params![id], map_session).map_err(|e| db_err("get_session query", e))?;
             match rows.next() {
@@ -2309,6 +2332,38 @@ impl Store for SqliteStore {
             tx.commit()
                 .map_err(|e| db_err("delete_session commit", e))?;
             Ok(())
+        })
+        .await
+    }
+
+    /// Ids of temporary sessions with no work left in the database. Read-only:
+    /// the caller owns the in-memory queues and the `SessionDeleted` events, so
+    /// it re-checks those before deleting each row.
+    async fn idle_ephemeral_session_ids(&self) -> Result<Vec<String>> {
+        self.read(move |conn| {
+            // Gating is the durable truth the runtime also believes: a row is
+            // idle when no run is registered, no subagent is live and no
+            // approval is waiting. Queued steers/follow-ups are runtime memory,
+            // which is why this is a candidate list rather than a delete.
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id FROM sessions WHERE ephemeral = 1 AND NOT EXISTS(
+                        SELECT 1 FROM runs r WHERE r.session_id = sessions.id AND r.status = 'running'
+                     ) AND NOT EXISTS(
+                        SELECT 1 FROM agents a WHERE a.session_id = sessions.id
+                         AND a.status IN ('running', 'paused')
+                     ) AND NOT EXISTS(
+                        SELECT 1 FROM approvals p WHERE p.session_id = sessions.id
+                         AND p.status = 'pending'
+                     ) ORDER BY sessions.created_at ASC, sessions.id ASC",
+                )
+                .map_err(|e| db_err("idle ephemeral select", e))?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| db_err("idle ephemeral rows", e))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("idle ephemeral collect", e))?;
+            Ok(ids)
         })
         .await
     }
@@ -4796,6 +4851,7 @@ mod tests {
                 21 => MIGRATION_21,
                 22 => MIGRATION_22,
                 23 => MIGRATION_23,
+                24 => MIGRATION_24,
                 other => panic!("no batch for v{other}"),
             };
             for (_, table, column, decl) in ADDED_COLUMNS
@@ -4876,7 +4932,7 @@ mod tests {
         assert!(listed.iter().all(|session| session.project_id.is_none()));
         // A project session is not a control session and is never listed with them.
         let ordinary = store
-            .create_session("n", "Project work", "/q", Some("q"))
+            .create_session("n", "Project work", "/q", Some("q"), false)
             .await
             .unwrap();
         assert!(!store.is_control_session(&ordinary.id).await.unwrap());
@@ -4931,7 +4987,7 @@ mod tests {
             .await
             .expect("control chat");
         store
-            .create_session("work", "Project work", "/w", None)
+            .create_session("work", "Project work", "/w", None, false)
             .await
             .expect("ordinary session");
 
@@ -4955,6 +5011,69 @@ mod tests {
         assert!(chats.iter().all(|chat| chat.control), "{chats:?}");
     }
 
+    /// A temporary session is never listed, but is fully readable by id, and the
+    /// idle-candidate query reports it only while it has no work left.
+    #[tokio::test]
+    async fn ephemeral_sessions_are_unlisted_but_readable_and_gated() {
+        let db = TempDb::new("ephemeral");
+        let store = db.open().await;
+        store
+            .create_session("eph", "Temp chat", "/w", None, true)
+            .await
+            .expect("ephemeral session");
+        store
+            .create_session("keep", "Real chat", "/w", None, false)
+            .await
+            .expect("durable session");
+
+        // Never listed, in any scope.
+        let all = store.list_sessions().await.expect("list");
+        assert!(!all.iter().any(|s| s.id == "eph"), "{all:?}");
+        assert!(all.iter().any(|s| s.id == "keep"), "{all:?}");
+
+        // Readable by id: the creating client polls `GET /api/sessions/:id`.
+        let session = store.get_session("eph").await.expect("read").expect("row");
+        assert!(session.ephemeral, "{session:?}");
+        let durable = store.get_session("keep").await.expect("read").expect("row");
+        assert!(!durable.ephemeral, "{durable:?}");
+
+        // Idle straight away - nothing has run in it.
+        let idle = store.idle_ephemeral_session_ids().await.expect("idle");
+        assert_eq!(idle, vec!["eph".to_string()], "{idle:?}");
+
+        // A running run, a live agent or a pending approval each hold it back.
+        store.create_run("r1", "eph", "m", "p").await.expect("run");
+        let busy = store.idle_ephemeral_session_ids().await.expect("idle");
+        assert!(busy.is_empty(), "a running run is work: {busy:?}");
+        store
+            .finish_run("r1", RunStatus::Completed, None)
+            .await
+            .expect("finish");
+        let idle_again = store.idle_ephemeral_session_ids().await.expect("idle");
+        assert_eq!(idle_again, vec!["eph".to_string()], "{idle_again:?}");
+    }
+
+    /// The flag survives the JSON wire form, so a client that only ever sees
+    /// `/api/sessions/:id` still learns which kind of session it is holding.
+    #[tokio::test]
+    async fn ephemeral_flag_round_trips_through_json() {
+        let db = TempDb::new("ephemeral-json");
+        let store = db.open().await;
+        let session = store
+            .create_session("eph", "Temp", "/w", None, true)
+            .await
+            .expect("ephemeral");
+        let json = serde_json::to_value(&session).expect("serialize");
+        assert_eq!(json["ephemeral"], serde_json::json!(true), "{json:?}");
+        let back: Session = serde_json::from_value(json).expect("deserialize");
+        assert!(back.ephemeral);
+        // Old payloads without the field are durable, not broken.
+        let legacy =
+            serde_json::json!({"id":"x","title":"","workspace":"","created_at":0,"updated_at":0});
+        let parsed: Session = serde_json::from_value(legacy).expect("legacy session");
+        assert!(!parsed.ephemeral);
+    }
+
     /// v19 held one control chat in a singleton table; v20 turns that row into a
     /// marked session and drops the table so more chats can exist.
     #[tokio::test]
@@ -4963,7 +5082,7 @@ mod tests {
         let store = Arc::new(db.open().await);
         store.create_project("p", "P", "/p").await.unwrap();
         let legacy = store
-            .create_session("legacy", "Control chat", "/p", Some("p"))
+            .create_session("legacy", "Control chat", "/p", Some("p"), false)
             .await
             .unwrap();
         store
@@ -5974,7 +6093,7 @@ mod tests {
         let store = db.open().await;
 
         let session = store
-            .create_session("s_1", "First", "/workspace", None)
+            .create_session("s_1", "First", "/workspace", None, false)
             .await
             .expect("create");
         assert_eq!(session.id, "s_1");
@@ -5984,7 +6103,7 @@ mod tests {
 
         // Caller-supplied id, idempotent on repeat.
         let again = store
-            .create_session("s_1", "Ignored", "/other", None)
+            .create_session("s_1", "Ignored", "/other", None, false)
             .await
             .expect("create again");
         assert_eq!(again.title, "First");
@@ -6058,7 +6177,7 @@ mod tests {
         let store = db.open().await;
 
         let created = store
-            .create_session("s_1", "First", "/workspace", None)
+            .create_session("s_1", "First", "/workspace", None, false)
             .await
             .expect("create");
         assert!(
@@ -6182,7 +6301,7 @@ mod tests {
         let store = db.open().await;
 
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         let msg_id = store
@@ -6223,7 +6342,10 @@ mod tests {
         let db = TempDb::new("recovery-candidates");
         let store = db.open().await;
         for id in ["old_run", "old_agent", "old_done", "recent_a", "recent_b"] {
-            store.create_session(id, id, "/w", None).await.unwrap();
+            store
+                .create_session(id, id, "/w", None, false)
+                .await
+                .unwrap();
         }
         store
             .create_run("run", "old_run", "model", "prompt")
@@ -6281,11 +6403,11 @@ mod tests {
         let store = db.open().await;
 
         store
-            .create_session("s_a", "A", "/w", None)
+            .create_session("s_a", "A", "/w", None, false)
             .await
             .expect("a");
         store
-            .create_session("s_b", "B", "/w", None)
+            .create_session("s_b", "B", "/w", None, false)
             .await
             .expect("b");
 
@@ -6332,7 +6454,10 @@ mod tests {
     async fn history_page_bounds_bytes_and_uses_exclusive_cursor() {
         let db = TempDb::new("history-page");
         let store = db.open().await;
-        store.create_session("s", "t", "/w", None).await.unwrap();
+        store
+            .create_session("s", "t", "/w", None, false)
+            .await
+            .unwrap();
         let old = store
             .append_message(&new_message("s", "user", "old"))
             .await
@@ -6381,7 +6506,10 @@ mod tests {
     async fn history_page_omits_oversized_tool_before_loading_payload() {
         let db = TempDb::new("history_oversized_tool");
         let store = db.open().await;
-        store.create_session("s", "t", "/w", None).await.unwrap();
+        store
+            .create_session("s", "t", "/w", None, false)
+            .await
+            .unwrap();
         store
             .append_message(&new_message("s", "user", "task"))
             .await
@@ -6419,7 +6547,7 @@ mod tests {
         let db = TempDb::new("messages");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -6431,7 +6559,7 @@ mod tests {
         }
         // Another session must not leak in.
         store
-            .create_session("s_2", "t2", "/w", None)
+            .create_session("s_2", "t2", "/w", None, false)
             .await
             .expect("session2");
         store
@@ -6464,11 +6592,11 @@ mod tests {
         let db = TempDb::new("message-page");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
-            .create_session("s_2", "t", "/w", None)
+            .create_session("s_2", "t", "/w", None, false)
             .await
             .expect("other session");
         let first = store
@@ -6545,7 +6673,10 @@ mod tests {
     async fn rewind_scan_reads_only_calls_and_enforces_aggregate_budget() {
         let db = TempDb::new("rewind-scan-budget");
         let store = db.open().await;
-        store.create_session("s_1", "t", "/w", None).await.unwrap();
+        store
+            .create_session("s_1", "t", "/w", None, false)
+            .await
+            .unwrap();
         let mut msg = new_message("s_1", "assistant", &"x".repeat(1024 * 1024));
         msg.tool_calls = vec![ToolCall {
             id: "1".into(),
@@ -6577,7 +6708,7 @@ mod tests {
         let db = TempDb::new("messages-after");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -6633,7 +6764,7 @@ mod tests {
         let db = TempDb::new("message-reasoning");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -6723,7 +6854,7 @@ mod tests {
         let db = TempDb::new("message-images");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -6994,7 +7125,7 @@ mod tests {
         let db = TempDb::new("runs");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -7058,7 +7189,7 @@ mod tests {
         let db = TempDb::new("runs-limit");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -7071,7 +7202,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
         store
-            .create_session("s_2", "t", "/w", None)
+            .create_session("s_2", "t", "/w", None, false)
             .await
             .expect("s2");
         store
@@ -7091,7 +7222,7 @@ mod tests {
         let db = TempDb::new("agents");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -7161,7 +7292,7 @@ mod tests {
         let db = TempDb::new("agent-iterations");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -7217,7 +7348,7 @@ mod tests {
         let db = TempDb::new("agent-note-narrow-update");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         let mut original = agent("a_1", "s_1", "completed");
@@ -7298,11 +7429,11 @@ mod tests {
             .await
             .expect("p2");
         store
-            .create_session("s_1", "Alpha", "/w/one", Some(&p1.id))
+            .create_session("s_1", "Alpha", "/w/one", Some(&p1.id), false)
             .await
             .expect("s1");
         store
-            .create_session("s_2", "Beta", "/w/two", Some(&p2.id))
+            .create_session("s_2", "Beta", "/w/two", Some(&p2.id), false)
             .await
             .expect("s2");
         store
@@ -7350,11 +7481,11 @@ mod tests {
             .await
             .expect("project");
         store
-            .create_session("s_busy", "Busy", "/w/one", Some(&project.id))
+            .create_session("s_busy", "Busy", "/w/one", Some(&project.id), false)
             .await
             .expect("busy");
         store
-            .create_session("s_quiet", "Quiet", "/w/one", Some(&project.id))
+            .create_session("s_quiet", "Quiet", "/w/one", Some(&project.id), false)
             .await
             .expect("quiet");
         // A control chat has no project, and its subagents must still be listed.
@@ -7416,11 +7547,11 @@ mod tests {
             .await
             .expect("project");
         store
-            .create_session("s_busy", "Busy", "/w/one", Some(&project.id))
+            .create_session("s_busy", "Busy", "/w/one", Some(&project.id), false)
             .await
             .expect("busy");
         store
-            .create_session("s_quiet", "Quiet", "/w/one", Some(&project.id))
+            .create_session("s_quiet", "Quiet", "/w/one", Some(&project.id), false)
             .await
             .expect("quiet");
         for (id, status) in [
@@ -7454,7 +7585,7 @@ mod tests {
         let db = TempDb::new("agent-transition-cas");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
@@ -7507,11 +7638,11 @@ mod tests {
         let db = TempDb::new("agents-paused-recovery");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
-            .create_session("s_2", "t", "/w", None)
+            .create_session("s_2", "t", "/w", None, false)
             .await
             .expect("session");
         store
@@ -7586,7 +7717,7 @@ mod tests {
         let db = TempDb::new("retention-paused-agent");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
@@ -7625,11 +7756,11 @@ mod tests {
         store.create_project("p1", "One", "/1").await.expect("p1");
         store.create_project("p2", "Two", "/2").await.expect("p2");
         store
-            .create_session("s_1", "one", "/1", Some("p1"))
+            .create_session("s_1", "one", "/1", Some("p1"), false)
             .await
             .expect("s1");
         store
-            .create_session("s_2", "two", "/2", Some("p2"))
+            .create_session("s_2", "two", "/2", Some("p2"), false)
             .await
             .expect("s2");
         store
@@ -7687,11 +7818,11 @@ mod tests {
         let db = TempDb::new("approvals");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("s1");
         store
-            .create_session("s_2", "t", "/w", None)
+            .create_session("s_2", "t", "/w", None, false)
             .await
             .expect("s2");
 
@@ -7800,7 +7931,7 @@ mod tests {
         let db = TempDb::new("approvals-conditional-resolve");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         for id in [
@@ -7899,7 +8030,7 @@ mod tests {
         let db = TempDb::new("approvals-competing-resolve");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
@@ -7944,7 +8075,7 @@ mod tests {
         let db = TempDb::new("approvals-expire");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -8011,7 +8142,7 @@ mod tests {
         let db = TempDb::new("claims-conflict");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -8094,7 +8225,7 @@ mod tests {
 
         let other_session = {
             store
-                .create_session("s_2", "t2", "/w", None)
+                .create_session("s_2", "t2", "/w", None, false)
                 .await
                 .expect("s2");
             store
@@ -8131,7 +8262,7 @@ mod tests {
         let db = TempDb::new("claims-release");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -8171,7 +8302,7 @@ mod tests {
                 for i in 0..5u32 {
                     let session = format!("s_{task}_{i}");
                     store
-                        .create_session(&session, "t", "/w", None)
+                        .create_session(&session, "t", "/w", None, false)
                         .await
                         .expect("create session");
                     for j in 0..3u32 {
@@ -8244,7 +8375,7 @@ mod tests {
         {
             let store = db.open().await;
             store
-                .create_session("s_1", "Persisted", "/w", None)
+                .create_session("s_1", "Persisted", "/w", None, false)
                 .await
                 .expect("session");
             store
@@ -8302,7 +8433,7 @@ mod tests {
         let db = TempDb::new("malformed");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -8479,11 +8610,11 @@ mod tests {
         assert!(keep > 0, "a retention pass must always keep some context");
 
         store
-            .create_session("s_big", "big", "/w", None)
+            .create_session("s_big", "big", "/w", None, false)
             .await
             .expect("big session");
         store
-            .create_session("s_small", "small", "/w", None)
+            .create_session("s_small", "small", "/w", None, false)
             .await
             .expect("small session");
 
@@ -8540,7 +8671,7 @@ mod tests {
         let db = TempDb::new("prune-visible-parent-window");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         let keep = store.retention_keep_messages();
@@ -8651,7 +8782,7 @@ mod tests {
         let db = TempDb::new("prune-zero");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         for i in 0..10 {
@@ -8681,7 +8812,7 @@ mod tests {
         let db = TempDb::new("prune-orphans");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -8771,7 +8902,7 @@ mod tests {
         let db = TempDb::new("prune-claims");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
@@ -8904,7 +9035,7 @@ mod tests {
         let db = TempDb::new("db-size");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         for i in 0..20 {
@@ -8932,7 +9063,7 @@ mod tests {
         let db = TempDb::new("vacuum");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         for i in 0..200 {
@@ -9031,7 +9162,7 @@ mod tests {
         );
         store.incremental_vacuum().await.expect("now enabled");
         store
-            .create_session("s_after", "After", "/w", None)
+            .create_session("s_after", "After", "/w", None, false)
             .await
             .expect("writes still work after conversion");
     }
@@ -9047,7 +9178,7 @@ mod tests {
         let db = TempDb::new("panic-no-poison");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -9108,7 +9239,7 @@ mod tests {
         let db = TempDb::new("instance-scoped-recovery");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -9260,7 +9391,7 @@ mod tests {
         );
 
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
@@ -9428,7 +9559,7 @@ mod tests {
 
         // The upgraded database is fully usable.
         store
-            .create_session("s_new", "New", "/w", None)
+            .create_session("s_new", "New", "/w", None, false)
             .await
             .expect("create after upgrade");
         store
@@ -9449,7 +9580,7 @@ mod tests {
         let db = TempDb::new("read-write-concurrency");
         let store = Arc::new(db.open().await);
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         for i in 0..50 {
@@ -9538,7 +9669,7 @@ mod tests {
         let db = TempDb::new("rewind-hide");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         let ids = conversation(&store, "s_1").await;
@@ -9596,7 +9727,7 @@ mod tests {
         let db = TempDb::new("rewind-normalise");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         let ids = conversation(&store, "s_1").await;
@@ -9621,7 +9752,7 @@ mod tests {
         let db = TempDb::new("rewind-parent-only");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
@@ -9665,11 +9796,11 @@ mod tests {
         let db = TempDb::new("rewind-scope");
         let store = db.open().await;
         store
-            .create_session("s_1", "one", "/w", None)
+            .create_session("s_1", "one", "/w", None, false)
             .await
             .expect("session one");
         store
-            .create_session("s_2", "two", "/w", None)
+            .create_session("s_2", "two", "/w", None, false)
             .await
             .expect("session two");
         let other = store
@@ -9689,7 +9820,7 @@ mod tests {
         let db = TempDb::new("rewind-no-prompt");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         let assistant = store
@@ -9722,7 +9853,7 @@ mod tests {
         let db = TempDb::new("checkpoint-roundtrip");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
 
@@ -9765,7 +9896,10 @@ mod tests {
     async fn checkpoint_metadata_and_individual_content_are_lazy() {
         let db = TempDb::new("checkpoint-lazy");
         let store = db.open().await;
-        store.create_session("s_1", "t", "/w", None).await.unwrap();
+        store
+            .create_session("s_1", "t", "/w", None, false)
+            .await
+            .unwrap();
         let large = "x".repeat(1024 * 1024);
         let first = store
             .record_checkpoint(&checkpoint("s_1", "a", &large, 10))
@@ -9815,7 +9949,7 @@ mod tests {
         let db = TempDb::new("checkpoint-delete");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         let shared = store
@@ -9869,11 +10003,11 @@ mod tests {
         let db = TempDb::new("delete-session-blobs");
         let store = db.open().await;
         store
-            .create_session("s_1", "doomed", "/w", None)
+            .create_session("s_1", "doomed", "/w", None, false)
             .await
             .expect("session");
         store
-            .create_session("s_kept", "kept", "/w", None)
+            .create_session("s_kept", "kept", "/w", None, false)
             .await
             .expect("session");
         store
@@ -9928,7 +10062,7 @@ mod tests {
         let db = TempDb::new("checkpoint-uncapturable");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         let mut row = checkpoint("s_1", "huge.bin", "", 1);
@@ -9953,7 +10087,7 @@ mod tests {
         let db = TempDb::new("checkpoint-created");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         let mut row = checkpoint("s_1", "new.rs", "", 1);
@@ -9975,7 +10109,7 @@ mod tests {
         let db = TempDb::new("checkpoint-retention");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         let keep = store.retention_keep_messages();
@@ -10029,7 +10163,7 @@ mod tests {
         let db = TempDb::new("checkpoint-in-flight");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
@@ -10124,7 +10258,7 @@ mod tests {
         let db = TempDb::new("checkpoint-bind-atomic");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         let first = store
@@ -10205,7 +10339,7 @@ mod tests {
         let db = TempDb::new("rewind-timestamp");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         let ids = conversation(&store, "s_1").await;
@@ -10256,11 +10390,11 @@ mod tests {
         let db = TempDb::new("usage-totals");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
-            .create_session("s_2", "other", "/w", None)
+            .create_session("s_2", "other", "/w", None, false)
             .await
             .expect("session");
 
@@ -10321,11 +10455,11 @@ mod tests {
         let db = TempDb::new("session-stats");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
-            .create_session("s_2", "other", "/w", None)
+            .create_session("s_2", "other", "/w", None, false)
             .await
             .expect("session");
 
@@ -10439,7 +10573,7 @@ mod tests {
         let db = TempDb::new("usage-no-cache");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
@@ -10462,7 +10596,7 @@ mod tests {
         let db = TempDb::new("usage-cascade");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w", None)
+            .create_session("s_1", "t", "/w", None, false)
             .await
             .expect("session");
         store
@@ -10857,11 +10991,11 @@ mod project_tests {
         assert!(duplicate.is_err(), "two projects may not share a directory");
 
         store
-            .create_session("s_1", "First", "/home/me/karucode", Some("p_1"))
+            .create_session("s_1", "First", "/home/me/karucode", Some("p_1"), false)
             .await
             .expect("session in project");
         store
-            .create_session("s_2", "Loose", "/elsewhere", None)
+            .create_session("s_2", "Loose", "/elsewhere", None, false)
             .await
             .expect("session without project");
 
@@ -10887,7 +11021,7 @@ mod project_tests {
         let db = TempDb::new("attach");
         let store = db.open().await;
         store
-            .create_session("s_old", "Legacy", "/legacy/root", None)
+            .create_session("s_old", "Legacy", "/legacy/root", None, false)
             .await
             .expect("legacy session");
         store
@@ -10918,7 +11052,7 @@ mod project_tests {
             .await
             .expect("project");
         store
-            .create_session("s_1", "Work", "/tmp/project", Some("p_1"))
+            .create_session("s_1", "Work", "/tmp/project", Some("p_1"), false)
             .await
             .expect("session");
 

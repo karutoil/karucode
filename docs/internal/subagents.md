@@ -239,14 +239,17 @@ row or concurrency slot is left behind.
   `interrupted`.
 * A subagent runs on its session's pinned model, not the install-wide default:
   pinning a session to a small model makes its subagents cheap too.
-* The `model` argument overrides that for one child, and it is checked against
-  the models this install actually offers **before** the child starts. An id
-  the endpoint does not know (`sonnet`, `gpt-5`, or - the common mistake - the
-  *name* of the agent you are spawning) is refused as a tool error naming real
-  ids, so you can fix it in the same turn. Omit `model` to inherit the
-  session's. The check needs a catalog: a profile that declares fewer than two
-  models refuses nothing, because it says nothing about which other ids the
-  endpoint accepts.
+* The `model` argument overrides that for one child. A valid id is one this
+  install created and made available: a model **any** provider profile
+  declares, not only the session's - and when the model lives on another
+  profile, the child runs on that profile's endpoint and per-model metadata
+  rather than the session's. The id is resolved before the child starts; an
+  id no profile offers (`sonnet`, `gpt-5`, or - the common mistake - the
+  *name* of the agent you are spawning) is refused as a tool error naming
+  real ids, so you can fix it in the same turn. Omit `model` to inherit the
+  session's. The check needs a catalog: an install that declares no models
+  anywhere refuses nothing, because it says nothing about which other ids
+  its endpoints accept.
 * A subagent that keeps working without progress burns tokens until
   `timeout_secs`. Keep it pointed at one task; split unrelated work into
   separate subagents instead of widening one.

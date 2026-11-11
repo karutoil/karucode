@@ -456,6 +456,32 @@ pub struct SessionModelSelection {
     pub reasoning_effort: Option<String>,
 }
 
+/// The verdict on a model id the *caller* typed: the `model` argument of
+/// `spawn_agent`/`spawn_agents`.
+///
+/// It is the one id in the whole runtime that nothing derived, so it is
+/// resolved like a session selection rather than copied over the session's
+/// endpoint. See [`Config::resolve_requested_model`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelOverrideJudgement {
+    /// The id is a model this install offers: the fully resolved
+    /// [`ModelConfig`] to run the child on, on the profile that declares it.
+    Resolved(ModelConfig),
+    /// No profile offers the id, and the install declares a catalog. Refuse
+    /// before the slot, the claim and the transcript are spent; `known` holds
+    /// real ids to choose from.
+    Unknown {
+        requested: String,
+        known: Vec<String>,
+    },
+    /// The install declares no catalog anywhere: cannot judge, keep the
+    /// historical pass-through (the id is used as typed, on the session's
+    /// resolved endpoint).
+    Unjudged { requested: String },
+    /// The override is empty/whitespace: refusing is the only honest answer.
+    Error(String),
+}
+
 impl SessionModelSelection {
     /// Field-level checks that do not depend on the configured profiles: both
     /// ids non-empty and bounded, no control characters, effort in the accepted
@@ -2744,48 +2770,105 @@ impl Config {
             .unwrap_or_else(|| self.model.model.clone())
     }
 
-    /// Every model id this config can actually send: the profile the session
-    /// resolves against (its pin's profile, else the active one), plus the id
-    /// that profile will send by default.
+    /// The ids a spawn's `model` override can be judged against: the union of
+    /// every profile's declared catalog plus the ids the install actually
+    /// sends. An id one of our profiles offers is a valid request even when
+    /// it is not the session's own profile, so the catalog is install-wide.
     ///
-    /// This exists so a model id that came from *outside* the config - a
-    /// `spawn_agent` `model` override, which the caller types and nothing
-    /// validates - can be checked before it is used. An empty list means
-    /// "unknown, do not judge": a profile that declares no catalog (or only the
-    /// single entry synthesized from a flat `[model]` section) says nothing about
-    /// which other ids the endpoint accepts, so refusing there would break a
-    /// setup that works today.
+    /// An empty list means "unknown, do not judge": a config that declares no
+    /// catalog anywhere says nothing about which other ids the endpoints
+    /// accept, so refusing there would break a setup that works today.
     pub fn known_models(&self, selection: Option<&SessionModelSelection>) -> Vec<String> {
-        let profile = selection
-            .and_then(|selection| {
-                let id = selection.provider.trim();
-                self.providers.iter().find(|profile| profile.id == id)
-            })
-            .or_else(|| self.active_profile());
-        let Some(profile) = profile else {
-            return Vec::new();
+        // The profile a session pin names is part of the union below, so the pin
+        // no longer narrows the catalog to one profile; it is kept for the
+        // trait's signature compatibility.
+        let _ = selection;
+        let mut ids: Vec<String> = Vec::new();
+        let mut push = |id: &str| {
+            let id = id.trim();
+            if !id.is_empty() && !ids.iter().any(|other| other == id) {
+                ids.push(id.to_string());
+            }
         };
-        // Nothing to check against means nothing to refuse: a profile with no
-        // declared catalog, or the single entry that the flat `[model]` section
-        // synthesizes, says nothing about which *other* ids the endpoint accepts.
-        // A refusal is only honest where the operator has declared a catalog.
-        if profile.models.len() < 2 {
-            return Vec::new();
+        for profile in &self.providers {
+            for entry in &profile.models {
+                push(&entry.id);
+            }
+            // The id a profile sends may be newer than its catalog snapshot,
+            // or set directly in `active_model`; it is always a valid answer.
+            push(&self.model_for_profile(profile).model);
         }
-        let mut ids: Vec<String> = profile
-            .models
-            .iter()
-            .map(|model| model.id.trim().to_string())
-            .filter(|id| !id.is_empty())
-            .collect();
-        // The model this profile sends may be newer than the catalog snapshot, or
-        // set directly in `active_model`; it is always a valid answer.
-        let sent = self.model_for_profile(profile).model;
-        let sent = sent.trim();
-        if !sent.is_empty() && !ids.iter().any(|id| id == sent) {
-            ids.insert(0, sent.to_string());
+        if ids.len() < 2 {
+            // One id is not a judge: a flat `[model]` section or a single-model
+            // profile says nothing about which *other* ids the endpoint accepts.
+            return Vec::new();
         }
         ids
+    }
+
+    /// Resolve an id the *caller* typed - the `model` argument of
+    /// `spawn_agent`/`spawn_agents` - into the runtime's [`ModelConfig`],
+    /// against the models this install actually made available.
+    ///
+    /// A requested id is valid when any profile declares it (the model was
+    /// created and made available in this karucode), and the child then runs
+    /// on that profile's endpoint and per-model metadata even when it differs
+    /// from the session's profile. An id no profile offers is refused with
+    /// the real ids to choose from. An install with no declared catalog
+    /// cannot judge and keeps the historical pass-through.
+    ///
+    /// [`ModelOverrideJudgement::Error`] is returned for an empty/whitespace
+    /// override, which would send an empty model id.
+    pub fn resolve_requested_model(
+        &self,
+        selection: Option<&SessionModelSelection>,
+        requested: &str,
+    ) -> ModelOverrideJudgement {
+        let requested = requested.trim();
+        if requested.is_empty() {
+            return ModelOverrideJudgement::Error(
+                "the `model` override is empty: omit it to inherit the session's model, or name one \
+                 of this install's models"
+                    .to_string(),
+            );
+        }
+        // A declared model of any profile resolves onto that profile, so the
+        // child inherits the matching endpoint, key, context window and
+        // capabilities instead of the session's.
+        for profile in &self.providers {
+            if self.model_entry_for(profile, requested).is_some() {
+                return ModelOverrideJudgement::Resolved(self.model_for(profile, requested));
+            }
+        }
+        // The id the active profile actually sends is always a valid request;
+        // it may be newer than the catalog.
+        let active = self.effective_model();
+        if active.model.trim() == requested {
+            return ModelOverrideJudgement::Resolved(active);
+        }
+        // So is the id a pinned session's profile sends.
+        if let Some(profile) = selection.and_then(|selection| {
+            self.providers
+                .iter()
+                .find(|profile| profile.id == selection.provider.trim())
+        }) {
+            let sent = self.model_for_profile(profile);
+            if sent.model.trim() == requested {
+                return ModelOverrideJudgement::Resolved(sent);
+            }
+        }
+        let known = self.known_models(selection);
+        if known.is_empty() {
+            // No catalog to judge against: an install that accepts free-form
+            // ids today keeps working unchanged.
+            return ModelOverrideJudgement::Unjudged {
+                requested: requested.to_string(),
+            };
+        }
+        ModelOverrideJudgement::Unknown {
+            requested: requested.to_string(),
+            known,
+        }
     }
 
     /// The `[[providers.models]]` entry for `model_id` on `profile`, if listed.
@@ -3365,12 +3448,12 @@ mod tests {
         }
     }
 
-    /// The ids a spawn's `model` override is checked against: the active
-    /// profile's catalog plus the model that profile actually sends. A profile
-    /// with no catalog is unknown ground, and reports nothing so nothing is
-    /// refused.
+    /// The ids a spawn's `model` override is judged against: the union of
+    /// every profile's catalog plus what each profile actually sends. A pin
+    /// no longer narrows the catalog, because a valid request is any model
+    /// this install made available.
     #[test]
-    fn known_models_are_the_active_profile_s_catalog() {
+    fn known_models_are_the_install_wide_catalog() {
         let mut cfg = Config {
             providers: vec![
                 profile("gateway", &["model-a", "model-b"]),
@@ -3382,30 +3465,126 @@ mod tests {
         };
         cfg.normalize_providers();
 
-        assert_eq!(cfg.known_models(None), vec!["model-a", "model-b"]);
+        assert_eq!(cfg.known_models(None), vec!["model-a", "model-b", "tiny"]);
 
-        // A pin that names another profile is judged against *that* profile - and
-        // a profile declaring a single model has no catalog to judge by.
+        // The pin no longer narrows the catalog: the child may be pointed at
+        // any model the install offers.
         let pinned = SessionModelSelection {
             provider: "local".into(),
             model: "tiny".into(),
             reasoning_effort: None,
         };
-        assert!(cfg.known_models(Some(&pinned)).is_empty());
+        assert_eq!(
+            cfg.known_models(Some(&pinned)),
+            vec!["model-a", "model-b", "tiny"]
+        );
 
-        // A cap that a profile never declared is still a valid answer: the model
-        // it sends is always in the list.
+        // A cap that a profile never declared is still a valid answer: the
+        // id the active profile sends is always in the list.
         cfg.active_model = Some("not-in-the-catalog".into());
         assert_eq!(
             cfg.known_models(None),
-            vec!["not-in-the-catalog", "model-a", "model-b"]
+            vec!["model-a", "model-b", "not-in-the-catalog", "tiny"]
         );
 
-        // No catalog at all means "cannot judge".
+        // No catalog anywhere means "cannot judge" - the flat section
+        // synthesizes a single-model profile, which is not a judge.
         let mut flat = Config::default();
         flat.model.model = "anything".into();
         flat.normalize_providers();
-        assert!(flat.known_models(None).is_empty(), "{:?}", flat.known_models(None));
+        assert!(
+            flat.known_models(None).is_empty(),
+            "{:?}",
+            flat.known_models(None)
+        );
+    }
+
+    /// A spawn's `model` argument resolves like a session selection: a model
+    /// any profile declares routes onto that profile, an id nobody offers is
+    /// refused with alternatives, and an install that declared no catalog
+    /// stays unjudged (pass-through).
+    #[test]
+    fn resolve_requested_model_is_install_wide_and_routes_profiles() {
+        let mut cfg = Config {
+            providers: vec![
+                profile("gateway", &["model-a", "model-b"]),
+                profile("local", &["tiny"]),
+            ],
+            active_provider: Some("gateway".into()),
+            active_model: Some("model-b".into()),
+            ..Config::default()
+        };
+        cfg.normalize_providers();
+
+        // A model on the session's own profile keeps that profile.
+        match cfg.resolve_requested_model(None, "model-a") {
+            ModelOverrideJudgement::Resolved(m) => {
+                assert_eq!(m.model, "model-a");
+                assert_eq!(m.base_url, "https://gateway.example/v1");
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+
+        // A model that lives on ANOTHER profile routes onto that profile's
+        // endpoint: this is the cross-profile case the old copy-over missed.
+        match cfg.resolve_requested_model(None, "tiny") {
+            ModelOverrideJudgement::Resolved(m) => {
+                assert_eq!(m.model, "tiny");
+                assert_eq!(m.base_url, "https://local.example/v1");
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+
+        // The id the active profile sends is valid even when newer than the
+        // catalog.
+        cfg.active_model = Some("fresh-cap".into());
+        match cfg.resolve_requested_model(None, "fresh-cap") {
+            ModelOverrideJudgement::Resolved(m) => assert_eq!(m.model, "fresh-cap"),
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+        cfg.active_model = Some("model-b".into());
+
+        // The id a pinned session's profile sends is valid too.
+        let pinned = SessionModelSelection {
+            provider: "local".into(),
+            model: "tiny".into(),
+            reasoning_effort: None,
+        };
+        match cfg.resolve_requested_model(Some(&pinned), "tiny") {
+            ModelOverrideJudgement::Resolved(m) => assert_eq!(m.model, "tiny"),
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+
+        // Whitespace is tolerated around a valid id.
+        assert!(matches!(
+            cfg.resolve_requested_model(None, " model-b "),
+            ModelOverrideJudgement::Resolved(_)
+        ));
+
+        // An id nobody offers names the real alternatives.
+        match cfg.resolve_requested_model(None, "sonnet") {
+            ModelOverrideJudgement::Unknown { requested, known } => {
+                assert_eq!(requested, "sonnet");
+                assert!(known.contains(&"model-a".to_string()), "{known:?}");
+                assert!(known.contains(&"tiny".to_string()), "{known:?}");
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+
+        // An empty override is an error, never a silent empty model id.
+        assert!(matches!(
+            cfg.resolve_requested_model(None, "   "),
+            ModelOverrideJudgement::Error(_)
+        ));
+
+        // No catalog anywhere: unjudged, pass-through preserved.
+        let mut flat = Config::default();
+        flat.model.model = "anything".into();
+        flat.normalize_providers();
+        assert!(matches!(
+            flat.resolve_requested_model(None, "whatever"),
+            ModelOverrideJudgement::Unjudged { .. }
+        ));
     }
 
     #[test]

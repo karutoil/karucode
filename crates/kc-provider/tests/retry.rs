@@ -911,12 +911,8 @@ async fn a_reset_window_longer_than_the_budget_fails_fast_and_says_so() {
          \"code\":\"model_cooldown\",\"reset_seconds\":1024}}",
     );
     let server = flaky_server(usize::MAX, failure).await;
-    let policy = RetryPolicy::new(
-        50,
-        Duration::from_millis(5),
-        Duration::from_millis(20),
-    )
-    .with_max_total(Duration::from_secs(10));
+    let policy = RetryPolicy::new(50, Duration::from_millis(5), Duration::from_millis(20))
+        .with_max_total(Duration::from_secs(10));
     let inner: Arc<dyn Provider> = Arc::new(OpenAiProvider::new(model_config(&server)).unwrap());
     let mut stream = RetryingProvider::new(inner, policy)
         .stream_chat(chat_request(), CancellationToken::new())

@@ -250,14 +250,17 @@
 //   `interrupted`.
 // * A subagent runs on its session's pinned model, not the install-wide default:
 //   pinning a session to a small model makes its subagents cheap too.
-// * The `model` argument overrides that for one child, and it is checked against
-//   the models this install actually offers **before** the child starts. An id
-//   the endpoint does not know (`sonnet`, `gpt-5`, or - the common mistake - the
-//   *name* of the agent you are spawning) is refused as a tool error naming real
-//   ids, so you can fix it in the same turn. Omit `model` to inherit the
-//   session's. The check needs a catalog: a profile that declares fewer than two
-//   models refuses nothing, because it says nothing about which other ids the
-//   endpoint accepts.
+// * The `model` argument overrides that for one child. A valid id is one this
+//   install created and made available: a model **any** provider profile
+//   declares, not only the session's - and when the model lives on another
+//   profile, the child runs on that profile's endpoint and per-model metadata
+//   rather than the session's. The id is resolved before the child starts; an
+//   id no profile offers (`sonnet`, `gpt-5`, or - the common mistake - the
+//   *name* of the agent you are spawning) is refused as a tool error naming
+//   real ids, so you can fix it in the same turn. Omit `model` to inherit the
+//   session's. The check needs a catalog: an install that declares no models
+//   anywhere refuses nothing, because it says nothing about which other ids
+//   its endpoints accept.
 // * A subagent that keeps working without progress burns tokens until
 //   `timeout_secs`. Keep it pointed at one task; split unrelated work into
 //   separate subagents instead of widening one.
@@ -279,6 +282,7 @@ use crate::hub::{AgentMessage, ControlError, LiveAgent, MailboxDelivery, MAX_MAI
 use crate::RuntimeInner;
 use async_trait::async_trait;
 use futures_util::FutureExt;
+use kc_core::config::ModelOverrideJudgement;
 use kc_core::error::Result;
 use kc_core::events::Event;
 use kc_core::ids::AgentId;
@@ -663,7 +667,7 @@ fn spawn_spec(fan_out: bool) -> ToolSpec {
                                     "items": { "type": "string" },
                                     "description": "Workspace paths this subagent intends to modify."
                                 },
-                                "model": { "type": "string", "description": "Optional model override for this subagent." }
+                                "model": { "type": "string", "description": "Optional model override for this subagent: one of this install's model ids (any provider profile's catalog). Omit to inherit the session's model." }
                             },
                             "required": ["task"],
                             "additionalProperties": false
@@ -707,7 +711,7 @@ fn spawn_spec(fan_out: bool) -> ToolSpec {
                         "items": { "type": "string" },
                         "description": "Workspace paths this subagent intends to modify; used to warn about overlaps."
                     },
-                    "model": { "type": "string", "description": "Optional model override for this subagent." },
+                    "model": { "type": "string", "description": "Optional model override for this subagent: one of this install's model ids (any provider profile's catalog). Omit to inherit the session's model." },
                     "background": {
                         "type": "boolean",
                         "description": "Return immediately instead of waiting for the subagent; collect the result with `wait_for_agents`."
@@ -933,22 +937,18 @@ async fn spawn_batch(
             None
         }
     };
-    let base_model = inner
-        .deps
-        .settings
-        .resolve_model(session_selection.as_ref())
-        .await;
     let limits = inner.deps.settings.limits().await;
     let policy = inner.deps.settings.approval_policy().await;
     // A spawn's `model` is free text the caller typed; nothing downstream checks
     // it, and an id the endpoint cannot resolve kills the child on its *first*
-    // provider call - after a slot, a claim and a transcript were spent. Ask the
-    // settings what this install can actually send, once, before any of that.
-    // An empty answer means "no catalog to judge against" and refuses nothing.
-    let known_models = inner
+    // provider call - after a slot, a claim and a transcript were spent. Resolve
+    // it like a session selection, once, before any of that: the valid ids are
+    // the models this install made available (any profile's catalog), and a
+    // cross-profile id routes the child onto that profile.
+    let base_model = inner
         .deps
         .settings
-        .known_models(session_selection.as_ref())
+        .resolve_model(session_selection.as_ref())
         .await;
 
     let mut started: Vec<Arc<LiveAgent>> = Vec::with_capacity(tasks.len());
@@ -956,16 +956,36 @@ async fn spawn_batch(
     let mut refusals: Vec<String> = Vec::new();
 
     for (index, spawn) in tasks.iter().enumerate() {
-        // Refuse an unusable `model` override before the slot, the claim and the
-        // transcript: the caller can fix this in the same turn, and the tool
-        // result is the only place it will read why.
-        if let Some(reason) = spawn
-            .model
-            .as_deref()
-            .and_then(|requested| unknown_model_refusal(&known_models, requested))
-        {
-            refusals.push(format!("{}: {reason}", spawn.label(index)));
-            continue;
+        // Resolve the requested model before the slot, the claim and the
+        // transcript: the caller can fix a refusal in the same turn, and the
+        // tool result is the only place it will read why.
+        let mut model = base_model.clone();
+        if let Some(requested) = spawn.model.as_deref() {
+            match inner
+                .deps
+                .settings
+                .resolve_requested_model(session_selection.as_ref(), requested)
+                .await
+            {
+                ModelOverrideJudgement::Resolved(resolved) => model = resolved,
+                ModelOverrideJudgement::Unjudged { .. } => {
+                    // No catalog to judge against: keep the historical
+                    // pass-through on the session's resolved endpoint.
+                    model.model = requested.trim().to_string();
+                }
+                ModelOverrideJudgement::Unknown { requested, known } => {
+                    refusals.push(format!(
+                        "{}: {}",
+                        spawn.label(index),
+                        unknown_model_message(&known, &requested)
+                    ));
+                    continue;
+                }
+                ModelOverrideJudgement::Error(reason) => {
+                    refusals.push(format!("{}: {reason}", spawn.label(index)));
+                    continue;
+                }
+            }
         }
 
         // Background and nested blocking spawns take a slot only when one is
@@ -1006,11 +1026,6 @@ async fn spawn_batch(
                 }
             }
         };
-
-        let mut model = base_model.clone();
-        if let Some(override_model) = &spawn.model {
-            model.model = override_model.clone();
-        }
 
         match prepare_child(
             inner,
@@ -1195,39 +1210,21 @@ fn first_line(text: &str) -> String {
     }
 }
 
-/// Why a spawn's `model` argument cannot be used, if it cannot.
+/// The refusal message for a spawn's `model` argument that no profile of this
+/// install offers.
 ///
 /// This is the one id in the whole runtime that nothing derived: the caller
-/// typed it into `spawn_agent`. `spawn_batch` copies it straight into the
-/// resolved model (the profile's endpoint, key and limits stay), so an id the
-/// endpoint does not know fails the child on its first provider call with a 400
-/// like *"Unable to determine provider for model `database-audit`"* - after the
-/// slot, the claims and the transcript were already spent, and with no hint that
-/// the argument was the problem. On this install that was 47 of 152 failed
-/// subagents, and most of the ids were the *name of the agent being spawned*.
-///
-/// A session model pin cannot fail this way: it resolves through
-/// `Settings::resolve_model`, which validates against the same profile list.
+/// typed it into `spawn_agent`. `spawn_batch` resolves it through
+/// [`Settings::resolve_requested_model`](kc_core::settings::Settings::resolve_requested_model),
+/// which routes a valid id onto the profile that declares it and returns this
+/// case only when the id is unknown *and* the install declared a catalog. An
+/// install that declares no catalog is unjudged and keeps the pass-through,
+/// so this message is never produced there.
 ///
 /// Refusing returns the reason as tool output the caller can act on in the same
 /// turn, which is strictly better than a dead subagent it has to guess about.
-/// `known` being empty means the profile declares no catalog, and then nothing is
-/// refused: an install that accepts free-form ids today keeps working.
-fn unknown_model_refusal(known: &[String], requested: &str) -> Option<String> {
+fn unknown_model_message(known: &[String], requested: &str) -> String {
     let requested = requested.trim();
-    if known.is_empty() {
-        return None;
-    }
-    if requested.is_empty() {
-        return Some(
-            "the `model` override is empty: omit it to inherit the session's model, or name one \
-             of this install's models"
-                .to_string(),
-        );
-    }
-    if known.iter().any(|id| id == requested) {
-        return None;
-    }
     // Enough to choose from without turning a refusal into a wall of ids: the
     // caller only needs the shape of a real id, not the whole catalog.
     const SHOWN: usize = 8;
@@ -1243,11 +1240,11 @@ fn unknown_model_refusal(known: &[String], requested: &str) -> Option<String> {
     } else {
         shown
     };
-    Some(format!(
+    format!(
         "unknown model `{requested}`: this install offers {} model(s) and none has that id. \
          Omit `model` to inherit the session's model, or pass one of: {tail}",
         known.len()
-    ))
+    )
 }
 
 /// Owns a persisted child until its real loop is spawned.
@@ -4221,30 +4218,26 @@ mod tests {
     #[test]
     fn an_unknown_model_override_is_refused_with_a_usable_alternative() {
         let known = vec!["gateway/model-a".to_string(), "gateway/model-b".to_string()];
-        // A listed id is fine, including one with surrounding whitespace.
-        assert!(unknown_model_refusal(&known, " gateway/model-b ").is_none());
         // The shapes actually seen in the database: a bare family name, and the
         // name of the agent being spawned.
         for bad in ["sonnet", "gpt-5", "database-audit", "default"] {
-            let reason = unknown_model_refusal(&known, bad).expect("must refuse");
+            let reason = unknown_model_message(&known, bad);
             assert!(reason.contains(&format!("`{bad}`")), "{reason}");
             assert!(reason.contains("gateway/model-a"), "{reason}");
             assert!(reason.contains("Omit `model`"), "{reason}");
         }
-        // An empty override is refused too: it would send an empty model id.
-        assert!(unknown_model_refusal(&known, "   ").is_some());
-        // No catalog means no judgement. This is what keeps a profile that
-        // declares no models (every free-form endpoint) working unchanged.
-        assert!(unknown_model_refusal(&[], "anything-goes").is_none());
     }
 
     #[test]
     fn a_long_catalog_is_summarised_instead_of_dumped() {
         let known: Vec<String> = (0..40).map(|i| format!("gateway/model-{i}")).collect();
-        let reason = unknown_model_refusal(&known, "sonnet").unwrap();
+        let reason = unknown_model_message(&known, "sonnet");
         assert!(reason.contains("40 model(s)"), "{reason}");
         assert!(reason.contains("model-7"), "{reason}");
-        assert!(!reason.contains("model-8,"), "only the first few are listed: {reason}");
+        assert!(
+            !reason.contains("model-8,"),
+            "only the first few are listed: {reason}"
+        );
         assert!(reason.contains("(and 32 more)"), "{reason}");
     }
 }

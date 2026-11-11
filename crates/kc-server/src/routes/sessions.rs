@@ -1,4 +1,84 @@
 //! Session CRUD, message submission and cancellation.
+//
+// @kc-doc: ephemeral-sessions
+// @kc-title: Run a temporary chat
+// @kc-summary: Create an ephemeral session for a program: it never appears in a session list and deletes itself once its work is over.
+// @kc-tags: sessions, temporary, ephemeral, api, integration, chat
+// @kc-applies-to: route:POST /api/sessions, route:DELETE /api/sessions, route:POST /api/sessions/:id/expire, route:GET /api/sessions, field:ephemeral, event:session_deleted
+//
+// # Temporary sessions
+//
+// A session created with `"ephemeral": true` is a chat for a program, not a
+// person: a third-party tool that links karucode for one question, one audit or
+// one task and does not want its work to litter the session rail.
+//
+// ```bash
+// curl -s -X POST localhost:8787/api/sessions \
+//   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+//   -d '{"ephemeral": true, "project": "p_...", "title": "audit"}'
+// ```
+//
+// Every ordinary verb works on it: post to `/api/sessions/:id/messages`, poll
+// `GET /api/sessions/:id`, steer, queue, cancel, rewind. What changes is
+// where the row appears and when it dies.
+//
+// # Never listed
+//
+// `GET /api/sessions` (with or without `?project=`), the control plane's
+// session lists and `GET /api/control/overview` all exclude ephemeral
+// sessions, permanently. The browser rail never shows one. A client that
+// created one tracks it by its id - the session id is the only handle, so keep
+// it; ids are random, which is what keeps someone else's ephemeral chat
+// unguessable.
+//
+// # When it disappears
+//
+// An ephemeral session is deleted the moment its work is over. "Over" means:
+// no run in flight (including the run that just finished), nothing queued
+// (neither steers nor follow-ups), no live subagent, and no approval waiting
+// for an answer. The finishing run's own teardown performs the delete, so a
+// chain of follow-ups cleans up after the *last* one; a chat that ended with a
+// question stops at the approval and stays until the answer (which starts a
+// run) leads to a quiet finish, or you retire it early:
+//
+// ```bash
+// curl -s -X POST localhost:8787/api/sessions/s_abc/expire \
+//   -H 'X-Karucode-Client: web'
+// ```
+//
+// `expire` refuses a durable session (that is what `DELETE` is for) and
+// refuses an ephemeral one while input is still queued - recall the queued
+// message or let it drain. `DELETE /api/sessions/:id` also works on an
+// ephemeral session and cancels any run in flight first, exactly like for a
+// durable one.
+//
+// Two more sweeps keep no row behind:
+//
+// * `DELETE /api/sessions` (no id) retires every **idle** ephemeral session at
+//   once and answers `{"deleted": N, "sessions": [...]}`; busy ones are left
+//   for their runs to finish. It never touches durable sessions.
+// * At startup, after interrupted runs are marked, ephemeral sessions with no
+//   work left are swept - a restart is not a way to keep one alive, and a
+//   program whose chat died with the process gets a `404` on its next poll
+//   and creates a fresh one, exactly as it would had the run finished.
+//
+// The delete publishes `session_deleted` on `/api/events`, the same event an
+// ordinary delete sends, so a listening client can drop its row without
+// polling. Deletion removes the transcript, runs, agents and approvals with
+// the row (`ON DELETE CASCADE`); there is no archive.
+//
+// # What is deliberately the same
+//
+// * **Titles are skipped.** Nothing names an ephemeral session - neither the
+//   deterministic derivation nor the model-written title - so no background
+//   titling request can race the delete. The `title` you pass is stored, and
+//   is only ever a label for your own bookkeeping.
+// * **Approvals still work.** A run that asks permission becomes pending, the
+//   session survives until it is answered, and the answer's run gets the same
+//   end-of-life treatment. Auto-expiry never fires while an approval is open.
+// * **Model pins still work.** `model` at creation and
+//   `PATCH /api/sessions/:id/model` behave exactly as for a durable session;
+//   the pin dies with the row.
 
 use crate::error::{ApiError, ApiResult};
 use crate::routes::{
@@ -56,6 +136,12 @@ struct TitleBody {
     /// an object pins this session to that profile + model.
     #[serde(default, deserialize_with = "double_option")]
     model: Option<Option<SessionModelBody>>,
+    /// Create a **temporary** session: excluded from every listing, never
+    /// auto-titled, and deleted automatically once its work is over (see
+    /// `ephemeral-sessions`). Absent (`false`) is the durable chat every
+    /// existing client creates.
+    #[serde(default)]
+    ephemeral: bool,
 }
 
 /// One session's model pin, as sent by the browser.
@@ -253,6 +339,7 @@ pub async fn create_session(State(state): State<AppState>, body: Bytes) -> ApiRe
             &title,
             &workspace.root().to_string_lossy(),
             body.project.as_deref(),
+            body.ephemeral,
         )
         .await?;
     let session = match selection {
@@ -414,25 +501,104 @@ pub async fn rename_session(
     ))
 }
 
+/// Delete a session exactly as the routes do: stop any in-flight work, drop the
+/// row (children cascade), release per-session approvals, sweep orphaned file
+/// before-images, and publish `session_deleted` so every client drops the row.
+///
+/// One body for the callers that end a session on request - the ordinary
+/// `DELETE /api/sessions/:id`, `POST /api/sessions/:id/expire` (a temporary
+/// session the caller finished with early), and the collection sweep - so none
+/// of them can drift on the teardown order. (The run-teardown auto-expiry uses
+/// the runtime's own retire path, which is the same sequence without the
+/// HTTP-facing checks.) Returns `false` when the row vanished first (another
+/// tab deleted it); the caller decides whether that is an error.
+pub(crate) async fn delete_session_rows(state: &AppState, id: &str) -> ApiResult<bool> {
+    // Stop any in-flight work before dropping its rows so the run loop cannot
+    // resurrect a deleted session.
+    let existed = state.store().get_session(id).await?.is_some();
+    if !existed {
+        return Ok(false);
+    }
+    state.runtime().cancel(id);
+    state.store().delete_session(id).await?;
+    state.runtime().clear_session_allows(id);
+    state.runtime().emit(
+        Some(id),
+        None,
+        None,
+        Event::SessionDeleted {
+            session_id: id.to_string(),
+        },
+    );
+    Ok(true)
+}
+
 pub async fn delete_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let _ = session_or_404(&state, &id).await?;
-    // Stop any in-flight work before dropping its rows so the run loop cannot
-    // resurrect a deleted session.
-    state.runtime().cancel(&id);
-    state.store().delete_session(&id).await?;
-    state.runtime().clear_session_allows(&id);
-    state.runtime().emit(
-        Some(&id),
-        None,
-        None,
-        Event::SessionDeleted {
-            session_id: id.clone(),
-        },
-    );
+    delete_session_rows(&state, &id).await?;
     Ok(Json(json!({ "deleted": true })))
+}
+
+/// `POST /api/sessions/:id/expire` — retire a session now.
+///
+/// For a temporary session this is the platform's "I am done with this chat"
+/// switch: it runs the same teardown an automatic expiry would, so the
+/// transcript, runs and agents go with the row and every listener sees
+/// `session_deleted`. Calling it on a durable session is refused (`403`-shaped
+/// `bad_request`): durability is the user's decision, not a client's, and a
+/// tool that silently deleted real chats would be a footgun. An in-flight run
+/// is cancelled first, exactly like `DELETE`.
+pub async fn expire_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let session = session_or_404(&state, &id).await?;
+    if !session.ephemeral {
+        return Err(ApiError::bad_request(
+            "session is not ephemeral; use DELETE to remove it",
+        ));
+    }
+    let queued = state.runtime().queued_all(&id);
+    if !queued.steers.is_empty() || !queued.follow_ups.is_empty() {
+        return Err(ApiError::conflict(
+            "session still has queued input; recall it (DELETE /api/sessions/:id/queues/:queued_id) \
+             or let it drain before expiring",
+        ));
+    }
+    delete_session_rows(&state, &id).await?;
+    Ok(Json(json!({ "expired": true, "session_id": id })))
+}
+
+/// `DELETE /api/sessions` — sweep every idle temporary session.
+///
+/// Not a bulk delete of durable chats: those are the user's records and stay.
+/// The sweep is the "platform shut down / clean up" call: it retires every
+/// temporary session that has nothing left in flight (a running one, or one
+/// with queued input, is left for its run to finish and expire on its own) and
+/// reports which ids went, so the caller can tell its own bookkeeping.
+///
+/// Deletion goes through the runtime's retire path rather than the route's
+/// delete helper: the sweep must not cancel live work (that is what "idle"
+/// means), and the retire path is the one place that knows all four meanings
+/// of "still busy" - registered loops, both queues, live agents, pending
+/// approvals.
+pub async fn sweep_ephemeral_sessions(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let candidates = state.store().idle_ephemeral_session_ids().await?;
+    let mut expired = Vec::with_capacity(candidates.len());
+    for id in candidates {
+        // The runtime re-checks everything (including the in-memory queues the
+        // SQL cannot see) and emits `session_deleted` itself.
+        if state.runtime().retire_idle_ephemeral_session(&id).await {
+            expired.push(id);
+        }
+    }
+    Ok(Json(json!({
+        "deleted": expired.len(),
+        "sessions": expired,
+    })))
 }
 
 pub async fn send_message(
@@ -733,6 +899,13 @@ pub async fn cancel_run(
 /// never retitled by a model: there is nothing to improve on, and a user who typed
 /// a name meant it.
 async fn maybe_auto_title(state: &AppState, session: &Session, content: &str) -> Option<String> {
+    // A temporary session has no rail row to name, and its transcript can be
+    // deleted by the expiry path at any moment - a background titling request
+    // racing that delete is work for nothing. Titles are for sessions that
+    // stay.
+    if session.ephemeral {
+        return None;
+    }
     if !is_placeholder_title(&session.title) {
         return None;
     }

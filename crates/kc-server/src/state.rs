@@ -120,6 +120,10 @@
 //   A control chat (or another project-less session) instead retains its recorded
 //   workspace. Uploads without an explicit `project` follow that record and never
 //   silently land in the default project.
+// * A temporary (`ephemeral`) session never shows in any project's list, even
+//   though it belongs to a project: `GET /api/sessions?project=…` excludes it.
+//   It is a chat for a program (see the `ephemeral-sessions` topic), not a row
+//   for the rail.
 // * Symlinked project roots are canonicalised on insert, so the stored path is the
 //   real one.
 //
@@ -429,6 +433,10 @@ pub struct AppStateInner {
     pub db_path: PathBuf,
     /// models.dev catalog cache (provider/model metadata for the settings UI).
     pub catalog: Arc<CatalogCache>,
+    /// Plugin-install jobs (`POST /api/plugins/install`), polled by the web
+    /// UI. In-process: a restart clears it, and the filesystem effect of any
+    /// finished job is already visible through `GET /api/plugins`.
+    pub installs: crate::routes::plugin_install::InstallJobRegistry,
     /// Project id -> confined workspace, plus the default workspace.
     pub projects: Arc<ProjectRegistry>,
     /// DNS-rebinding `Host` allowlist (see [`crate::host`]).
@@ -501,6 +509,7 @@ impl AppState {
                 web: WebAssets::new(deps.web_dir),
                 db_path: deps.db_path,
                 catalog: Arc::new(CatalogCache::new()),
+                installs: crate::routes::plugin_install::InstallJobRegistry::default(),
                 projects: deps.projects,
                 host_allowlist: HostAllowlist::new(&deps.bind_host, deps.allowed_hosts.as_deref()),
                 terminals: Arc::new(TerminalRegistry::new()),
@@ -591,6 +600,11 @@ impl AppState {
 
     pub fn plugins(&self) -> &Arc<Mutex<PluginHost>> {
         &self.inner.plugins
+    }
+
+    /// The plugin-install job registry (`POST /api/plugins/install`).
+    pub fn installs(&self) -> &crate::routes::plugin_install::InstallJobRegistry {
+        &self.inner.installs
     }
 
     pub fn mcp(&self) -> &Arc<Mutex<McpManager>> {

@@ -9,7 +9,7 @@
 // @kc-title: Build, run and stop the server
 // @kc-summary: Build the UI and the binary, start it against a workspace, and know what each CLI flag and startup failure means.
 // @kc-tags: install, build, run, cli, startup, server
-// @kc-applies-to: cmd:karucode, cmd:--workspace, cmd:--port, cmd:--host, cmd:--data-dir, cmd:--config, cmd:--help, cmd:--version, cmd:karucode update, cmd:karucode update --check, cmd:karucode update --stage, cmd:karucode update --apply, cmd:karucode update --apply --restart, env:KARUCODE_HOST, env:KARUCODE_PORT, env:KARUCODE_WORKSPACE, env:KARUCODE_DATA_DIR, env:KARUCODE_AUTH_TOKEN, env:KARUCODE_LOG, env:KARUCODE_WEB_DIR, env:KARUCODE_ALLOWED_HOSTS, env:KARUCODE_SKIP_WEB_BUILD, env:KARUCODE_WEB_DIST, env:KARUCODE_NPM, cmd:npm run build, cmd:npm ci, route:GET /api/health, file:web/dist, file:crates/kc-server/build.rs
+// @kc-applies-to: cmd:karucode, cmd:--workspace, cmd:--port, cmd:--host, cmd:--data-dir, cmd:--config, cmd:--help, cmd:--version, cmd:karucode update, cmd:karucode update --check, cmd:karucode update --stage, cmd:karucode update --apply, cmd:karucode update --apply --restart, cmd:karucode plugin init, cmd:karucode plugin sdk, cmd:karucode plugin install, env:KARUCODE_HOST, env:KARUCODE_PORT, env:KARUCODE_WORKSPACE, env:KARUCODE_DATA_DIR, env:KARUCODE_AUTH_TOKEN, env:KARUCODE_LOG, env:KARUCODE_WEB_DIR, env:KARUCODE_ALLOWED_HOSTS, env:KARUCODE_SKIP_WEB_BUILD, env:KARUCODE_WEB_DIST, env:KARUCODE_NPM, cmd:npm run build, cmd:npm ci, route:GET /api/health, file:web/dist, file:crates/kc-server/build.rs
 //
 // # Build and run
 //
@@ -81,8 +81,17 @@
 // [--check]` refreshes that vendored copy after a karucode upgrade, and `--check`
 // exits non-zero on drift so a plugin's CI can guard it.
 //
+// `karucode plugin install <source> [names…]` installs plugins from a GitHub
+// repository (`owner/repo`, a github.com URL, `owner/repo@ref`) or a local
+// directory into `<data_dir>/plugins/`, building what the plugins' `[install]`
+// tables declare; `--list` shows what a source offers. It runs without the
+// server and needs no git checkout. The repository format — a root
+// `index.toml` or one directory per plugin — is in the `plugins` topic.
+//
 // Neither subcommand starts the server, reads the config file or touches the
-// data directory, and an existing file is never overwritten without `--force`.
+// data directory (`plugin install` reads the config only for the data
+// directory, and writes only under it), and an existing file is never
+// overwritten without `--force`.
 //
 // `karucode update` is the third subcommand and the one that keeps an installed
 // binary current:
@@ -218,6 +227,8 @@ pub enum CliAction {
     PluginInit(crate::scaffold::PluginInitArgs),
     /// `karucode plugin sdk <dir> [--check]`
     PluginSdk(crate::scaffold::PluginSdkArgs),
+    /// `karucode plugin install <source> [names…] [flags]`
+    PluginInstall(crate::plugin_install::PluginInstallOptions),
     /// `karucode update [--check|--stage|--apply]`
     Update(crate::update::UpdateOptions),
 }
@@ -242,6 +253,9 @@ Commands:
   plugin init <dir>        Scaffold a plugin project; the SDK is vendored, so it
                            depends on nothing from karucode
   plugin sdk <dir>         Refresh a plugin's vendored SDK (--check exits 1 on drift)
+  plugin install <source>  Install plugins from a GitHub repository
+                           (owner/repo, a URL, owner/repo@ref) or a local
+                           directory; --list shows what a source offers
   update                   Check for a newer build (--check), download and verify it
                            (--stage), or install it (--apply, which needs write
                            access to the binary; --restart restarts the service)
@@ -380,7 +394,8 @@ fn parse_plugin(args: &[OsString]) -> anyhow::Result<CliAction> {
     let command = match words.next() {
         Some(command) => command,
         None => bail!(
-            "`karucode plugin` needs a command: `plugin init <dir>` or `plugin sdk <dir>`\n\n{}",
+            "`karucode plugin` needs a command: `plugin init <dir>`, `plugin sdk <dir>` or \
+             `plugin install <source>`\n\n{}",
             Cli::usage()
         ),
     };
@@ -404,8 +419,11 @@ fn parse_plugin(args: &[OsString]) -> anyhow::Result<CliAction> {
                 check,
             }))
         }
+        "install" => Ok(CliAction::PluginInstall(
+            crate::plugin_install::parse_plugin_install(&words)?,
+        )),
         other => bail!(
-            "unknown `plugin` command `{other}`; expected `init` or `sdk`\n\n{}",
+            "unknown `plugin` command `{other}`; expected `init`, `sdk` or `install`\n\n{}",
             Cli::usage()
         ),
     }
@@ -740,6 +758,37 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         api_keys,
     });
     state.reload_tools().await;
+    // Temporary sessions, last call: recovery above has already marked this
+    // process' interrupted runs and agents terminal and expired their pending
+    // approvals, so anything `idle_ephemeral_session_ids` still reports is a
+    // temporary chat with no work left - typically one whose run died with the
+    // previous process. Delete it now; a platform that linked it gets a 404 on
+    // its next poll and makes a fresh one, exactly as it would had the run
+    // finished.
+    match state.store().idle_ephemeral_session_ids().await {
+        Ok(idle) if !idle.is_empty() => {
+            let mut expired = 0usize;
+            for id in &idle {
+                if runtime.retire_idle_ephemeral_session(id).await {
+                    expired += 1;
+                }
+            }
+            tracing::info!(
+                candidates = idle.len(),
+                expired,
+                "startup swept idle temporary sessions left by the previous process"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            // A failed sweep must not keep the server from starting: the rows
+            // stay and the next boot (or the collection sweep) retries them.
+            tracing::warn!(
+                error = %e,
+                "could not list idle temporary sessions at startup; they will be retried"
+            );
+        }
+    }
     if !state.sign_in_required() && !state.api_keys().is_empty() {
         tracing::warn!(
             "API keys exist but this server requires no credential: set KARUCODE_AUTH_TOKEN or \
@@ -1391,7 +1440,7 @@ mod tests {
 
         let err = parse(&["plugin", "deploy", "x"]).unwrap_err().to_string();
         assert!(err.contains("unknown `plugin` command `deploy`"), "{err}");
-        assert!(err.contains("expected `init` or `sdk`"), "{err}");
+        assert!(err.contains("expected `init`, `sdk` or `install`"), "{err}");
 
         let err = parse(&["plugin", "init"]).unwrap_err().to_string();
         assert!(err.contains("needs a target directory"), "{err}");

@@ -11,7 +11,10 @@ use crate::subagent::SubagentLimiter;
 use crate::{ActiveRun, Runtime, RuntimeDeps, RuntimeInner};
 use async_trait::async_trait;
 use kc_core::approval::ApprovalKind;
-use kc_core::config::{ApprovalPolicy, Limits, ModelConfig, SessionModelSelection, SubagentConfig};
+use kc_core::config::{
+    ApprovalPolicy, Limits, ModelConfig, ModelOverrideJudgement, SessionModelSelection,
+    SubagentConfig,
+};
 use kc_core::error::{Error, Result};
 use kc_core::events::EventEnvelope;
 use kc_core::hooks::{Hooks, NoHooks};
@@ -264,6 +267,7 @@ impl Store for FakeStore {
         title: &str,
         workspace: &str,
         project_id: Option<&str>,
+        ephemeral: bool,
     ) -> Result<Session> {
         let now = now_ms();
         let session = Session {
@@ -272,11 +276,31 @@ impl Store for FakeStore {
             workspace: workspace.to_string(),
             project_id: project_id.map(str::to_string),
             model: None,
+            ephemeral,
             created_at: now,
             updated_at: now,
         };
         self.db().sessions.push(session.clone());
         Ok(session)
+    }
+
+    async fn idle_ephemeral_session_ids(&self) -> Result<Vec<String>> {
+        let db = self.db();
+        let busy = |session_id: &str| {
+            db.runs
+                .iter()
+                .any(|r| r.session_id == session_id && r.status == "running")
+                || db
+                    .agents
+                    .iter()
+                    .any(|a| a.session_id == session_id && a.status == "running")
+        };
+        Ok(db
+            .sessions
+            .iter()
+            .filter(|s| s.ephemeral && !busy(&s.id))
+            .map(|s| s.id.clone())
+            .collect())
     }
 
     async fn recovery_sessions(
@@ -332,6 +356,10 @@ impl Store for FakeStore {
             .db()
             .sessions
             .iter()
+            // Listings never show a temporary session: the client that created
+            // it tracks it by id, and every other consumer would see a row
+            // that vanishes on its own.
+            .filter(|s| !s.ephemeral)
             .map(|s| SessionSummary {
                 id: s.id.clone(),
                 title: s.title.clone(),
@@ -344,6 +372,7 @@ impl Store for FakeStore {
                 last_run_status: None,
                 running: false,
                 control: false,
+                ephemeral: false,
             })
             .collect())
     }
@@ -1490,6 +1519,9 @@ pub(crate) struct ScriptedFactory {
     keyed: KeyedScripts,
     requests: Arc<Mutex<Vec<ChatRequest>>>,
     builds: Arc<AtomicUsize>,
+    /// The `(model, base_url)` of every provider build, so a test can prove
+    /// which endpoint a child (or a run) actually ran on.
+    built_configs: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl ScriptedFactory {
@@ -1499,6 +1531,7 @@ impl ScriptedFactory {
             keyed: Arc::new(Mutex::new(Vec::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
             builds: Arc::new(AtomicUsize::new(0)),
+            built_configs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -1515,6 +1548,15 @@ impl ScriptedFactory {
         self.requests.lock().expect("requests lock").clone()
     }
 
+    /// The `(model, base_url)` pairs of every provider build, in order: the
+    /// endpoint each loop actually ran on, not just the id it asked for.
+    pub(crate) fn built_configs(&self) -> Vec<(String, String)> {
+        self.built_configs
+            .lock()
+            .expect("built_configs lock")
+            .clone()
+    }
+
     pub(crate) fn builds(&self) -> usize {
         self.builds.load(Ordering::Relaxed)
     }
@@ -1522,8 +1564,12 @@ impl ScriptedFactory {
 
 #[async_trait]
 impl ProviderFactory for ScriptedFactory {
-    async fn build(&self, _config: &ModelConfig) -> Result<Arc<dyn Provider>> {
+    async fn build(&self, config: &ModelConfig) -> Result<Arc<dyn Provider>> {
         self.builds.fetch_add(1, Ordering::Relaxed);
+        self.built_configs
+            .lock()
+            .expect("built_configs lock")
+            .push((config.model.clone(), config.base_url.clone()));
         Ok(Arc::new(ScriptedProvider {
             scripts: Arc::clone(&self.scripts),
             keyed: Arc::clone(&self.keyed),
@@ -1542,10 +1588,14 @@ pub(crate) struct FakeSettings {
     pub policy: ApprovalPolicy,
     pub subagents: SubagentConfig,
     pub notifications: kc_core::config::NotificationsConfig,
-    /// What `known_models` answers. Empty (the default) means "no catalog to
-    /// judge against", which is the permissive behaviour a single-model
-    /// embedding has.
+    /// What `resolve_requested_model` judges against. Empty (the default)
+    /// means "no catalog to judge against", which is the permissive behaviour
+    /// a single-model embedding has.
     pub known_models: Vec<String>,
+    /// A second profile's endpoint + catalog, for tests of cross-profile
+    /// model routing. `None` means the fake install has only the one
+    /// endpoint the base model already names.
+    pub alt_profile: Option<(String, Vec<String>)>,
 }
 
 impl Default for FakeSettings {
@@ -1571,6 +1621,7 @@ impl Default for FakeSettings {
             subagents: SubagentConfig::default(),
             notifications: kc_core::config::NotificationsConfig::default(),
             known_models: Vec::new(),
+            alt_profile: None,
         }
     }
 }
@@ -1608,6 +1659,17 @@ impl FakeSettings {
     /// override can be checked against it.
     pub(crate) fn with_known_models(mut self, models: &[&str]) -> Self {
         self.known_models = models.iter().map(|m| m.to_string()).collect();
+        self
+    }
+
+    /// Declare a second endpoint with its own catalog, so a test can prove a
+    /// requested model that lives on another profile routes the child onto
+    /// that profile's endpoint.
+    pub(crate) fn with_alt_profile(mut self, base_url: &str, models: &[&str]) -> Self {
+        self.alt_profile = Some((
+            base_url.to_string(),
+            models.iter().map(|m| m.to_string()).collect(),
+        ));
         self
     }
 }
@@ -1651,8 +1713,60 @@ impl Settings for FakeSettings {
         self.notifications.clone()
     }
 
-    async fn known_models(&self, _selection: Option<&SessionModelSelection>) -> Vec<String> {
-        self.known_models.clone()
+    /// Mirrors the server's resolver closely enough to prove the runtime
+    /// *uses* a session's or a spawn's selection: the selected id (and, for a
+    /// cross-profile request, the profile's endpoint) wins; an id outside both
+    /// catalogs is refused with the alternatives when any catalog was declared.
+    async fn resolve_requested_model(
+        &self,
+        _selection: Option<&SessionModelSelection>,
+        requested: &str,
+    ) -> ModelOverrideJudgement {
+        let requested = requested.trim();
+        if requested.is_empty() {
+            return ModelOverrideJudgement::Error(
+                "the `model` override is empty: omit it to inherit the session's model, or name one \
+                 of this install's models"
+                    .to_string(),
+            );
+        }
+        if let Some((base_url, models)) = &self.alt_profile {
+            if models.iter().any(|m| m == requested) {
+                let mut model = self.model.clone();
+                model.model = requested.to_string();
+                model.base_url = base_url.clone();
+                return ModelOverrideJudgement::Resolved(model);
+            }
+        }
+        // The base model's own id is always valid.
+        if requested == self.model.model.trim() {
+            return ModelOverrideJudgement::Resolved(self.model.clone());
+        }
+        if let Some(id) = self.known_models.iter().find(|m| m.as_str() == requested) {
+            let mut model = self.model.clone();
+            model.model = id.clone();
+            return ModelOverrideJudgement::Resolved(model);
+        }
+        let mut known = self.known_models.clone();
+        if !self.model.model.trim().is_empty() && !known.contains(&self.model.model) {
+            known.push(self.model.model.clone());
+        }
+        if let Some((_, models)) = &self.alt_profile {
+            for m in models {
+                if !known.contains(m) {
+                    known.push(m.clone());
+                }
+            }
+        }
+        if known.len() < 2 {
+            return ModelOverrideJudgement::Unjudged {
+                requested: requested.to_string(),
+            };
+        }
+        ModelOverrideJudgement::Unknown {
+            requested: requested.to_string(),
+            known,
+        }
     }
 }
 
@@ -2689,6 +2803,10 @@ pub(crate) struct HarnessBuilder {
     hooks: Arc<dyn Hooks>,
     workspaces: Option<Arc<dyn crate::WorkspaceProvider>>,
     session_workspace: Option<PathBuf>,
+    /// Create the session with `ephemeral: true`, so the run teardown must
+    /// retire it. Defaults to false: every pre-existing test talks about a
+    /// durable chat.
+    ephemeral: bool,
 }
 
 impl HarnessBuilder {
@@ -2701,6 +2819,7 @@ impl HarnessBuilder {
             hooks: Arc::new(NoHooks),
             workspaces: None,
             session_workspace: None,
+            ephemeral: false,
         }
     }
 
@@ -2717,6 +2836,13 @@ impl HarnessBuilder {
 
     pub(crate) fn settings(mut self, settings: FakeSettings) -> Self {
         self.settings = settings;
+        self
+    }
+
+    /// Create the harness session as temporary: it must delete itself once its
+    /// work is over (see `Runtime::retire_idle_ephemeral_session`).
+    pub(crate) fn ephemeral(mut self) -> Self {
+        self.ephemeral = true;
         self
     }
 
@@ -2776,6 +2902,7 @@ impl HarnessBuilder {
                 "test session",
                 &session_workspace.to_string_lossy(),
                 self.project_id.as_deref(),
+                self.ephemeral,
             )
             .await
             .expect("create session");

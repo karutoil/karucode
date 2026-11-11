@@ -100,6 +100,97 @@ Rules:
 * A plugin with no `name` in `plugin.toml` uses its directory name.
 * `enabled = false` means "discovered, not started" — status `disabled`.
 
+### Installing from a GitHub repository (or a local directory)
+
+`karucode plugin install` fetches a whole plugin repository, builds what needs
+building and places each plugin under `<data_dir>/plugins/<name>/` — the
+disk-manifest source above. It needs no running server, no restart and no git
+checkout:
+
+```bash
+karucode plugin install owner/plugin-repo            # every plugin it offers
+karucode plugin install owner/plugin-repo wordy      # just these names
+karucode plugin install owner/plugin-repo@v0.2.0     # a tag, branch or commit
+karucode plugin install https://github.com/owner/plugin-repo
+karucode plugin install https://github.com/owner/plugin-repo/tree/main/wordy
+karucode plugin install ./my-plugins                 # a local directory, same layout
+karucode plugin install owner/plugin-repo --list     # what does it offer?
+```
+
+A repository is one of three shapes, tried in this order:
+
+1. **A root `index.toml`** — the curated list:
+
+   ```toml
+   # index.toml
+   [[plugins]]
+   name = "wordy"                # what `plugin install wordy` selects
+   path = "wordy"                # directory, relative to the repository root
+   description = "Counts words"
+   ```
+
+   When an index exists it is authoritative: directories it does not name are
+   invisible, and a manifest `name` that disagrees with the index is an error.
+   `description` is optional (a manifest top-level `description` is the
+   fallback) and is what `--list` prints.
+
+2. **One directory per plugin at the root**, each with a `plugin.toml`
+   (discovered by scan, sorted by name).
+
+3. **A `plugin.toml` at the root itself** — a single-plugin repository.
+
+Each plugin's `plugin.toml` is the manifest from §2 plus one optional table:
+
+```toml
+[install]
+build = ["cargo", "build", "--release"]   # run with the plugin dir as cwd
+build_timeout_secs = 900                  # default 900
+exclude = ["examples"]                    # extra dirs not to copy into the install
+```
+
+What the installer does, in order:
+
+1. **Fetch.** Remote sources download
+   `https://codeload.github.com/<owner>/<repo>/tar.gz/<ref>` (default ref
+   `HEAD`; `--ref` overrides one carried by the URL). Public repositories need
+   no token; private ones need `GH_TOKEN` or `GITHUB_TOKEN`. Local sources are
+   copied to a staging tree, so the operator's checkout is never written to.
+2. **Extract, safely.** In-process, not `tar`: a member with an absolute path,
+   a `..` component, a symlink or a hardlink is refused outright, the archive
+   is capped (256 MiB compressed / 512 MiB unpacked) and the single
+   `repo-<sha>/` top directory GitHub adds is stripped.
+3. **Build.** `[install].build` runs in the staging copy with the operator's
+   environment and stdio (it is the plugin author's command, run by the person
+   who asked for the install), in its own process group so a timeout
+   (`build_timeout_secs`, or `--build-timeout-secs`) tears down the whole
+   tree. `--no-build` skips it.
+4. **Relocate.** The manifest's `command` is rewritten to the installed
+   location: an absolute path inside the plugin's source directory maps to the
+   same position under `<data_dir>/plugins/<name>/`, a relative argument that
+   names a file in the plugin directory (`["python3", "atlas.py"]`) maps to the
+   installed file, and a bare program name (`python3`) is kept. Anything that
+   points outside the plugin's own directory is refused — an installed plugin
+   must be self-contained. `target/`, `node_modules/`, `.git/`, `venv/` and
+   friends are never copied.
+5. **Swap in.** An existing `<data_dir>/plugins/<name>/` is an error unless
+   `--force`. The new copy is built in a staging directory and renamed into
+   place; if the rename fails the previous install is restored.
+
+Every install writes `install.json` beside `plugin.toml`: the source
+(`owner/repo@<sha>` or `local:<path>`), the resolved commit, the tarball's
+sha256, the final command and a timestamp.
+
+**A repository manifest may not grant itself operator power.**
+`permissions = ["*"]`, `settings.trust` and `settings.read_only_tools` are
+refused as install errors — the same keys the host strips from a disk manifest
+(§6). Narrow permissions (`files.read`, `shell`, …) are copied as written. If
+you want an approval exemption for an installed plugin, add the key yourself in
+the `[[plugins]]` entry in `config.toml`.
+
+`--data-dir` and `--config` choose the target directory exactly like the server
+flags. The command starts nothing, stops nothing, and writes only under the
+data directory.
+
 ### Environment the host sets for the process
 
 | Variable | Meaning |
@@ -158,8 +249,9 @@ The host re-reads its sources on demand, so none of these needs a server restart
 
 | You want to… | Do this | Then |
 | --- | --- | --- |
-| install a plugin | write `<data_dir>/plugins/<name>/plugin.toml` (or add a `[[plugins]]` entry) | `POST /api/plugins/reload` |
-| upgrade one | rebuild the binary in place, or edit its manifest | `POST /api/plugins/:name/reload` |
+| install from GitHub or a local directory | `karucode plugin install <source> [names…]`, or **Settings → Plugins & MCP → Install from a repository** in the browser | nothing: an install job rescans the host itself |
+| install by hand | write `<data_dir>/plugins/<name>/plugin.toml` (or add a `[[plugins]]` entry) | `POST /api/plugins/reload` |
+| upgrade one | `karucode plugin install <source> <name> --force` (or the browser's install with *Replace existing installs*), or rebuild the binary in place, or edit its manifest | `POST /api/plugins/:name/reload` |
 | remove one | delete its directory / `[[plugins]]` entry | `POST /api/plugins/reload` |
 | none of the above | — | leave it to `plugins_watch` |
 

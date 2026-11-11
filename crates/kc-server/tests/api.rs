@@ -5999,8 +5999,8 @@ async fn mission_replan_api_validates_review_dag_and_releases_blocked_task() {
         Script::Fail("failure [http 400] [permanent]".into()),
         text("replanned"),
     ])
-        .build()
-        .await;
+    .build()
+    .await;
     let project = h.get("/api/projects").await.json()["projects"][0]["id"]
         .as_str()
         .unwrap()
@@ -6988,7 +6988,7 @@ async fn the_overview_counts_every_failing_session_not_just_the_page() {
     for index in 0..15 {
         let id = format!("s_failed_{index:02}");
         store
-            .create_session(&id, "Broken work", "/w", Some(&project))
+            .create_session(&id, "Broken work", "/w", Some(&project), false)
             .await
             .expect("session");
         store

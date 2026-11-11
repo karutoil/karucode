@@ -1,5 +1,6 @@
 use crate::config::{
-    ApprovalPolicy, Limits, ModelConfig, NotificationsConfig, SessionModelSelection, SubagentConfig,
+    ApprovalPolicy, Limits, ModelConfig, ModelOverrideJudgement, NotificationsConfig,
+    SessionModelSelection, SubagentConfig,
 };
 use async_trait::async_trait;
 
@@ -22,19 +23,28 @@ pub trait Settings: Send + Sync {
     async fn approval_policy(&self) -> ApprovalPolicy;
     async fn subagent_config(&self) -> SubagentConfig;
 
-    /// The model ids this install can actually send, for validating an id that
-    /// did not come from the config: the `model` argument of
-    /// `spawn_agent`/`spawn_agents`, which the caller types and nothing else
-    /// checks.
+    /// Resolve the `model` argument of `spawn_agent`/`spawn_agents` - one id
+    /// that came from *outside* the config, typed by the caller and derived
+    /// by nothing - against the models this install actually made available.
     ///
-    /// `selection` is the session's pin, because a pinned session resolves
-    /// against *its* profile rather than the install-wide one. The default is
-    /// empty, which means "cannot judge, refuse nothing" - an embedding or a
-    /// test that keeps the single-model behaviour must not start failing spawns
-    /// because it has no catalog to check against.
-    async fn known_models(&self, selection: Option<&SessionModelSelection>) -> Vec<String> {
-        let _ = selection;
-        Vec::new()
+    /// A valid id is one we created and made available in karucode: a model
+    /// **any** profile declares resolves onto that profile's endpoint and
+    /// per-model metadata, even when it is not the session's own profile.
+    /// `selection` is the session's pin, so the id a pinned profile actually
+    /// sends is recognized too, and the historical pass-through on installs
+    /// where nobody declared a catalog keeps working. The default returns
+    /// [`ModelOverrideJudgement::Unjudged`] ("cannot judge, refuse nothing"),
+    /// so an embedding or a test that keeps the single-model behaviour must
+    /// not start failing spawns because it has no catalog to judge against.
+    async fn resolve_requested_model(
+        &self,
+        selection: Option<&SessionModelSelection>,
+        requested: &str,
+    ) -> ModelOverrideJudgement {
+        let _ = (selection, requested);
+        ModelOverrideJudgement::Unjudged {
+            requested: String::new(),
+        }
     }
 
     /// Live `[notifications]` settings.

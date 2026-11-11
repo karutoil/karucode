@@ -601,6 +601,12 @@ pub(crate) async fn derive_untitled_title(
             return None;
         }
     };
+    // Temporary sessions are never named: there is no rail row to show a title
+    // on, and the expiry path may delete the row out from under the background
+    // model call. Same early return the ordinary send path uses.
+    if session.ephemeral {
+        return None;
+    }
     if !is_untitled(&session.title) {
         return None;
     }

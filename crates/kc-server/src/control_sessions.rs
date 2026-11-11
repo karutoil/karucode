@@ -108,7 +108,7 @@ impl Tool for ListSessions {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "control_list_sessions".into(),
-            description: "List sessions across every project, newest activity first: id, title, project, latest run status, whether it is running, message count and last update. Read-only; use it to audit what work exists before reading or guiding a session.".into(),
+            description: "List sessions across every project, newest activity first: id, title, project, latest run status, whether it is running, message count and last update. Read-only; use it to audit what work exists before reading or guiding a session. Temporary (ephemeral) sessions are never listed - they exist for the API client that created them and vanish when their work ends.".into(),
             parameters: json!({"type":"object","properties":{
                 "project_id":{"type":"string","description":"Only sessions in this registered project"},
                 "running":{"type":"boolean","description":"Only sessions with a run in flight"},

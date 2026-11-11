@@ -433,7 +433,22 @@ matters to an operator says which behaviour changed, not which number.
   old first section, whose name the tab had taken, is **Theme and layout**. Provider
   cards are cards on the input rung with their models as divided rows, not cards
   inside a card. Verified in Chromium at 1440/1024/800/390 in both modes by
-  `scripts/verify_settings_tabs.py` (33 checks).
+  `scripts/verify_settings_tabs.py` (35 checks).
+
+- **Every settings group is a card and every option inside it is a bordered
+  tile.** The pane was one flat column: a section was a heading over a field grid
+  on the sheet's own fill, so two groups were told apart by a single hairline and
+  the controls inside a group by nothing at all — the complaint that they "all
+  just blend together". A section is now a card on the `--surface` rung with its
+  title bar ruled off under the heading, and a `.field`, a switch row and a
+  "name + control" row all share one tile recipe (a `--line` edge, `--radius-sm`),
+  scoped to the sheet body so a field in a dialog is not boxed twice. A section
+  subheading ("Set a password", "Which events") became a kicker: at
+  `--fs-label`/700 it was indistinguishable from a field label, which was the
+  other half of the blur. The Options/Providers cards the Models section already
+  had moved up a rung so a card inside a card still reads as two objects, and the
+  Advanced disclosure is now the same card as a section (its old negative-margin
+  bleed is gone) with the sections inside it flattened rather than boxed again.
 
 - **The command palette speaks the workbench's language.** Three things in it were
   drawn twice: the row Enter would run was an accent label on an accent tint (a

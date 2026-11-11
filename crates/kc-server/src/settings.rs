@@ -466,8 +466,8 @@ use crate::error::ApiError;
 use async_trait::async_trait;
 use kc_core::config::{
     AccessConfig, ApprovalMode, ApprovalPolicy, Config, Limits, ModelConfig, ModelEntry,
-    ProviderProfile, SessionModelSelection, SubagentConfig, TerminalConfig, TitlesConfig,
-    TunnelKind, MAX_TERMINALS_HINT, MAX_TERMINAL_SCROLLBACK, MAX_TITLE_CHARS_HINT,
+    ModelOverrideJudgement, ProviderProfile, SessionModelSelection, SubagentConfig, TerminalConfig,
+    TitlesConfig, TunnelKind, MAX_TERMINALS_HINT, MAX_TERMINAL_SCROLLBACK, MAX_TITLE_CHARS_HINT,
     MIN_TERMINAL_SCROLLBACK,
 };
 use kc_core::error::{Error, Result};
@@ -1218,8 +1218,13 @@ impl Settings for SettingsHandle {
         resolve_session_model(&self.snapshot(), selection)
     }
 
-    async fn known_models(&self, selection: Option<&SessionModelSelection>) -> Vec<String> {
-        self.snapshot().known_models(selection)
+    async fn resolve_requested_model(
+        &self,
+        selection: Option<&SessionModelSelection>,
+        requested: &str,
+    ) -> ModelOverrideJudgement {
+        self.snapshot()
+            .resolve_requested_model(selection, requested)
     }
 
     async fn limits(&self) -> Limits {
@@ -2428,7 +2433,10 @@ fn validate_limits(limits: &Limits) -> Result<()> {
             "limits.max_tool_calls_per_turn",
             limits.max_tool_calls_per_turn as u64,
         ),
-        ("limits.max_turn_retries", u64::from(limits.max_turn_retries)),
+        (
+            "limits.max_turn_retries",
+            u64::from(limits.max_turn_retries),
+        ),
         ("limits.turn_retry_delay_ms", limits.turn_retry_delay_ms),
     ];
     for ((name, value), (expected, min, max)) in values.iter().zip(LIMITS_BOUNDS) {

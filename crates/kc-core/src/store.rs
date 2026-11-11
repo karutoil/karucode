@@ -107,6 +107,12 @@ pub struct Session {
     /// so several sessions can run different models at the same time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<SessionModelSelection>,
+    /// True for a temporary session. Ephemeral sessions are excluded from every
+    /// listing (they exist for an API client's own bookkeeping, not the rail)
+    /// and are deleted when their work is over - by the finishing run, by
+    /// `POST /api/sessions/:id/expire`, or by an ordinary delete.
+    #[serde(default)]
+    pub ephemeral: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -212,6 +218,10 @@ pub struct SessionSummary {
     /// sessions of a project" must be able to tell them apart from one.
     #[serde(default)]
     pub control: bool,
+    /// True for a temporary session. Never present in a listing the store
+    /// returns; carried for clients that read one directly.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -888,7 +898,22 @@ pub trait Store: Send + Sync {
         title: &str,
         workspace: &str,
         project_id: Option<&str>,
+        ephemeral: bool,
     ) -> Result<Session>;
+    /// Ids of every temporary (`ephemeral`) session that has no work left in
+    /// the database: no run in flight, no live subagent, no pending approval.
+    /// Read-only - the caller re-checks the runtime's in-memory queues (which
+    /// SQL cannot see) before deleting, then emits `SessionDeleted` per row.
+    ///
+    /// This is the candidate list behind `DELETE /api/sessions` and the
+    /// cleanup pass at startup; the store is where the durable gating truth
+    /// (runs, agents, approvals) lives.
+    async fn idle_ephemeral_session_ids(&self) -> Result<Vec<String>> {
+        let _ = self;
+        Err(crate::error::Error::Store(
+            "ephemeral session expiry unsupported".into(),
+        ))
+    }
     /// Total sessions and up to `limit` recovery candidates, interrupted first
     /// then recent, each ordered by update time and id descending. Call before
     /// marking runs or agents interrupted. Exclude agents if their snapshot failed.

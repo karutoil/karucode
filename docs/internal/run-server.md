@@ -7,7 +7,7 @@
 
 - **Slug:** `run-server`
 - **Tags:** install, build, run, cli, startup, server
-- **Applies to:** `cmd:karucode`, `cmd:--workspace`, `cmd:--port`, `cmd:--host`, `cmd:--data-dir`, `cmd:--config`, `cmd:--help`, `cmd:--version`, `cmd:karucode update`, `cmd:karucode update --check`, `cmd:karucode update --stage`, `cmd:karucode update --apply`, `cmd:karucode update --apply --restart`, `env:KARUCODE_HOST`, `env:KARUCODE_PORT`, `env:KARUCODE_WORKSPACE`, `env:KARUCODE_DATA_DIR`, `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_LOG`, `env:KARUCODE_WEB_DIR`, `env:KARUCODE_ALLOWED_HOSTS`, `env:KARUCODE_SKIP_WEB_BUILD`, `env:KARUCODE_WEB_DIST`, `env:KARUCODE_NPM`, `cmd:npm run build`, `cmd:npm ci`, `route:GET /api/health`, `file:web/dist`, `file:crates/kc-server/build.rs`
+- **Applies to:** `cmd:karucode`, `cmd:--workspace`, `cmd:--port`, `cmd:--host`, `cmd:--data-dir`, `cmd:--config`, `cmd:--help`, `cmd:--version`, `cmd:karucode update`, `cmd:karucode update --check`, `cmd:karucode update --stage`, `cmd:karucode update --apply`, `cmd:karucode update --apply --restart`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin install`, `env:KARUCODE_HOST`, `env:KARUCODE_PORT`, `env:KARUCODE_WORKSPACE`, `env:KARUCODE_DATA_DIR`, `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_LOG`, `env:KARUCODE_WEB_DIR`, `env:KARUCODE_ALLOWED_HOSTS`, `env:KARUCODE_SKIP_WEB_BUILD`, `env:KARUCODE_WEB_DIST`, `env:KARUCODE_NPM`, `cmd:npm run build`, `cmd:npm ci`, `route:GET /api/health`, `file:web/dist`, `file:crates/kc-server/build.rs`
 - **Source:** `crates/kc-server/src/bootstrap.rs:8`
 
 ---
@@ -82,8 +82,17 @@ whose SDK is vendored, so it depends on nothing from karucode; see the
 [--check]` refreshes that vendored copy after a karucode upgrade, and `--check`
 exits non-zero on drift so a plugin's CI can guard it.
 
+`karucode plugin install <source> [names…]` installs plugins from a GitHub
+repository (`owner/repo`, a github.com URL, `owner/repo@ref`) or a local
+directory into `<data_dir>/plugins/`, building what the plugins' `[install]`
+tables declare; `--list` shows what a source offers. It runs without the
+server and needs no git checkout. The repository format — a root
+`index.toml` or one directory per plugin — is in the `plugins` topic.
+
 Neither subcommand starts the server, reads the config file or touches the
-data directory, and an existing file is never overwritten without `--force`.
+data directory (`plugin install` reads the config only for the data
+directory, and writes only under it), and an existing file is never
+overwritten without `--force`.
 
 `karucode update` is the third subcommand and the one that keeps an installed
 binary current:

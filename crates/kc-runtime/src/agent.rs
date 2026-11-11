@@ -503,7 +503,24 @@ async fn start_run_with_lifecycle_policy(
         // The hop through [`start_run_boxed`] is what lets the compiler size the
         // type - `start_run` awaiting `start_run` directly would be an infinitely
         // sized future, and spawning it would be a `Send` cycle between the two.
-        continue_with_follow_up(runtime_for_follow_up, spawned_state.session_id.0.clone()).await;
+        continue_with_follow_up(
+            Arc::clone(&runtime_for_follow_up),
+            spawned_state.session_id.0.clone(),
+        )
+        .await;
+
+        // Last thing, after the follow-up decision: a temporary session whose
+        // work is over disappears here. Ordering matters - if a follow-up was
+        // queued, that call just started a new run, and the retire's own
+        // "is a loop registered" gate (correctly) leaves the session alive for
+        // it. When nothing is queued, `continue_with_follow_up` found nothing,
+        // the queues are empty, and this run was the last work in the session:
+        // its teardown is the moment "finished" is true. Not spawned: this task
+        // is already off the request path and is the one place the ordering is
+        // knowable.
+        runtime_for_follow_up
+            .retire_idle_ephemeral_session(&spawned_state.session_id.0)
+            .await;
     });
 
     Ok(RunHandle {
@@ -1419,8 +1436,9 @@ is {})",
                                 // exists for: the provider's own budget ran out
                                 // after 300 s of backoff, and nothing about the
                                 // request is wrong.
-                                recoverable:
-                                    kc_core::error::is_transient_provider_failure_error(&e),
+                                recoverable: kc_core::error::is_transient_provider_failure_error(
+                                    &e,
+                                ),
                             },
                             None,
                         )
@@ -4588,7 +4606,13 @@ mod current_runtime_regressions {
             .set(Arc::downgrade(&runtime))
             .expect("attach runtime once");
         store
-            .create_session(&session, "failed start", &dir.to_string_lossy(), None)
+            .create_session(
+                &session,
+                "failed start",
+                &dir.to_string_lossy(),
+                None,
+                false,
+            )
             .await
             .expect("create session");
         let mut events = runtime.subscribe();

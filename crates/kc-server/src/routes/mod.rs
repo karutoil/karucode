@@ -12,6 +12,7 @@ pub mod info;
 pub mod missions;
 pub mod models;
 pub mod onboarding;
+pub mod plugin_install;
 pub mod plugins;
 pub mod projects;
 pub mod rewind;
@@ -116,7 +117,9 @@ pub fn api_router() -> Router<AppState> {
         .route("/stats", get(config::stats))
         .route(
             "/sessions",
-            get(sessions::list_sessions).post(sessions::create_session),
+            get(sessions::list_sessions)
+                .post(sessions::create_session)
+                .delete(sessions::sweep_ephemeral_sessions),
         )
         .route(
             "/sessions/:id",
@@ -124,6 +127,7 @@ pub fn api_router() -> Router<AppState> {
                 .patch(sessions::rename_session)
                 .delete(sessions::delete_session),
         )
+        .route("/sessions/:id/expire", post(sessions::expire_session))
         .route("/sessions/:id/info", get(info::session_info))
         .route("/sessions/:id/messages", post(sessions::send_message))
         .route("/sessions/:id/queues", get(sessions::list_queues))
@@ -234,6 +238,19 @@ pub fn api_router() -> Router<AppState> {
         .route("/terminals/:id/socket", get(terminals::terminal_socket))
         .route("/plugins", get(plugins::list_plugins))
         .route("/plugins/reload", post(plugins::reload_plugins))
+        // Plugin installs: preview (sync) + a pollable job, admin-gated like
+        // `POST /api/update/apply` because a build runs arbitrary code with
+        // the server's environment. See routes/plugin_install.rs.
+        .route(
+            "/plugins/install/preview",
+            post(plugin_install::preview_install),
+        )
+        .route("/plugins/install", post(plugin_install::start_install))
+        .route("/plugins/install/:id", get(plugin_install::get_install))
+        .route(
+            "/plugins/install/:id/cancel",
+            post(plugin_install::cancel_install),
+        )
         .route("/plugins/:name/enable", post(plugins::enable_plugin))
         .route("/plugins/:name/reload", post(plugins::reload_plugin))
         .route("/plugins/:name/panels/:panel", get(plugins::read_panel))

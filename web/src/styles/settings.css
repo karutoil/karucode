@@ -324,10 +324,16 @@
   min-height: 0;
 }
 
+/* The panel area: one scroller for whichever section is showing. It is a column
+ * as well, so the cards inside are spaced by the same gap rather than by every
+ * card authoring its own margin. */
 .settings-panels > .tab-panel {
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-6);
   min-height: 0;
-  padding: 0 var(--space-9) var(--space-9);
+  padding: var(--space-7) var(--space-9) var(--space-9);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -371,27 +377,32 @@
 
 /* ---------- sections --------------------------------------------------- */
 
+/* A section is a card. Before this it was a heading over a field grid on the
+ * sheet's own fill, so two sections were told apart by one hairline and the
+ * options inside them by nothing at all: the whole pane read as one long block
+ * ("they just blend together"). A card on the rung below the sheet (`--surface`,
+ * the fill the Theme studio's presets use) with its head ruled off gives every
+ * group an edge, and the field table inside gives every option one. */
 .settings-section {
   display: flex;
   flex-direction: column;
-  gap: var(--space-7);
-  /* One vertical rhythm for the whole sheet: --space-9 above a section, --space-8
-   * below it (44px between two sections). The disclosure bodies used to run their
-   * own 29px/36px rhythms, so the same job had three answers (M3). */
-  padding: var(--space-9) 0 var(--space-8);
-  border-bottom: 1px solid var(--line);
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-7);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
 }
 
-.settings-section:last-of-type {
-  border-bottom: 0;
-}
-
+/* The head is the card's title bar: a rule under it separates "what this group
+ * is" from the options, which is the distinction that was missing. */
 .settings-section-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
   gap: var(--space-5);
   flex-wrap: wrap;
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--line);
 }
 
 .settings-section-head h3 {
@@ -422,7 +433,7 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-7);
-  padding: var(--space-7) 0;
+  padding: var(--space-5) 0;
   border-top: 1px solid var(--line);
 }
 
@@ -445,22 +456,24 @@
   padding-left: var(--space-6);
 }
 
-/* A sub-heading inside one settings section (server routing vs this browser). */
+/* A sub-heading inside one settings section (server routing vs this browser).
+ * It is a kicker, not a field label: at the same size and weight as a `.field-label`
+ * it read as one more option, which is half of why the pane blended. */
 .settings-subhead {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
   gap: var(--space-2) var(--space-5);
-  /* The same 24px step the sections use; the rule is gone with the extra
-   * padding that used to make a third rhythm (M3). */
-  margin-top: var(--space-9);
+  margin-top: var(--space-4);
 }
 
 .settings-subhead h4 {
-  color: var(--text);
-  font-size: var(--fs-label);
-  font-weight: 700;
+  color: var(--text-kicker);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.9px;
   line-height: 1.4;
+  text-transform: uppercase;
 }
 
 /* A small input that sits on the right of a setting row. */
@@ -550,14 +563,28 @@
 
 /* ---------- fields ----------------------------------------------------- */
 
+/* Every option in the sheet is its own bordered block. This is the answer to
+ * "they all blend together": the card separates a group, and this separates the
+ * options inside it. The three shapes an option can take — a labelled field, a
+ * switch row, a "name + control" row — share one box, so no container has to opt
+ * in and no tab can drift back to bare rows.
+ *
+ * Scoped to the sheet body: a `.field` in a dialog (the model editor, rewind) is
+ * already inside a box and must not gain a second one, and a switch that lives
+ * *inside* a field is part of that field's box, not another tile. */
+.settings-body .field,
+.settings-body .list-editor,
+.settings-body .setting-row,
+.settings-section > .toggle-field {
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-6) var(--space-7);
-}
-
-.field-grid-compact {
-  gap: var(--space-6) var(--space-7);
+  gap: var(--space-4);
 }
 
 .field,
@@ -800,7 +827,7 @@
   padding: var(--space-6) var(--space-7);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: var(--surface);
+  background: var(--surface-raised);
 }
 
 .provider-card:focus-within {
@@ -1093,9 +1120,12 @@
   padding: var(--space-7) var(--space-9) 0;
 }
 
+/* The dialog's grid is a table like every other: the gutter is a margin, not
+ * padding on the grid, or the grid's own `--line` background would paint a
+ * frame around its cells. */
 .dialog-model-edit > .field-grid {
   min-height: 0;
-  padding: var(--space-7) var(--space-9) 0;
+  margin: var(--space-7) var(--space-9) 0;
   overflow-y: auto;
 }
 
@@ -1327,7 +1357,7 @@
   padding: var(--space-4) var(--space-5);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: var(--surface);
+  background: transparent;
 }
 
 .diagnostics-name {
@@ -1416,18 +1446,16 @@
 /* ---------- advanced disclosure ---------------------------------------- */
 
 /* One per tab that has tuning knobs. Collapsed by default: the point of the
- * tabs is that the common settings fit without scrolling, and a timeouts block
- * would refill that screen for everyone to spare a click for a few. */
+ * sections is that the common settings fit without scrolling, and a timeouts
+ * block would refill that screen for everyone to spare a click for a few.
+ *
+ * It is a card like a section (same rung, same radius), with the summary as its
+ * title bar, so opening it does not change the shape of the pane. */
 .settings-advanced {
-  /* The disclosure bleeds out by exactly the inset its body carries, so the
-   * controls *inside* it share the panel's gutter and line up with the controls
-   * outside it. Before this, two selects in the same column ended 13px apart
-   * (1427 vs 1413 in the audit) because the box was inset 24px by the panel and
-   * then 12px again by its own body (M3). */
-  margin: var(--space-8) calc(-1 * var(--space-6)) 0;
+  margin: 0;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   background: var(--surface);
 }
 
@@ -1436,7 +1464,7 @@
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-2) var(--space-5);
-  padding: var(--space-6) var(--space-6);
+  padding: var(--space-5) var(--space-7);
   cursor: pointer;
   list-style: none;
   transition: background-color var(--transition-fast);
@@ -1484,33 +1512,26 @@
   border-bottom: 1px solid var(--line);
 }
 
-/* Inset to the summary's own gutter, because the contents are full settings
- * sections: they bring their own vertical rhythm but no horizontal padding, so
- * without this their labels sit flush against the disclosure's border. The
- * gutter is the value the block above bleeds out by. */
+/* The fold's own body is the card's interior, so the sections inside it are not
+ * cards themselves: a box inside a box of the same fill is noise. They keep
+ * their head rule and their field table, which is what separates the options. */
 .settings-advanced-body {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
-  padding: 0 var(--space-6) var(--space-3);
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-7);
 }
 
-/* Inside a disclosure the section is the only thing on screen, so the divider
- * that separates sections elsewhere has nothing to separate. */
-/* Sections in the fold keep the sheet's own rhythm: one answer to "how far apart
- * are two sections", whether or not a disclosure is open (M3). */
 .settings-advanced-body > .settings-section {
-  padding-bottom: var(--space-8);
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
-.settings-advanced-body > .settings-section:first-child {
-  padding-top: var(--space-9);
-}
-
-/* A section inside a disclosure is the last thing in the panel, so it does not
- * need the divider it draws when it follows another section. */
-.settings-advanced-body .settings-section:last-of-type {
-  border-bottom: 0;
+/* Two sections inside one fold still need a line between them. */
+.settings-advanced-body > .settings-section + .settings-section {
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--line);
 }
 
 /* ---------- footer ----------------------------------------------------- */

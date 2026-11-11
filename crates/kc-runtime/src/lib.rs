@@ -611,6 +611,102 @@ impl Runtime {
         self.inner.clear_session_allows(session_id);
     }
 
+    /// Delete a temporary session now, if its work is over.
+    ///
+    /// This is the end-of-life path the run loop calls from its teardown: a
+    /// session created with `ephemeral` disappears once nothing is left in it.
+    /// "Work is over" means all of:
+    ///
+    /// * the session row still says `ephemeral` (a client that made it durable
+    ///   is obeyed, and this call then does nothing);
+    /// * no loop for the session is registered and uncancelled — neither a user
+    ///   run (this teardown has deregistered; a queued follow-up has not started
+    ///   yet) nor a subagent, including a detached one;
+    /// * neither queue holds anything for it (queued steers and follow-ups are
+    ///   user input and stay until drained or recalled);
+    /// * no agent row is live and no approval is pending in the store (a
+    ///   paused subagent or an unanswered question is work that has not ended).
+    ///
+    /// Returns `true` when the session was deleted; the `session_deleted`
+    /// event has already been published so every listener drops the row.
+    /// False is *not* an error: it means the session is durable, or work
+    /// re-arrived in the gap between the run ending and this call.
+    ///
+    /// The caller must have finished its own teardown first — this method
+    /// looks at the very registration that teardown removes.
+    pub async fn retire_idle_ephemeral_session(&self, session_id: &str) -> bool {
+        let Some(session) = self
+            .inner
+            .deps
+            .store
+            .get_session(session_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            // Already gone (deleted by a client, or an earlier expiry won).
+            return false;
+        };
+        if !session.ephemeral {
+            return false;
+        }
+        // Re-check everything that says "work is not over", in the same order
+        // the doc comment lists them. A run re-registered after this check is
+        // the caller's race to lose: the expiry is best-effort and the next
+        // teardown retries it.
+        if self.is_running(session_id) {
+            return false;
+        }
+        let queued = self.queued_all(session_id);
+        if !queued.steers.is_empty() || !queued.follow_ups.is_empty() {
+            return false;
+        }
+        let live_agents = self
+            .inner
+            .deps
+            .store
+            .list_agents(session_id)
+            .await
+            .map(|agents| {
+                agents
+                    .iter()
+                    .any(|agent| AgentStatus::parse(&agent.status).is_some_and(|s| s.is_live()))
+            })
+            .unwrap_or(false);
+        if live_agents {
+            return false;
+        }
+        let pending = self
+            .inner
+            .deps
+            .store
+            .list_pending_approvals(Some(session_id))
+            .await
+            .map(|approvals| !approvals.is_empty())
+            .unwrap_or(false);
+        if pending {
+            return false;
+        }
+        if let Err(error) = self.inner.deps.store.delete_session(session_id).await {
+            tracing::warn!(
+                session = %session_id,
+                error = %error,
+                "could not delete the finished temporary session"
+            );
+            return false;
+        }
+        self.clear_session_allows(session_id);
+        self.inner.emit(
+            Some(session_id),
+            None,
+            None,
+            kc_core::events::Event::SessionDeleted {
+                session_id: session_id.to_string(),
+            },
+        );
+        true
+    }
+
     /// Startup recovery: leftover `running` runs and agents become
     /// `interrupted`, the path claims those agents held are released, and
     /// approvals still pending become `expired`. Returns counts. Every affected
@@ -1811,7 +1907,7 @@ mod recovery_tests {
         // disk, so its repair succeeds without appending anything.
         let other = "s_other";
         store
-            .create_session(other, "other", "/tmp", None)
+            .create_session(other, "other", "/tmp", None, false)
             .await
             .expect("create session");
         broken_exchange(&store, other, "call_b").await;
@@ -1942,7 +2038,7 @@ mod recovery_tests {
         // The harness already made one session; add enough to exceed the cap.
         for i in 0..RECOVERY_MAX_SESSIONS {
             store
-                .create_session(&format!("s_cap_{i}"), "cap", "/tmp", None)
+                .create_session(&format!("s_cap_{i}"), "cap", "/tmp", None, false)
                 .await
                 .expect("create session");
         }

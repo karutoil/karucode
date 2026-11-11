@@ -1214,6 +1214,105 @@ export function setPluginEnabled(
 }
 
 /**
+ * What a plugin-install source offers, fetched before anything runs: the
+ * review surface for choosing plugins to install.
+ */
+export interface PluginInstallPreview {
+  source: string;
+  kind: 'remote' | 'local';
+  resolved?: string | null;
+  plugins: Array<{
+    name: string;
+    description?: string | null;
+    /** What the plugin's manifest asks to touch; shown before install. */
+    permissions: string[];
+    /** Whether installing will run a build. */
+    builds: boolean;
+    /** Whether an install of this name already exists (needs `force`). */
+    already_installed: boolean;
+  }>;
+  /** Non-fatal findings (operator-only keys stripped, ...) to show up front. */
+  notes: string[];
+}
+
+export interface PluginInstallJob {
+  id: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  /** Progress lines in order, replayed from the poll. */
+  events: Array<
+    | { kind: 'downloading'; url: string }
+    | { kind: 'note'; message: string }
+    | { kind: 'building'; plugin: string; command: string }
+    | { kind: 'installed'; plugin: string; path: string }
+    | { kind: 'done'; installed: number }
+  >;
+  error?: string | null;
+  result?: {
+    installed: string[];
+    paths: Array<{ name: string; path: string }>;
+    /** The rescan the job ran; `added` names the new plugins. */
+    rescan: PluginRescanResponse['report'];
+  } | null;
+  elapsed_ms: number;
+}
+
+export interface PluginInstallRequest {
+  source: string;
+  names?: string[];
+  git_ref?: string;
+  force?: boolean;
+  no_build?: boolean;
+  build_timeout_secs?: number;
+}
+
+/** Resolve a source and see what it offers, without installing anything. */
+export function previewPluginInstall(
+  request: PluginInstallRequest,
+  options: CallOptions = {},
+): Promise<PluginInstallPreview> {
+  return apiRequest<PluginInstallPreview>('/api/plugins/install/preview', {
+    ...options,
+    method: 'POST',
+    body: request,
+  });
+}
+
+/**
+ * Start an install job. The answer is the job id; poll it with
+ * `getPluginInstallJob`. On success the job has already rescanned the host,
+ * so the plugin is live by the time the poll says `completed`.
+ */
+export function startPluginInstall(
+  request: PluginInstallRequest,
+  options: CallOptions = {},
+): Promise<{ id: string; status: string; poll: string }> {
+  return apiRequest<{ id: string; status: string; poll: string }>('/api/plugins/install', {
+    ...options,
+    method: 'POST',
+    body: request,
+  });
+}
+
+/** The job's snapshot: status, progress lines, and the result when done. */
+export function getPluginInstallJob(
+  id: string,
+  options: CallOptions = {},
+): Promise<PluginInstallJob> {
+  return apiRequest<PluginInstallJob>(`/api/plugins/install/${encodeURIComponent(id)}`, options);
+}
+
+/** Ask a running job to stop. Terminal jobs answer 409. */
+export function cancelPluginInstall(
+  id: string,
+  options: CallOptions = {},
+): Promise<{ id: string; status: string }> {
+  return apiRequest<{ id: string; status: string }>(
+    `/api/plugins/install/${encodeURIComponent(id)}/cancel`,
+    { ...options, method: 'POST', body: {} },
+  );
+}
+
+/**
  * Read one plugin panel's payload.
  *
  * The payload is opaque JSON declared by a plugin: render it with a registered
