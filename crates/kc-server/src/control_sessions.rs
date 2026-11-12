@@ -780,17 +780,40 @@ impl Tool for ListAgents {
                 Err(e) => return ToolOutcome::err(e.to_string()),
             }
         } else {
+            // The whole-list read this replaced materialised every agent on the
+            // server (1042 rows, ~5 MB of summaries) to return `limit` of them;
+            // the page query takes the limit into SQL, so the tool costs the
+            // page, not the fleet. The filter predicates above stay in SQL too.
             let statuses: Vec<String> = status.clone().into_iter().collect();
             match store
-                .list_agents_filtered(args.project_id.as_deref(), None, &statuses)
+                .list_agents_page(args.project_id.as_deref(), None, &statuses, limit, 0)
                 .await
             {
                 Ok(agents) => agents,
                 Err(e) => return ToolOutcome::err(e.to_string()),
             }
         };
+        let mut total = if agents.len() < limit {
+            // A short page is the whole answer: the count needs no second query.
+            agents.len()
+        } else {
+            // A full page only means "at least `limit`": ask for the count under
+            // the *same* filter rather than reporting a truncation as a total.
+            // The status list is moved, not re-cloned, because it is not read
+            // again on this path.
+            let statuses: Vec<String> = status.clone().into_iter().collect();
+            match store
+                .agent_status_counts(args.project_id.as_deref(), None, &statuses)
+                .await
+            {
+                Ok(counts) => counts.total,
+                Err(e) => return ToolOutcome::err(e.to_string()),
+            }
+        };
         // The per-session listing takes no filter, so both predicates are applied
-        // here; for the global listing they are already applied in SQL.
+        // here; for the global listing they are already applied in SQL. That
+        // retain can shrink a per-session list below its pre-count, so its total
+        // is computed after the filter, from the list itself.
         if args.session_id.is_some() {
             agents.retain(|summary| {
                 status
@@ -801,8 +824,8 @@ impl Tool for ListAgents {
                         .as_deref()
                         .is_none_or(|id| summary.project_id.as_deref() == Some(id))
             });
+            total = agents.len();
         }
-        let total = agents.len();
         let rows: Vec<_> = agents.iter().take(limit).map(agent_row).collect();
         ToolOutcome::ok(json!({"total": total, "agents": rows}).to_string())
     }

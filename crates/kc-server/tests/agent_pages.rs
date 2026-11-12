@@ -310,3 +310,101 @@ async fn overview_truncates_lists_but_not_its_totals() {
         overview.body.len()
     );
 }
+
+/// `control_list_agents` shares the fleet-page economics: it reads a page, not
+/// the fleet, and its `total` stays honest both when the page is short (the
+/// list *is* the answer) and when it is full (the count comes from SQL under the
+/// same filter).
+#[tokio::test]
+async fn control_list_agents_pages_the_fleet_and_keeps_totals_honest() {
+    let h = harness().await;
+    let session = new_project_session(&h, "Delegating session").await;
+    let store = store_of(&h);
+    // More than the tool's default page of 40, with a status mix the count can
+    // disagree with: 48 completed and 12 running means a `running` filter over
+    // a full page must still count 12, not 40.
+    let total = 60usize;
+    for index in 0..total {
+        let status = if index % 5 == 0 { "running" } else { "completed" };
+        store
+            .upsert_agent(&agent_record(&session, index, status))
+            .await
+            .unwrap();
+    }
+    let running_total = (0..total).filter(|i| i % 5 == 0).count();
+    let central = h
+        .post("/api/control/sessions", json!({"title": "Supervisor"}))
+        .await
+        .json()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let send = format!("/api/sessions/{central}/messages");
+
+    // Default page: 40 of 60, so `total` cannot come from the rows returned.
+    h.factory
+        .push(support::tool_call("control_list_agents", "{}"));
+    h.factory.push(support::text("Sixty agents."));
+    assert_eq!(
+        h.post(&send, json!({"content": "Who is doing what?"}))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let body = tool_result_json(&detail, "agents");
+    assert_eq!(body["total"], total, "{body}");
+    assert_eq!(body["agents"].as_array().unwrap().len(), 40, "{body}");
+
+    // A filtered full page: `total` counts the filtered fleet (13), not the 40
+    // rows a filtered page would carry on a bigger fleet.
+    h.factory.push(support::tool_call(
+        "control_list_agents",
+        &json!({"status": "running"}).to_string(),
+    ));
+    h.factory.push(support::text("Only the running ones."));
+    assert_eq!(
+        h.post(&send, json!({"content": "Who is running?"}))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let body = tool_result_json(&detail, "agents");
+    assert_eq!(body["total"], running_total, "{body}");
+    assert_eq!(body["agents"].as_array().unwrap().len(), running_total, "{body}");
+
+    // A short page under the same filter reports its rows and the same count.
+    h.factory.push(support::tool_call(
+        "control_list_agents",
+        &json!({"status": "running", "limit": 5}).to_string(),
+    ));
+    h.factory.push(support::text("Five runners."));
+    assert_eq!(
+        h.post(&send, json!({"content": "Show me five runners"}))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let body = tool_result_json(&detail, "agents");
+    assert_eq!(body["total"], running_total, "{body}");
+    assert_eq!(body["agents"].as_array().unwrap().len(), 5, "{body}");
+}
+
+/// Pull the parsed JSON of the newest tool result carrying `key` out of a
+/// session detail.
+fn tool_result_json(detail: &Value, key: &str) -> Value {
+    detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .filter(|message| message["role"] == "tool")
+        .filter_map(|message| serde_json::from_str::<Value>(message["content"].as_str()?).ok())
+        .find(|value| value.get(key).is_some())
+        .unwrap_or_else(|| panic!("no tool result carrying `{key}` in {detail}"))
+}
