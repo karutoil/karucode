@@ -1,5 +1,5 @@
 site_name: karucode
-site_description: A self-hosted coding agent for long sessions.
+site_description: A coding agent that is one binary, not a stack.
 repo_url: https://github.com/karutoil/karucode
 repo_name: karutoil/karucode
 

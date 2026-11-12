@@ -507,6 +507,10 @@ impl Terminal {
         // An acquire load observing zero must also observe this timestamp.
         self.last_seen
             .store(crate::state::now_ms(), Ordering::Release);
+        // `Atomic::fetch_update` is `try_update` from Rust 1.100. The workspace's
+        // MSRV is 1.89, where only the old name exists, so the old name stays (and
+        // the deprecation is allowed) until the MSRV moves.
+        #[allow(deprecated)]
         let _ = self
             .attached
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
@@ -702,23 +706,44 @@ fn finish(terminal: &Terminal) {
 fn open_pty(cols: u16, rows: u16) -> kc_core::Result<(std::fs::File, std::fs::File)> {
     let mut master: libc::c_int = -1;
     let mut slave: libc::c_int = -1;
-    let size = libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
+    // `openpty` writes the two fds through the pointers. The termios/winsize
+    // arguments are read-only on Linux (`*const`) but are written back on macOS
+    // (`*mut`), so each target passes the pointer type its libc binding expects.
+    #[cfg(target_os = "macos")]
+    let rc = {
+        let mut size = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        }
     };
-    // `openpty` writes the two fds through the pointers; it only ever reads the
-    // termios/winsize arguments, so they do not need to be `mut` (clippy's
-    // `unnecessary_mut_passed` would flag `&mut`).
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            &size,
-        )
+    #[cfg(not(target_os = "macos"))]
+    let rc = {
+        let size = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &size,
+            )
+        }
     };
     if rc != 0 {
         return Err(kc_core::Error::Tool(format!(

@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="branding/social/banner.svg" alt="karucode — a self-hosted coding agent for long sessions" width="1280">
+  <img src="branding/social/banner.svg" alt="karucode — a coding agent that is one binary, not a stack" width="1280">
 </p>
 
 <h1 align="center">karucode</h1>
 
 <p align="center">
-  <strong>A self-hosted coding agent for long sessions.</strong><br>
+  <strong>A coding agent that is one binary, not a stack.</strong><br>
   one Rust binary · SQLite state · any OpenAI-compatible endpoint · no Node at runtime
 </p>
 
