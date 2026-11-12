@@ -7268,7 +7268,12 @@ async fn a_replay_reports_that_no_run_ever_started() {
         .auto_approvals()
         .build()
         .await;
-    let project = h.get("/api/projects").await.json()["projects"][0]["id"]
+    let projects_resp = h.get("/api/projects").await.json();
+    let project = projects_resp["projects"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let project_path = projects_resp["projects"][0]["path"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -7280,7 +7285,7 @@ async fn a_replay_reports_that_no_run_ever_started() {
             "s_reserved",
             &project,
             "",
-            &h.workspace_dir.to_string_lossy(),
+            &project_path,
             "Port the CLI to Rust",
         )
         .await

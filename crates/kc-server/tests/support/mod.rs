@@ -455,6 +455,8 @@ impl HarnessBuilder {
         let data_dir = root.join("data");
         std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
         std::fs::create_dir_all(&data_dir).expect("data dir");
+        let workspace_dir = workspace_dir.canonicalize().unwrap_or(workspace_dir);
+        let data_dir = data_dir.canonicalize().unwrap_or(data_dir);
 
         let web_dir = self.web_dir;
         let db_path = data_dir.join("karucode.db");

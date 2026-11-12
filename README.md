@@ -50,8 +50,8 @@ workspace built for a long session, not for a dashboard demo.
 | | |
 | --- | --- |
 | [What it does](#what-it-does) | the runtime, tools, approvals, containment, crash recovery |
-| [Quick start](#quick-start) | build it and run a real task in two commands |
-| [Install](#install) | container or systemd, without a checkout |
+| [Quick start](#quick-start) | install via curl and run in seconds |
+| [Install](#install) | curl script, pre-built binary releases, systemd, container |
 | [The browser workspace](#the-browser-workspace) | the terminal tab, notifications, titles, themes, artifacts, the control plane |
 | [Configuration](#configuration) | precedence, the keys that matter, remote access |
 | [Providers](#providers) | gateways, named profiles, model metadata, retries |
@@ -100,50 +100,90 @@ workspace built for a long session, not for a dashboard demo.
 
 ## Quick start
 
-Prerequisites: Linux (the primary target — the shell tool's process-group code is
-Linux-specific). macOS runs the unit-test matrix in CI but is otherwise untested;
-Windows is unsupported (`setsid`/`libc` in the shell tool). Rust 1.89+ for the
-backend (matching the workspace's `rust-version`). Node.js 22.12+ is needed
-**only** to build the frontend — it is
-embedded into the binary and not needed at runtime. Optional: `ripgrep` (a
-pure-Rust fallback is built in) and `git`.
+karucode is distributed as pre-compiled standalone releases containing the complete binary with embedded web UI. You do **not** need to install Rust or Node or compile anything yourself.
+
+### 1. Install
+
+**One-line install (systemd service + binary on Linux):**
 
 ```bash
-git clone https://github.com/karutoil/karucode && cd karucode
+curl -fsSL https://raw.githubusercontent.com/karutoil/karucode/main/packaging/install.sh | sudo sh
+```
 
-export KARUCODE_BASE_URL=http://127.0.0.1:4000/v1   # your gateway
+Or install user-local without root or systemd:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/karutoil/karucode/main/packaging/install.sh | sh -s -- --prefix "$HOME/.local" --no-systemd
+```
+
+You can also download standalone release archives directly from [GitHub Releases](https://github.com/karutoil/karucode/releases/latest).
+
+### 2. Run
+
+Point karucode at your OpenAI-compatible model provider and workspace:
+
+```bash
+export KARUCODE_BASE_URL=http://127.0.0.1:4000/v1   # your gateway or provider
 export KARUCODE_API_KEY=sk-...                     # if the gateway needs one
 export KARUCODE_MODEL=gpt-4o-mini
 
-cargo run --release -p kc-server -- --workspace /path/to/your/project
+karucode --workspace /path/to/your/project
 ```
 
-`cargo build` runs the frontend build itself (`npm ci` when the tree is missing
-or the lockfile moved, then `npm run build`) and embeds the result, so that is
-the whole build. Open <http://127.0.0.1:8787>, create a session, type a task,
-approve the commands you want it to run.
+Open <http://127.0.0.1:8787> in your browser, create a session, type a task, and approve the commands you want it to run.
 
-Prefer not to build the UI? `KARUCODE_WEB_DIST=/path/to/web/dist` embeds a
-bundle built elsewhere, `KARUCODE_SKIP_WEB_BUILD=1` skips the frontend entirely
-(Rust-only iteration, placeholder page), and `KARUCODE_WEB_DIR=web/dist` serves
-the folder from disk while you edit it.
-
-**Try it on a real bug.** `examples/demo-app` is a dependency-free Node project
-whose `add()` subtracts instead of adding, so two of its five tests fail:
+**Try it on a real bug.** `examples/demo-app` is a dependency-free Node project whose `add()` subtracts instead of adding, so two of its five tests fail:
 
 ```bash
-cargo run --release -p kc-server -- --workspace examples/demo-app
+karucode --workspace examples/demo-app
 # prompt: Run the tests, find the failing cases, fix the bug in src/math.js,
 #         and re-run the tests to prove it passes.
 ```
 
-Useful flags: `--help`, `--host`, `--port`, `--workspace`, `--data-dir`,
-`--config`. Flags beat environment variables for the process they start.
+Useful flags: `--help`, `--host`, `--port`, `--workspace`, `--data-dir`, `--config`. Flags beat environment variables for the process they start.
+
+### Building from source (optional)
+
+If you are developing karucode itself or want to compile a custom build from source:
+
+Prerequisites: Linux (the primary target) or macOS (unit-tested). Rust 1.89+ (the workspace `rust-version`) and Node.js 22.12+ (only to build the embedded frontend; nothing Node remains at runtime).
+
+```bash
+git clone https://github.com/karutoil/karucode && cd karucode
+cargo run --release -p kc-server -- --workspace /path/to/your/project
+```
+
+`cargo build` runs `npm ci` and `npm run build` in `web/` automatically and embeds the bundle into the binary.
+
+Prefer not to build the UI? `KARUCODE_WEB_DIST=/path/to/web/dist` embeds a bundle built elsewhere, `KARUCODE_SKIP_WEB_BUILD=1` skips the frontend entirely (Rust-only iteration, placeholder page), and `KARUCODE_WEB_DIR=web/dist` serves the folder from disk while you edit it.
 
 ## Install
 
-For a server rather than a checkout, [packaging/README.md](packaging/README.md)
-covers the operator side (proxy, backup, upgrade, uninstall). Short version:
+For a server rather than a checkout, [packaging/README.md](packaging/README.md) covers the operator side (proxy, backup, upgrade, uninstall).
+
+### With the curl installer
+
+The official installer downloads the release binary, verifies its checksum against `SHA256SUMS`, installs the hardened systemd unit, and starts the service:
+
+```bash
+# install systemd service + binary (system default: /usr/local/bin)
+curl -fsSL https://raw.githubusercontent.com/karutoil/karucode/main/packaging/install.sh | sudo sh -s -- --workspace /srv/karucode/workspace
+
+# or install user-local binary only (no root, no systemd):
+curl -fsSL https://raw.githubusercontent.com/karutoil/karucode/main/packaging/install.sh | sh -s -- --prefix "$HOME/.local" --no-systemd
+```
+
+### Pre-built release binaries
+
+Every commit on `main` publishes pre-compiled binaries and tarballs with SHA-256 checksums to [GitHub Releases](https://github.com/karutoil/karucode/releases/latest):
+
+```bash
+# Download and install a release tarball manually
+curl -fsSLO https://raw.githubusercontent.com/karutoil/karucode/main/packaging/install.sh
+sudo sh install.sh --workspace /srv/karucode/workspace
+```
+
+### Container
 
 ```bash
 # container: multi-stage, non-root, /data volume, healthcheck
@@ -151,13 +191,6 @@ docker build -t karucode .
 docker run -d --name karucode -p 8787:8787 \
   -e KARUCODE_AUTH_TOKEN=... -e KARUCODE_ADMIN_TOKEN=... \
   -v karucode-data:/data -v /path/to/project:/workspace karucode
-
-# systemd: verified release tarball, binary + hardened unit
-sudo ./packaging/install.sh --workspace /srv/karucode/workspace
-# (inside the release tarball the installer sits at ./install.sh)
-# ... or install the build you already have, before any release exists:
-cargo build --release -p kc-server
-sudo ./packaging/install.sh --binary target/release/karucode --workspace /srv/karucode/workspace
 ```
 
 `packaging/install.sh` downloads the release tarball, checks it against the
