@@ -12,6 +12,19 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Changed
 
+- **Temporary (ephemeral) sessions no longer notify by default.** A temporary
+  chat is created by a program - an API client, a plugin's helper - never
+  appears in the session rail, and deletes itself the moment its work ends, so
+  a "run finished" ping about one interrupted a human for a row they could not
+  open: by the time the toast was read, the session was gone. Every producer is
+  now gated the same way - a finished run, a parked approval, a failed subagent,
+  and a plugin notice naming the session - through the new
+  `notifications.ephemeral_sessions` switch, **off by default**. It is settable
+  in `config.toml`, through `PATCH /api/config` (`{"notifications":
+  {"ephemeral_sessions": true}}`), as the **Temporary chats** toggle in Settings
+  → Notifications, or with `KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS=1`; opting
+  in restores the old behaviour exactly. Durable sessions are untouched.
+
 - **A phone's composer is one control row, and one pill carries model and
   reasoning.** The row held attach, a 108px model pill, a 92px reasoning pill,
   Usage and Send in 336px, so both pills ellipsised to "Claud…" and "Def…" - two

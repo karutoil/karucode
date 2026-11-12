@@ -105,6 +105,7 @@ describe('what the section shows', () => {
     expect(toggle('A run failed')).toBeTruthy();
     expect(toggle('Plugin messages')).toBeTruthy();
     expect(toggle('Let plugins raise notifications')).toBeTruthy();
+    expect(toggle('Temporary chats')).toBeTruthy();
     // This browser.
     expect(screen.getByRole('heading', { name: 'This browser' })).toBeTruthy();
     expect(toggle('Play a sound')).toBeTruthy();
@@ -173,6 +174,15 @@ describe('saving a switch', () => {
     fireEvent.click(toggle('Let plugins raise notifications'));
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     expect(patchAt(spy, 0)).toEqual({ plugin: false });
+  });
+
+  it('PATCHes the temporary-chats switch', async () => {
+    // Off by default; turning it on is an explicit opt-in to hearing about
+    // helper sessions that delete themselves.
+    const spy = renderSection();
+    fireEvent.click(toggle('Temporary chats'));
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    expect(patchAt(spy, 0)).toEqual({ ephemeral_sessions: true });
   });
 
   it('PATCHes the body switch', async () => {

@@ -7,7 +7,7 @@
 
 - **Slug:** `notifications`
 - **Tags:** notifications, sounds, alerts, approvals, unread, plugin notify, desktop
-- **Applies to:** `config:[notifications]`, `config:notifications.enabled`, `config:notifications.run_finished`, `config:notifications.needs_input`, `config:notifications.error`, `config:notifications.info`, `config:notifications.plugin`, `config:notifications.min_run_secs`, `config:notifications.say_body`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/events`, `event:notification`, `method:notify`, `route:GET /api/update`, `ui:Settings > Updates`, `hook:on_notify`, `ui:SettingsSheet`, `ui:SessionsRail`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:ProjectRail`, `file:web/src/state/notifier.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`
+- **Applies to:** `config:[notifications]`, `config:notifications.enabled`, `config:notifications.run_finished`, `config:notifications.needs_input`, `config:notifications.error`, `config:notifications.info`, `config:notifications.plugin`, `config:notifications.min_run_secs`, `config:notifications.say_body`, `config:notifications.ephemeral_sessions`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `env:KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/events`, `event:notification`, `method:notify`, `route:GET /api/update`, `ui:Settings > Updates`, `hook:on_notify`, `ui:SettingsSheet`, `ui:SessionsRail`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:ProjectRail`, `file:web/src/state/notifier.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`
 - **Source:** `crates/kc-core/src/notify.rs:24`
 
 ---
@@ -36,9 +36,11 @@ tool loop, so the signal is about states a human cares about.
 | a plugin raised one | whatever it chose (`info` by default) | one tick for `info` |
 | a newer karucode build is available | `info` | one tick for `info` |
 | **you** cancelled the run | *nothing* | — |
+| a temporary (ephemeral) session did any of the above | *nothing* by default | — |
 
 A cancellation you asked for needs no ping: you pressed Escape. A cancellation
-nobody asked for (a shutdown) still notifies.
+nobody asked for (a shutdown) still notifies. And a temporary session is
+quiet by default: see `notifications.ephemeral_sessions` below.
 
 The update notice is raised once per build by the background update check, with
 id `update:<build>`, so a check every six hours does not repeat it. It obeys the
@@ -60,18 +62,40 @@ They answer different questions, so all four exist.
    in Settings → Notifications silence a *surface*, not the signal. They are
    stored in `localStorage`, not on the server, because they describe the device.
 
+## Temporary sessions
+
+A temporary (ephemeral) session — one created with `"ephemeral": true` by an
+API client, or the helper session a plugin spawns — is **silent by default**:
+`notifications.ephemeral_sessions = false` (the shipped default). Every
+producer respects it: a run that finishes, an approval that parks, a failed
+subagent, and a plugin notice that names the session.
+
+The reasoning is about *what a notification is for*. A notification says "look
+at this session"; a temporary session retires itself the moment its work ends,
+so by the time you look, the Open button points at a row that no longer
+exists. And the client that created it (the program driving the API, the
+plugin that owns the helper) is already holding the answer it asked for — a
+ping is noise twice over: once for existing, once for arriving too late.
+
+Turn it on with `ephemeral_sessions = true`, `PATCH /api/config`
+(`{"notifications": {"ephemeral_sessions": true}}`), the **Temporary chats**
+toggle in Settings → Notifications, or `KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS=1`
+in the environment. The notify-frame rules above are unchanged; only the
+session's ephemerality decides.
+
 ## Configuration
 
 ```toml
 [notifications]
-enabled = true         # master switch
+enabled = true             # master switch
 run_finished = true
 needs_input = true
 error = true
-info = true            # plugin info notifications
-plugin = true          # may plugins raise notifications at all
-min_run_secs = 0       # skip runs shorter than this
-say_body = true        # include the start of the answer, or title only
+info = true                # plugin info notifications
+plugin = true              # may plugins raise notifications at all
+min_run_secs = 0           # skip runs shorter than this
+say_body = true            # include the start of the answer, or title only
+ephemeral_sessions = false # may temporary (ephemeral) sessions notify
 ```
 
 The same settings are editable in the UI and through `PATCH /api/config`
@@ -87,6 +111,7 @@ KARUCODE_NOTIFICATIONS_EVENTS=error,!info     # a leading ! or - turns one off
 KARUCODE_NOTIFICATIONS_PLUGIN=0
 KARUCODE_NOTIFICATIONS_MIN_RUN_SECS=30
 KARUCODE_NOTIFICATIONS_SAY_BODY=0
+KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS=1  # let temporary chats notify
 ```
 
 An unknown event name in `KARUCODE_NOTIFICATIONS_EVENTS` fails at startup with

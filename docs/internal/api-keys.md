@@ -139,5 +139,13 @@ human-held credential.
 * Keys never appear in `config.toml` or `GET /api/config`, and no log line
   contains the secret. Treat the token like a password: HTTPS (a reverse proxy)
   or loopback only.
+* `POST` is not idempotent and the token exists only in its answer. A create
+  that times out (or whose connection drops) is therefore ambiguous: the key
+  may exist on the server while its secret is gone for good. The web UI
+  (Settings -> Access) never silently re-sends in that case — it re-reads the
+  key list so a minted key is visible, and tells the reader to **rotate** that
+  key (which mints a new secret) rather than create a second one. A script
+  hitting the same ambiguity should do the same: list, then rotate the row
+  that appeared, instead of POSTing `create` twice.
 
 Full reference: `docs/API.md` (API keys), `docs/SECURITY.md` (credentials).

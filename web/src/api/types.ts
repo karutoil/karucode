@@ -1738,6 +1738,8 @@ export interface NotificationsConfig {
   min_run_secs: number;
   /** Include the first line of the answer as the notification body. */
   say_body: boolean;
+  /** Whether temporary (ephemeral) sessions notify at all. Off by default. */
+  ephemeral_sessions: boolean;
   /** The documented ceiling, sent by the server so the UI need not hard-code it. */
   max_min_run_secs: number;
   /** The kinds this server can emit. */
@@ -1754,6 +1756,7 @@ export interface NotificationsPatch {
   plugin?: boolean;
   min_run_secs?: number;
   say_body?: boolean;
+  ephemeral_sessions?: boolean;
 }
 
 /**

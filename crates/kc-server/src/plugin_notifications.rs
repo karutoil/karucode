@@ -52,6 +52,19 @@ pub fn spawn(state: AppState, mut rx: UnboundedReceiver<kc_plugin_host::PluginNo
                 notice.session_id.clone()
             };
             let facts = session_facts(&state, &session_id).await;
+            // A plugin notice naming a temporary session is suppressed with the
+            // same switch as the runtime's own notifications: that session
+            // retires when its work ends, so an announcement about it cannot be
+            // opened, and the plugin's caller already holds the result.
+            if facts.ephemeral && !config.ephemeral_sessions {
+                debug!(
+                    plugin = %notice.plugin,
+                    kind = notice.kind.as_str(),
+                    session = %session_id,
+                    "plugin notification for an ephemeral session refused by [notifications]"
+                );
+                continue;
+            }
             let notification = Notify::new(
                 notice.kind,
                 // `<plugin>:<title>` rather than a counter: a plugin that raises the
@@ -88,6 +101,7 @@ pub fn spawn(state: AppState, mut rx: UnboundedReceiver<kc_plugin_host::PluginNo
 struct SessionFacts {
     title: String,
     project_id: String,
+    ephemeral: bool,
 }
 
 /// The session title and project for a notice, when it named a session.
@@ -104,6 +118,7 @@ async fn session_facts(state: &AppState, session_id: &str) -> SessionFacts {
         Ok(Some(session)) => SessionFacts {
             title: session.title,
             project_id: session.project_id.unwrap_or_default(),
+            ephemeral: session.ephemeral,
         },
         Ok(None) => {
             warn!(session = %session_id, "a plugin notified about a session that does not exist");

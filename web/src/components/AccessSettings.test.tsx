@@ -81,6 +81,14 @@ interface Harness {
   passwordWrites: { method: string; body: unknown }[];
   /** Every `/api/auth/api-keys…` write: mint, rotate, revoke. */
   keyWrites: { method: string; url: string; body: unknown; admin: string | null }[];
+  /**
+   * How the next `POST /api/auth/api-keys` fails, if it must. Set after
+   * `installFetch` and before the click. `network` is the ambiguous case: the
+   * stub mints the key server-side and then drops the connection, so the list
+   * re-read finds it — the same shape as the real client's 30s deadline firing
+   * after the server persisted the key.
+   */
+  failCreate: { kind: 'network'; minted: ApiKeySummary } | { kind: 'refused'; status: number; code: string; message: string } | null;
 }
 
 /** One key as the API lists it: Unix seconds, no secret. */
@@ -118,6 +126,13 @@ function installFetch(
   const passwordWrites: { method: string; body: unknown }[] = [];
   const keyWrites: { method: string; url: string; body: unknown; admin: string | null }[] = [];
   let keys = [...apiKeys];
+  // Declared before the fetch mock below so the mock can read and clear it.
+  const harness: Harness = {
+    patches,
+    passwordWrites,
+    keyWrites,
+    failCreate: null,
+  };
 
   const onboarding: OnboardingState = {
     needed: false,
@@ -160,6 +175,20 @@ function installFetch(
         body,
         admin: new Headers(init?.headers).get('x-karucode-admin-token'),
       });
+      if (harness.failCreate !== null) {
+        const failure = harness.failCreate;
+        harness.failCreate = null;
+        if (failure.kind === 'network') {
+          // The mint landed; only the answer was lost. A later list read must
+          // see the key, which is what makes this failure ambiguous.
+          keys = [failure.minted, ...keys];
+          throw new TypeError('fetch failed');
+        }
+        return jsonResponse(
+          { error: { code: failure.code, message: failure.message } },
+          failure.status,
+        );
+      }
       const issued = {
         api_key: keyFixture({
           name: String(body.name ?? 'new-key'),
@@ -225,7 +254,7 @@ function installFetch(
   });
 
   vi.stubGlobal('fetch', fetchMock);
-  return { patches, passwordWrites, keyWrites };
+  return harness;
 }
 
 beforeEach(() => {
@@ -491,5 +520,57 @@ describe('AccessSettings: API keys', () => {
     expect(await screen.findByText(/requires no credential yet/)).not.toBeNull();
     const create = screen.getByRole('button', { name: 'Create key' }) as HTMLButtonElement;
     expect(create.disabled).toBe(true);
+  });
+
+  it('treats a create that failed ambiguously as "the key may exist": no second mint, the list is re-read', async () => {
+    // The POST dies on the wire (the client's own deadline or a dropped
+    // connection), but the server side of the stub did mint the key — exactly
+    // the ambiguity the finding is about: the sole copy of the token was in
+    // the answer that never arrived.
+    const harness = installFetch(accessSummary());
+    const name = 'ci-runner';
+    harness.failCreate = { kind: 'network', minted: keyFixture({ name }) };
+
+    render(<AccessSettings />);
+
+    fireEvent.input(await screen.findByLabelText('Name', { selector: 'input' }), {
+      target: { value: name },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
+
+    // The message a person reads says the key may already exist and what to do
+    // about it — not a bare network error next to an armed "Create key" button.
+    expect(await screen.findByText(/may already have been created/)).not.toBeNull();
+    expect(screen.getByText(/rotate it to get a new token/)).not.toBeNull();
+
+    // The re-read happened, so the key the server minted is visible in the list
+    // instead of hiding behind the failure.
+    expect(await screen.findByText(/kck_abcdef1234567890…abcd/)).not.toBeNull();
+
+    // The blind retry is not taken for them: exactly one create was attempted.
+    expect(harness.keyWrites).toHaveLength(1);
+  });
+
+  it('keeps the server’s own message for a refusal that minted nothing', async () => {
+    // A 400 is a definitive answer: nothing was minted, so the message is the
+    // server’s own and the form stays armed for a corrected retry.
+    const harness = installFetch(accessSummary());
+    harness.failCreate = {
+      kind: 'refused',
+      status: 400,
+      code: 'bad_request',
+      message: 'this server already has 100 live API keys; revoke one before creating another',
+    };
+
+    render(<AccessSettings />);
+
+    fireEvent.input(await screen.findByLabelText('Name', { selector: 'input' }), {
+      target: { value: 'ci-runner' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
+
+    expect(await screen.findByText(/revoke one before creating another/)).not.toBeNull();
+    expect(screen.queryByText(/may already have been created/)).toBeNull();
+    expect(harness.keyWrites).toHaveLength(1);
   });
 });

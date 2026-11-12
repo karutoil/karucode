@@ -15,7 +15,7 @@
 // @kc-title: Change karucode's configuration
 // @kc-summary: The four config layers, which settings apply live, and how secrets and invalid values are handled.
 // @kc-tags: config, settings, configuration, toml, env
-// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_PARALLEL_TOOL_CALLS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:limits.parallel_tool_calls, config:limits.max_turn_retries, config:limits.turn_retry_delay_ms, config:notifications.enabled, config:notifications.min_run_secs, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings, config:[updates], config:updates.check, config:updates.check_secs, config:updates.manifest_url, config:updates.auto_apply, env:KARUCODE_UPDATE_CHECK, env:KARUCODE_UPDATE_CHECK_SECS, env:KARUCODE_UPDATE_MANIFEST_URL, env:KARUCODE_UPDATE_AUTO_APPLY, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, ui:Settings > Updates
+// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_PARALLEL_TOOL_CALLS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:limits.parallel_tool_calls, config:limits.max_turn_retries, config:limits.turn_retry_delay_ms, config:notifications.enabled, config:notifications.min_run_secs, config:notifications.ephemeral_sessions, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings, config:[updates], config:updates.check, config:updates.check_secs, config:updates.manifest_url, config:updates.auto_apply, env:KARUCODE_UPDATE_CHECK, env:KARUCODE_UPDATE_CHECK_SECS, env:KARUCODE_UPDATE_MANIFEST_URL, env:KARUCODE_UPDATE_AUTO_APPLY, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, ui:Settings > Updates
 //
 // # Where the settings come from
 //
@@ -542,6 +542,7 @@ mod keys {
     pub const NOTIFICATIONS_PLUGIN: &str = "notifications.plugin";
     pub const NOTIFICATIONS_MIN_RUN_SECS: &str = "notifications.min_run_secs";
     pub const NOTIFICATIONS_SAY_BODY: &str = "notifications.say_body";
+    pub const NOTIFICATIONS_EPHEMERAL_SESSIONS: &str = "notifications.ephemeral_sessions";
 
     pub const ACCESS_ENABLED: &str = "access.enabled";
     pub const ACCESS_PUBLIC_URL: &str = "access.public_url";
@@ -669,6 +670,7 @@ pub struct NotificationsPatch {
     pub plugin: Option<bool>,
     pub min_run_secs: Option<u64>,
     pub say_body: Option<bool>,
+    pub ephemeral_sessions: Option<bool>,
 }
 
 /// `[updates]` section of `PATCH /api/config`.
@@ -1178,6 +1180,7 @@ pub fn public_notifications(
         "plugin": notifications.plugin,
         "min_run_secs": notifications.min_run_secs,
         "say_body": notifications.say_body,
+        "ephemeral_sessions": notifications.ephemeral_sessions,
         // The documented ceiling, so the settings screen can validate without
         // hard-coding a number that lives in core.
         "max_min_run_secs": kc_core::config::MAX_MIN_RUN_SECS,
@@ -1738,6 +1741,9 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         }
         if let Some(v) = notifications.say_body {
             target.say_body = v;
+        }
+        if let Some(v) = notifications.ephemeral_sessions {
+            target.ephemeral_sessions = v;
         }
     }
 
@@ -2714,6 +2720,10 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
         keys::NOTIFICATIONS_SAY_BODY,
         notifications.say_body.to_string(),
     );
+    rows.insert(
+        keys::NOTIFICATIONS_EPHEMERAL_SESSIONS,
+        notifications.ephemeral_sessions.to_string(),
+    );
 
     let access = &config.access;
     rows.insert(keys::ACCESS_ENABLED, access.enabled.to_string());
@@ -3030,6 +3040,11 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
         keys::NOTIFICATIONS_SAY_BODY => {
             if let Some(v) = parse_value(key, value) {
                 config.notifications.say_body = v;
+            }
+        }
+        keys::NOTIFICATIONS_EPHEMERAL_SESSIONS => {
+            if let Some(v) = parse_bool(key, value) {
+                config.notifications.ephemeral_sessions = v;
             }
         }
 
@@ -4234,6 +4249,7 @@ mod tests {
             notifications: Some(NotificationsPatch {
                 enabled: Some(false),
                 min_run_secs: Some(30),
+                ephemeral_sessions: Some(true),
                 ..NotificationsPatch::default()
             }),
             ..ConfigPatch::default()
@@ -4246,6 +4262,8 @@ mod tests {
         apply_patch(&mut config, &notifications_patch()).unwrap();
         assert!(!config.notifications.enabled);
         assert_eq!(config.notifications.min_run_secs, 30);
+        // The one field an older server did not have.
+        assert!(config.notifications.ephemeral_sessions);
         // Fields the patch did not name keep their current value.
         assert!(config.notifications.plugin);
         assert!(config.notifications.run_finished);
@@ -4291,6 +4309,7 @@ mod tests {
             plugin: false,
             min_run_secs: 45,
             say_body: false,
+            ephemeral_sessions: true,
         };
         let rows: Vec<(String, String)> = rows_for(&config)
             .into_iter()
@@ -4314,6 +4333,7 @@ mod tests {
             keys::NOTIFICATIONS_PLUGIN,
             keys::NOTIFICATIONS_MIN_RUN_SECS,
             keys::NOTIFICATIONS_SAY_BODY,
+            keys::NOTIFICATIONS_EPHEMERAL_SESSIONS,
         ] {
             assert!(
                 rows.contains_key(key),
@@ -4333,6 +4353,9 @@ mod tests {
         assert_eq!(json["plugin"], serde_json::json!(true));
         assert_eq!(json["min_run_secs"], serde_json::json!(0));
         assert_eq!(json["say_body"], serde_json::json!(true));
+        // Off by default: a temporary session's runs are the thing this switch
+        // exists to silence.
+        assert_eq!(json["ephemeral_sessions"], serde_json::json!(false));
         // The ceiling and the kind list come from core, so the UI cannot drift.
         assert_eq!(
             json["max_min_run_secs"],

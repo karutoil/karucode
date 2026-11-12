@@ -82,6 +82,7 @@ function withDefaults(config: NotificationsConfig | undefined): NotificationsCon
       plugin: true,
       min_run_secs: 0,
       say_body: true,
+      ephemeral_sessions: false,
       max_min_run_secs: 3600,
       kinds: ['run_finished', 'needs_input', 'error', 'info'],
     }
@@ -112,6 +113,7 @@ export function NotificationsSection({
     routing.plugin,
     routing.min_run_secs,
     routing.say_body,
+    routing.ephemeral_sessions,
   ]);
 
   const persist = async (patch: NotificationsPatch): Promise<void> => {
@@ -186,6 +188,15 @@ export function NotificationsSection({
         label="Let plugins raise notifications"
         description="A plugin can ask for your attention (and observe notifications with on_notify). Off refuses both, whatever the plugin sends."
         onChange={(checked) => void persist({ plugin: checked })}
+      />
+
+      <Toggle
+        id="notify-ephemeral-sessions"
+        checked={draft.ephemeral_sessions}
+        disabled={disabled || saving || !draft.enabled}
+        label="Temporary chats"
+        description="Temporary (ephemeral) sessions delete themselves when their work ends, so a notification about one usually arrives after the chat is gone. On announces their runs anyway."
+        onChange={(checked) => void persist({ ephemeral_sessions: checked })}
       />
     </section>
   );

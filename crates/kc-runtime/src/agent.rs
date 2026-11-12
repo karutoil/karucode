@@ -845,6 +845,7 @@ async fn finalize_top_level(
             .as_ref()
             .and_then(|session| session.project_id.clone())
             .unwrap_or_default();
+        let session_ephemeral = session.as_ref().is_some_and(|s| s.ephemeral);
         crate::notify::run_finished(
             inner,
             &ctx,
@@ -858,6 +859,7 @@ async fn finalize_top_level(
                 started_at_ms: state.started_at,
                 finished_at_ms: crate::events::now_ms(),
                 cancelled_by_user: state.was_cancelled_by_user(),
+                session_ephemeral,
             },
         )
         .await;

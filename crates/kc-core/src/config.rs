@@ -1628,6 +1628,16 @@ pub struct NotificationsConfig {
     /// title only, which keeps model output off a lock screen.
     #[serde(default = "d_true")]
     pub say_body: bool,
+    /// Notify about ephemeral (temporary) sessions. Off by default: a temporary
+    /// chat exists for a program's own bookkeeping (the API, a plugin's vision
+    /// session), it deletes itself when its work ends, and nobody is waiting on
+    /// it — so announcing its runs interrupts a human for something they are
+    /// already watching, or cannot open at all once it retires.
+    ///
+    /// Applies to every producer: a terminal run, an approval, a failed
+    /// subagent, and a plugin notice that names the session.
+    #[serde(default)]
+    pub ephemeral_sessions: bool,
 }
 
 impl Default for NotificationsConfig {
@@ -1641,6 +1651,7 @@ impl Default for NotificationsConfig {
             plugin: true,
             min_run_secs: 0,
             say_body: true,
+            ephemeral_sessions: false,
         }
     }
 }
@@ -2334,6 +2345,9 @@ impl Config {
         }
         if let Some(v) = env_bool("KARUCODE_NOTIFICATIONS_SAY_BODY")? {
             cfg.notifications.say_body = v;
+        }
+        if let Some(v) = env_bool("KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS")? {
+            cfg.notifications.ephemeral_sessions = v;
         }
         // The browser terminal. `KARUCODE_TERMINALS=0` is the switch a locked
         // deployment needs: with it off there is no PTY surface at all, so an
@@ -4530,6 +4544,7 @@ retry_max_stream_restarts = 0
             "KARUCODE_ALLOW_RECURSIVE_SUBAGENTS",
             "KARUCODE_SUBAGENT_ALLOW_BACKGROUND",
             "KARUCODE_PARALLEL_TOOL_CALLS",
+            "KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS",
         ]);
 
         let cfg = Config::from_parts(ConfigFile::default(), None).expect("config loads");
@@ -4541,6 +4556,10 @@ retry_max_stream_restarts = 0
         assert!(
             cfg.limits.parallel_tool_calls,
             "independent tool calls run in parallel unless switched off"
+        );
+        assert!(
+            !cfg.notifications.ephemeral_sessions,
+            "temporary sessions are quiet unless the operator opts in"
         );
 
         for (spelling, expected) in [
@@ -4577,6 +4596,10 @@ retry_max_stream_restarts = 0
                 cfg.limits.parallel_tool_calls, expected,
                 "KARUCODE_PARALLEL_TOOL_CALLS={spelling}"
             );
+            assert_eq!(
+                cfg.notifications.ephemeral_sessions, expected,
+                "KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS={spelling}"
+            );
         }
     }
 
@@ -4602,6 +4625,7 @@ retry_max_stream_restarts = 0
             "KARUCODE_NOTIFICATIONS",
             "KARUCODE_NOTIFICATIONS_PLUGIN",
             "KARUCODE_NOTIFICATIONS_SAY_BODY",
+            "KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS",
             "KARUCODE_TERMINALS",
             "KARUCODE_ALLOW_TEMP_DIR",
             "KARUCODE_MODEL_SUPPORTS_IMAGES",

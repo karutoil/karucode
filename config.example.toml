@@ -272,6 +272,10 @@ min_run_secs = 0
 # title only, which keeps model output off a lock screen. Error text always travels:
 # "Run failed" with no reason is not actionable.
 say_body = true
+# Let temporary (ephemeral) sessions notify. Off by default: a temporary chat
+# deletes itself when its work ends, so a notification about it usually arrives
+# after the row is gone, and the program that created it already holds the answer.
+ephemeral_sessions = false
 
 # Out-of-process plugins (JSON-RPC over stdio).
 # [[plugins]]

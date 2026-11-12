@@ -25,7 +25,7 @@
 
 import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
-import { toErrorMessage } from '../api/client';
+import { ApiError, toErrorMessage } from '../api/client';
 import * as api from '../api/endpoints';
 import type {
   AccessSettingsSummary,
@@ -564,6 +564,14 @@ export function AccessSettings(): JSX.Element {
    * The expiry is a whole number of days or empty (never expires). The server is
    * the authority on both bounds; the checks here exist so a typo is answered
    * before a round trip, not so the form can disagree with it.
+   *
+   * The POST is not idempotent and the answer is the only copy of the secret, so
+   * a timeout (or a dropped connection) is ambiguous: the key may already exist
+   * on the server while its token is gone for good. That failure is never left
+   * as a bare error next to a still-armed "Create key" button, because the blind
+   * retry the hint invites would mint a second key and orphan the first. Instead
+   * the list is re-read so a minted key shows up in it, and the message says
+   * what actually happened and what to do: rotate the key if it is there.
    */
   const createKey = async (): Promise<void> => {
     if (keyBusy !== null) return;
@@ -613,7 +621,18 @@ export function AccessSettings(): JSX.Element {
         text: `Key “${issued.api_key.name}” created. Copy the token now — it is not shown again.`,
       });
     } catch (error) {
-      setKeyMessage({ ok: false, text: toErrorMessage(error) });
+      if (error instanceof ApiError && (error.isNetwork || error.code === 'timeout')) {
+        // Ambiguous: the server may have minted the key and lost only the
+        // answer, which is the sole copy of the token. Re-read the list so the
+        // key (if it exists) is on screen, and say what to do next.
+        await refreshApiKeys();
+        setKeyMessage({
+          ok: false,
+          text: `Key “${name}” may already have been created — the server’s answer (the only copy of its token) was lost. Check the list: if the key is there, rotate it to get a new token; only create it again if it is not.`,
+        });
+      } else {
+        setKeyMessage({ ok: false, text: toErrorMessage(error) });
+      }
     } finally {
       setKeyBusy(null);
     }

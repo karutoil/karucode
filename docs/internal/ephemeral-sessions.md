@@ -85,3 +85,8 @@ the row (`ON DELETE CASCADE`); there is no archive.
 * **Model pins still work.** `model` at creation and
   `PATCH /api/sessions/:id/model` behave exactly as for a durable session;
   the pin dies with the row.
+* **Notifications are off for them by default.** A temporary session never
+  appears in a rail and deletes itself when its work ends, so a notification
+  about it would point at a row that is already gone. If you *want* to hear
+  about helper sessions, `notifications.ephemeral_sessions = true` opts back
+  in (see the `notifications` topic).

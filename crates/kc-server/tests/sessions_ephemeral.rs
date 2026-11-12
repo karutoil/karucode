@@ -215,3 +215,73 @@ async fn an_ephemeral_session_is_never_auto_titled() {
         "an ephemeral session must not be auto-titled: {final_title:?}"
     );
 }
+
+/// A temporary session's run produces no `notification` event on the stream:
+/// the session deletes itself as the run ends, so the ping would name a row
+/// that is already gone. The switch `notifications.ephemeral_sessions` opts
+/// back in, and `GET /api/config` reports it.
+#[tokio::test]
+async fn an_ephemeral_run_emits_no_notification_event_by_default() {
+    use support::events_within;
+
+    let h = HarnessBuilder::new(vec![text("done")]).build().await;
+    let created = h
+        .post("/api/sessions", serde_json::json!({ "ephemeral": true }))
+        .await;
+    let id = created.json()["id"].as_str().unwrap().to_string();
+
+    let (status, _, body) = h.open_events("", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sent = h
+        .post(
+            &format!("/api/sessions/{id}/messages"),
+            serde_json::json!({ "content": "do the thing" }),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.text());
+
+    // Wait for the retire first (bounded), then look back over what the stream
+    // delivered across the whole run: the notification, if any, is emitted in
+    // the run's teardown — right before the row disappears.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let one = h.get(&format!("/api/sessions/{id}")).await;
+        if one.status == StatusCode::NOT_FOUND {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the session was not retired after the run finished"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+    let events = events_within(body, Duration::from_millis(500)).await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "notification"),
+        "a temporary session's run must not notify: {events:?}"
+    );
+
+    // The switch is visible and off by default, so a client can offer it.
+    let config = h.get("/api/config").await;
+    assert_eq!(
+        config.json()["notifications"]["ephemeral_sessions"],
+        serde_json::json!(false)
+    );
+
+    // And PATCHing it on is accepted, round-tripping through the same shape.
+    let patched = h
+        .patch(
+            "/api/config",
+            serde_json::json!({ "notifications": { "ephemeral_sessions": true } }),
+        )
+        .await;
+    assert_eq!(patched.status, StatusCode::OK, "{}", patched.text());
+    let config = h.get("/api/config").await;
+    assert_eq!(
+        config.json()["notifications"]["ephemeral_sessions"],
+        serde_json::json!(true)
+    );
+}

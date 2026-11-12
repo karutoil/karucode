@@ -9725,3 +9725,81 @@ async fn the_ephemeral_retire_leaves_durable_sessions_alone() {
     let messages = h.session_messages().await;
     assert_eq!(messages.len(), 2, "the transcript is untouched");
 }
+
+/// A temporary session's runs are not announced: it exists for a program's own
+/// bookkeeping, retires itself when the work ends, and its caller already holds
+/// the answer. This is the default, because nobody asked for the ping.
+#[tokio::test]
+async fn an_ephemeral_run_does_not_notify_by_default() {
+    let mut h = HarnessBuilder::new(vec![Script::text("done")])
+        .ephemeral()
+        .build()
+        .await;
+
+    let events = h.run_to_finish("hi").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert!(h.wait_idle().await.is_empty());
+    let tail = h.collect_until_quiet().await;
+    let mut all = events;
+    all.extend(tail);
+    assert!(
+        !all
+            .iter()
+            .any(|e| matches!(e.event, Event::Notification { .. })),
+        "a temporary session's run must not produce a notification: {all:?}"
+    );
+    // The session still retired itself; only the announcement was skipped.
+    assert!(h.store.get_session(&h.session_id).await.unwrap().is_none());
+}
+
+/// Opting back in with `notifications.ephemeral_sessions = true` restores the
+/// ping, so an operator who *does* want to hear about helper sessions can have
+/// them without a code change.
+#[tokio::test]
+async fn an_ephemeral_run_notifies_when_the_switch_is_explicitly_on() {
+    let mut h = HarnessBuilder::new(vec![Script::text("done")])
+        .ephemeral()
+        .settings(FakeSettings::default().with_notifications(
+            kc_core::config::NotificationsConfig {
+                ephemeral_sessions: true,
+                ..Default::default()
+            },
+        ))
+        .build()
+        .await;
+
+    let events = h.run_to_finish("hi").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert!(h.wait_idle().await.is_empty());
+    let tail = h.collect_until_quiet().await;
+    let mut all = events;
+    all.extend(tail);
+    assert!(
+        all.iter().any(|e| match &e.event {
+            Event::Notification { notification } => {
+                notification.kind == kc_core::notify::NotifyKind::RunFinished
+            }
+            _ => false,
+        }),
+        "the switch is on, so the finished run must announce itself: {all:?}"
+    );
+    assert!(h.store.get_session(&h.session_id).await.unwrap().is_none());
+}
+
+/// A durable session in the same harness still notifies: the gate is the
+/// session's ephemeral flag, not a change to run routing in general.
+#[tokio::test]
+async fn a_durable_run_still_notifies_with_the_default_config() {
+    let mut h = HarnessBuilder::new(vec![Script::text("done")]).build().await;
+
+    // The notification is published in the run's teardown, after RunFinished,
+    // so collect until the loops are quiet rather than stopping at the finish.
+    h.submit("hi").await;
+    let _ = h.collect_until_finished().await;
+    assert!(h.wait_idle().await.is_empty());
+    let seen = h.collect_until_quiet().await;
+    assert!(
+        seen.iter().any(|e| matches!(e.event, Event::Notification { .. })),
+        "a normal session's finished run must still notify: {seen:?}"
+    );
+}

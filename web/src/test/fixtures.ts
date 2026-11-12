@@ -114,6 +114,7 @@ export const configFixture: Config = {
     plugin: true,
     min_run_secs: 0,
     say_body: true,
+    ephemeral_sessions: false,
     max_min_run_secs: 3600,
     kinds: ['run_finished', 'needs_input', 'error', 'info'],
   },

@@ -53,6 +53,11 @@ pub(crate) struct RunFinished<'a> {
     /// Whether the human asked for this run to stop. A user's own cancellation is
     /// never worth a notification.
     pub cancelled_by_user: bool,
+    /// Whether this run belongs to an ephemeral (temporary) session, read from the
+    /// session row by the caller. Such a session deletes itself right after this
+    /// notification would fire, so it is suppressed unless the operator explicitly
+    /// switched [`NotificationsConfig::ephemeral_sessions`] on.
+    pub session_ephemeral: bool,
 }
 
 /// Emit the notification for a terminal run, if the configuration wants one.
@@ -67,6 +72,12 @@ pub(crate) async fn run_finished(
 ) -> Option<Notify> {
     let config = inner.deps.settings.notify_config().await;
     if !config.enabled {
+        return None;
+    }
+    // A temporary session retires itself as this run ends: a ping about it would
+    // name a row that is going away, and the caller (an API client or a plugin's
+    // helper session) already holds the answer it asked for.
+    if run.session_ephemeral && !config.ephemeral_sessions {
         return None;
     }
 
@@ -112,6 +123,13 @@ pub(crate) async fn approval_requested(
         return None;
     }
     let facts = session_facts(inner, &ctx.session_id).await;
+    // An approval in a temporary session would leave a sticky notification that
+    // cannot be opened: the session retires the moment the run parks. The client
+    // that created the session is still holding the HTTP request, so it can see
+    // the pending approval itself.
+    if facts.ephemeral && !config.ephemeral_sessions {
+        return None;
+    }
     // The approval's own title is the most useful thing to show ("Write a file"),
     // and its detail names the target. Together they are what the card says.
     let body = if approval_detail.trim().is_empty() {
@@ -155,6 +173,11 @@ pub(crate) async fn agent_failed(
         return None;
     }
     let facts = session_facts(inner, session_id).await;
+    // Same deal as the other producers: a temporary session's failure is
+    // reported to the parent run that spawned it, which holds the result.
+    if facts.ephemeral && !config.ephemeral_sessions {
+        return None;
+    }
     let notification = Notify::new(
         NotifyKind::Error,
         format!("agent:{agent_id}"),
@@ -174,15 +197,22 @@ pub(crate) async fn agent_failed(
 /// run is in flight, and the current name is the one worth showing. The project is
 /// read here for the same reason — the browser counts unread news per project, and
 /// it only lists the sessions of the project it is showing, so the server has to
-/// say which project a notification belongs to.
+/// say which project a notification belongs to. `ephemeral` gates the whole
+/// notification: a temporary session retires itself when its work ends, so a ping
+/// about it is either a duplicate of what the caller is already watching or points
+/// at a row that is about to be gone.
 #[derive(Debug, Default, Clone)]
 struct SessionFacts {
     title: String,
     project_id: String,
+    ephemeral: bool,
 }
 
-/// The session's title and project. A missing row is not an error — the run works
-/// and the notification is still worth showing — so both fields are empty then.
+/// The session's title, project and ephemerality. A missing row is not an error —
+/// the run works and the notification is still worth showing — so both string
+/// fields are empty then, and `ephemeral` is false: a row that no longer exists is
+/// not a temporary session whose pings need suppressing (retiring it already
+/// handled that, and an unknown session is the durable kind by default).
 async fn session_facts(inner: &Arc<RuntimeInner>, session_id: &str) -> SessionFacts {
     if session_id.is_empty() {
         return SessionFacts::default();
@@ -191,6 +221,7 @@ async fn session_facts(inner: &Arc<RuntimeInner>, session_id: &str) -> SessionFa
         Ok(Some(session)) => SessionFacts {
             title: session.title,
             project_id: session.project_id.unwrap_or_default(),
+            ephemeral: session.ephemeral,
         },
         _ => SessionFacts::default(),
     }
@@ -369,6 +400,7 @@ mod tests {
             started_at_ms: 0,
             finished_at_ms: 5_000,
             cancelled_by_user: false,
+            session_ephemeral: false,
         };
         let config = NotificationsConfig::default();
         assert_eq!(
@@ -389,6 +421,7 @@ mod tests {
             started_at_ms: 0,
             finished_at_ms: 1_000,
             cancelled_by_user: false,
+            session_ephemeral: false,
         };
         let config = NotificationsConfig {
             say_body: false,
@@ -412,6 +445,7 @@ mod tests {
             started_at_ms: 0,
             finished_at_ms: 1_000,
             cancelled_by_user: false,
+            session_ephemeral: false,
         };
         let config = NotificationsConfig {
             say_body: false,
@@ -431,6 +465,7 @@ mod tests {
             started_at_ms: 0,
             finished_at_ms: 1_000,
             cancelled_by_user: false,
+            session_ephemeral: false,
         };
         let config = NotificationsConfig::default();
         assert_eq!(
@@ -452,6 +487,7 @@ mod tests {
             started_at_ms: 0,
             finished_at_ms: 1_000,
             cancelled_by_user: false,
+            session_ephemeral: false,
         };
         let body = body_for(&NotificationsConfig::default(), &run, "S");
         assert!(body.contains("limit"), "{body}");
@@ -470,6 +506,7 @@ mod tests {
             started_at_ms: 0,
             finished_at_ms: 1_000,
             cancelled_by_user: false,
+            session_ephemeral: false,
         };
         let body = body_for(&NotificationsConfig::default(), &run, "S");
         assert!(body.chars().count() <= BODY_PREVIEW_CHARS + 1);

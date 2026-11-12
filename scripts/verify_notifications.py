@@ -337,17 +337,20 @@ def main():
         )
         time.sleep(1.5)
         # Open the Notifications tab first: the switches exist only in the panel
-        # that is actually showing.
-        evaluate(
+        # that is actually showing. The tab button carries a stable id
+        # (`settings-nav-tab-<section>`); its accessible name is only the label,
+        # but its `textContent` also holds the note next to it, so matching on
+        # text would break the moment the note is reworded.
+        opened_tab = evaluate(
             ws,
             """(() => {
-                 const tab = Array.from(document.querySelectorAll('[role=tab]'))
-                   .find(t => (t.textContent || '').trim() === 'Notifications');
+                 const tab = document.getElementById('settings-nav-tab-notifications');
                  if (!tab) return 'no-tab';
                  tab.click();
                  return 'switched';
                })()""",
         )
+        check("the Notifications tab is reachable", opened_tab == "switched", opened_tab)
         time.sleep(0.6)
         section = evaluate(
             ws,
