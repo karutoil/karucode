@@ -1588,6 +1588,17 @@ pub(crate) struct FakeSettings {
     pub policy: ApprovalPolicy,
     pub subagents: SubagentConfig,
     pub notifications: kc_core::config::NotificationsConfig,
+    /// Live `[skills]` settings.
+    ///
+    /// Deliberately **not** `SkillsConfig::default()`: that has `auto_detect =
+    /// true`, which also scans the *user's* folders (`~/.agents/skills`,
+    /// `~/.claude/skills`, `~/.karucode/skills`, …). A developer who has skills
+    /// installed there would then get a different prompt from the one this suite
+    /// asserts - an "empty workspace" test does grow a `Skills:` block on a
+    /// machine that has them. Auto-detect off keeps every test hermetic; a test
+    /// about skills opts in with
+    /// `with_skills(SkillsConfig::default())`.
+    pub skills: kc_core::skill::SkillsConfig,
     /// What `resolve_requested_model` judges against. Empty (the default)
     /// means "no catalog to judge against", which is the permissive behaviour
     /// a single-model embedding has.
@@ -1620,6 +1631,13 @@ impl Default for FakeSettings {
             },
             subagents: SubagentConfig::default(),
             notifications: kc_core::config::NotificationsConfig::default(),
+            // A harness workspace is empty, so this is still the prompt an install
+            // with no skills and no files sends - see the field's own comment for
+            // why auto-detect is off here.
+            skills: kc_core::skill::SkillsConfig {
+                auto_detect: false,
+                ..Default::default()
+            },
             known_models: Vec::new(),
             alt_profile: None,
         }
@@ -1652,6 +1670,12 @@ impl FakeSettings {
         notifications: kc_core::config::NotificationsConfig,
     ) -> Self {
         self.notifications = notifications;
+        self
+    }
+
+    /// Replace the `[skills]` section the runtime and the `skill` tool read.
+    pub(crate) fn with_skills(mut self, skills: kc_core::skill::SkillsConfig) -> Self {
+        self.skills = skills;
         self
     }
 
@@ -1711,6 +1735,10 @@ impl Settings for FakeSettings {
 
     async fn notify_config(&self) -> kc_core::config::NotificationsConfig {
         self.notifications.clone()
+    }
+
+    async fn skills(&self) -> kc_core::skill::SkillsConfig {
+        self.skills.clone()
     }
 
     /// Mirrors the server's resolver closely enough to prove the runtime

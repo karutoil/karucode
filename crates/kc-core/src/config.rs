@@ -1900,6 +1900,11 @@ pub struct ConfigFile {
     /// user). On by default; see [`TerminalConfig`].
     #[serde(default)]
     pub terminals: Option<TerminalConfig>,
+    /// `[skills]`: reusable instruction packs the agent loads on demand (see
+    /// [`SkillsConfig`]). On by default, with auto-detection of the conventional
+    /// folders.
+    #[serde(default)]
+    pub skills: Option<crate::skill::SkillsConfig>,
     /// `[access]`: web-UI sign-in (password/passkeys), the public URL and the
     /// tunnel/proxy trust list. See [`AccessConfig`].
     #[serde(default)]
@@ -1977,6 +1982,9 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     /// The browser terminal (see [`TerminalConfig`]). On by default.
     pub terminals: TerminalConfig,
+    /// Agent skills: auto-detected instruction packs plus the ones added through
+    /// the UI (see [`crate::skill::SkillsConfig`]). On by default.
+    pub skills: crate::skill::SkillsConfig,
     /// How the web UI is reached and who may use it (see [`AccessConfig`]).
     pub access: AccessConfig,
     /// Automatic update checking (see [`UpdatesConfig`]). On by default: a check
@@ -2028,6 +2036,7 @@ impl Default for Config {
             titles: TitlesConfig::default(),
             notifications: NotificationsConfig::default(),
             terminals: TerminalConfig::default(),
+            skills: crate::skill::SkillsConfig::default(),
             access: AccessConfig::default(),
             updates: UpdatesConfig::default(),
             plugins: Vec::new(),
@@ -2235,6 +2244,9 @@ impl Config {
         if let Some(v) = file.terminals {
             cfg.terminals = v;
         }
+        if let Some(v) = file.skills {
+            cfg.skills = v;
+        }
         if let Some(v) = file.access {
             cfg.access = v;
         }
@@ -2389,6 +2401,30 @@ impl Config {
         // lifetime and the proxy/tunnel trust list. Credentials themselves have no
         // environment spelling on purpose - a password hash in `KARUCODE_*` would
         // end up in a unit file and in `systemctl show`.
+        // Skills. The switches are spelled `KARUCODE_SKILLS_*` so a locked
+        // deployment can turn the feature off - or point it at its own folders -
+        // without editing `[skills]`. A skill folder is read by the agent, so this
+        // is the one place an operator disables the whole surface.
+        if let Some(v) = env_bool("KARUCODE_SKILLS_ENABLED")? {
+            cfg.skills.enabled = v;
+        }
+        if let Some(v) = env_bool("KARUCODE_SKILLS_AUTO_DETECT")? {
+            cfg.skills.auto_detect = v;
+        }
+        if let Some(v) = env_bool("KARUCODE_SKILLS_PROMPT")? {
+            cfg.skills.prompt = v;
+        }
+        if let Some(v) = env_str("KARUCODE_SKILLS_DIRECTORIES") {
+            // Comma list: a path may contain a space, so whitespace is not a
+            // separator here the way it is for most of the other list settings.
+            cfg.skills.directories = v
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(PathBuf::from)
+                .collect();
+        }
+
         if let Some(v) = env_bool("KARUCODE_ACCESS_ENABLED")? {
             cfg.access.enabled = v;
         }
@@ -2590,6 +2626,7 @@ impl Config {
             )));
         }
         cfg.access.validate()?;
+        cfg.skills.normalize();
         // `max_concurrent = 0` and `max_background = 0` mean *no ceiling* and are
         // kept as written: the limiter and the background check read 0 as
         // "unlimited", so clamping it here would silently turn the widest setting

@@ -247,6 +247,8 @@ directory. `provider_configured` is computed from the effective model (below).
                      "min_run_secs": 0, "say_body": true,
                      "max_min_run_secs": 3600,
                      "kinds": ["run_finished", "needs_input", "error", "info"] },
+  "skills": { "enabled": true, "auto_detect": true, "directories": [],
+              "prompt": true, "prompt_max_chars": 4000, "max_skills": 64 },
   "plugins": [ { "name": "example-hello", "version": "0.1.0", "status": "ready",
                  "tools": ["plugin__example-hello__hello"], "error": null,
                  "permissions": ["files.read"] } ],
@@ -318,8 +320,21 @@ a smaller number.
 the request is `403 permission_denied` and nothing is applied. Without the gate,
 any holder of the ordinary bearer token could turn approvals off and then repoint
 the provider at a host of its choosing. Changes to other sections (limits,
-subagents, plugins, MCP) need only the normal credential. Every authorised
+subagents, skills, plugins, MCP) need only the normal credential. Every authorised
 security change is logged with the field names that changed, never the values.
+
+**`skills`.** A `skills` patch takes any subset of the six settings fields -
+`enabled`, `auto_detect`, `directories`, `prompt`, `prompt_max_chars`,
+`max_skills` - and is not on the admin-gate list above: the worst it does is change
+which instructions the model is offered. `directories` is the **whole** list, not a
+delta, the way `approvals.allow_commands` behaves. `skills.disabled` and
+`skills.custom` are not part of a config patch at all: a `skills` object carrying
+them is `400 bad_request` (unknown field) rather than a silent no-op, and the
+`/api/skills` routes own them (see [Skills](#skills)) - those do take the admin
+token when it is configured, because they carry text the model will read.
+`prompt_max_chars` is clamped to 200–64,000 and `max_skills` to 1–512 by the skill
+registry itself, so a hand-edited config cannot silence the listing while claiming
+it is on.
 
 **Body limits.** JSON routes accept up to 1 MiB + 64 KiB; the upload route accepts
 8 MiB + 64 KiB. A body over the limit is `413 payload_too_large` in the same JSON
@@ -1795,6 +1810,103 @@ is `409 bad_request` naming its status; an unknown id is `404 not_found`.
 `GET /api/mcp` → `{ "servers": [ { "name": "fs", "transport": "stdio",
   "status": "connected|failed|disconnected", "tools": ["mcp__fs__read"],
   "error": null } ] }`
+
+## Skills
+
+A skill is a Markdown page the agent opens when a task matches its description: the
+procedure for cutting a release here, the migration order this database needs. The
+`[skills]` section decides where they are found; these routes read the same registry
+the system prompt and the `skill` tool read, so this list is exactly what the model
+can see. Every route here accepts `?project=<id>` and resolves the scan roots inside
+that project's directory, falling back to the default workspace when it is absent;
+an unknown id is `404 not_found`. Which skills are *found* depends on that project,
+but `skills.disabled` and `skills.custom` are one install-wide pair of lists, so
+hiding or adding a skill affects every project.
+
+A skill is text that reaches the model's prompt, so the three mutating routes follow
+the ordinary write rules - the `X-Karucode-Client` CSRF header, `403
+permission_denied` while `settings_locked` is true - and, when `KARUCODE_ADMIN_TOKEN`
+is set, they also need `X-Karucode-Admin-Token`: the same gate and the same message
+as `PATCH /api/config`.
+
+`GET /api/skills[?project=<id>]` →
+```json
+{ "enabled": true, "auto_detect": true, "directories": ["/home/me/my-skills"],
+  "prompt": true, "prompt_max_chars": 4000, "max_skills": 64, "truncated": false,
+  "roots": [ { "path": "/home/me/project/.karucode/skills", "source": "workspace",
+               "exists": true, "configured": false, "count": 2 } ],
+  "skills": [ { "id": "release", "name": "release",
+                "description": "Cut a release: bump versions, run the gates, tag, push.",
+                "source": "workspace",
+                "path": "/home/me/project/.karucode/skills/release/SKILL.md",
+                "enabled": true, "custom": false } ] }
+```
+The first six fields are `[skills]` as the runtime resolved it, environment and UI
+overrides folded in: `enabled` is the master switch, `auto_detect` the conventional
+folders, `prompt` whether the list is advertised in the system prompt,
+`prompt_max_chars` the prompt space reserved for it and `max_skills` the ceiling.
+`truncated` is `true` when `max_skills` cut the registry. `roots[]` is every folder
+that was considered, so an empty `skills` array is explainable: `exists` is `false`
+for a folder that is not there (most projects have none, and that is not an error),
+`configured` marks one that came from `skills.directories`, and `count` is how many
+skills it contributed after shadowing.
+
+`source` is the `SkillSource` variant: `workspace` for a conventional folder inside
+this project, `user` for one in `$HOME` (or `$XDG_CONFIG_HOME`), `config` for a
+folder named in `skills.directories`, and `custom` for a skill added through this
+API, which lives in the settings table instead of on disk. `custom` on a skill is
+the same test as `source == "custom"`. The first skill found with a given id wins,
+so a workspace skill shadows a user skill of the same name, and `enabled` is
+per-skill: `false` means the id is in `skills.disabled`.
+
+`GET /api/skills/:id[?project=<id>]` → the same object plus the body:
+```json
+{ "id": "release", "name": "release", "description": "Cut a release.",
+  "source": "workspace", "path": "/home/me/project/.karucode/skills/release/SKILL.md",
+  "enabled": true, "custom": false,
+  "body": "# Cutting a release\n\n1. `cargo test --workspace` ...",
+  "body_truncated": false }
+```
+`body` is the file with its YAML frontmatter removed, cut at 128 KiB
+(`SKILL_BODY_MAX_BYTES`), and `body_truncated` says whether that cut happened. An
+unknown id is `404 not_found`; a skill that was turned off is still readable here,
+because reading it is how you decide whether to turn it back on. The `skill` tool's
+`read` returns this same text, paged.
+
+`POST /api/skills[?project=<id>]` — body `{ "id"?, "name"?, "description", "body" }`:
+```json
+{ "name": "release", "description": "Cut a release: bump versions, run the gates.",
+  "body": "1. `cargo test --workspace` ..." }
+```
+→ `201` with the skill object (`"source": "custom"`, `"custom": true`,
+`"enabled": true`, `"path": null`). `body` is required, non-empty after trimming and
+at most 64 KiB (`CUSTOM_BODY_MAX_CHARS`). `id` and `name` default to each other and
+the id is slugged (`Release notes` becomes `release-notes`), so one of them is
+enough. The description is reduced to its first line and to 300 characters, because
+it becomes one line of the prompt block. `400 bad_request` for a missing or
+oversized `body`, or an id that slugs to nothing; `409 bad_request` when that id is
+already taken - by a hand-added skill or by one discovered on disk for this project
+- so a create never overwrites a file.
+
+`PATCH /api/skills/:id[?project=<id>]` — any subset of `{ "enabled", "name",
+"description", "body" }`, e.g. `{ "enabled": false }` → `200` with the skill object.
+`enabled` works on every skill and is how you hide one: `false` appends the id to
+`skills.disabled`, which drops it from the prompt block while the file stays where
+it is (`skill` → `list` still shows it, marked off); `true` puts it back. `name`,
+`description` and `body` are accepted only for a skill whose `source` is `custom` -
+editing a file-backed skill is `400 bad_request` naming the file, because the file
+is the truth and a copy in the database would drift from it. An unknown id is `404
+not_found`.
+
+`DELETE /api/skills/:id[?project=<id>]` → `204`, no body. A `custom` skill is
+removed from `skills.custom`. A file-backed skill is `400 bad_request` naming the
+file: deleting the row would not delete the file, so the next run would discover it
+again - turn it off with `PATCH` instead, or delete the file. An unknown id is `404
+not_found`. There is no rename route either: `id` comes from the name for a custom
+skill and from the folder or file name for a discovered one.
+
+The file format, the folders that are scanned, the prompt block and the `skill`
+tool are all in the `skills` doc topic.
 
 ## Version and updates
 

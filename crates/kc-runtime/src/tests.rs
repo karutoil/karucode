@@ -2035,6 +2035,207 @@ async fn a_workspace_without_instructions_sends_no_instructions_block() {
 }
 
 // ---------------------------------------------------------------------------
+// the workspace's skills
+// ---------------------------------------------------------------------------
+
+/// One skill file at the conventional workspace root, with frontmatter.
+fn seed_workspace_skill(workspace: &std::path::Path, id: &str, description: &str) {
+    let dir = workspace.join(".karucode/skills").join(id);
+    std::fs::create_dir_all(&dir).expect("create the skills folder");
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {id}\ndescription: {description}\n---\n\n# {id}\n\n1. run the gates\n"),
+    )
+    .expect("seed the skill file");
+}
+
+/// The product's `[skills]` default: on, auto-detect on, so `<workspace>/
+/// .karucode/skills` is scanned.
+///
+/// The harness turns auto-detect off by default (`FakeSettings::skills`), because
+/// it would otherwise also scan the *user's* folders and make a developer's
+/// `~/.agents/skills` part of the assertion; a test that wants discovery says so
+/// with this.
+fn product_skills() -> kc_core::skill::SkillsConfig {
+    kc_core::skill::SkillsConfig::default()
+}
+
+#[tokio::test]
+async fn a_workspace_skill_is_advertised_in_the_prompt_without_its_body() {
+    let mut h = HarnessBuilder::new(vec![Script::text("hi")])
+        .settings(FakeSettings::default().with_skills(product_skills()))
+        .build()
+        .await;
+    seed_workspace_skill(
+        &h.workspace_dir,
+        "release",
+        "Cut a release: bump versions, run the gates, tag, push.",
+    );
+
+    h.run_to_finish("cut a release").await;
+
+    let requests = h.factory.requests();
+    let prompt = &requests[0].messages[0].content;
+    assert!(prompt.contains("Skills:"), "no skills block: {prompt}");
+    // The id and the description are what make the skill findable...
+    assert!(
+        prompt.contains(
+            "`release` (workspace): Cut a release: bump versions, run the gates, tag, push."
+        ),
+        "the skill line is missing its id, source or description: {prompt}"
+    );
+    // ...and the call it names is the one the `skill` tool answers.
+    assert!(
+        prompt.contains(r#""action":"read""#),
+        "the block must name the call that opens a skill: {prompt}"
+    );
+    // The point of the feature: the body is *not* in the prompt, which is
+    // re-sent and re-billed on every turn.
+    assert!(
+        !prompt.contains("1. run the gates"),
+        "the skill's body leaked into the prompt"
+    );
+}
+
+#[tokio::test]
+async fn a_workspace_without_skills_sends_no_skills_block() {
+    // No skills anywhere: the harness's own default (auto-detect off, nothing
+    // configured, nothing hand-added) is the "install with no skills" case, and
+    // the prompt must be the one this feature never touching it produces.
+    let mut h = HarnessBuilder::new(vec![Script::text("hi")]).build().await;
+    h.run_to_finish("hello").await;
+    let requests = h.factory.requests();
+    assert!(
+        !requests[0].messages[0].content.contains("Skills:"),
+        "an empty workspace grew a skills block"
+    );
+    assert!(
+        !requests[0].messages[0].content.contains("`skill` tool"),
+        "an empty workspace advertised the skill tool's listing"
+    );
+}
+
+#[tokio::test]
+async fn skills_turned_off_send_no_skills_block_even_when_skill_files_exist() {
+    // Two runs over the same seeded skill, differing only in `skills.enabled`: the
+    // first proves the file *is* discoverable under these settings (or the second
+    // assertion would hold for the wrong reason), the second proves the master
+    // switch hides it.
+    let mut on = HarnessBuilder::new(vec![Script::text("hi")])
+        .settings(FakeSettings::default().with_skills(product_skills()))
+        .build()
+        .await;
+    seed_workspace_skill(&on.workspace_dir, "release", "Cut a release.");
+    on.run_to_finish("cut a release").await;
+    let listed = &on.factory.requests()[0].messages[0].content;
+    assert!(
+        listed.contains("`release` (workspace)"),
+        "the skill must be discoverable with the feature on: {listed}"
+    );
+
+    let mut off = HarnessBuilder::new(vec![Script::text("hi")])
+        .settings(
+            FakeSettings::default().with_skills(kc_core::skill::SkillsConfig {
+                enabled: false,
+                ..product_skills()
+            }),
+        )
+        .build()
+        .await;
+    seed_workspace_skill(&off.workspace_dir, "release", "Cut a release.");
+    off.run_to_finish("cut a release").await;
+
+    let prompt = &off.factory.requests()[0].messages[0].content;
+    assert!(
+        !prompt.contains("Skills:") && !prompt.contains("`release`"),
+        "skills.enabled = false must hide the listing: {prompt}"
+    );
+}
+
+#[tokio::test]
+async fn a_skill_edited_mid_run_does_not_change_that_runs_prompt() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "rewrite", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(WriteWorkspaceFileTool::boxed(
+        "rewrite",
+        ".karucode/skills/release/SKILL.md",
+        "---\nname: release\ndescription: CHANGED MID-RUN: this must not reach the prompt.\n---\n\nbody\n",
+    ))
+    .settings(FakeSettings::default().with_skills(product_skills()))
+    .build()
+    .await;
+    seed_workspace_skill(
+        &h.workspace_dir,
+        "release",
+        "ORIGINAL: run the gates before reporting.",
+    );
+
+    h.run_to_finish("cut a release").await;
+
+    let requests = h.factory.requests();
+    assert!(requests.len() >= 2, "the run should take two model turns");
+    for (index, request) in requests.iter().enumerate() {
+        let prompt = &request.messages[0].content;
+        assert!(
+            prompt.contains("ORIGINAL: run the gates before reporting."),
+            "request {index} lost the skill it started with"
+        );
+        assert!(
+            !prompt.contains("CHANGED MID-RUN"),
+            "request {index} re-discovered skills instead of reusing the run's block"
+        );
+    }
+    // Byte-identical, not merely equivalent: the cached prefix must not move.
+    assert_eq!(
+        requests[0].messages[0].content, requests[1].messages[0].content,
+        "the skills block changed between turns of one run"
+    );
+    // And the file really did change mid-run, or the assertion is vacuous.
+    let on_disk =
+        std::fs::read_to_string(h.workspace_dir.join(".karucode/skills/release/SKILL.md")).unwrap();
+    assert!(on_disk.contains("CHANGED MID-RUN"));
+}
+
+#[tokio::test]
+async fn a_subagents_own_prompt_lists_the_workspaces_skills() {
+    let mut h = HarnessBuilder::new(vec![
+        spawn_call("do the delegated work", None, false),
+        Script::text("child summary"),
+        Script::text("parent done"),
+    ])
+    .settings(FakeSettings::default().with_skills(product_skills()))
+    .build()
+    .await;
+    seed_workspace_skill(&h.workspace_dir, "release", "Cut a release.");
+
+    let events = h.run_to_finish("delegate").await;
+    assert_eq!(finished_status(&events), "completed");
+
+    let requests = h.factory.requests();
+    assert!(requests.len() >= 2, "the child must make its own request");
+    // The parent's prompt, then the child's: the child runs the same loop
+    // against the same workspace, so it inherits the skill list with no extra
+    // plumbing.
+    assert!(
+        requests[0].messages[0]
+            .content
+            .contains("`release` (workspace)"),
+        "the parent's prompt lost the skill"
+    );
+    let child = &requests[1].messages[0].content;
+    assert!(
+        child.contains("You are a focused subagent"),
+        "request 1 is not the child's prompt: {child}"
+    );
+    assert!(
+        child.contains("`release` (workspace): Cut a release."),
+        "the subagent's prompt must list the workspace's skills: {child}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // the prompt hook and the turn it answers
 // ---------------------------------------------------------------------------
 

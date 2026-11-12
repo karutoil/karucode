@@ -17,6 +17,7 @@ pub mod plugins;
 pub mod projects;
 pub mod rewind;
 pub mod sessions;
+pub mod skills;
 pub mod terminals;
 pub mod update;
 pub mod workspace;
@@ -259,6 +260,21 @@ pub fn api_router() -> Router<AppState> {
             post(plugins::run_ui_action),
         )
         .route("/mcp", get(plugins::list_mcp))
+        // Agent skills: reusable instruction packs the agent loads on demand.
+        // The list is discovery, not a table (there is no skills table), so
+        // `GET` is a live scan of the workspace and the conventional folders.
+        // `disabled` and `custom` are edited per skill here rather than through
+        // `PATCH /api/config`; each mutation applies the admin gate itself.
+        .route(
+            "/skills",
+            get(skills::list_skills).post(skills::create_skill),
+        )
+        .route(
+            "/skills/:id",
+            get(skills::get_skill)
+                .patch(skills::patch_skill)
+                .delete(skills::delete_skill),
+        )
         // Update checking and installing. `GET` is a cached read; the two `POST`s
         // reach the network, and `apply` replaces the running binary (it needs the
         // admin credential when one is configured). See `crate::update`.

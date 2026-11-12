@@ -1,5 +1,5 @@
 {
-  "count": 33,
+  "count": 34,
   "generated_by": "cargo run -p kc-docs -- --write",
   "topics": [
     {
@@ -138,6 +138,7 @@
         "tool:git_diff",
         "tool:git_log",
         "tool:karucode_docs",
+        "tool:skill",
         "tool:spawn_agent",
         "tool:spawn_agents",
         "tool:send_message",
@@ -1062,6 +1063,50 @@
         "titles.enabled"
       ],
       "title": "Give sessions AI-written titles"
+    },
+    {
+      "applies_to": [
+        "config:[skills]",
+        "config:skills.enabled",
+        "config:skills.auto_detect",
+        "config:skills.directories",
+        "config:skills.prompt",
+        "config:skills.prompt_max_chars",
+        "config:skills.max_skills",
+        "config:skills.disabled",
+        "config:skills.custom",
+        "dir:.karucode/skills",
+        "dir:.claude/skills",
+        "dir:.agents/skills",
+        "dir:~/.karucode/skills",
+        "dir:~/.claude/skills",
+        "tool:skill",
+        "env:KARUCODE_SKILLS_ENABLED",
+        "env:KARUCODE_SKILLS_AUTO_DETECT",
+        "env:KARUCODE_SKILLS_DIRECTORIES",
+        "env:KARUCODE_SKILLS_PROMPT",
+        "route:GET /api/skills",
+        "route:POST /api/skills",
+        "route:GET /api/skills/:id",
+        "route:PATCH /api/skills/:id",
+        "route:DELETE /api/skills/:id",
+        "ui:SkillsTab"
+      ],
+      "path": "skills.md",
+      "slug": "skills",
+      "source": "crates/kc-core/src/skill.rs:25",
+      "summary": "Auto-detected and hand-written skills: which folders are scanned, the file format, how the agent finds one, and the switches that turn the whole feature off.",
+      "tags": [
+        "skills",
+        "skill.md",
+        "prompt",
+        "context",
+        "auto-detect",
+        "workspace",
+        "user",
+        "register"
+      ],
+      "title": "Give the agent skills it loads on demand"
     },
     {
       "applies_to": [

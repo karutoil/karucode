@@ -904,6 +904,22 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
     // reason a top-level run does.
     let instructions = kc_core::prompt::load_project_instructions(spec.workspace.root())
         .map(|instructions| kc_core::prompt::instructions_block(&instructions));
+    // Skills are resolved **once per run**, for exactly the reason the
+    // instructions above are: the listing is part of message 0, and a skill file
+    // that changed between two turns of the same run would move the cached
+    // prefix and cost a full prompt-cache miss on a request that is otherwise
+    // append-only. Bodies are not part of this - only the one line per skill; the
+    // agent opens the body through the `skill` tool when a task matches.
+    //
+    // A subagent runs this same loop against the same workspace (see
+    // `subagent.rs`), so a delegated task inherits the same skill list without
+    // any extra plumbing. `skills_block` is empty when the feature is off or
+    // nothing was found, which keeps such a prompt byte-identical to the one this
+    // harness produced before skills existed.
+    let skills_config = inner.deps.settings.skills().await;
+    let skills_registry = kc_core::skill::discover(&skills_config, spec.workspace.root());
+    let skills = kc_core::skill::skills_block(&skills_registry, &skills_config);
+    let skills = (!skills.is_empty()).then_some(skills);
     // The user turn this run is answering, captured before the loop mutates the
     // conversation: `run_loop_inner` pushes steers, mail and continuation nudges
     // onto the same history, so deriving it later would drift. It is the last
@@ -921,6 +937,7 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
         spec,
         Arc::clone(&notebook),
         instructions,
+        skills,
         turn,
     ))
     .catch_unwind()
@@ -958,6 +975,10 @@ async fn run_loop_inner(
     notebook: Arc<std::sync::Mutex<crate::context::Notebook>>,
     // The workspace's instructions block, rendered once at run start.
     instructions: Option<String>,
+    // The skills block, rendered once at run start. `None` when the feature is
+    // off or the workspace has no skills, so the prompt stays byte-identical to
+    // the one an install without skills sends.
+    skills: Option<String>,
     // The user turn this run is answering, read once at run start.
     turn: Option<String>,
 ) -> LoopOutcome {
@@ -1275,7 +1296,7 @@ is {})",
             }
         }
         let tool_specs = spec.tools.specs();
-        let system = kc_core::prompt::system_prompt_with_instructions(
+        let system = kc_core::prompt::system_prompt_with_context(
             &spec.workspace.root().to_string_lossy(),
             spec.workspace.extra_roots(),
             &tool_specs,
@@ -1283,6 +1304,7 @@ is {})",
             &spec.budget,
             &extra,
             instructions.as_deref(),
+            skills.as_deref(),
         );
         let mut base = Vec::with_capacity(history.len() + 2);
         base.push(Message::system(system));

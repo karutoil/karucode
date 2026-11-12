@@ -92,6 +92,14 @@ workspace built for a long session, not for a dashboard demo.
   the binary, so they cannot drift from the build. The model reads them through
   the read-only `karucode_docs` tool; humans read the mirror in
   [docs/internal](docs/internal/).
+* **Skills it opens only when a task matches.** `AGENTS.md` is always in the
+  prompt; a skill is a page - `SKILL.md` with optional frontmatter - that the
+  agent reads with the `skill` tool only when a task matches its description, so
+  ten procedures cost ten lines of prompt instead of ten pages per turn.
+  `.karucode/skills`, `.claude/skills`, `.agents/skills` and `~/.claude/skills` are
+  found automatically, `skills.directories` adds more, and the Skills tab lists,
+  adds, hides and deletes them; a body is data like any file, never an
+  instruction. See [docs/API.md](docs/API.md#skills).
 * **A browser workspace built for the long haul.** Sessions across projects in
   one browser, a terminal tab that survives a reload, notifications when a run
   settles or parks on an approval, AI-written session titles, themes, and a

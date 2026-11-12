@@ -550,6 +550,20 @@ mod keys {
     pub const ACCESS_TUNNEL: &str = "access.tunnel";
     /// JSON array of CIDR/IP strings.
     pub const ACCESS_TRUSTED_PROXIES: &str = "access.trusted_proxies";
+
+    pub const SKILLS_ENABLED: &str = "skills.enabled";
+    pub const SKILLS_AUTO_DETECT: &str = "skills.auto_detect";
+    pub const SKILLS_PROMPT: &str = "skills.prompt";
+    pub const SKILLS_PROMPT_MAX_CHARS: &str = "skills.prompt_max_chars";
+    pub const SKILLS_MAX_SKILLS: &str = "skills.max_skills";
+    /// JSON array of folder strings.
+    pub const SKILLS_DIRECTORIES: &str = "skills.directories";
+    /// JSON array of skill ids the user turned off. Written by
+    /// `PATCH /api/skills/:id`, never by `PATCH /api/config`.
+    pub const SKILLS_DISABLED: &str = "skills.disabled";
+    /// JSON array of [`kc_core::skill::CustomSkill`]. Written by
+    /// `POST`/`PATCH`/`DELETE /api/skills`, never by `PATCH /api/config`.
+    pub const SKILLS_CUSTOM: &str = "skills.custom";
 }
 
 // ---------------------------------------------------------------------------
@@ -742,6 +756,28 @@ pub struct AccessPatch {
     pub trusted_proxies: Option<Vec<String>>,
 }
 
+/// `[skills]` section of `PATCH /api/config`.
+///
+/// Only the six operator switches are patchable. `skills.disabled` and
+/// `skills.custom` are written by `PATCH /api/skills/:id` and
+/// `POST`/`DELETE /api/skills` instead, because they are per-skill edits that
+/// must be checked against what discovery actually found - and because a config
+/// patch that silently dropped one would delete a skill someone pasted in.
+///
+/// `directories` is the full replacement list (not a delta), the way
+/// `approvals.allow_commands` behaves: the settings screen always sends the list
+/// it is showing.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsPatch {
+    pub enabled: Option<bool>,
+    pub auto_detect: Option<bool>,
+    pub prompt: Option<bool>,
+    pub prompt_max_chars: Option<usize>,
+    pub max_skills: Option<usize>,
+    pub directories: Option<Vec<String>>,
+}
+
 /// Body of `PATCH /api/config`. Every section is optional; unknown fields are
 /// rejected so a typo in the browser cannot silently do nothing.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -757,6 +793,7 @@ pub struct ConfigPatch {
     pub notifications: Option<NotificationsPatch>,
     pub access: Option<AccessPatch>,
     pub updates: Option<UpdatesPatch>,
+    pub skills: Option<SkillsPatch>,
 }
 
 impl ConfigPatch {
@@ -1044,9 +1081,51 @@ impl SettingsHandle {
         let mut next = old.clone();
         apply_patch(&mut next, patch)?;
         validate_settings(&next)?;
+        self.persist(&old, &next).await?;
+        Ok(next)
+    }
 
-        let old_rows = rows_for(&old);
-        let new_rows = rows_for(&next);
+    /// Read-modify-write the `[skills]` section and persist it.
+    ///
+    /// The `/api/skills` routes cannot go through [`Self::update`]: they change
+    /// `skills.disabled` and `skills.custom`, which are deliberately absent from
+    /// [`SkillsPatch`] because they are per-skill edits checked against what
+    /// discovery found, not a settings form. Everything else is the same - the
+    /// lock check, the update mutex, the validate-then-persist order and the
+    /// "a failed write changes nothing" rule - so a skills edit is as safe as a
+    /// config save.
+    ///
+    /// `mutate` gets a copy of the live section; `normalize` runs after it, so a
+    /// caller can hand over a 70,000-character body or a duplicate id and get the
+    /// clamped, deduplicated result rather than an invalid config. Returning
+    /// `Ok(section)` means the change is live *and* on disk.
+    pub async fn update_skills<F>(&self, mutate: F) -> Result<kc_core::skill::SkillsConfig>
+    where
+        F: FnOnce(&mut kc_core::skill::SkillsConfig) -> Result<()>,
+    {
+        if self.is_locked() {
+            return Err(Error::PermissionDenied(
+                "settings are locked (KARUCODE_LOCK_SETTINGS); change them in the config file or environment"
+                    .into(),
+            ));
+        }
+
+        let _update = self.update_lock.lock().await;
+        let old = self.snapshot();
+        let mut next = old.clone();
+        mutate(&mut next.skills)?;
+        next.skills.normalize();
+        validate_settings(&next)?;
+        self.persist(&old, &next).await?;
+        Ok(next.skills)
+    }
+
+    /// Write the rows that differ between `old` and `next`, then swap the live
+    /// config. Shared by [`Self::update`] and [`Self::update_skills`] so the two
+    /// cannot drift apart on rollback behaviour.
+    async fn persist(&self, old: &Config, next: &Config) -> Result<()> {
+        let old_rows = rows_for(old);
+        let new_rows = rows_for(next);
         let mut changed: Vec<(&'static str, String, String)> = Vec::new();
         for (key, value) in &new_rows {
             let previous = old_rows.get(key).cloned().unwrap_or_default();
@@ -1076,7 +1155,7 @@ impl SettingsHandle {
         }
 
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = next.clone();
-        Ok(next)
+        Ok(())
     }
 
     /// Persist and apply an empty API key (the `clear_api_key` flow).
@@ -1159,9 +1238,39 @@ impl SettingsHandle {
                     == kc_core::config::TunnelKind::Cloudflare,
                 "public_authority": cfg.access.public_authority(),
             },
+            // Agent skills. The switches only: `disabled` and `custom` are
+            // per-skill edits made through `/api/skills` and are not part of
+            // `PATCH /api/config` (see `public_skills`).
+            "skills": public_skills(&cfg.skills),
             "version": crate::VERSION,
         })
     }
+}
+
+/// The `skills` slice of `GET /api/config`.
+///
+/// Split out like [`public_notifications`] so a test can assert the wire shape
+/// without a database, and so the settings screen reads the field names from one
+/// place.
+///
+/// Deliberately *not* included: `skills.disabled` and `skills.custom`. Those are
+/// per-skill edits made through `/api/skills`, and echoing them here would invite
+/// a settings save to send them back - which `SkillsPatch` rejects, because a
+/// whole-list replacement of "every skill you turned off" is exactly the kind of
+/// edit that silently re-enables one.
+pub fn public_skills(skills: &kc_core::skill::SkillsConfig) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": skills.enabled,
+        "auto_detect": skills.auto_detect,
+        "directories": skills
+            .directories
+            .iter()
+            .map(|dir| dir.to_string_lossy().to_string())
+            .collect::<Vec<_>>(),
+        "prompt": skills.prompt,
+        "prompt_max_chars": skills.prompt_max_chars,
+        "max_skills": skills.max_skills,
+    })
 }
 
 /// The `notifications` slice of `GET /api/config`.
@@ -1244,6 +1353,13 @@ impl Settings for SettingsHandle {
 
     async fn notify_config(&self) -> kc_core::config::NotificationsConfig {
         self.read().notifications.clone()
+    }
+
+    async fn skills(&self) -> kc_core::skill::SkillsConfig {
+        // The whole section, not a summary: the caller needs `disabled` and
+        // `custom` to build the registry, and they are already normalised on
+        // every write (see `SettingsHandle::update_skills`).
+        self.read().skills.clone()
     }
 }
 
@@ -1786,6 +1902,37 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
             target.auto_apply = v;
         }
         target.check_secs = target.interval();
+    }
+
+    if let Some(skills) = &patch.skills {
+        let target = &mut config.skills;
+        if let Some(v) = skills.enabled {
+            target.enabled = v;
+        }
+        if let Some(v) = skills.auto_detect {
+            target.auto_detect = v;
+        }
+        if let Some(v) = skills.prompt {
+            target.prompt = v;
+        }
+        if let Some(v) = skills.prompt_max_chars {
+            target.prompt_max_chars = v;
+        }
+        if let Some(v) = skills.max_skills {
+            target.max_skills = v;
+        }
+        if let Some(list) = &skills.directories {
+            // Empty entries are a mistake worth naming rather than silently
+            // dropping: an empty folder would scan the workspace root and list
+            // every `*.md` in it as a skill.
+            target.directories = clean_list("skills.directories", list)?
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect();
+        }
+        // `disabled`/`custom` are absent from the patch on purpose; the ids and
+        // the stored skills survive a settings save untouched.
+        config.skills.normalize();
     }
 
     // Repair a missing selection (first profile added, active profile deleted)
@@ -2738,6 +2885,30 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
         serde_json::to_string(&access.trusted_proxies).unwrap_or_else(|_| "[]".into()),
     );
 
+    let skills = &config.skills;
+    rows.insert(keys::SKILLS_ENABLED, skills.enabled.to_string());
+    rows.insert(keys::SKILLS_AUTO_DETECT, skills.auto_detect.to_string());
+    rows.insert(keys::SKILLS_PROMPT, skills.prompt.to_string());
+    rows.insert(
+        keys::SKILLS_PROMPT_MAX_CHARS,
+        skills.prompt_max_chars.to_string(),
+    );
+    rows.insert(keys::SKILLS_MAX_SKILLS, skills.max_skills.to_string());
+    // One row for the folder list and one for all the stored skills, so a list
+    // and its entries can never be torn apart by a half-applied write.
+    rows.insert(
+        keys::SKILLS_DIRECTORIES,
+        serde_json::to_string(&skills.directories).unwrap_or_else(|_| "[]".into()),
+    );
+    rows.insert(
+        keys::SKILLS_DISABLED,
+        serde_json::to_string(&skills.disabled).unwrap_or_else(|_| "[]".into()),
+    );
+    rows.insert(
+        keys::SKILLS_CUSTOM,
+        serde_json::to_string(&skills.custom).unwrap_or_else(|_| "[]".into()),
+    );
+
     rows
 }
 
@@ -3070,6 +3241,58 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
         keys::ACCESS_TRUSTED_PROXIES => {
             if let Ok(list) = serde_json::from_str::<Vec<String>>(value) {
                 config.access.trusted_proxies = list;
+            }
+        }
+
+        keys::SKILLS_ENABLED => {
+            if let Some(v) = parse_bool(key, value) {
+                config.skills.enabled = v;
+            }
+        }
+        keys::SKILLS_AUTO_DETECT => {
+            if let Some(v) = parse_bool(key, value) {
+                config.skills.auto_detect = v;
+            }
+        }
+        keys::SKILLS_PROMPT => {
+            if let Some(v) = parse_bool(key, value) {
+                config.skills.prompt = v;
+            }
+        }
+        keys::SKILLS_PROMPT_MAX_CHARS => {
+            if let Some(v) = parse_value(key, value) {
+                config.skills.prompt_max_chars = v;
+            }
+        }
+        keys::SKILLS_MAX_SKILLS => {
+            if let Some(v) = parse_value(key, value) {
+                config.skills.max_skills = v;
+            }
+        }
+        keys::SKILLS_DIRECTORIES => {
+            if let Some(list) = parse_list(key, value) {
+                config.skills.directories =
+                    list.into_iter().map(std::path::PathBuf::from).collect();
+            }
+        }
+        keys::SKILLS_DISABLED => {
+            if let Some(list) = parse_list(key, value) {
+                config.skills.disabled = list;
+            }
+        }
+        keys::SKILLS_CUSTOM => {
+            if value.trim().is_empty() {
+                return;
+            }
+            match serde_json::from_str::<Vec<kc_core::skill::CustomSkill>>(value) {
+                Ok(skills) => config.skills.custom = skills,
+                Err(e) => {
+                    warn!(
+                        key,
+                        error = %e,
+                        "ignoring a stored-skill row that is not valid JSON"
+                    );
+                }
             }
         }
 
@@ -4190,6 +4413,105 @@ mod tests {
         assert_eq!(restored.approvals.mode, ApprovalMode::AskCommands);
         assert_eq!(restored.approvals.allow_commands.len(), 2);
         assert_eq!(restored.subagents.max_depth, 2);
+    }
+
+    #[test]
+    fn skills_settings_survive_a_row_round_trip() {
+        let mut cfg = Config::default();
+        cfg.skills.enabled = false;
+        cfg.skills.auto_detect = false;
+        cfg.skills.prompt = false;
+        cfg.skills.prompt_max_chars = 900;
+        cfg.skills.max_skills = 7;
+        cfg.skills.directories = vec![
+            std::path::PathBuf::from("/tmp/kc-skills"),
+            std::path::PathBuf::from("relative/skills"),
+        ];
+        cfg.skills.disabled = vec!["release".into(), "house-style".into()];
+        cfg.skills.custom = vec![kc_core::skill::CustomSkill {
+            id: "note".into(),
+            name: "Note".into(),
+            description: "How we write notes.".into(),
+            body: "# Notes\n\nShort.".into(),
+        }];
+        let rows: Vec<(String, String)> = rows_for(&cfg)
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+
+        // A restart is `apply_rows` over a fresh config; the whole section - the
+        // switches, the off list and the stored skills - has to come back.
+        let mut restored = Config::default();
+        apply_rows(&mut restored, &rows);
+        assert_eq!(restored.skills, cfg.skills);
+
+        // A hand-edited comma list for the folders still reads.
+        let mut legacy = Config::default();
+        apply_rows(
+            &mut legacy,
+            &[(
+                keys::SKILLS_DIRECTORIES.to_string(),
+                "/a/skills, /b/skills".to_string(),
+            )],
+        );
+        assert_eq!(
+            legacy.skills.directories,
+            vec![
+                std::path::PathBuf::from("/a/skills"),
+                std::path::PathBuf::from("/b/skills")
+            ]
+        );
+
+        // A stale row from another build is warned about, not fatal.
+        let mut broken = Config::default();
+        apply_rows(
+            &mut broken,
+            &[(keys::SKILLS_CUSTOM.to_string(), "{not json".to_string())],
+        );
+        assert!(broken.skills.custom.is_empty());
+    }
+
+    #[test]
+    fn a_skills_patch_is_clamped_and_cannot_touch_the_stored_skills() {
+        let mut cfg = Config::default();
+        cfg.skills.custom = vec![kc_core::skill::CustomSkill {
+            id: "note".into(),
+            name: "Note".into(),
+            description: "d".into(),
+            body: "b".into(),
+        }];
+        cfg.skills.disabled = vec!["release".into()];
+        let patch = ConfigPatch {
+            skills: Some(SkillsPatch {
+                enabled: Some(false),
+                prompt_max_chars: Some(0),
+                max_skills: Some(10_000),
+                ..SkillsPatch::default()
+            }),
+            ..ConfigPatch::default()
+        };
+        apply_patch(&mut cfg, &patch).unwrap();
+        assert!(!cfg.skills.enabled);
+        // Both bounds are clamped to what the prompt builder can live with.
+        assert_eq!(cfg.skills.prompt_max_chars, 200);
+        assert!(cfg.skills.max_skills <= 512);
+        // The per-skill rows are not part of the patch and must be untouched.
+        assert_eq!(cfg.skills.custom.len(), 1);
+        assert_eq!(cfg.skills.disabled, vec!["release".to_string()]);
+
+        // An empty folder is refused rather than silently scanning the root.
+        let empty = ConfigPatch {
+            skills: Some(SkillsPatch {
+                directories: Some(vec!["".into()]),
+                ..SkillsPatch::default()
+            }),
+            ..ConfigPatch::default()
+        };
+        assert!(apply_patch(&mut cfg, &empty).is_err());
+
+        // A skills patch is a prompt change, not a credential change: the
+        // ordinary bearer token is enough, exactly as the plan says.
+        assert!(patch.security_fields().is_empty());
     }
 
     #[test]

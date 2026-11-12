@@ -71,6 +71,7 @@ nav:
       - Build, run and stop the server: internal/run-server.md
       - Understand the security model: internal/security.md
       - Give sessions AI-written titles: internal/session-titles.md
+      - Give the agent skills it loads on demand: internal/skills.md
       - Delegate work to subagents: internal/subagents.md
       - What the agent is told about reading, tool output and stopping: internal/system-prompt.md
       - Use the terminal tab: internal/terminals.md

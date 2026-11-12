@@ -244,6 +244,42 @@ max_depth = 1
 # Wall clock for one delegated task (4h).
 timeout_secs = 14400
 
+# Reusable instruction packs the agent loads on demand. A skill is a Markdown page
+# - normally `<dir>/<name>/SKILL.md`, with optional YAML frontmatter - holding one
+# procedure this project or this machine has already worked out: how to cut a
+# release here, which migration order this database needs. It is not project
+# instructions (AGENTS.md): instructions are always in the prompt, a skill is
+# opened only when the task matches its description. Only one line per skill
+# reaches the prompt; the body is read with the `skill` tool, so ten skills do not
+# cost ten pages per turn.
+#
+# `KARUCODE_SKILLS_ENABLED`, `_AUTO_DETECT`, `_PROMPT` and `_DIRECTORIES`
+# (comma-separated) override these. Skills can also be added, hidden and deleted
+# from the Skills tab of the results panel, or with `/api/skills`; see
+# docs/API.md.
+[skills]
+enabled = true           # master switch: `false` drops the prompt block and
+                         # makes the `skill` tool answer that skills are disabled
+auto_detect = true       # scan the conventional folders: in the workspace
+                         # .karucode/skills, .claude/skills, .agents/skills,
+                         # .agent/skills; in $HOME .karucode/skills, .claude/skills,
+                         # .agents/skills, .config/karucode/skills
+directories = []         # extra folders to scan; `~` expands, a relative path
+                         # resolves against the workspace, a missing folder is not
+                         # an error. A workspace skill shadows a user skill with
+                         # the same id
+prompt = true            # list the available skills in the system prompt. The
+                         # `skill` tool works either way, so `false` keeps the
+                         # feature and stops spending prompt bytes on it
+prompt_max_chars = 4000  # prompt characters reserved for that list (200 .. 64000);
+                         # the block says so when it cuts a skill
+max_skills = 64          # most skills the registry keeps (1 .. 512)
+# `disabled` and `custom` exist here too, but the web UI and POST/PATCH/DELETE
+# /api/skills write them: `disabled` is the list of ids turned off (they stay
+# discovered, just hidden) and `custom` is the skills pasted in rather than found
+# on disk. Both live in the settings table, so an added skill survives a restart
+# without a file. Editing them by hand is not refused, but the UI will not know.
+
 # Tell a human when something happened: a run settled, an approval is waiting, a
 # run failed. On by default; every switch below is also editable in Settings and
 # through PATCH /api/config, and overridable from the environment.

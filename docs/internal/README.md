@@ -39,6 +39,7 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`run-server`](run-server.md) | Build the UI and the binary, start it against a workspace, and know what each CLI flag and startup failure means. | `crates/kc-server/src/bootstrap.rs:8` |
 | [`security`](security.md) | What karucode protects by default, what it explicitly does not, and the recipe for safe remote access. | `crates/kc-server/src/app.rs:16` |
 | [`session-titles`](session-titles.md) | Sessions are titled from their first message; with `[titles]` on (the default) a model writes a short, plain-language title instead, using the session's own model or a cheaper one you pick. | `crates/kc-server/src/titles.rs:1` |
+| [`skills`](skills.md) | Auto-detected and hand-written skills: which folders are scanned, the file format, how the agent finds one, and the switches that turn the whole feature off. | `crates/kc-core/src/skill.rs:25` |
 | [`subagents`](subagents.md) | How spawn_agent, spawn_agents and the control tools work - blocking and background, sequential and parallel - and the limits they run under. | `crates/kc-runtime/src/subagent.rs:20` |
 | [`system-prompt`](system-prompt.md) | The rules in the system prompt that keep a run from bloating: read the narrow window, continue a cut result from the offset it names, never repeat a call, and stop when the work is done. | `crates/kc-core/src/prompt.rs:3` |
 | [`terminals`](terminals.md) | A real shell in the browser that survives a reload, another browser and a cleared cache - and the honest limit of what survives a restart. | `crates/kc-server/src/terminals.rs:1` |
@@ -49,4 +50,4 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`web-auth`](web-auth.md) | Put a password or a passkey in front of the web UI, choose the address it answers to, and understand what each sign-in method costs. | `crates/kc-server/src/routes/auth.rs:14` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-33 topic(s).
+34 topic(s).

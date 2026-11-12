@@ -145,6 +145,7 @@ pub const REQUIRED_SLUGS: &[&str] = &[
     "prompt-cache",
     "run-server",
     "security",
+    "skills",
     "subagents",
     "system-prompt",
     "themes",

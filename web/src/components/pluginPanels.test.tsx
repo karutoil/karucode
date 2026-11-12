@@ -425,7 +425,8 @@ describe('the inspector tab strip', () => {
 
     const tabs = screen.getAllByRole('tab').map((tab) => tab.textContent ?? '');
     expect(tabs.some((label) => label.includes('Todo'))).toBe(false);
-    expect(tabs).toHaveLength(4);
+    // The five built-ins only: Files, Git, Session usage, Agents, Skills.
+    expect(tabs).toHaveLength(5);
   });
 
   it('opens a plugin tab and reads its payload', async () => {
