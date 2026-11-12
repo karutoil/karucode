@@ -122,7 +122,7 @@ matters to an operator says which behaviour changed, not which number.
   enabled skill reaches the system prompt, bounded by `prompt_max_chars` (4,000) and
   `max_skills` (64), and the body is read with the new read-only `skill` tool
   (`list`, `read`, `search`, paged like `karucode_docs`). Skills are listed, added,
-  hidden and deleted through `/api/skills` and the new Skills tab, or by dropping a
+  hidden and deleted through `/api/skills` and Settings → Skills, or by dropping a
   `SKILL.md` in a scanned folder; adding one makes it a settings row, while a
   file-backed skill is refused for delete and rename because the file is the truth.
   `skills.enabled = false`, `KARUCODE_SKILLS_ENABLED=0` or `skills.prompt = false`

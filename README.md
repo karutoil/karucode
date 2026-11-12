@@ -97,7 +97,7 @@ workspace built for a long session, not for a dashboard demo.
   agent reads with the `skill` tool only when a task matches its description, so
   ten procedures cost ten lines of prompt instead of ten pages per turn.
   `.karucode/skills`, `.claude/skills`, `.agents/skills` and `~/.claude/skills` are
-  found automatically, `skills.directories` adds more, and the Skills tab lists,
+  found automatically, `skills.directories` adds more, and Settings → Skills lists,
   adds, hides and deletes them; a body is data like any file, never an
   instruction. See [docs/API.md](docs/API.md#skills).
 * **A browser workspace built for the long haul.** Sessions across projects in

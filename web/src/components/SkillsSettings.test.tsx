@@ -1,17 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import type { SkillListResponse, SkillSummary } from '../api/types';
-import { SkillsTab } from './SkillsTab';
+import { SkillsSettings } from './SkillsSettings';
 import { resetSkillsForTests } from '../state/skills';
 import * as store from '../state/store';
 import { errorResponse, jsonResponse, resetAppState } from '../test/fixtures';
 
 /**
- * The Skills tab, exercised through the real `api/endpoints` client against a
- * stubbed `fetch` (the way `AgentsTab.test.tsx` does it). That keeps the URL,
- * the method and the JSON body under test rather than a mock's argument order:
- * `PATCH /api/skills/release` with `{"enabled":false}` is what the verifier's
- * browser script will see too.
+ * The Skills settings pane, exercised through the real `api/endpoints` client
+ * against a stubbed `fetch` (the way `AgentsTab.test.tsx` does it). That keeps
+ * the URL, the method and the JSON body under test rather than a mock's argument
+ * order: `PATCH /api/skills/release` with `{"enabled":false}` is what the
+ * verifier's browser script sees too.
+ *
+ * The pane is rendered on its own here; `SettingsSheet.test.tsx` covers how it is
+ * reached (the rail, the pane header and the footer note).
  */
 
 interface Call {
@@ -150,7 +153,7 @@ const listReads = (): Call[] =>
   calls.filter((call) => call.method === 'GET' && call.path === '/api/skills');
 
 async function renderTab(): Promise<void> {
-  render(<SkillsTab />);
+  render(<SkillsSettings />);
   await waitFor(() => expect(listReads().length).toBeGreaterThan(0));
   // The first read has resolved by the time the count is a number.
   await waitFor(() => expect(screen.getByTestId('skills-count').textContent).not.toContain('loading'));
@@ -162,7 +165,7 @@ function rowFor(id: string): HTMLElement {
   return row;
 }
 
-describe('SkillsTab', () => {
+describe('SkillsSettings', () => {
   beforeEach(() => {
     resetAppState();
     resetSkillsForTests();
@@ -291,28 +294,35 @@ describe('SkillsTab', () => {
     await renderTab();
 
     // The server clamps the budget to what it is willing to store; the box must
-    // show the stored value, not the number that was typed.
-    routes.patchConfig = (body) =>
-      jsonResponse({
-        skills: {
-          ...stored,
-          ...(body?.skills ?? {}),
-          prompt_max_chars: 4000,
-        },
-      });
+    // show the stored value, not the number that was typed. The stored section
+    // accumulates across the two patches, exactly as `PATCH /api/config` answers
+    // with the whole `[skills]` section it now holds.
+    let section: Record<string, unknown> = { ...stored };
+    routes.patchConfig = (body) => {
+      section = { ...section, ...(body?.skills ?? {}) };
+      return jsonResponse({ skills: { ...section, prompt_max_chars: 4000 } });
+    };
 
+    // A switch saves itself the moment it moves; only the numbers wait for the
+    // button, so the two writes are separate and both are asserted here.
     fireEvent.click(screen.getByTestId('skills-autodetect-toggle'));
-    fireEvent.input(screen.getByTestId('skills-prompt-max'), { target: { value: '99999' } });
-    fireEvent.input(screen.getByTestId('skills-max-skills'), { target: { value: '8' } });
-    fireEvent.click(screen.getByTestId('skills-save-options'));
-
     await waitFor(() => expect(writes()).toHaveLength(1));
     expect(writes()[0]).toMatchObject({
       method: 'PATCH',
       path: '/api/config',
+      body: { skills: { auto_detect: false } },
+    });
+
+    fireEvent.input(screen.getByTestId('skills-prompt-max'), { target: { value: '99999' } });
+    fireEvent.input(screen.getByTestId('skills-max-skills'), { target: { value: '8' } });
+    fireEvent.click(screen.getByTestId('skills-save-options'));
+
+    await waitFor(() => expect(writes()).toHaveLength(2));
+    expect(writes()[1]).toMatchObject({
+      method: 'PATCH',
+      path: '/api/config',
       body: {
         skills: {
-          auto_detect: false,
           prompt: true,
           prompt_max_chars: 99999,
           max_skills: 8,
@@ -324,10 +334,14 @@ describe('SkillsTab', () => {
       expect((screen.getByTestId('skills-prompt-max') as HTMLInputElement).value).toBe('4000'),
     );
     expect((screen.getByTestId('skills-max-skills') as HTMLInputElement).value).toBe('8');
-    expect(
-      screen.getByTestId('skills-autodetect-toggle').getAttribute('aria-checked'),
-    ).toBe('false');
-    // Changing what is scanned makes the root list stale, and the tab says so
+    // The switch reads the stored config, so it flips only once the response
+    // that carries `auto_detect: false` has been applied.
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('skills-autodetect-toggle').getAttribute('aria-checked'),
+      ).toBe('false'),
+    );
+    // Changing what is scanned makes the root list stale, and the pane says so
     // instead of re-reading behind the person's back.
     expect(screen.getByTestId('skills-roots-stale')).not.toBeNull();
   });
@@ -496,12 +510,14 @@ describe('SkillsTab', () => {
 
   it('offers no controls when the route is missing on this server', async () => {
     routes.list = () => errorResponse('not_found', 'no route for GET /api/skills', 404);
-    render(<SkillsTab />);
+    render(<SkillsSettings />);
 
     const alert = await screen.findByTestId('skills-error');
     expect(alert.textContent).toBe('no route for GET /api/skills');
-    // The panel still renders its frame, with an explanation rather than a blank.
+    // The pane still renders, with an explanation where the controls would be
+    // rather than a blank section nobody can act on.
     expect(screen.getByTestId('skills-panel')).not.toBeNull();
-    expect(screen.getByText('Skills are not available')).not.toBeNull();
+    expect(screen.getByText(/did not answer GET \/api\/skills/)).not.toBeNull();
+    expect(screen.queryByTestId('skills-master-toggle')).toBeNull();
   });
 });

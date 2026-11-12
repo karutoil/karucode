@@ -444,7 +444,7 @@ export interface Config {
   access?: AccessConfig;
   /**
    * The `[skills]` section. Absent on an older server, which has no skills
-   * feature at all - the Skills tab reads `GET /api/skills` instead, so an
+   * feature at all - Settings → Skills reads `GET /api/skills` instead, so an
    * absent field here costs nothing.
    */
   skills?: SkillsConfigSummary;
@@ -708,7 +708,7 @@ export interface SkillsConfigSummary {
  * `source` field on the wire is one of these four strings. They are *not* the
  * human labels: the prompt and the `skill` tool use `SkillSource::label()`, which
  * says `configured` for `config` and `added` for `custom`. Anything that shows
- * the source to a person maps the value (`SkillsTab.tsx`); anything that keys off
+ * the source to a person maps the value (`SkillsSettings.tsx`); anything that keys off
  * the wire (`data-source`) mirrors it verbatim.
  */
 export type SkillSource = 'workspace' | 'user' | 'config' | 'custom';

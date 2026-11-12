@@ -12,11 +12,11 @@ import type {
 import * as store from './store';
 
 /**
- * The Skills tab's state, and the only place that talks to `/api/skills`.
+ * The Skills settings pane's state, and the only place that talks to `/api/skills`.
  *
  * Everything a person can see about skills comes from one read:
  * `GET /api/skills` answers the six config switches, the folders discovery
- * looked in and every skill it found. The tab loads it once when it opens and
+ * looked in and every skill it found. The pane loads it once when it opens and
  * again on an explicit Refresh or after a mutation - it never polls, because
  * nothing here changes without somebody using this panel or dropping a file on
  * disk.

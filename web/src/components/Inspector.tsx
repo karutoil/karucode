@@ -14,7 +14,6 @@ import { GitManager } from './git/GitManager';
 import { changeCounts } from './git/gitModel';
 import { SessionInfoTab, sessionInfoTooltip } from './SessionInfoTab';
 import { AgentsTab } from './AgentsTab';
-import { SkillsTab } from './SkillsTab';
 import { PluginPanelView } from './PluginPanelView';
 import { PluginSlot } from './PluginSlot';
 import { uniqueHostedPanels } from './pluginPanels';
@@ -41,11 +40,6 @@ function inspectorTabTarget(id: InspectorTab): string | null {
       return UI_HIDE_INSPECTOR_TAB_SESSION;
     case 'agents':
       return UI_HIDE_INSPECTOR_TAB_AGENTS;
-    case 'skills':
-      // Skills are text that reaches the model's prompt: a plugin may not hide
-      // the only place they can be seen, turned off or removed. `null` is the
-      // "not externally hideable" answer the plugin tabs also get.
-      return null;
     default:
       // A plugin's own tab is not hideable from the outside: its plugin already
       // decides whether it declares one.
@@ -151,13 +145,6 @@ export function Inspector(): JSX.Element {
   );
   const items: TabItem<InspectorTab>[] = [
     ...builtins.tabs,
-    // Skills is a management surface, not a live feed: it is here next to Agents
-    // because both answer "what can the model use?". It is appended outside
-    // `visibleTabs` because it is not externally hideable (`inspectorTabTarget`
-    // returns null for it): a plugin may not remove the one place skill text can
-    // be seen or turned off. That also keeps the "no plugin may empty the strip"
-    // refusal armed, since the decision is taken over the four hideable tabs.
-    { id: 'skills', label: 'Skills' },
     // One tab per panel a plugin declared. The plugin supplies a data payload,
     // never markup: see `pluginPanels.ts` for why that matters.
     ...pluginTabs.map((panel) => ({
@@ -245,9 +232,6 @@ export function Inspector(): JSX.Element {
         </TabPanel>
         <TabPanel idPrefix="inspector" id="agents" active={active === 'agents'}>
           <AgentsTab />
-        </TabPanel>
-        <TabPanel idPrefix="inspector" id="skills" active={active === 'skills'}>
-          <SkillsTab />
         </TabPanel>
         {pluginTabs.map((panel) => (
           <TabPanel

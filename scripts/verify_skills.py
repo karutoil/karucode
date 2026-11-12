@@ -14,7 +14,7 @@ browser on this host, so the plumbing is the same as `verify_agents_tab.py`):
     what the prompt advertised;
   * add / toggle / delete through the API and the UI agree, and a file-backed
     skill refuses deletion with a message that says what to do instead;
-  * the Skills tab renders the count, the roots, the source badges and the body
+  * the Skills settings pane renders the count, the roots, the source badges and the body
     viewer, and saves the options through `PATCH /api/config` (surviving a
     reload);
   * nothing overflows at 1280px or 390px.
@@ -28,6 +28,7 @@ by `cargo build -p kc-server`), plus `chromium` and `node` on PATH.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import shutil
@@ -345,12 +346,44 @@ window.__kc = {
   within(root, id) {
     return root ? root.querySelector('[data-testid="' + id + '"]') : null;
   },
-  openSkills() {
+  /**
+   * Open Settings, then its Skills section.
+   *
+   * The pane is install configuration, so it lives in the sheet's rail - the
+   * gear button opens it, and the rail row is matched on `.settings-nav-label`
+   * (the accessible name also carries the note).
+   */
+  async openSkills() {
+    if (!document.querySelector('[role=dialog] .settings-nav-label')) {
+      const find = () =>
+        Array.from(document.querySelectorAll('button')).find((node) =>
+          /open settings/i.test(node.getAttribute('aria-label') || ''),
+        ) || null;
+      // A freshly navigated page has not booted yet, so the gear is waited for
+      // rather than assumed.
+      const gear = find() || (await window.__kc.until(find, 20000));
+      if (!gear) return 'no-gear';
+      gear.click();
+      // The dialog is a portal and its rail is rendered after the click, so the
+      // tab cannot be looked up in the same turn.
+      const rail = await window.__kc.until(
+        () => document.querySelector('[role=dialog] .settings-nav-label'),
+        20000,
+      );
+      if (!rail) return 'no-rail';
+    }
     const tab = Array.from(document.querySelectorAll('[role=tab]')).find(
-      (node) => (node.textContent || '').trim().toLowerCase() === 'skills',
+      (node) =>
+        ((node.querySelector('.settings-nav-label') || {}).textContent || '').trim().toLowerCase() ===
+        'skills',
     );
-    if (tab) { tab.click(); return true; }
-    return false;
+    if (!tab) return 'no-skills-section';
+    tab.click();
+    const pane = await window.__kc.until(() => {
+      const panel = document.querySelector('#settings-panel-skills');
+      return panel && !panel.hasAttribute('hidden') ? panel : null;
+    }, 20000);
+    return pane ? true : 'pane-not-shown';
   },
   setValue(node, value) {
     if (!node) return false;
@@ -672,14 +705,29 @@ def main() -> int:
               () => document.querySelector('button, [role=tab]'),
               20000,
             );
-            return window.__kc.openSkills();
+            return await window.__kc.openSkills();
             """
         )
-        check("the inspector offers a Skills tab", opened is True, str(opened))
+        check("the settings sheet offers a Skills section", opened is True, str(opened))
         panel = session.evaluate(
-            "return await window.__kc.until(() => window.__kc.byTest('skills-panel'), 20000) ? 'panel' : null;"
+            """
+            const shown = document.querySelector('#settings-panel-skills');
+            const pane = await window.__kc.until(() => window.__kc.byTest('skills-panel'), 20000);
+            if (!pane || !shown || shown.hasAttribute('hidden')) return null;
+            const title = document.querySelector('.settings-pane-title');
+            return {
+              title: title ? (title.textContent || '').trim() : null,
+              panel: shown.id,
+            };
+            """
         )
-        check("the Skills panel renders", panel == "panel", str(panel))
+        check(
+            "the Skills pane renders under its own section header",
+            isinstance(panel, dict)
+            and panel.get("title") == "Skills"
+            and panel.get("panel") == "settings-panel-skills",
+            str(panel),
+        )
 
         row_text = session.evaluate(
             """
@@ -862,7 +910,8 @@ def main() -> int:
         persisted = session.evaluate(
             JS_HELPERS
             + """
-            await window.__kc.until(() => window.__kc.openSkills(), 20000);
+            const opened = await window.__kc.openSkills();
+            if (opened !== true) return String(opened);
             const node = await window.__kc.until(() => window.__kc.byTest('skills-prompt-max'), 20000);
             return node ? String(node.value) : null;
             """
@@ -919,6 +968,15 @@ def main() -> int:
             json.dumps(restarted_config.get("skills")),
         )
 
+        # A screenshot of the pane, for a human to look at what the checks
+        # measured. Kept beside the logs so a failure is inspectable.
+        shots = tmp / "shots"
+        shots.mkdir(exist_ok=True)
+        shot = session.cdp("Page.captureScreenshot", {"format": "png"})
+        if isinstance(shot, dict) and shot.get("data"):
+            (shots / "skills-settings.png").write_bytes(base64.b64decode(shot["data"]))
+            print(f"  shot {shots / 'skills-settings.png'}", flush=True)
+
         # Narrow layout: nothing may overflow.
         session.cdp(
             "Emulation.setDeviceMetricsOverride",
@@ -942,7 +1000,7 @@ def main() -> int:
             print(f"logs: {tmp}/server.log, {tmp}/chrome.log")
             return 1
         if args.keep:
-            print(f"kept: server {api}, workspace {workspace}")
+            print(f"kept: server {api}, browser cdp http://127.0.0.1:{cdp_port}, workspace {workspace}")
             return 0
         return 0
     finally:

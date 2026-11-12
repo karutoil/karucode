@@ -34,7 +34,7 @@ import type { AgentActivity } from './agentConsole';
  * (`plugin__<plugin>__<panel>`), so the active tab is typed as `string` and the
  * built-ins stay a closed union for the components that need one.
  */
-export type BuiltinInspectorTab = 'workspace' | 'changes' | 'session' | 'agents' | 'skills';
+export type BuiltinInspectorTab = 'workspace' | 'changes' | 'session' | 'agents';
 export type InspectorTab = string;
 
 /** One plugin panel advertised by `GET /api/config`, ready to render as a tab. */

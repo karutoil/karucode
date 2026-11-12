@@ -1388,7 +1388,7 @@ describe('SettingsSheet tabs', () => {
     vi.unstubAllGlobals();
   });
 
-  it('splits the sheet into seven labelled sections, one panel at a time', async () => {
+  it('splits the sheet into eight labelled sections, one panel at a time', async () => {
     installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
 
@@ -1400,6 +1400,7 @@ describe('SettingsSheet tabs', () => {
       'Appearance',
       'Models & providers',
       'Agent',
+      'Skills',
       'Access & sign-in',
       'Notifications',
       'Plugins & MCP',
@@ -1409,6 +1410,7 @@ describe('SettingsSheet tabs', () => {
       'Theme, transcript, results',
       'Endpoints, keys, models',
       'Approvals, subagents, limits',
+      'Procedures it loads on demand',
       'Sign-in, password, passkeys',
       'Run events, delivery, device',
       'Processes, tools, preferences',
@@ -1423,13 +1425,14 @@ describe('SettingsSheet tabs', () => {
       'false',
       'false',
       'false',
+      'false',
     ]);
-    expect(tabs.map((tab) => tab.tabIndex)).toEqual([0, -1, -1, -1, -1, -1, -1]);
+    expect(tabs.map((tab) => tab.tabIndex)).toEqual([0, -1, -1, -1, -1, -1, -1, -1]);
 
     // The first section is the one that opens, and it is the only visible panel.
     expect(tabs[0]?.getAttribute('aria-controls')).toBe('settings-panel-general');
     const panels = document.querySelectorAll('.settings-panels > .tab-panel');
-    expect(panels).toHaveLength(7);
+    expect(panels).toHaveLength(8);
     expect(panels[0]?.hasAttribute('hidden')).toBe(false);
     expect([...panels].slice(1).every((panel) => panel.hasAttribute('hidden'))).toBe(true);
 
@@ -1660,7 +1663,7 @@ describe('SettingsSheet search', () => {
     fireEvent.keyDown(input, { key: 'Escape' });
 
     expect((input as HTMLInputElement).value).toBe('');
-    expect(railLabels()).toHaveLength(7);
+    expect(railLabels()).toHaveLength(8);
     expect(document.querySelector('[role=dialog]')).not.toBeNull();
   });
 
@@ -1676,7 +1679,7 @@ describe('SettingsSheet search', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear the search' }));
     expect((input as HTMLInputElement).value).toBe('');
-    expect(railLabels()).toHaveLength(7);
+    expect(railLabels()).toHaveLength(8);
   });
 
   it('keeps the rail operable while the selected section is filtered out', async () => {
@@ -1813,6 +1816,38 @@ describe('SettingsSheet plugins', () => {
         '/api/plugins/muted/enable',
       ]),
     );
+  });
+
+  it('carries the Skills section and says its switches save themselves', async () => {
+    installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    // Skills is install configuration, not a view of one session: it belongs in
+    // the sheet beside the agent's other bounds, not in the results panel.
+    await openTab('Skills');
+    expect(
+      (document.querySelector('.settings-pane-title') as HTMLElement | null)?.textContent,
+    ).toBe('Skills');
+    const panel = visiblePanel();
+    expect(panel.id).toBe('settings-panel-skills');
+    // The pane renders its own frame even when `/api/skills` is not stubbed here;
+    // its controls are covered by `SkillsSettings.test.tsx`.
+    expect(panel.querySelector('#settings-skills-switch')).not.toBeNull();
+
+    // A switch that commits itself must not sit above a footer claiming Save is
+    // what keeps it.
+    const note = document.querySelector('.settings-footer-note')?.textContent ?? '';
+    expect(note).toContain('saves itself');
+    expect(note).not.toContain('press Save changes');
+
+    // Searchable by what it holds, not only by its name: the synonyms reach the
+    // rail even before the panel has any data to print.
+    const input = await screen.findByRole('searchbox', { name: 'Search settings' });
+    fireEvent.input(input, { target: { value: 'auto-detect' } });
+    const labels = [...document.querySelectorAll('.settings-nav-label')].map((node) =>
+      (node.textContent ?? '').trim(),
+    );
+    expect(labels).toContain('Skills');
   });
 
   it('reports the watcher state so an operator knows whether to click', async () => {

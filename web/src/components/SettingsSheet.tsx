@@ -32,6 +32,7 @@ import type {
 } from '../theme';
 import { SettingsAdvanced } from './SettingsAdvanced';
 import { AccessSettings } from './AccessSettings';
+import { SkillsSettings } from './SkillsSettings';
 import { PluginInstallSection } from './PluginInstallSection';
 import { UpdateSettings } from './UpdateSettings';
 import { Dialog } from './Dialog';
@@ -2027,6 +2028,19 @@ const SCOPE_NOTES: Record<SettingsScope, string> = {
 };
 
 /**
+ * Tabs whose controls commit themselves, so the footer must not imply that its
+ * Save button is what keeps them.
+ *
+ * Skills save as they change (a switch has no Save of its own near it, and a
+ * skill's row is a per-skill PATCH); the sheet's own form never sees them. Saying
+ * "press Save changes" over such a pane is the small lie that teaches someone to
+ * press a button that does nothing.
+ */
+const SELF_SAVING: ReadonlySet<SettingsTab> = new Set<SettingsTab>(['skills']);
+
+const SELF_SAVING_NOTE = 'Every control here saves itself — Save changes does not affect this section.';
+
+/**
  * Where each validated field lives: its tab, whether it sits behind that tab's
  * Advanced disclosure, and the DOM id to focus.
  *
@@ -3107,6 +3121,14 @@ export function SettingsSheet(): JSX.Element | null {
                       </SettingsAdvanced>
                     </TabPanel>
 
+                    <TabPanel idPrefix="settings" id="skills" active={tab === 'skills'} persist>
+                      {/* Self-contained: every switch here PATCHes `[skills]` or a
+                          single skill itself, so it never touches this sheet's form
+                          or its Save button - and the footer says so while it is on
+                          screen (see SELF_SAVING). */}
+                      <SkillsSettings disabled={disabled} />
+                    </TabPanel>
+
                     <TabPanel idPrefix="settings" id="access" active={tab === 'access'} persist>
                       {/* Self-contained: it loads its own state from /api/auth and
                           patches `access` itself, so it never touches this sheet's
@@ -3301,7 +3323,9 @@ export function SettingsSheet(): JSX.Element | null {
                 </span>
               </p>
             ) : (
-              <p class="settings-footer-note">{SCOPE_NOTES[scope.scope]}</p>
+              <p class="settings-footer-note">
+                {SELF_SAVING.has(tab) ? SELF_SAVING_NOTE : SCOPE_NOTES[scope.scope]}
+              </p>
             )}
             <div class="settings-footer-actions">
               <button type="button" class="button" onClick={actions.closeSettings}>

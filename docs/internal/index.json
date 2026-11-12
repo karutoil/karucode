@@ -1090,7 +1090,7 @@
         "route:GET /api/skills/:id",
         "route:PATCH /api/skills/:id",
         "route:DELETE /api/skills/:id",
-        "ui:SkillsTab"
+        "ui:SkillsSettings"
       ],
       "path": "skills.md",
       "slug": "skills",

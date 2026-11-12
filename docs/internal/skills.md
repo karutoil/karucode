@@ -7,7 +7,7 @@
 
 - **Slug:** `skills`
 - **Tags:** skills, skill.md, prompt, context, auto-detect, workspace, user, register
-- **Applies to:** `config:[skills]`, `config:skills.enabled`, `config:skills.auto_detect`, `config:skills.directories`, `config:skills.prompt`, `config:skills.prompt_max_chars`, `config:skills.max_skills`, `config:skills.disabled`, `config:skills.custom`, `dir:.karucode/skills`, `dir:.claude/skills`, `dir:.agents/skills`, `dir:~/.karucode/skills`, `dir:~/.claude/skills`, `tool:skill`, `env:KARUCODE_SKILLS_ENABLED`, `env:KARUCODE_SKILLS_AUTO_DETECT`, `env:KARUCODE_SKILLS_DIRECTORIES`, `env:KARUCODE_SKILLS_PROMPT`, `route:GET /api/skills`, `route:POST /api/skills`, `route:GET /api/skills/:id`, `route:PATCH /api/skills/:id`, `route:DELETE /api/skills/:id`, `ui:SkillsTab`
+- **Applies to:** `config:[skills]`, `config:skills.enabled`, `config:skills.auto_detect`, `config:skills.directories`, `config:skills.prompt`, `config:skills.prompt_max_chars`, `config:skills.max_skills`, `config:skills.disabled`, `config:skills.custom`, `dir:.karucode/skills`, `dir:.claude/skills`, `dir:.agents/skills`, `dir:~/.karucode/skills`, `dir:~/.claude/skills`, `tool:skill`, `env:KARUCODE_SKILLS_ENABLED`, `env:KARUCODE_SKILLS_AUTO_DETECT`, `env:KARUCODE_SKILLS_DIRECTORIES`, `env:KARUCODE_SKILLS_PROMPT`, `route:GET /api/skills`, `route:POST /api/skills`, `route:GET /api/skills/:id`, `route:PATCH /api/skills/:id`, `route:DELETE /api/skills/:id`, `ui:SkillsSettings`
 - **Source:** `crates/kc-core/src/skill.rs:25`
 
 ---

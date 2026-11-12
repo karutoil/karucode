@@ -242,8 +242,7 @@ describe('Workbench result dock', () => {
     };
     render(<Inspector />);
     // Every request is refused rather than honoured into an empty panel.
-    // Five built-in tabs: Files, Git, Session usage, Agents, Skills.
-    expect(screen.getAllByRole('tab')).toHaveLength(5);
+    expect(screen.getAllByRole('tab')).toHaveLength(4);
   });
 
   it('carries plugin-contributed buttons in its header without owning Context', () => {

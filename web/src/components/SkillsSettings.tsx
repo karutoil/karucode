@@ -7,17 +7,22 @@ import { Toggle } from './Toggle';
 import { EditIcon, EyeIcon, RefreshIcon, TrashIcon } from './icons';
 
 /**
- * The **Skills** inspector tab: every switch, folder and skill the feature has.
+ * The **Skills** section of the settings sheet: every switch, folder and skill
+ * the feature has.
  *
- * Skills are text that reaches the model's prompt, so this panel is deliberately
- * a management surface and not a list with a link: the master switch, what it
- * costs (`prompt_max_chars`, `max_skills`), where discovery looked (the roots,
- * so "auto-detect found nothing" is explainable), and one row per skill with the
+ * It lives here rather than in the results panel because it is install
+ * configuration, not a view of one session: the master switch, what the list
+ * costs (`prompt_max_chars`, `max_skills`), where discovery looked (the roots, so
+ * "auto-detect found nothing" is explainable), and one row per skill with the
  * file it came from. Nothing here is a prompt editor - a skill body is data the
  * agent reads, and the viewer says so.
  *
- * The tab loads once when it opens (the panel is unmounted while another tab is
- * selected) and then only on Refresh or after a mutation; nothing polls.
+ * Every control saves itself (`PATCH /api/config` for the switches,
+ * `POST`/`PATCH`/`DELETE /api/skills` per skill), so this pane never touches the
+ * sheet's form or its Save button - the footer says as much while it is open.
+ * It reads once when opened (the sheet keeps panels mounted but the data may be
+ * stale after a plugin install) and then only on Refresh or after a mutation;
+ * nothing polls.
  */
 
 /**
@@ -294,12 +299,12 @@ function SkillEditor({ detail }: { detail: SkillDetail }): JSX.Element {
   );
 }
 
-function AddSkillForm(): JSX.Element {
+function AddSkillForm({ disabled }: { disabled: boolean }): JSX.Element {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [body, setBody] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
-  const busy = skills.skillsBusy.value;
+  const busy = skills.skillsBusy.value || disabled;
 
   const add = async (): Promise<void> => {
     if (body.trim() === '') {
@@ -385,29 +390,61 @@ function AddSkillForm(): JSX.Element {
 }
 
 /**
- * The six install-level settings, saved through one `PATCH /api/config`.
- *
- * The numbers are text inputs on purpose: a `type=number` box that silently
- * drops a half-typed value cannot tell a person why nothing was saved. The
- * server clamps both, so the fields are re-seeded from the response and never
- * from what was typed.
+ * The two switches that decide how skills behave, each saved the moment it is
+ * flipped: a switch that waits for a Save button nowhere near it is a switch
+ * people believe they already used.
  */
-function OptionsBlock({ data }: { data: SkillListResponse }): JSX.Element {
-  const [autoDetect, setAutoDetect] = useState(data.auto_detect);
+function MasterSwitch({ data, disabled }: { data: SkillListResponse; disabled: boolean }): JSX.Element {
+  const busy = skills.skillsBusy.value || disabled;
+  return (
+    <Toggle
+      checked={data.enabled}
+      onChange={(next) => void skills.saveOptions({ enabled: next })}
+      label="Skills enabled"
+      description="The master switch: off means no skill text in the prompt and the skill tool refuses."
+      disabled={busy}
+      testId="skills-master-toggle"
+    />
+  );
+}
+
+/** Auto-detection: the conventional folders, on or off. */
+function DiscoveryToggle({ data, disabled }: { data: SkillListResponse; disabled: boolean }): JSX.Element {
+  const busy = skills.skillsBusy.value || disabled;
+  return (
+    <Toggle
+      checked={data.auto_detect}
+      onChange={(next) => void skills.saveOptions({ auto_detect: next })}
+      label="Auto-detect skill folders"
+      description="Scan this workspace and your home folder for SKILL.md files."
+      disabled={busy}
+      testId="skills-autodetect-toggle"
+    />
+  );
+}
+
+/**
+ * Whether the listing is advertised, and what it may cost.
+ *
+ * The two numbers are text inputs on purpose: a `type=number` box that silently
+ * drops a half-typed value cannot tell a person why nothing was saved. The server
+ * clamps both, so the fields are re-seeded from the response and never from what
+ * was typed.
+ */
+function PromptOptions({ data, disabled }: { data: SkillListResponse; disabled: boolean }): JSX.Element {
   const [prompt, setPrompt] = useState(data.prompt);
   const [promptMax, setPromptMax] = useState(String(data.prompt_max_chars));
   const [maxSkills, setMaxSkills] = useState(String(data.max_skills));
   const [problem, setProblem] = useState<string | null>(null);
-  const busy = skills.skillsBusy.value;
+  const busy = skills.skillsBusy.value || disabled;
 
   // Re-seed from the stored values, not the whole payload: toggling one skill
   // replaces the data object, and that must not throw away a half-typed number.
   useEffect(() => {
-    setAutoDetect(data.auto_detect);
     setPrompt(data.prompt);
     setPromptMax(String(data.prompt_max_chars));
     setMaxSkills(String(data.max_skills));
-  }, [data.auto_detect, data.prompt, data.prompt_max_chars, data.max_skills]);
+  }, [data.prompt, data.prompt_max_chars, data.max_skills]);
 
   const save = async (): Promise<void> => {
     const chars = Number(promptMax.trim());
@@ -423,24 +460,11 @@ function OptionsBlock({ data }: { data: SkillListResponse }): JSX.Element {
       return;
     }
     setProblem(null);
-    await skills.saveOptions({
-      auto_detect: autoDetect,
-      prompt,
-      prompt_max_chars: chars,
-      max_skills: limit,
-    });
+    await skills.saveOptions({ prompt, prompt_max_chars: chars, max_skills: limit });
   };
 
   return (
-    <section class="skills-options" aria-label="Skill options">
-      <Toggle
-        checked={autoDetect}
-        onChange={setAutoDetect}
-        label="Auto-detect skill folders"
-        description="Scan this workspace and your home folder for SKILL.md files."
-        disabled={busy}
-        testId="skills-autodetect-toggle"
-      />
+    <>
       <Toggle
         checked={prompt}
         onChange={setPrompt}
@@ -449,7 +473,7 @@ function OptionsBlock({ data }: { data: SkillListResponse }): JSX.Element {
         disabled={busy}
         testId="skills-prompt-toggle"
       />
-      <div class="skills-number-row">
+      <div class="field-grid">
         <div class="field">
           <label class="field-label" for="skills-prompt-max">
             Prompt budget (characters)
@@ -505,19 +529,22 @@ function OptionsBlock({ data }: { data: SkillListResponse }): JSX.Element {
           disabled={busy}
           onClick={() => void save()}
         >
-          {busy ? 'Saving…' : 'Save options'}
+          {busy ? 'Saving…' : 'Save prompt settings'}
         </button>
-        <span class="field-hint">Saved with PATCH /api/config; the values below are what was stored.</span>
+        <span class="field-hint">
+          Stored with <code>PATCH /api/config</code>; the fields show what was stored, not what was
+          typed.
+        </span>
       </div>
-    </section>
+    </>
   );
 }
 
 /** The folders that may be scanned, added and removed one at a time. */
-function DirectoriesBlock({ data }: { data: SkillListResponse }): JSX.Element {
+function DirectoriesBlock({ data, disabled }: { data: SkillListResponse; disabled: boolean }): JSX.Element {
   const [draft, setDraft] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
-  const busy = skills.skillsBusy.value;
+  const busy = skills.skillsBusy.value || disabled;
   const directories = data.directories;
 
   const add = async (): Promise<void> => {
@@ -638,16 +665,16 @@ function RootsBlock({ roots }: { roots: SkillRoot[] }): JSX.Element {
   );
 }
 
-export function SkillsTab(): JSX.Element {
+export function SkillsSettings({ disabled = false }: { disabled?: boolean }): JSX.Element {
   const data = skills.skillsData.value;
   const loading = skills.skillsLoading.value;
   const error = skills.skillsError.value;
-  const busy = skills.skillsBusy.value;
+  const busy = skills.skillsBusy.value || disabled;
   const staleRoots = skills.skillRootsStale.value;
   const [dialog, setDialog] = useState<'view' | 'edit' | null>(null);
 
-  // One read when the tab opens. The panel unmounts while another tab is
-  // selected, so this is "on open", not "on every render".
+  // One read when the pane is first opened. The sheet keeps panels mounted, so
+  // this is "on open" for the sheet's lifetime, not "on every tab switch".
   useEffect(() => {
     void skills.loadSkills();
   }, []);
@@ -669,112 +696,120 @@ export function SkillsTab(): JSX.Element {
   const workspaceRoot = data?.roots.find((root) => root.source === 'workspace') ?? data?.roots[0];
 
   return (
-    <div class="inspector-section skills-panel" data-testid="skills-panel">
-      <div class="inspector-kicker-row">
-        <span class="inspector-kicker">
-          Skills
-          <span class="inspector-kicker-note" data-testid="skills-count">
-            {data === null ? 'loading…' : `${skillCount(total)}${on < total ? ` · ${total - on} off` : ''}`}
-          </span>
-        </span>
-        <button
-          type="button"
-          class="icon-button inspector-mini"
-          aria-label="Refresh skills"
-          title="Read every folder again"
-          disabled={loading}
-          onClick={() => void skills.refreshSkills()}
-        >
-          <RefreshIcon size={13} class={loading ? 'spin' : undefined} />
-        </button>
-      </div>
-
+    <div class="skills-settings" data-testid="skills-panel">
       {error !== null ? (
         <p class="field-error skills-error" role="alert" data-testid="skills-error">
           {error}
         </p>
       ) : null}
 
-      {data !== null && !data.enabled ? (
-        <div class="skills-master-off" role="status" data-testid="skills-master-off">
-          <strong>Skills are off.</strong> No skill text reaches the system prompt and the{' '}
-          <code>skill</code> tool refuses. The list below still shows what is installed; turning a
-          skill on or off here changes nothing until the master switch is back on.
+      <section class="settings-section" aria-labelledby="settings-skills-switch">
+        <div class="settings-section-head">
+          <h3 id="settings-skills-switch">Skills</h3>
+          <span class="settings-section-note">Saved as you change it</span>
         </div>
-      ) : null}
-
-      {data === null ? (
-        loading ? (
+        {data === null ? (
           <p class="field-hint" role="status">
-            Loading skills…
+            {loading ? 'Loading skills…' : 'This server did not answer GET /api/skills; settings that need it are hidden.'}
           </p>
         ) : (
-          <div class="empty-inspector">
-            <p class="empty-inspector-title">Skills are not available</p>
-            <p>
-              This server did not answer <code>GET /api/skills</code>. Refresh once the server has
-              been updated.
-            </p>
-          </div>
-        )
-      ) : (
+          <>
+            <MasterSwitch data={data} disabled={disabled} />
+            {!data.enabled ? (
+              <div class="skills-master-off" role="status" data-testid="skills-master-off">
+                <strong>Skills are off.</strong> No skill text reaches the system prompt and the{' '}
+                <code>skill</code> tool refuses. The list below still shows what is installed;
+                turning a single skill on or off changes nothing until the master switch is back on.
+              </div>
+            ) : null}
+          </>
+        )}
+      </section>
+
+      {data === null ? null : (
         <>
-          <Toggle
-            checked={data.enabled}
-            onChange={(next) => void skills.saveOptions({ enabled: next })}
-            label="Skills enabled"
-            description="The master switch: off means no skill text in the prompt and the skill tool refuses."
-            disabled={busy}
-            testId="skills-master-toggle"
-          />
-
-          <OptionsBlock data={data} />
-
-          <DirectoriesBlock data={data} />
-
-          {staleRoots ? (
-            <p class="inline-warning" role="status" data-testid="skills-roots-stale">
-              The folders changed. Refresh to see which ones exist and how many skills each holds.
-            </p>
-          ) : null}
-
-          <RootsBlock roots={data.roots} />
-
-          <section class="skills-list" aria-label="Installed skills">
-            <div class="skills-list-head">
-              <span class="field-label">Installed</span>
-              {data.truncated ? (
-                <span class="field-hint">
-                  The list is cut at <code>max_skills</code>; raise it above to see the rest.
-                </span>
-              ) : null}
+          <section class="settings-section" aria-labelledby="settings-skills-discovery">
+            <div class="settings-section-head">
+              <h3 id="settings-skills-discovery">Where they are found</h3>
+              <span class="settings-section-note">Conventional folders, plus your own</span>
             </div>
+            <DiscoveryToggle data={data} disabled={disabled} />
+            <DirectoriesBlock data={data} disabled={disabled} />
+            {staleRoots ? (
+              <p class="inline-warning" role="status" data-testid="skills-roots-stale">
+                The folders changed. Refresh to see which ones exist and how many skills each holds.
+              </p>
+            ) : null}
+            <RootsBlock roots={data.roots} />
+          </section>
+
+          <section class="settings-section" aria-labelledby="settings-skills-prompt">
+            <div class="settings-section-head">
+              <h3 id="settings-skills-prompt">What the agent sees</h3>
+              <span class="settings-section-note">One line each; the body waits for the task</span>
+            </div>
+            <PromptOptions data={data} disabled={disabled} />
+          </section>
+
+          <section class="settings-section" aria-labelledby="settings-skills-installed">
+            <div class="settings-section-head">
+              <h3 id="settings-skills-installed">Installed</h3>
+              <span class="settings-section-note skills-list-head">
+                <span data-testid="skills-count">
+                  {data === null
+                    ? 'loading…'
+                    : `${skillCount(total)}${on < total ? ` · ${total - on} off` : ''}`}
+                </span>
+                <button
+                  type="button"
+                  class="icon-button inspector-mini"
+                  aria-label="Refresh skills"
+                  title="Read every folder again"
+                  disabled={loading}
+                  onClick={() => void skills.refreshSkills()}
+                >
+                  <RefreshIcon size={13} class={loading ? 'spin' : undefined} />
+                </button>
+              </span>
+            </div>
+            {data.truncated ? (
+              <p class="field-hint">
+                The list is cut at <code>max_skills</code>; raise it above to see the rest.
+              </p>
+            ) : null}
             {total === 0 ? (
-              <div class="empty-inspector">
-                <p class="empty-inspector-title">No skills found</p>
+              <div class="skills-empty">
+                <p class="skills-empty-title">No skills found</p>
                 <p>
                   Add one below, or drop a <code>SKILL.md</code> in{' '}
-                  <code class="mono">{workspaceRoot?.path ?? 'your workspace'}</code>
-                  {' '}— one skill per folder, with an optional frontmatter block naming and
-                  describing it.
+                  <code class="mono">{workspaceRoot?.path ?? 'a scanned folder'}</code> — one skill
+                  per folder, with an optional frontmatter block naming and describing it.
                 </p>
               </div>
             ) : (
-              rows.map((skill) => (
-                <SkillRow
-                  key={skill.id}
-                  skill={skill}
-                  busy={busy}
-                  onView={() => open(skill.id, 'view')}
-                  onEdit={() => open(skill.id, 'edit')}
-                />
-              ))
+              <div class="skills-list">
+                {rows.map((skill) => (
+                  <SkillRow
+                    key={skill.id}
+                    skill={skill}
+                    busy={busy}
+                    onView={() => open(skill.id, 'view')}
+                    onEdit={() => open(skill.id, 'edit')}
+                  />
+                ))}
+              </div>
             )}
           </section>
 
-          <AddSkillForm />
+          <section class="settings-section" aria-labelledby="settings-skills-add">
+            <div class="settings-section-head">
+              <h3 id="settings-skills-add">Add a skill</h3>
+              <span class="settings-section-note">Stored in the settings table, no file needed</span>
+            </div>
+            <AddSkillForm disabled={disabled} />
+          </section>
 
-          <p class="inspector-note">
+          <p class="settings-section-note">
             A skill is data, not instructions: the agent is told to read one, and none of it can
             change the harness rules.
           </p>

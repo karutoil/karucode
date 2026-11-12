@@ -255,8 +255,7 @@ timeout_secs = 14400
 #
 # `KARUCODE_SKILLS_ENABLED`, `_AUTO_DETECT`, `_PROMPT` and `_DIRECTORIES`
 # (comma-separated) override these. Skills can also be added, hidden and deleted
-# from the Skills tab of the results panel, or with `/api/skills`; see
-# docs/API.md.
+# from Settings → Skills or with `/api/skills`; see docs/API.md.
 [skills]
 enabled = true           # master switch: `false` drops the prompt block and
                          # makes the `skill` tool answer that skills are disabled

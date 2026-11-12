@@ -154,7 +154,7 @@ fn render_list(registry: &SkillRegistry, config: &SkillsConfig) -> String {
         out.push_str(
             "\nA skill is `<folder>/<name>/SKILL.md` (or `<folder>/<name>.md`) with optional `name` and \
              `description` frontmatter; `<folder>` is `.karucode/skills`, `.claude/skills` or `.agents/skills` in \
-             the project. A person can add one from the Skills tab of the web UI or with `POST /api/skills`.",
+             the project. A person can add one from Settings → Skills in the web UI or with `POST /api/skills`.",
         );
         return out;
     }
@@ -182,7 +182,7 @@ fn render_list(registry: &SkillRegistry, config: &SkillsConfig) -> String {
     if total > on {
         out.push_str(
             "\n\nA skill marked `off` was turned off in the Skills settings: it is not usable until it is turned \
-             back on (`PATCH /api/skills/<id>` with {\"enabled\":true}, or the Skills tab).",
+             back on (`PATCH /api/skills/<id>` with {\"enabled\":true}, or in Settings → Skills).",
         );
     }
     out.push_str(&usage_footer());
@@ -224,7 +224,7 @@ fn disabled_message() -> String {
     "skills are turned off on this server: `skills.enabled = false` (`[skills] enabled = false` in the config file, \
      or the environment variable `KARUCODE_SKILLS_ENABLED=0`), so no skill is discovered and the `skill` tool can \
      read none. Turn them on with `enabled = true` under `[skills]` (or `KARUCODE_SKILLS_ENABLED=1`), or with the \
-     master switch in the Skills tab of the web UI; the registry is resolved on every run, so the next run sees the \
+     master switch under Settings → Skills in the web UI; the registry is resolved on every run, so the next run sees the \
      change."
         .to_string()
 }
@@ -316,8 +316,7 @@ impl Tool for SkillTool {
                 if !skill.enabled {
                     return ToolOutcome::err(format!(
                         "skill `{}` is turned off (`skills.disabled` contains it), so it cannot be read. Turn it \
-                         back on with `PATCH /api/skills/{}` and {{\"enabled\":true}}, or with the Skills tab of the \
-                         web UI. {}",
+                         back on with `PATCH /api/skills/{}` and {{\"enabled\":true}}, or in Settings → Skills. {}",
                         skill.id,
                         skill.id,
                         available_ids(&registry)

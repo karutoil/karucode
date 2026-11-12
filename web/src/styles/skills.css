@@ -1,11 +1,21 @@
-/* Skills tab (`SkillsTab.tsx`).
+/* Skills settings (`SkillsSettings.tsx`).
  *
- * The panel is a management surface, so it reads top-down as answers to
- * questions: what is on (the switches), where it looked (the roots), what it
- * found (the rows), how to add one. Each block is a card on the inspector pane
- * and every control inside it reuses the app's own recipes (`.field`,
- * `.button`, `.toggle-field`), so nothing here invents a second vocabulary.
+ * The pane is a management surface, so it reads top-down as answers to
+ * questions: what is on (the switches), where it looked (the folders and the
+ * roots), what it found (the rows), how to add one. Each of those is a
+ * `.settings-section` card from the sheet's own stylesheet - this file only adds
+ * the rows, chips and dialogs inside them, and every control reuses the app's
+ * recipes (`.field`, `.button`, `.toggle-field`), so nothing here invents a
+ * second vocabulary.
  */
+
+/* The wrapper only exists so the panel is one node for the verifier: the
+ * sections inside it are spaced by the same gap the other panes use. */
+.skills-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
 
 .skills-panel {
   gap: var(--space-4);
@@ -38,25 +48,27 @@
   font-weight: 640;
 }
 
-.skills-options,
+/* Blocks inside a section keep the column rhythm without a second card border:
+ * a card inside a card reads as a different kind of thing, and these are all the
+ * same kind of thing. */
 .skills-directories,
 .skills-roots,
-.skills-add,
-.skill-row {
+.skills-add {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  padding: var(--space-6);
-  border: 1px solid var(--line-card);
-  border-radius: var(--radius);
-  background: var(--surface);
 }
 
-/* Two numbers side by side: one line of copy each, no scrolling. */
-.skills-number-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-4);
+/* One skill is a card of its own: rows are separate objects, not a list inside
+ * the section's card. */
+.skill-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius);
+  background: var(--bg);
 }
 
 .skills-options-actions {
@@ -149,6 +161,27 @@
 
 /* ---------- one row per skill ------------------------------------------ */
 
+.skills-empty {
+  padding: var(--space-5);
+  border: 1px dashed var(--line-card-strong);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+}
+
+.skills-empty p {
+  margin: 0;
+}
+
+.skills-empty-title {
+  margin-bottom: var(--space-2);
+  color: var(--text);
+  font-weight: 640;
+}
+
+
 .skills-list {
   display: flex;
   flex-direction: column;
@@ -156,14 +189,8 @@
 }
 
 .skills-list-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.skill-row {
+  display: inline-flex;
+  align-items: center;
   gap: var(--space-3);
 }
 
@@ -200,7 +227,7 @@
 }
 
 /* The attribute is the API's spelling (`data-source`), the text beside it is the
- * label a person reads - see `SOURCE_LABEL` in `SkillsTab.tsx`. */
+ * label a person reads - see `SOURCE_LABEL` in `SkillsSettings.tsx`. */
 .skill-source[data-source='workspace'] {
   border-color: color-mix(in srgb, var(--accent) 38%, var(--chip-line));
   color: var(--accent-text);
@@ -305,16 +332,13 @@
 }
 
 @media (max-width: 640px) {
-  .skills-options,
-  .skills-directories,
-  .skills-roots,
-  .skills-add,
   .skill-row {
-    padding: var(--space-5);
+    padding: var(--space-4);
   }
 
-  /* One number per line: two inputs side by side is a 160px box on a phone. */
-  .skills-number-row {
-    grid-template-columns: minmax(0, 1fr);
+  /* The count and the refresh button sit on their own line under a narrow
+   * heading rather than squeezing it. */
+  .skills-list-head {
+    flex-wrap: wrap;
   }
 }
