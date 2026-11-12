@@ -56,9 +56,12 @@ async fn new_project_session(h: &Harness, title: &str) -> String {
         .as_str()
         .unwrap()
         .to_owned();
-    h.post("/api/sessions", json!({ "project": project, "title": title }))
-        .await
-        .json()["id"]
+    h.post(
+        "/api/sessions",
+        json!({ "project": project, "title": title }),
+    )
+    .await
+    .json()["id"]
         .as_str()
         .unwrap()
         .to_owned()
@@ -325,7 +328,11 @@ async fn control_list_agents_pages_the_fleet_and_keeps_totals_honest() {
     // a full page must still count 12, not 40.
     let total = 60usize;
     for index in 0..total {
-        let status = if index % 5 == 0 { "running" } else { "completed" };
+        let status = if index % 5 == 0 {
+            "running"
+        } else {
+            "completed"
+        };
         store
             .upsert_agent(&agent_record(&session, index, status))
             .await
@@ -374,7 +381,11 @@ async fn control_list_agents_pages_the_fleet_and_keeps_totals_honest() {
     let detail = h.get(&format!("/api/sessions/{central}")).await.json();
     let body = tool_result_json(&detail, "agents");
     assert_eq!(body["total"], running_total, "{body}");
-    assert_eq!(body["agents"].as_array().unwrap().len(), running_total, "{body}");
+    assert_eq!(
+        body["agents"].as_array().unwrap().len(),
+        running_total,
+        "{body}"
+    );
 
     // A short page under the same filter reports its rows and the same count.
     h.factory.push(support::tool_call(

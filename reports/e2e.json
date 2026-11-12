@@ -55,7 +55,7 @@
   ],
   "failed": [],
   "skipped": [],
-  "events": 467,
-  "server_log": "/tmp/kc-e2e-ac5uhb2n/server.log",
-  "mock_requests": 40
+  "events": 469,
+  "server_log": "/tmp/kc-e2e-e3n_7z63/server.log",
+  "mock_requests": 43
 }

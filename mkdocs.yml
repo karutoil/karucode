@@ -19,18 +19,20 @@ validation:
   omitted_files: warn
   absolute_links: warn
 
-# The docs_dir is the repository's own docs/ tree, imported as-is: no
-# frontmatter anywhere (page titles come from each file's single H1), relative
-# links intact. Regenerate the Reference section with:
+# The docs_dir is the tree `scripts/build_site.py` stages: git-tracked files from
+# `docs/`, the root pages a site needs (`README.md` as the homepage) and links
+# rewritten to resolve without a repository above them. Building the raw `docs/`
+# tree directly works for a quick look but keeps this repository's link warnings,
+# which is why CI stages first and builds with `--strict`.
+# Regenerate the Reference section with:
 #   python3 scripts/gen_docs_nav.py --snippet
 # after `cargo run -p kc-docs -- --write` adds or removes a topic.
 # The full nav, ready to paste, is `python3 scripts/gen_docs_nav.py`.
-docs_dir: docs
+docs_dir: !ENV [KARUCODE_SITE_DOCS, docs]
 
-# README.md is the homepage: mkdocs copies it into the site. Its repo-root
-# relative links (README.md, CONTRIBUTING.md, SECURITY.md) resolve because those
-# files are also in docs_dir via the symlinks-free copies the importer makes —
-# see docs/WEBSITE.md "importing", which defines the two link rewrites.
+# README.md is the homepage: it is staged at the root of docs_dir, so the site
+# gets a home page that is also the repository's front door. Its repo-root
+# relative links are rewritten by scripts/build_site.py (see docs/WEBSITE.md).
 use_directory_urls: true
 
 nav:
@@ -43,6 +45,7 @@ nav:
       - Security model: SECURITY.md
       - Internal docs system: INTERNAL-DOCS.md
       - Contributing (agents): CONTRIBUTING-AGENTS.md
+      - Contributing: CONTRIBUTING.md
   - Reference:
       - Issue API keys for applications: internal/api-keys.md
       - Understand approval timeout and storage-failure recovery: internal/approval-expiry-recovery.md
@@ -86,7 +89,9 @@ nav:
       - Audit — panels: internal/design-audit/panels.md
       - Design verify report: internal/design-verify/REPORT.md
   - Website import: WEBSITE.md
+  - Changelog: CHANGELOG.md
 
 not_in_nav: |
   internal/README.md
   internal/index.json
+  REPORT.md

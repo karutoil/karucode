@@ -258,9 +258,7 @@ async fn an_ephemeral_run_emits_no_notification_event_by_default() {
     }
     let events = events_within(body, Duration::from_millis(500)).await;
     assert!(
-        !events
-            .iter()
-            .any(|event| event["type"] == "notification"),
+        !events.iter().any(|event| event["type"] == "notification"),
         "a temporary session's run must not notify: {events:?}"
     );
 

@@ -605,13 +605,23 @@ verification record — including what was checked in a real browser — in
 
 ### Turning the docs into a website
 
-The whole documentation tree imports into a static site generator as-is: no
+The whole documentation tree imports into a static site generator: no
 frontmatter is required (titles come from each file's single H1), and
 [docs/internal/index.json](docs/internal/index.json) is a machine-readable nav
 index (slug, title, summary, tags, identifiers) that
-`scripts/gen_docs_nav.py` turns into the site navigation. The setup — chosen
-generator, link-rewrite rules, and the known rough edges — is written down in
-[docs/WEBSITE.md](docs/WEBSITE.md).
+`scripts/gen_docs_nav.py` turns into the site navigation. `scripts/build_site.py`
+stages the tree — the root README as the homepage, links that escape `docs/`
+pointed at the repository — and the result builds with mkdocs-material in strict
+mode:
+
+```bash
+python3 scripts/build_site.py
+KARUCODE_SITE_DOCS=.site-docs mkdocs build --strict
+```
+
+The generator choice, the staging rules and the known rough edges are written
+down in [docs/WEBSITE.md](docs/WEBSITE.md). CI builds the site, so the recipe
+cannot rot silently.
 
 ### The documentation contract
 

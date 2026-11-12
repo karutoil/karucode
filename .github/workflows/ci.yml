@@ -144,6 +144,28 @@ jobs:
       - name: docs/internal is up to date
         run: cargo run -p kc-docs -- --check
 
+  # The README says the documentation imports into a static site, so the claim is
+  # tested the way a reader would use it: stage the tree, then build it with
+  # mkdocs-material in strict mode. Without this job the recipe could rot - the
+  # root README is not in docs/, and links that escape the tree only resolve in a
+  # repository - and nobody would notice until someone tried to publish it.
+  site:
+    name: docs site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Pinned: a new major of the generator is a deliberate change, not a CI
+      # surprise on an unrelated commit.
+      - run: pip install "mkdocs-material==9.8.1"
+      - run: python3 tests/test_build_site.py
+      - run: python3 scripts/build_site.py
+      - run: mkdocs build --strict
+        env:
+          KARUCODE_SITE_DOCS: .site-docs
+
   web:
     name: web
     runs-on: ubuntu-latest

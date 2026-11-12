@@ -33,13 +33,18 @@ matters to an operator says which behaviour changed, not which number.
   artifact with open findings and file/line pointers) and dropped from the docs
   map.
 
-- **The docs import into a static website as-is.** `mkdocs.yml` at the root
-  configures mkdocs-material over `docs/` with no frontmatter changes, and
-  `scripts/gen_docs_nav.py` generates the site navigation from
-  `docs/internal/index.json` (the machine-readable topic index: slug, title,
-  summary, tags, identifiers), with `--check` to catch drift.
-  `docs/WEBSITE.md` records the import: the generator choice, the two
-  link-rewrite rules, and the known rough edges. The README links all three.
+- **The docs import into a static website, and CI proves it.** `mkdocs.yml`
+  configures mkdocs-material over a staged docs tree.
+  `scripts/build_site.py` stages the git-tracked pages from `docs/` (root
+  `README.md` as the homepage; root `SECURITY.md` replacing the redirect stub)
+  and rewrites the links that escape the tree to repository URLs, so a static
+  site resolves them without a repository above it. `scripts/gen_docs_nav.py`
+  generates the site navigation from `docs/internal/index.json` (the
+  machine-readable topic index: slug, title, summary, tags, identifiers), with
+  `--check` to catch drift. The new `site` CI job builds the result with
+  `mkdocs build --strict` and `tests/test_build_site.py` covers the rewrites, so
+  the recipe cannot rot silently. `docs/WEBSITE.md` records the staging rules
+  and the known rough edges; the README links all of it.
 
 - **Temporary (ephemeral) sessions no longer notify by default.** A temporary
   chat is created by a program - an API client, a plugin's helper - never
@@ -83,6 +88,19 @@ matters to an operator says which behaviour changed, not which number.
   their own scrolling, and span the screen's gutters on a phone. The phone sheet
   also stops opening underneath the dock it belongs to: the old fixed 64px offset
   is gone.
+- **Two dependency advisories are gone, not ignored.** `cargo deny check` — the
+  `audit` CI job — fails on an open RustSec advisory, and the tree had two:
+  `libsqlite3-sys` 0.30.1 bundles a SQLite affected by CVE-2026-119375 (a crafted
+  database/`-wal` pair can make queries return uninitialised page-cache bytes),
+  and `crypto-bigint` 0.5.5 carries RUSTSEC-2026-0387 (timing variability in
+  operations meant to be constant-time), reached through `p256` and the WebAuthn
+  verifier. `rusqlite` moves 0.32 → 0.41 (`libsqlite3-sys` 0.39.1, SQLite
+  3.54.1) and `p256` 0.13 → 0.14 (`crypto-bigint` 0.7.11). Two call sites
+  followed the API: the recovery count is read as `i64` and converted, and the
+  WebAuthn test uses `to_sec1_point`, the name 0.14 gave the encoding call. The
+  workspace MSRV still holds — `cargo +1.89.0 check --locked --workspace`
+  passes.
+
 - **Expanding Results on a phone no longer covers it with a black blur.** The
   Results sheet carried `z-index: 24` from its docked-overlay placement while
   `.sheet-backdrop` - a sibling of `.app`, painting the dark blurred veil - is 35,

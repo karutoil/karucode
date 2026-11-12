@@ -2480,7 +2480,7 @@ impl Store for SqliteStore {
         include_agents: bool,
     ) -> Result<(usize, Vec<String>)> {
         self.read(move |conn| {
-            let total: usize = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            let total: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
                 .map_err(|e| db_err("recovery session count", e))?;
             let mut stmt = conn.prepare(
                 "SELECT id FROM (SELECT s.id, s.updated_at,
@@ -2494,7 +2494,7 @@ impl Store for SqliteStore {
                 .map_err(|e| db_err("recovery sessions query", e))?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|e| db_err("recovery sessions rows", e))?;
-            Ok((total, ids))
+            Ok((usize::try_from(total).unwrap_or(usize::MAX), ids))
         }).await
     }
 

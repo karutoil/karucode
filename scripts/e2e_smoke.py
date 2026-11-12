@@ -188,6 +188,16 @@ class EventStream:
 
 def build_config(tmp, plugin_bin):
     cfg = ['host = "127.0.0.1"', 'log_level = "warn"']
+    # Two retry layers can wait: the provider layer (shrunk with KARUCODE_RETRY_*
+    # in the server's environment) and the turn layer, whose defaults are 30 s and
+    # then 60 s. The second one is right for a flaky gateway and wrong for a suite
+    # that scripts a permanent failure: a `[fail]` would sit there for a minute and
+    # a half before the run ends, which is longer than the step's own timeout.
+    cfg += [
+        "[limits]",
+        "max_turn_retries = 1",
+        "turn_retry_delay_ms = 200",
+    ]
     if plugin_bin:
         cfg += [
             "[[plugins]]",

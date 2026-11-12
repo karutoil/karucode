@@ -515,7 +515,8 @@ pub async fn overview(State(state): State<AppState>) -> ApiResult<Json<ControlOv
         .collect();
 
     let control =
-        control_chat_summaries(&state, control_sessions, &pending_by_session, &agent_counts).await?;
+        control_chat_summaries(&state, control_sessions, &pending_by_session, &agent_counts)
+            .await?;
 
     Ok(Json(ControlOverview {
         generated_at: crate::state::now_ms(),

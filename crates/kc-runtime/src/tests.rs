@@ -9743,8 +9743,7 @@ async fn an_ephemeral_run_does_not_notify_by_default() {
     let mut all = events;
     all.extend(tail);
     assert!(
-        !all
-            .iter()
+        !all.iter()
             .any(|e| matches!(e.event, Event::Notification { .. })),
         "a temporary session's run must not produce a notification: {all:?}"
     );
@@ -9790,7 +9789,9 @@ async fn an_ephemeral_run_notifies_when_the_switch_is_explicitly_on() {
 /// session's ephemeral flag, not a change to run routing in general.
 #[tokio::test]
 async fn a_durable_run_still_notifies_with_the_default_config() {
-    let mut h = HarnessBuilder::new(vec![Script::text("done")]).build().await;
+    let mut h = HarnessBuilder::new(vec![Script::text("done")])
+        .build()
+        .await;
 
     // The notification is published in the run's teardown, after RunFinished,
     // so collect until the loops are quiet rather than stopping at the finish.
@@ -9799,7 +9800,8 @@ async fn a_durable_run_still_notifies_with_the_default_config() {
     assert!(h.wait_idle().await.is_empty());
     let seen = h.collect_until_quiet().await;
     assert!(
-        seen.iter().any(|e| matches!(e.event, Event::Notification { .. })),
+        seen.iter()
+            .any(|e| matches!(e.event, Event::Notification { .. })),
         "a normal session's finished run must still notify: {seen:?}"
     );
 }

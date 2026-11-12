@@ -1,6 +1,10 @@
 target/
 web/node_modules/
 web/dist/
+# `scripts/build_site.py`'s staging tree: generated from git-tracked files on
+# every build, never an input
+.site-docs/
+site/
 *.db
 *.db-wal
 *.db-shm

@@ -512,7 +512,7 @@ mod tests {
     }
 
     fn cose_key(signing: &SigningKey) -> Vec<u8> {
-        let point = signing.verifying_key().to_encoded_point(false);
+        let point = signing.verifying_key().to_sec1_point(false);
         let map = ciborium::value::Value::Map(vec![
             (1.into(), 2.into()),
             (3.into(), (-7i64).into()),
@@ -613,7 +613,7 @@ mod tests {
         assert_eq!(registered.public_key.len(), 65);
         assert_eq!(registered.public_key[0], 4);
         assert!(registered.user_verified);
-        let expected = fixture.signing.verifying_key().to_encoded_point(false);
+        let expected = fixture.signing.verifying_key().to_sec1_point(false);
         assert_eq!(registered.public_key[1..], expected.as_bytes()[1..]);
     }
 

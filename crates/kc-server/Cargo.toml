@@ -34,7 +34,7 @@ futures-util.workspace = true
 getrandom = "0.2"
 libc.workspace = true
 mime_guess.workspace = true
-p256 = { version = "0.13", features = ["ecdsa"] }
+p256 = { version = "0.14", features = ["ecdsa"] }
 reqwest.workspace = true
 rust-embed = { workspace = true, optional = true }
 serde.workspace = true

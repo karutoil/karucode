@@ -1008,7 +1008,7 @@ describe('ChatTranscript rerender cost', () => {
         samples.push(performance.now() - start);
       }
       samples.sort((a, b) => a - b);
-      return samples[Math.floor(samples.length / 2)];
+      return samples[Math.floor(samples.length / 2)]!;
     };
 
     const early = perToken();

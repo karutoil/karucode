@@ -440,8 +440,13 @@ async fn stdio_failure_isolation_and_bounded_connect() {
     let healthy = stdio_server("healthy");
 
     let mut manager = McpManager::new(&[broken, hanging, healthy]);
+    // Two seconds, not the 500 ms that was enough on a quiet machine: Python
+    // start-up under a loaded CI runner can exceed 500 ms, and what this test
+    // proves is isolation (a hung server must not delay the healthy one), not how
+    // fast an interpreter boots. The bound below still holds: the three connects
+    // run concurrently, so the call waits one timeout, not three.
     manager.set_timeouts(McpTimeouts {
-        connect: Duration::from_millis(500),
+        connect: Duration::from_secs(2),
         call: Duration::from_secs(5),
     });
     let started = Instant::now();

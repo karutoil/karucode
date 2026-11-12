@@ -58,6 +58,10 @@ cargo test -p kc-docs
   with the code change.
 * `python3 scripts/check_readme.py` passes if you touched the README or the
   markdown it links.
+* `python3 tests/test_build_site.py` passes, and the site builds cleanly, if you
+  touched `docs/`, `mkdocs.yml` or the README's links:
+  `python3 scripts/build_site.py && KARUCODE_SITE_DOCS=.site-docs mkdocs build --strict`
+  (CI's `site` job runs exactly that).
 * Every release is a commit on `main` (the version is the commit count), so the
   change should be done when it lands: describe what changed and how it was
   verified, and record user-visible changes in `CHANGELOG.md` under
