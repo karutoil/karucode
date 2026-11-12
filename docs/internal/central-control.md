@@ -90,6 +90,10 @@ dashboard that would otherwise make five requests:
   plane; each control chat carries its own `pending_approvals` count.
 - `live_agents` is running or paused subagents, most recently active first, at
   most 12, and each row carries the session it belongs to so a click can open it.
+- Every list is `LIMIT`-bounded and every number is a `COUNT` in one read
+  transaction, so a poll costs the same on an install with 30 sessions as on one
+  with 3: the lists never grow past 12 rows and no list is built to be thrown
+  away. It is safe to poll every few seconds.
 
 A control chat is **not inside a project**. Each owns its own directory,
 `<data_dir>/control-workspaces/<session_id>`, so its file tools never touch a

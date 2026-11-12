@@ -788,13 +788,12 @@ enum SessionScope<'a> {
     Control,
 }
 
-fn summarize_sessions(
-    conn: &rusqlite::Connection,
-    scope: SessionScope<'_>,
-) -> Result<Vec<SessionSummary>> {
-    let base =
-        "SELECT s.id, s.title, s.workspace, s.project_id, s.model, s.created_at, s.updated_at,
-                       s.control, s.ephemeral,
+/// The projection every [`SessionSummary`] query selects, aliased `sessions s`.
+///
+/// Shared by the listings, the paged control-plane slices and the counts, so a new
+/// summary column is added in one place instead of in four drifting copies.
+const SESSION_SUMMARY_SELECT: &str = "SELECT s.id, s.title, s.workspace, s.project_id, s.model,
+                       s.created_at, s.updated_at, s.control, s.ephemeral,
                        (SELECT COUNT(*) FROM messages m
                          WHERE m.session_id = s.id AND m.rewound_at IS NULL) AS message_count,
                        (SELECT r.status FROM runs r
@@ -803,6 +802,22 @@ fn summarize_sessions(
                        EXISTS(SELECT 1 FROM runs r
                                WHERE r.session_id = s.id AND r.status = 'running') AS running
                   FROM sessions s";
+
+fn summarize_sessions(
+    conn: &rusqlite::Connection,
+    scope: SessionScope<'_>,
+) -> Result<Vec<SessionSummary>> {
+    // `message_count` is a correlated subquery on `messages(session_id, id)`, and
+    // that is deliberate: `EXPLAIN QUERY PLAN` shows `SEARCH m USING INDEX
+    // idx_messages_session_id (session_id=?)`, so it is index-backed rather than
+    // a scan per row, and on the 2.6 GB production database it beats the
+    // alternative. `COUNT(*) ... GROUP BY session_id` joined back on (which reads
+    // every message once but cannot use the rewound filter) takes 190-207 ms for
+    // the 556-session / 231k-message list against this query's 176-178 ms, and the
+    // grouped form pays the whole table even when the caller asked for one
+    // project's sessions. The index it depends on is created in the schema
+    // (`idx_messages_session_id`), so it exists on every migrated database.
+    let base = SESSION_SUMMARY_SELECT;
     // A temporary session is never listed, in any scope: it exists for the API
     // client that created it, which learns its end from the `session_deleted`
     // event. The filter goes before the scope's own so both apply.
@@ -827,6 +842,280 @@ fn summarize_sessions(
     .map_err(|e| db_err("list_sessions query", e))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| db_err("list_sessions rows", e))
+}
+
+/// Quote `values` as a SQL `IN` list.
+///
+/// Only ever called with the fixed strings of [`AgentStatus`] / the run-status
+/// vocabulary - never with anything a request carried - so there is no injection
+/// surface here.
+fn sql_string_list<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
+    values
+        .into_iter()
+        .map(|value| format!("'{value}'"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The statuses that count as "alive and spending", as `AgentStatus` defines
+/// them: a paused agent still holds its slot.
+fn live_agent_status_list() -> String {
+    sql_string_list([AgentStatus::Running.as_str(), AgentStatus::Paused.as_str()])
+}
+
+/// `sessions s` is a project session: durable, and not a control chat.
+const PROJECT_SESSION_PREDICATE: &str = "s.ephemeral = 0 AND s.control = 0";
+
+/// `sessions s` has a run in flight.
+const RUNNING_SESSION_PREDICATE: &str =
+    "EXISTS(SELECT 1 FROM runs r WHERE r.session_id = s.id AND r.status = 'running')";
+
+/// `sessions s` is stalled on an unanswered approval.
+const WAITING_SESSION_PREDICATE: &str =
+    "EXISTS(SELECT 1 FROM approvals a WHERE a.session_id = s.id AND a.status = 'pending')";
+
+/// `sessions s`'s latest run ended in one of [`ATTENTION_STATUSES`].
+///
+/// Built from the constant so the list and the count below cannot drift from the
+/// vocabulary the rest of the server uses.
+fn attention_session_predicate() -> String {
+    format!(
+        "(SELECT r.status FROM runs r WHERE r.session_id = s.id
+            ORDER BY r.started_at DESC, r.id DESC LIMIT 1) IN ({})",
+        sql_string_list(ATTENTION_STATUSES)
+    )
+}
+
+/// One `LIMIT`-bounded slice of the session listing, newest activity first.
+fn session_slice(
+    conn: &rusqlite::Connection,
+    predicate: &str,
+    limit: usize,
+) -> Result<Vec<SessionSummary>> {
+    let sql = format!(
+        "{SESSION_SUMMARY_SELECT} WHERE {predicate} ORDER BY s.updated_at DESC, s.id DESC LIMIT ?1"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| db_err("session slice prepare", e))?;
+    let rows = stmt
+        .query_map(params![limit as i64], map_session_summary)
+        .map_err(|e| db_err("session slice query", e))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| db_err("session slice rows", e))
+}
+
+/// The control plane's snapshot: whole-fleet `COUNT`s plus four `LIMIT`-bounded
+/// lists, instead of materialising every session row to throw most of them away.
+///
+/// On the production database that is 556 session summaries (each with two
+/// correlated subqueries) against five counts and four `LIMIT 12` slices; the
+/// response was 31 KB, so almost all of the work was producing rows nobody read.
+fn control_overview_snapshot(
+    conn: &rusqlite::Connection,
+    limit: usize,
+) -> Result<ControlOverviewRows> {
+    let running = RUNNING_SESSION_PREDICATE;
+    let (total, running_total): (i64, i64) = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*), COALESCE(SUM(CASE WHEN {running} THEN 1 ELSE 0 END), 0)
+                   FROM sessions s WHERE {PROJECT_SESSION_PREDICATE}"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| db_err("overview session counts", e))?;
+    let failed: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM sessions s
+                  WHERE {PROJECT_SESSION_PREDICATE} AND {}",
+                attention_session_predicate()
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| db_err("overview attention count", e))?;
+    // Same predicate `list_control_sessions` uses, so the count and the rail's own
+    // list always describe the same chats.
+    let control: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions s WHERE s.ephemeral = 0 AND s.control = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| db_err("overview control count", e))?;
+
+    let project_counts = {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT s.project_id, COUNT(*),
+                        COALESCE(SUM(CASE WHEN {running} THEN 1 ELSE 0 END), 0)
+                   FROM sessions s
+                  WHERE {PROJECT_SESSION_PREDICATE} AND s.project_id IS NOT NULL
+                  GROUP BY s.project_id"
+            ))
+            .map_err(|e| db_err("overview project counts prepare", e))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? as usize,
+                    row.get::<_, i64>(2)? as usize,
+                ))
+            })
+            .map_err(|e| db_err("overview project counts", e))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| db_err("overview project counts rows", e))?
+    };
+
+    Ok(ControlOverviewRows {
+        sessions: SessionFleetCounts {
+            total: total as usize,
+            running: running_total as usize,
+            failed: failed as usize,
+            control: control as usize,
+        },
+        project_counts,
+        running: session_slice(
+            conn,
+            &format!("{PROJECT_SESSION_PREDICATE} AND {RUNNING_SESSION_PREDICATE}"),
+            limit,
+        )?,
+        attention: session_slice(
+            conn,
+            &format!(
+                "{PROJECT_SESSION_PREDICATE} AND {}",
+                attention_session_predicate()
+            ),
+            limit,
+        )?,
+        waiting: session_slice(
+            conn,
+            &format!("{PROJECT_SESSION_PREDICATE} AND {WAITING_SESSION_PREDICATE}"),
+            limit,
+        )?,
+        recent: session_slice(
+            conn,
+            &format!("{PROJECT_SESSION_PREDICATE} AND NOT {RUNNING_SESSION_PREDICATE}"),
+            limit,
+        )?,
+    })
+}
+
+/// The `WHERE` clause every agent listing and count shares.
+///
+/// Returned as SQL plus positional values, so the paged query, the unpaged one and
+/// the `COUNT` can never disagree about what a filter means.
+fn agent_filter(
+    project_id: Option<&str>,
+    session_id: Option<&str>,
+    statuses: &[String],
+) -> (String, Vec<String>) {
+    let mut values = Vec::<String>::new();
+    let mut predicates = Vec::<String>::new();
+    if let Some(project_id) = project_id {
+        values.push(project_id.to_string());
+        predicates.push(format!("s.project_id = ?{}", values.len()));
+    }
+    if let Some(session_id) = session_id {
+        values.push(session_id.to_string());
+        predicates.push(format!("a.session_id = ?{}", values.len()));
+    }
+    if !statuses.is_empty() {
+        let placeholders = statuses
+            .iter()
+            .map(|status| {
+                values.push(status.clone());
+                format!("?{}", values.len())
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        predicates.push(format!("a.status IN ({placeholders})"));
+    }
+    let predicate = if predicates.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", predicates.join(" AND "))
+    };
+    (predicate, values)
+}
+
+fn agent_summary_params(values: &[String]) -> Vec<&dyn rusqlite::ToSql> {
+    values
+        .iter()
+        .map(|value| value as &dyn rusqlite::ToSql)
+        .collect()
+}
+
+/// `LIMIT`/`OFFSET`-bounded agent rows for a prepared filter.
+fn query_agent_summaries(
+    conn: &rusqlite::Connection,
+    predicate: &str,
+    values: &[String],
+    page: Option<(usize, usize)>,
+) -> Result<Vec<AgentSummary>> {
+    let limit = match page {
+        Some((limit, offset)) => {
+            format!(" LIMIT {} OFFSET {}", limit.max(1), offset)
+        }
+        None => String::new(),
+    };
+    let sql = format!(
+        "SELECT a.id, a.session_id, a.parent_run_id, a.parent_agent_id, a.name,
+                a.role, a.task, a.status, a.model, a.iterations, a.summary, a.error,
+                a.owned_paths, a.created_at, a.updated_at, a.finished_at,
+                a.background, a.note, a.progress,
+                s.title AS session_title, s.workspace AS workspace,
+                s.project_id AS project_id
+           FROM agents a JOIN sessions s ON s.id = a.session_id
+           {predicate}
+          ORDER BY a.created_at DESC, a.id DESC{limit}"
+    );
+    let params = agent_summary_params(values);
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| db_err("list_agents_filtered prepare", e))?;
+    let rows = stmt
+        .query_map(params.as_slice(), map_agent_summary)
+        .map_err(|e| db_err("list_agents_filtered query", e))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| db_err("list_agents_filtered rows", e))
+}
+
+/// Whole-set agent counts for a prepared filter, in one aggregate query.
+fn query_agent_status_counts(
+    conn: &rusqlite::Connection,
+    predicate: &str,
+    values: &[String],
+) -> Result<AgentStatusCounts> {
+    // The paused/failed literals are bound as ordinary positional values after the
+    // filter's own, so one numbering scheme covers the whole statement.
+    let mut all = values.to_vec();
+    all.push(AgentStatus::Paused.as_str().to_string());
+    let paused_at = all.len();
+    all.push(AgentStatus::Failed.as_str().to_string());
+    let failed_at = all.len();
+    let sql = format!(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN a.status IN ({live}) THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN a.status = ?{paused_at} THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN a.status = ?{failed_at} THEN 1 ELSE 0 END), 0)
+           FROM agents a JOIN sessions s ON s.id = a.session_id
+           {predicate}",
+        live = live_agent_status_list()
+    );
+    let params = agent_summary_params(&all);
+    conn.query_row(&sql, params.as_slice(), |row| {
+        Ok(AgentStatusCounts {
+            total: row.get::<_, i64>(0)? as usize,
+            live: row.get::<_, i64>(1)? as usize,
+            paused: row.get::<_, i64>(2)? as usize,
+            failed: row.get::<_, i64>(3)? as usize,
+        })
+    })
+    .map_err(|e| db_err("agent status counts", e))
 }
 
 fn map_stored_message(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
@@ -3491,36 +3780,39 @@ impl Store for SqliteStore {
         session_id: Option<&str>,
         statuses: &[String],
     ) -> Result<Vec<AgentSummary>> {
-        let project_id = project_id.map(str::to_string);
-        let session_id = session_id.map(str::to_string);
-        let statuses = statuses.to_vec();
+        let (predicate, values) = agent_filter(project_id, session_id, statuses);
+        self.read(move |conn| query_agent_summaries(conn, &predicate, &values, None))
+            .await
+    }
+
+    async fn list_agents_page(
+        &self,
+        project_id: Option<&str>,
+        session_id: Option<&str>,
+        statuses: &[String],
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<AgentSummary>> {
+        let (predicate, values) = agent_filter(project_id, session_id, statuses);
         self.read(move |conn| {
-            let mut values = Vec::<String>::new();
-            let mut predicates = Vec::<String>::new();
-            if let Some(project_id) = project_id {
-                values.push(project_id);
-                predicates.push(format!("s.project_id = ?{}", values.len()));
-            }
-            if let Some(session_id) = session_id {
-                values.push(session_id);
-                predicates.push(format!("a.session_id = ?{}", values.len()));
-            }
-            if !statuses.is_empty() {
-                let placeholders = statuses
-                    .iter()
-                    .map(|status| {
-                        values.push(status.clone());
-                        format!("?{}", values.len())
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                predicates.push(format!("a.status IN ({placeholders})"));
-            }
-            let predicate = if predicates.is_empty() {
-                String::new()
-            } else {
-                format!("WHERE {}", predicates.join(" AND "))
-            };
+            query_agent_summaries(conn, &predicate, &values, Some((limit, offset)))
+        })
+        .await
+    }
+
+    async fn agent_status_counts(
+        &self,
+        project_id: Option<&str>,
+        session_id: Option<&str>,
+        statuses: &[String],
+    ) -> Result<AgentStatusCounts> {
+        let (predicate, values) = agent_filter(project_id, session_id, statuses);
+        self.read(move |conn| query_agent_status_counts(conn, &predicate, &values))
+            .await
+    }
+
+    async fn list_live_agents(&self, limit: usize) -> Result<Vec<AgentSummary>> {
+        self.read(move |conn| {
             let sql = format!(
                 "SELECT a.id, a.session_id, a.parent_run_id, a.parent_agent_id, a.name,
                         a.role, a.task, a.status, a.model, a.iterations, a.summary, a.error,
@@ -3529,23 +3821,26 @@ impl Store for SqliteStore {
                         s.title AS session_title, s.workspace AS workspace,
                         s.project_id AS project_id
                    FROM agents a JOIN sessions s ON s.id = a.session_id
-                   {predicate}
-                  ORDER BY a.created_at DESC, a.id DESC"
+                  WHERE a.status IN ({})
+                  ORDER BY a.updated_at DESC, a.id ASC
+                  LIMIT ?1",
+                live_agent_status_list()
             );
-            let params = values
-                .iter()
-                .map(|value| value as &dyn rusqlite::ToSql)
-                .collect::<Vec<_>>();
             let mut stmt = conn
                 .prepare(&sql)
-                .map_err(|e| db_err("list_agents_filtered prepare", e))?;
+                .map_err(|e| db_err("list_live_agents prepare", e))?;
             let rows = stmt
-                .query_map(params.as_slice(), map_agent_summary)
-                .map_err(|e| db_err("list_agents_filtered query", e))?;
+                .query_map(params![limit as i64], map_agent_summary)
+                .map_err(|e| db_err("list_live_agents query", e))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|e| db_err("list_agents_filtered rows", e))
+                .map_err(|e| db_err("list_live_agents rows", e))
         })
         .await
+    }
+
+    async fn control_overview_rows(&self, limit: usize) -> Result<ControlOverviewRows> {
+        self.read(move |conn| control_overview_snapshot(conn, limit))
+            .await
     }
 
     async fn list_agent_summaries_for_session(
@@ -7811,6 +8106,201 @@ mod tests {
                 .len(),
             151
         );
+    }
+
+    /// The paged list, the whole-set counts and the control plane's snapshot all
+    /// come from the same predicates, so this test asserts they agree: a page must
+    /// equal the matching slice of the unpaged list, and a `COUNT` must equal the
+    /// count of that same list.
+    #[tokio::test]
+    async fn agent_pages_counts_and_overview_snapshot_agree_with_the_full_lists() {
+        let db = TempDb::new("agents-page-counts");
+        let store = db.open().await;
+        store.create_project("p1", "One", "/1").await.expect("p1");
+        store
+            .create_session("s_1", "busy", "/1", Some("p1"), false)
+            .await
+            .expect("s1");
+        store
+            .create_session("s_2", "failed", "/1", Some("p1"), false)
+            .await
+            .expect("s2");
+        store
+            .create_session("s_3", "waiting", "/1", Some("p1"), false)
+            .await
+            .expect("s3");
+        store
+            .create_control_session("s_central", "Control chat", "/control/x")
+            .await
+            .expect("central");
+
+        let statuses = ["running", "paused", "completed", "failed"];
+        for index in 0..30usize {
+            let mut record = agent(&format!("a_{index:03}"), "s_1", statuses[index % 4]);
+            record.created_at = index as i64;
+            record.updated_at = 1000 + index as i64;
+            store.upsert_agent(&record).await.expect("agent");
+        }
+
+        let all = store
+            .list_agents_filtered(None, None, &[])
+            .await
+            .expect("all");
+        assert_eq!(all.len(), 30);
+        let expected = count_agent_statuses(&all);
+        assert_eq!(
+            store
+                .agent_status_counts(None, None, &[])
+                .await
+                .expect("counts"),
+            expected,
+            "the SQL counts must equal the Rust count of the same list"
+        );
+        assert_eq!(expected.total, 30);
+        assert_eq!(expected.live, 16, "running + paused");
+        assert_eq!(expected.paused, 8);
+        assert_eq!(expected.failed, 7);
+
+        // A page is exactly the matching slice of the unpaged list, filters and
+        // all - not a different query with its own idea of the order.
+        let first = store
+            .list_agents_page(None, None, &[], 10, 0)
+            .await
+            .expect("page 1");
+        assert_eq!(
+            first
+                .iter()
+                .map(|summary| summary.agent.id.as_str())
+                .collect::<Vec<_>>(),
+            all.iter()
+                .take(10)
+                .map(|summary| summary.agent.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        let second = store
+            .list_agents_page(None, None, &[], 10, 10)
+            .await
+            .expect("page 2");
+        assert_eq!(second[0].agent.id, all[10].agent.id);
+        assert!(store
+            .list_agents_page(None, None, &[], 10, 999)
+            .await
+            .expect("past the end")
+            .is_empty());
+
+        // Counts follow the filter, not the page: `?status=paused` inside the
+        // project is 8 paused agents however few rows are asked for.
+        let paused = vec!["paused".to_string()];
+        let project_counts = store
+            .agent_status_counts(Some("p1"), None, &paused)
+            .await
+            .expect("project counts");
+        assert_eq!(project_counts.total, 8);
+        assert_eq!(project_counts.paused, 8);
+        assert_eq!(project_counts.live, 8);
+        assert_eq!(
+            store
+                .list_agents_page(Some("p1"), None, &paused, 5, 0)
+                .await
+                .expect("paged filter")
+                .len(),
+            5
+        );
+        // A filter that matches nothing is 0, not a panic on an empty aggregate.
+        assert_eq!(
+            store
+                .agent_status_counts(None, Some("s_2"), &[])
+                .await
+                .expect("empty counts"),
+            AgentStatusCounts::default()
+        );
+
+        // `list_live_agents` is the same live set, most recently active first.
+        let live = store.list_live_agents(5).await.expect("live agents");
+        assert_eq!(live.len(), 5);
+        assert!(live.iter().all(|summary| summary.agent.is_live()));
+        let mut expected_live: Vec<&AgentSummary> = all
+            .iter()
+            .filter(|summary| summary.agent.is_live())
+            .collect();
+        expected_live.sort_by(|a, b| {
+            b.agent
+                .updated_at
+                .cmp(&a.agent.updated_at)
+                .then_with(|| a.agent.id.cmp(&b.agent.id))
+        });
+        assert_eq!(
+            live.iter()
+                .map(|summary| summary.agent.id.as_str())
+                .collect::<Vec<_>>(),
+            expected_live
+                .iter()
+                .take(5)
+                .map(|summary| summary.agent.id.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        // One run in flight, one that failed, one session stalled on an approval.
+        store
+            .create_run("r_1", "s_1", "test-model", "go")
+            .await
+            .expect("run");
+        store
+            .create_run("r_2", "s_2", "test-model", "go")
+            .await
+            .expect("run");
+        store
+            .finish_run("r_2", RunStatus::Failed, Some("boom"))
+            .await
+            .expect("finish");
+        store
+            .create_approval(&approval("ap_1", "s_3", "r_2"))
+            .await
+            .expect("approval");
+
+        let snapshot = store.control_overview_rows(12).await.expect("snapshot");
+        assert_eq!(snapshot.sessions.total, 3, "project sessions only");
+        assert_eq!(snapshot.sessions.running, 1);
+        assert_eq!(snapshot.sessions.failed, 1);
+        assert_eq!(snapshot.sessions.control, 1);
+        assert_eq!(
+            snapshot
+                .running
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["s_1"]
+        );
+        assert_eq!(
+            snapshot
+                .attention
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["s_2"]
+        );
+        assert_eq!(
+            snapshot
+                .waiting
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["s_3"]
+        );
+        // `recent` is every project session with nothing in flight.
+        assert_eq!(snapshot.recent.len(), 2);
+        assert_eq!(
+            snapshot.project_counts,
+            vec![("p1".to_string(), 3, 1)],
+            "one GROUP BY row per project"
+        );
+
+        // The limit truncates the lists and leaves the counts alone.
+        let narrow = store.control_overview_rows(1).await.expect("narrow");
+        assert_eq!(narrow.recent.len(), 1);
+        assert_eq!(narrow.sessions.total, 3);
+        assert_eq!(narrow.sessions.failed, 1);
+        assert_eq!(narrow.project_counts, snapshot.project_counts);
     }
 
     #[tokio::test]

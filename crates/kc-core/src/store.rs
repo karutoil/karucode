@@ -440,6 +440,95 @@ pub struct AgentSummary {
     pub project_id: Option<String>,
 }
 
+/// Whole-set subagent counts, the numbers a badge draws beside a *page* of
+/// agents.
+///
+/// They are counts of the entire filtered set, never of the page that was
+/// returned: an install with 1042 agents must be able to say "100 of 1042"
+/// without the server building 1042 rows to count them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentStatusCounts {
+    /// Every agent that matches the filter.
+    pub total: usize,
+    /// Running **or paused** - see [`AgentStatus::is_live`]. A paused agent still
+    /// holds its slot, so it is not finished work.
+    pub live: usize,
+    pub paused: usize,
+    pub failed: usize,
+}
+
+/// Server-wide session totals for the control plane, counted in SQL.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionFleetCounts {
+    /// Project sessions (control chats and temporary sessions excluded).
+    pub total: usize,
+    /// Project sessions with a run in flight.
+    pub running: usize,
+    /// Project sessions whose latest run ended in an attention status.
+    pub failed: usize,
+    /// Control chats. `total - control` is therefore not project sessions; the
+    /// control chats are simply not part of `total`.
+    pub control: usize,
+}
+
+/// Run outcomes that mean "a person should look at this".
+///
+/// `cancelled` is something a human asked for and `completed` needs nothing, so
+/// neither belongs in an attention list.
+pub const ATTENTION_STATUSES: [&str; 3] = ["failed", "interrupted", "limit_reached"];
+
+/// Everything `GET /api/control/overview` shows about sessions, from a fixed
+/// number of `LIMIT`-bounded queries instead of one row per session.
+///
+/// The four lists are each already truncated to the requested limit, newest
+/// `updated_at` first, and the counts are whole-fleet totals: a truncated list
+/// must never turn 30 failing sessions into 12.
+#[derive(Debug, Clone, Default)]
+pub struct ControlOverviewRows {
+    pub sessions: SessionFleetCounts,
+    /// `(project_id, sessions, running)` per project, for the project rail.
+    pub project_counts: Vec<(String, usize, usize)>,
+    /// Project sessions with a run in flight.
+    pub running: Vec<SessionSummary>,
+    /// Project sessions whose latest run needs a person.
+    pub attention: Vec<SessionSummary>,
+    /// Project sessions stalled on an unanswered approval.
+    pub waiting: Vec<SessionSummary>,
+    /// Project sessions with nothing in flight, newest activity first.
+    pub recent: Vec<SessionSummary>,
+}
+
+/// Whether a session's latest run ended in a way a person should look at.
+pub fn needs_attention(session: &SessionSummary) -> bool {
+    session
+        .last_run_status
+        .as_deref()
+        .is_some_and(|status| ATTENTION_STATUSES.contains(&status))
+}
+
+/// Count [`AgentStatusCounts`] out of an already-materialised list of agents.
+///
+/// The reference implementation of the SQL store's `COUNT` over the same set, so
+/// the two can be checked against each other.
+pub fn count_agent_statuses(agents: &[AgentSummary]) -> AgentStatusCounts {
+    let mut counts = AgentStatusCounts {
+        total: agents.len(),
+        ..AgentStatusCounts::default()
+    };
+    for summary in agents {
+        if summary.agent.is_live() {
+            counts.live += 1;
+        }
+        if summary.agent.status == AgentStatus::Paused.as_str() {
+            counts.paused += 1;
+        }
+        if summary.agent.status == AgentStatus::Failed.as_str() {
+            counts.failed += 1;
+        }
+    }
+    counts
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRecord {
     pub id: String,
@@ -1191,6 +1280,133 @@ pub trait Store: Send + Sync {
             agents.retain(|summary| statuses.contains(&summary.agent.status));
         }
         Ok(agents)
+    }
+    /// One page of [`Store::list_agents_filtered`]'s result set: same predicates,
+    /// same order, `offset` rows in, `limit` rows out.
+    ///
+    /// Paging belongs in SQL: the whole point is not to build the other 942 rows.
+    /// The default slices the unpaged list, which is correct but not cheap, so a
+    /// store that can push `LIMIT`/`OFFSET` down should.
+    async fn list_agents_page(
+        &self,
+        project_id: Option<&str>,
+        session_id: Option<&str>,
+        statuses: &[String],
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<AgentSummary>> {
+        let agents = self
+            .list_agents_filtered(project_id, session_id, statuses)
+            .await?;
+        Ok(agents.into_iter().skip(offset).take(limit).collect())
+    }
+    /// Whole-set counts for the same filter [`Store::list_agents_filtered`] takes.
+    ///
+    /// Separate from the page because the page is a page: `running`/`paused` are
+    /// fleet facts, and deriving them from a truncated list would report "1
+    /// running" for a server with 30 running agents as soon as the client asked
+    /// for `?limit=10`.
+    async fn agent_status_counts(
+        &self,
+        project_id: Option<&str>,
+        session_id: Option<&str>,
+        statuses: &[String],
+    ) -> Result<AgentStatusCounts> {
+        let agents = self
+            .list_agents_filtered(project_id, session_id, statuses)
+            .await?;
+        Ok(count_agent_statuses(&agents))
+    }
+    /// The most recently active live agents (`running` or `paused`), newest
+    /// activity first - the control plane's `live_agents` list.
+    ///
+    /// Bounded by `limit` because the panel only ever draws a handful; the
+    /// default derives them from the full list, which is what a small store can
+    /// afford and a 1000-agent install cannot.
+    async fn list_live_agents(&self, limit: usize) -> Result<Vec<AgentSummary>> {
+        let mut live: Vec<AgentSummary> = self
+            .list_agents_all(None)
+            .await?
+            .into_iter()
+            .filter(|summary| summary.agent.is_live())
+            .collect();
+        live.sort_by(|a, b| {
+            b.agent
+                .updated_at
+                .cmp(&a.agent.updated_at)
+                .then_with(|| a.agent.id.cmp(&b.agent.id))
+        });
+        live.truncate(limit);
+        Ok(live)
+    }
+    /// The counts and the four truncated lists `GET /api/control/overview` draws.
+    ///
+    /// One call rather than five, because the five are one snapshot: a session
+    /// that starts between the counts and the lists would otherwise be counted as
+    /// recent and drawn as running. The default derives everything from
+    /// `list_sessions` (correct, and O(all sessions)); a SQL store pushes the
+    /// `LIMIT` and the `COUNT`s down instead.
+    async fn control_overview_rows(&self, limit: usize) -> Result<ControlOverviewRows> {
+        let sessions = self.list_sessions().await?;
+        let project_sessions: Vec<&SessionSummary> =
+            sessions.iter().filter(|session| !session.control).collect();
+        let pending: std::collections::HashSet<String> = self
+            .list_pending_approvals(None)
+            .await?
+            .into_iter()
+            .map(|approval| approval.session_id)
+            .collect();
+        let mut rows = ControlOverviewRows {
+            sessions: SessionFleetCounts {
+                total: project_sessions.len(),
+                running: project_sessions.iter().filter(|s| s.running).count(),
+                failed: project_sessions
+                    .iter()
+                    .filter(|session| needs_attention(session))
+                    .count(),
+                control: sessions.iter().filter(|session| session.control).count(),
+            },
+            ..ControlOverviewRows::default()
+        };
+        let mut per_project: std::collections::HashMap<&str, (usize, usize)> =
+            std::collections::HashMap::new();
+        for session in &project_sessions {
+            if let Some(project_id) = session.project_id.as_deref() {
+                let counts = per_project.entry(project_id).or_default();
+                counts.0 += 1;
+                if session.running {
+                    counts.1 += 1;
+                }
+            }
+        }
+        rows.project_counts = per_project
+            .into_iter()
+            .map(|(id, (sessions, running))| (id.to_string(), sessions, running))
+            .collect();
+        for session in project_sessions {
+            if session.running {
+                rows.running.push(session.clone());
+            } else {
+                rows.recent.push(session.clone());
+            }
+            if needs_attention(session) {
+                rows.attention.push(session.clone());
+            }
+            if pending.contains(&session.id) {
+                rows.waiting.push(session.clone());
+            }
+        }
+        // Already ordered by `updated_at` (the list is), so truncation keeps the
+        // newest rows.
+        for list in [
+            &mut rows.running,
+            &mut rows.recent,
+            &mut rows.attention,
+            &mut rows.waiting,
+        ] {
+            list.truncate(limit);
+        }
+        Ok(rows)
     }
     /// Every subagent of one session, newest `created_at` first, each with the
     /// session context (`session_title`, `workspace`, `project_id`) the Agents

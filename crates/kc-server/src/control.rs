@@ -84,6 +84,10 @@
 //   plane; each control chat carries its own `pending_approvals` count.
 // - `live_agents` is running or paused subagents, most recently active first, at
 //   most 12, and each row carries the session it belongs to so a click can open it.
+// - Every list is `LIMIT`-bounded and every number is a `COUNT` in one read
+//   transaction, so a poll costs the same on an install with 30 sessions as on one
+//   with 3: the lists never grow past 12 rows and no list is built to be thrown
+//   away. It is safe to poll every few seconds.
 //
 // A control chat is **not inside a project**. Each owns its own directory,
 // `<data_dir>/control-workspaces/<session_id>`, so its file tools never touch a
@@ -176,7 +180,7 @@ use kc_core::{
     config::{ApprovalMode, SessionModelSelection},
     events::Event,
     ids::SessionId,
-    store::{AgentStatus, AgentSummary, Session, SessionSummary},
+    store::{AgentSummary, Session, SessionSummary},
     tool::{Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOutcome, ToolSpec},
 };
 use serde::Deserialize;
@@ -319,12 +323,6 @@ const OVERVIEW_LIMIT: usize = 12;
 /// Public because `control_create_control_chat` validates its own arguments
 /// against the same bound before asking for approval.
 pub(crate) const MAX_LAUNCH_PROMPT_BYTES: usize = 32 * 1024;
-/// Run outcomes that mean "a person should look at this".
-///
-/// The store's own vocabulary: `cancelled` is something a human asked for and
-/// `completed` needs nothing, so neither belongs in an attention list.
-const ATTENTION_STATUSES: [&str; 3] = ["failed", "interrupted", "limit_reached"];
-
 /// One control chat as the rail needs it: the session row plus what the chat is
 /// running and which model answers for it.
 ///
@@ -424,25 +422,6 @@ pub(crate) fn model_label(
     Some(id.to_string())
 }
 
-fn is_live_agent(summary: &AgentSummary) -> bool {
-    AgentStatus::parse(&summary.agent.status).is_some_and(|status| status.is_live())
-}
-
-fn is_paused_agent(summary: &AgentSummary) -> bool {
-    summary.agent.status == AgentStatus::Paused.as_str()
-}
-
-fn is_failed_agent(summary: &AgentSummary) -> bool {
-    summary.agent.status == AgentStatus::Failed.as_str()
-}
-
-fn needs_attention(session: &SessionSummary) -> bool {
-    session
-        .last_run_status
-        .as_deref()
-        .is_some_and(|status| ATTENTION_STATUSES.contains(&status))
-}
-
 async fn control_chat_summaries(
     state: &AppState,
     sessions: Vec<SessionSummary>,
@@ -492,57 +471,33 @@ async fn pending_counts(state: &AppState) -> ApiResult<(HashMap<String, usize>, 
 }
 
 /// `GET /api/control/overview` - the control plane's one-shot snapshot.
+///
+/// Every list it returns is truncated to [`OVERVIEW_LIMIT`] and every number is a
+/// `COUNT`, both pushed into SQL. This route is polled every few seconds by an
+/// open control plane, and it used to answer from `list_sessions` +
+/// `list_agents_all`: 554 session summaries (2.6 MB) and 1042 agent summaries
+/// (5.7 MB) built to fill twelve-row lists and return 31 KB. The work, and the
+/// allocator footprint that went with it, was thrown away on every poll.
 pub async fn overview(State(state): State<AppState>) -> ApiResult<Json<ControlOverview>> {
     let store = state.store();
-    let sessions = store.list_sessions().await?;
-    let control_sessions = store.list_control_sessions().await?;
+    // One snapshot: the counts and the slices come from the same read connection,
+    // so a session cannot be counted as recent and drawn as running.
+    let rows = store.control_overview_rows(OVERVIEW_LIMIT).await?;
     let projects = store.list_projects().await?;
-    let agents = store.list_agents_all(None).await?;
+    let control_sessions = store.list_control_sessions().await?;
     let (pending_by_session, pending_total) = pending_counts(&state).await?;
+    let agent_totals = store.agent_status_counts(None, None, &[]).await?;
+    // Prepared by `control_overview_rows`; shared with the table above so
+    // `get_agent` and the store's own queries stay untouched.
+    let agent_counts = agent_counts(&state).await?;
 
-    let mut running: Vec<SessionSummary> = Vec::new();
-    let mut attention: Vec<SessionSummary> = Vec::new();
-    let mut recent: Vec<SessionSummary> = Vec::new();
-    let mut waiting: Vec<SessionSummary> = Vec::new();
-    let mut project_sessions = 0usize;
-    let mut project_running = 0usize;
-    for session in sessions.iter().filter(|session| !session.control) {
-        project_sessions += 1;
-        if session.running {
-            project_running += 1;
-            running.push(session.clone());
-        } else {
-            recent.push(session.clone());
-        }
-        if needs_attention(session) {
-            attention.push(session.clone());
-        }
-        if pending_by_session.contains_key(&session.id) {
-            waiting.push(session.clone());
-        }
-    }
-    // Counted before the lists are truncated: `sessions.failed` is a total, and a
-    // truncated list must not turn 30 failing sessions into 12.
-    let attention_total = attention.len();
-    // Sorted by `updated_at` already; the calls above only drop rows.
-    running.truncate(OVERVIEW_LIMIT);
-    recent.truncate(OVERVIEW_LIMIT);
-    attention.truncate(OVERVIEW_LIMIT);
-    waiting.truncate(OVERVIEW_LIMIT);
-
-    // Per-project counts, from the same one pass: a session whose project was
-    // deleted simply has no row to land in.
+    // Per-project counts come from one GROUP BY, so a project with no sessions
+    // simply has no row and lands on `0 / 0`.
     let mut per_project: HashMap<&str, (usize, usize)> = HashMap::new();
-    for session in sessions.iter().filter(|session| !session.control) {
-        if let Some(project_id) = session.project_id.as_deref() {
-            let counts = per_project.entry(project_id).or_default();
-            counts.0 += 1;
-            if session.running {
-                counts.1 += 1;
-            }
-        }
+    for (project_id, sessions, running) in &rows.project_counts {
+        per_project.insert(project_id.as_str(), (*sessions, *running));
     }
-    let rows: Vec<ProjectRow> = projects
+    let project_rows: Vec<ProjectRow> = projects
         .iter()
         .map(|project| {
             let (sessions, running) = per_project
@@ -559,59 +514,35 @@ pub async fn overview(State(state): State<AppState>) -> ApiResult<Json<ControlOv
         })
         .collect();
 
-    let mut live_agents: Vec<AgentSummary> = agents
-        .iter()
-        .filter(|summary| is_live_agent(summary))
-        .cloned()
-        .collect();
-    // `list_agents_all` orders by creation; a supervisor cares about activity.
-    live_agents.sort_by(|a, b| {
-        b.agent
-            .updated_at
-            .cmp(&a.agent.updated_at)
-            .then_with(|| a.agent.id.cmp(&b.agent.id))
-    });
-    live_agents.truncate(OVERVIEW_LIMIT);
-
-    let counts = agent_counts(&state).await?;
     let control =
-        control_chat_summaries(&state, control_sessions, &pending_by_session, &counts).await?;
+        control_chat_summaries(&state, control_sessions, &pending_by_session, &agent_counts).await?;
 
     Ok(Json(ControlOverview {
         generated_at: crate::state::now_ms(),
         sessions: SessionCounts {
-            total: project_sessions,
-            running: project_running,
+            total: rows.sessions.total,
+            running: rows.sessions.running,
             // The latest-run outcome is per session, not a stored counter: a
             // session that failed and was retried successfully is not failed.
-            failed: attention_total,
-            control: control.len(),
+            failed: rows.sessions.failed,
+            control: rows.sessions.control,
         },
         agents: AgentTotals {
-            live: agents
-                .iter()
-                .filter(|summary| is_live_agent(summary))
-                .count(),
-            paused: agents
-                .iter()
-                .filter(|summary| is_paused_agent(summary))
-                .count(),
-            failed: agents
-                .iter()
-                .filter(|summary| is_failed_agent(summary))
-                .count(),
-            total: agents.len(),
+            live: agent_totals.live,
+            paused: agent_totals.paused,
+            failed: agent_totals.failed,
+            total: agent_totals.total,
         },
         approvals: ApprovalTotals {
             pending: pending_total,
         },
-        projects: rows,
+        projects: project_rows,
         control,
-        running,
-        attention,
-        waiting,
-        recent,
-        live_agents,
+        running: rows.running,
+        attention: rows.attention,
+        waiting: rows.waiting,
+        recent: rows.recent,
+        live_agents: store.list_live_agents(OVERVIEW_LIMIT).await?,
     }))
 }
 

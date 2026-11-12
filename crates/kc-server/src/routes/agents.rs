@@ -59,6 +59,46 @@ fn parse_status_filter(query: &QueryMap) -> ApiResult<Vec<String>> {
     Ok(statuses)
 }
 
+/// How many agents `GET /api/agents` returns when the caller does not say.
+///
+/// The response used to be every agent on the server: 1042 of them, 4.86 MB of
+/// JSON and +11.7 MB of resident memory for the first call. A page keeps the
+/// worst case near a hundred rows, and `?all=true` is how a script that really
+/// wants the fleet asks for it.
+const AGENTS_PAGE_DEFAULT: usize = 100;
+/// Hard ceiling on one page, `?all=true` included: an unbounded response is what
+/// this route was fixed to stop producing, and 2000 rows is already ~10 MB.
+const AGENTS_PAGE_MAX: usize = 2000;
+
+/// How many agents this request should return, and where the page starts.
+///
+/// `?limit=N` (1..=2000) with `?offset=N`, or `?all=true` for the whole fleet up
+/// to [`AGENTS_PAGE_MAX`]. `?limit=0` is a 400 rather than a silent default: a
+/// caller that computed 0 has a bug, and answering it with 100 rows would hide it.
+fn agent_page(query: &QueryMap) -> ApiResult<(usize, usize)> {
+    let all = query
+        .get("all")
+        .map(|value| matches!(value.as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+    let limit = match query_usize(query, "limit")? {
+        Some(0) => {
+            return Err(ApiError::bad_request(
+                "`limit` must be at least 1; use `all=true` to fetch every agent".to_string(),
+            ))
+        }
+        Some(limit) if limit > AGENTS_PAGE_MAX => {
+            return Err(ApiError::bad_request(format!(
+                "`limit` must be at most {AGENTS_PAGE_MAX}"
+            )))
+        }
+        Some(limit) => limit,
+        None if all => AGENTS_PAGE_MAX,
+        None => AGENTS_PAGE_DEFAULT,
+    };
+    let offset = query_usize(query, "offset")?.unwrap_or(0);
+    Ok((limit, offset))
+}
+
 pub async fn list_agents(
     State(state): State<AppState>,
     Query(query): Query<QueryMap>,
@@ -66,28 +106,27 @@ pub async fn list_agents(
     let project = query_str(&query, "project");
     let session = query_str(&query, "session");
     let statuses = parse_status_filter(&query)?;
-    let agents = state
-        .store()
-        .list_agents_filtered(project, session, &statuses)
+    let (limit, offset) = agent_page(&query)?;
+    let store = state.store();
+    let agents = store
+        .list_agents_page(project, session, &statuses, limit, offset)
         .await?;
     // `running` is "alive and spending", which includes paused: a paused agent
     // still holds a subagent slot, so a caller that used this count to decide
     // whether it had capacity would be wrong if paused were excluded. The exact
     // split is one `status` per row, which the client already has.
-    let running = agents
-        .iter()
-        .filter(|summary| {
-            AgentStatus::parse(&summary.agent.status).is_some_and(|status| status.is_live())
-        })
-        .count();
-    let paused = agents
-        .iter()
-        .filter(|summary| summary.agent.status == AgentStatus::Paused.as_str())
-        .count();
+    //
+    // Counted over the whole filtered set, not over the page: `total` is what lets
+    // a client say "100 of 1042", and a truncation must not report "3 running" for
+    // a server with 30.
+    let counts = store
+        .agent_status_counts(project, session, &statuses)
+        .await?;
     Ok(Json(json!({
         "agents": agents,
-        "running": running,
-        "paused": paused,
+        "running": counts.live,
+        "paused": counts.paused,
+        "total": counts.total,
         // The runtime's own view, which covers both scopes: the store list above
         // can be filtered, while `live` is "loops that exist right now".
         "live": state.runtime().live_agent_count(

@@ -77,7 +77,8 @@
 // | `GET /api/sessions/:id/queues`, `DELETE /api/sessions/:id/queues/:queued_id` | the messages waiting for the run, and recall one (it never reaches the model) |
 // | `POST /api/sessions/:id/cancel` | cancel the active run |
 // | `GET`/`POST /api/sessions/:id/rewind` | preview, then hide the transcript after a message (optionally reverting its file changes, retrying it, or replacing it with a note) |
-// | `GET /api/agents`, `GET /api/agents/:id` | every subagent in a project, and one agent's own transcript |
+// | `GET /api/agents` | every subagent, newest first, paginated (`?limit=`, default 100, `?offset=`, `?all=true`, plus `total`) |
+// | `GET /api/agents/:id` | one agent's own transcript |
 // | `POST /api/agents/:id/pause`, `/resume`, `/cancel` | pause a live subagent between iterations, release it, or stop it |
 // | `GET /api/approvals`, `POST /api/approvals/:id` | list and answer pending approvals |
 // | `GET /api/workspace/tree`, `/api/workspace/file` | workspace explorer, confined to the project |
@@ -709,13 +710,24 @@
 // excluded from the session transcript the main chat renders, so these routes are
 // how a client watches delegation without opening the database:
 //
-// * `GET /api/agents?project=<id>` lists every agent in the project, newest
-//   first, with the session title/workspace flattened onto each record. Narrow it
-//   with `&session=<id>` or `&status=running,failed` (comma-separated; an unknown
-//   status is `400 bad_request`). The response also carries `running` (alive and
-//   spending, which includes `paused`), `paused` and `live` (the runtime's own
-//   count of loops that exist right now), so a badge does not have to count the
-//   array. Without `?project=` it lists every agent on the server.
+// * `GET /api/agents?project=<id>` lists agents newest first, with the session
+//   title/workspace flattened onto each record. Narrow it with `&session=<id>` or
+//   `&status=running,failed` (comma-separated; an unknown status is `400
+//   bad_request`). **It is paginated**: no `&limit=` returns the newest **100**,
+//   `&limit=N` returns up to 2000, `&offset=N` walks the rest, and `&all=true`
+//   returns the whole fleet (still capped at 2000, and a `limit` above that is
+//   `400 bad_request`). The response carries `total`, the number of agents that
+//   match the filters, so a client can say "100 of 1042" and know when to stop
+//   paging:
+//
+//   ```json
+//   { "agents": [ ... ], "running": 3, "paused": 1, "total": 1042, "live": 3 }
+//   ```
+//
+//   `running` (alive and spending, which includes `paused`), `paused` and `total`
+//   are counted over the **whole filtered set**, never over the page, and `live`
+//   is the runtime's own count of loops that exist right now. A count is therefore
+//   the same whether you asked for one page or all of them.
 // * `GET /api/agents/:id` returns `{ agent, messages, messages_truncated,
 //   messages_limit }`: only that agent's messages, oldest first, tail-limited by
 //   `?messages=N` (default 2000, max 50000). This is the drill-in transcript.

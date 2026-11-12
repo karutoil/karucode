@@ -198,6 +198,9 @@
 //
 // The same data is available over HTTP: `GET /api/agents?project=<id>`,
 // `GET /api/agents/:id`, and `POST /api/agents/:id/pause`, `/resume`, `/cancel`.
+// The list is paginated - `?limit=` (default 100, max 2000), `?offset=`, or
+// `?all=true` - and answers `total` beside `running`/`paused`, so a client can
+// page through a fleet of a thousand agents instead of downloading all of them.
 // All are documented in `docs/API.md`.
 //
 // # Failure handling
