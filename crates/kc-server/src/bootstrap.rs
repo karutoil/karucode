@@ -1105,7 +1105,7 @@ fn init_tracing(level: &str) {
         .try_init();
 }
 
-/// Create the data directory with 0700 permissions (`docs/SECURITY.md`: the
+/// Create the data directory with 0700 permissions (`SECURITY.md`: the
 /// settings table may hold an API key).
 fn ensure_private_dir(dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)

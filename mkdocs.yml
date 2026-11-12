@@ -1,0 +1,92 @@
+site_name: karucode
+site_description: A self-hosted coding agent for long sessions.
+repo_url: https://github.com/karutoil/karucode
+repo_name: karutoil/karucode
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.indexes
+
+markdown_extensions:
+  - attr_list        # README.md's <p align=…>, badges, image tags
+  - md_in_html       # the README's raw-HTML blocks keep rendering markdown
+  - tables
+  - fenced_code
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+
+# The docs_dir is the repository's own docs/ tree, imported as-is: no
+# frontmatter anywhere (page titles come from each file's single H1), relative
+# links intact. Regenerate the Reference section with:
+#   python3 scripts/gen_docs_nav.py --snippet
+# after `cargo run -p kc-docs -- --write` adds or removes a topic.
+# The full nav, ready to paste, is `python3 scripts/gen_docs_nav.py`.
+docs_dir: docs
+
+# README.md is the homepage: mkdocs copies it into the site. Its repo-root
+# relative links (README.md, CONTRIBUTING.md, SECURITY.md) resolve because those
+# files are also in docs_dir via the symlinks-free copies the importer makes —
+# see docs/WEBSITE.md "importing", which defines the two link rewrites.
+use_directory_urls: true
+
+nav:
+  - Home: README.md
+  - Handbooks:
+      - HTTP API: API.md
+      - Architecture: ARCHITECTURE.md
+      - MCP client: MCP.md
+      - Plugins: PLUGINS.md
+      - Security model: SECURITY.md
+      - Internal docs system: INTERNAL-DOCS.md
+      - Contributing (agents): CONTRIBUTING-AGENTS.md
+  - Reference:
+      - Issue API keys for applications: internal/api-keys.md
+      - Understand approval timeout and storage-failure recovery: internal/approval-expiry-recovery.md
+      - Control what the agent may do without asking: internal/approvals.md
+      - Render rich artifacts in the chat transcript: internal/artifacts.md
+      - The built-in tools the agent can call: internal/builtin-tools.md
+      - Coordinate work across projects: internal/central-control.md
+      - Change karucode's configuration: internal/configuration.md
+      - Run it as a systemd service: internal/deployment.md
+      - How karucode's own documentation works: internal/documentation.md
+      - Run a temporary chat: internal/ephemeral-sessions.md
+      - Call the HTTP API: internal/http-api.md
+      - Connect MCP servers: internal/mcp.md
+      - Organize work into missions: internal/missions.md
+      - Get told when a run finishes or needs an answer: internal/notifications.md
+      - Write and install a plugin: internal/plugins.md
+      - Follow a project's own AGENTS.md instructions: internal/project-instructions.md
+      - Work on more than one project: internal/projects.md
+      - Keep the prompt cache hitting (cheap long runs): internal/prompt-cache.md
+      - Configure a model provider: internal/provider-profiles.md
+      - Recover a provider stream without extra logical requests: internal/provider-stream-recovery.md
+      - Keep steering and follow-up input safe across run endings: internal/queued-run-recovery.md
+      - Build, run and stop the server: internal/run-server.md
+      - Understand the security model: internal/security.md
+      - Give sessions AI-written titles: internal/session-titles.md
+      - Delegate work to subagents: internal/subagents.md
+      - What the agent is told about reading, tool output and stopping: internal/system-prompt.md
+      - Use the terminal tab: internal/terminals.md
+      - Theme the workspace: internal/themes.md
+      - What a failed tool call tells the model: internal/tool-call-errors.md
+      - Update karucode automatically: internal/updates.md
+      - Understand karucode's version and build number: internal/versioning.md
+      - Sign in to the web UI: internal/web-auth.md
+      - Use the browser workspace: internal/web-ui.md
+  - Design:
+      - Design system: internal/DESIGN-SYSTEM.md
+      - Design audit: internal/DESIGN-AUDIT.md
+      - Audit — shell: internal/design-audit/shell.md
+      - Audit — transcript: internal/design-audit/transcript.md
+      - Audit — overlays: internal/design-audit/overlays.md
+      - Audit — panels: internal/design-audit/panels.md
+      - Design verify report: internal/design-verify/REPORT.md
+  - Website import: WEBSITE.md
+
+not_in_nav: |
+  internal/README.md
+  internal/index.json

@@ -215,17 +215,21 @@ sticky-bottom with a "Jump to latest" affordance).
   given deployment.
 * **Shell is not sandboxed**, by design and documented prominently. Approvals are
   a gate, not isolation.
-* **Git worktrees isolate subagent work** when available. A worktree is created for each subagent spawned in a git repository and cleaned up when it completes. If the workspace is not a git repository or worktree creation fails, subagents fall back to the shared workspace and `owned_paths` provides advisory conflict reporting.
+* **Subagents share the parent's live workspace** (including dirty and untracked
+  files); automatic git worktrees are intentionally not used. `owned_paths`
+  provides advisory conflict reporting, not locking or worktree isolation.
 * **Approval expiry granularity**: subagent approvals are marked `resolved` with
   decision `expired` (the store has no per-id `expired` status), so the UI shows
   them as resolved rather than expired.
 * **Resolved approvals are not exposed** by any endpoint; only pending ones are.
 * **MCP**: tools only. Resources/prompts, sampling and the legacy SSE transport are
-  not implemented; servers are connected once at startup (enable/disable restarts
-  the whole manager via plugin reload only).
+  not implemented; servers are connected once at startup — there is no reconnect
+  path, so a failed server is reconnected by restarting the process.
 * **Plugins** are supervised processes, not a sandbox; a malicious plugin has the
   user's permissions. Permissions are declarative and config-authoritative only.
-* **One workspace per instance**; sessions share it.
+* **Many projects per instance**; each session runs in its project's workspace,
+  resolved through the `WorkspaceProvider` trait (`POST /api/projects` registers
+  a project).
 * **No TLS**; remote use needs a reverse proxy or SSH tunnel plus a token.
 * **Compaction is trimming**, not model-assisted summarisation.
 * Windows is not supported (`setsid`/`libc` in the shell tool); macOS is untested.

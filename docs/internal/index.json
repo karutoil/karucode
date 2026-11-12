@@ -23,7 +23,7 @@
         "file:crates/kc-server/src/api_keys.rs",
         "file:crates/kc-server/src/app.rs",
         "doc:docs/API.md",
-        "doc:docs/SECURITY.md"
+        "doc:SECURITY.md"
       ],
       "path": "api-keys.md",
       "slug": "api-keys",
@@ -1011,7 +1011,7 @@
         "route:DELETE /api/auth/api-keys/:id",
         "route:POST /api/auth/api-keys/:id/rotate",
         "header:X-Karucode-Admin-Token",
-        "doc:docs/SECURITY.md",
+        "doc:SECURITY.md",
         "concept:approvals",
         "concept:workspace containment",
         "concept:sign-in",
@@ -1357,7 +1357,7 @@
         "ui:Settings",
         "file:crates/kc-server/src/web_auth.rs",
         "file:crates/kc-server/src/webauthn.rs",
-        "doc:docs/SECURITY.md"
+        "doc:SECURITY.md"
       ],
       "path": "web-auth.md",
       "slug": "web-auth",

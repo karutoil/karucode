@@ -78,6 +78,11 @@ node_modules/
 /docs/internal/design-verify/screens/
 /docs/internal/design-verify/appearance-matrix.json
 
+# The production-readiness audit is an internal review artifact: it enumerates
+# open findings with file/line pointers, and it is written for this checkout's
+# maintainers, not for a public release. Kept locally, never shipped.
+/docs/PRODUCTION-READINESS.md
+
 # --- a session's own plan and scratch notes ----------------------------------
 # An agent's working plan is not a product doc: `PLAN.md` / `NOTES.md` /
 # `SCRATCH.md` at the root, a `docs/plans/` tree, and any `*.plan.md` are written

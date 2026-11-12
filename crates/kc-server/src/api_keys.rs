@@ -2,7 +2,7 @@
 // @kc-title: Issue API keys for applications
 // @kc-summary: Mint scoped, expiring bearer keys for scripts and integrations, then rotate or revoke them without touching the web password.
 // @kc-tags: api keys, authentication, bearer, token, integration, scopes, expiry, rotate, revoke, security, automation
-// @kc-applies-to: route:GET /api/auth/api-keys, route:POST /api/auth/api-keys, route:PATCH /api/auth/api-keys/:id, route:DELETE /api/auth/api-keys/:id, route:POST /api/auth/api-keys/:id/rotate, route:GET /api/auth/me, route:GET /api/auth/status, header:Authorization, header:X-Karucode-Client, header:X-Karucode-Admin-Token, env:KARUCODE_ADMIN_TOKEN, config:admin_token, config:[access], config:access.enabled, ui:Settings, ui:AccessSettings, file:crates/kc-server/src/api_keys.rs, file:crates/kc-server/src/app.rs, doc:docs/API.md, doc:docs/SECURITY.md
+// @kc-applies-to: route:GET /api/auth/api-keys, route:POST /api/auth/api-keys, route:PATCH /api/auth/api-keys/:id, route:DELETE /api/auth/api-keys/:id, route:POST /api/auth/api-keys/:id/rotate, route:GET /api/auth/me, route:GET /api/auth/status, header:Authorization, header:X-Karucode-Client, header:X-Karucode-Admin-Token, env:KARUCODE_ADMIN_TOKEN, config:admin_token, config:[access], config:access.enabled, ui:Settings, ui:AccessSettings, file:crates/kc-server/src/api_keys.rs, file:crates/kc-server/src/app.rs, doc:docs/API.md, doc:SECURITY.md
 //
 // # What an API key is
 //
@@ -140,7 +140,7 @@
 //   hitting the same ambiguity should do the same: list, then rotate the row
 //   that appeared, instead of POSTing `create` twice.
 //
-// Full reference: `docs/API.md` (API keys), `docs/SECURITY.md` (credentials).
+// Full reference: `docs/API.md` (API keys), `SECURITY.md` (credentials).
 
 use axum::http::Method;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

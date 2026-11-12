@@ -177,8 +177,8 @@ before the exemption is consulted.
   the HTTP request / forgets the stdio waiter.
 * **Dead servers**: when a call fails at the transport level (child exited, HTTP
   connection refused) the server's status flips to `failed` with the reason, and
-  its tools disappear from the registry. `GET /api/mcp` shows it; a reconnect is
-  an explicit action for now (see §6).
+  its tools disappear from the registry. `GET /api/mcp` shows it; there is no
+  reconnect path — restart the process to reconnect a failed server.
 * **Error mapping**:
   * JSON-RPC `error` → failed tool outcome:
     `MCP server `fs` reported an error for tool `mcp__fs__read`: <message> (code -32601)`.
@@ -251,8 +251,8 @@ Stated plainly so nobody is surprised:
 * **Legacy HTTP+SSE transport** (the pre-streamable two-endpoint dialect).
 * **OAuth / interactive auth**: only static `headers` are supported. Tokens from
   a browser flow are not handled.
-* **Automatic reconnect/backoff**: a failed server stays failed until an explicit
-  reconnect or a restart. There is no health-check loop.
+* **Automatic reconnect/backoff**: a failed server stays failed until the process
+  is restarted. There is no health-check loop.
 * **`ping` keepalive**: not sent.
 * **Concurrency limits per server**: requests are multiplexed freely; the MCP
   spec's `maxConcurrency` hints are ignored.

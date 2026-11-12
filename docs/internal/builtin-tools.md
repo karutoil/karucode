@@ -316,4 +316,4 @@ Secrets are never passed to a command: `KARUCODE_*`, `AWS_*`, `OPENAI_*`,
 therefore cannot be exfiltrated by a prompt-injected `curl`. A command that
 needs a credential must be given it explicitly (e.g. read from a file).
 
-Full reference: `README.md` (What it does), `docs/SECURITY.md`.
+Full reference: `README.md` (What it does), `SECURITY.md`.

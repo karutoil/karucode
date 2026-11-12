@@ -7,7 +7,7 @@
 
 - **Slug:** `api-keys`
 - **Tags:** api keys, authentication, bearer, token, integration, scopes, expiry, rotate, revoke, security, automation
-- **Applies to:** `route:GET /api/auth/api-keys`, `route:POST /api/auth/api-keys`, `route:PATCH /api/auth/api-keys/:id`, `route:DELETE /api/auth/api-keys/:id`, `route:POST /api/auth/api-keys/:id/rotate`, `route:GET /api/auth/me`, `route:GET /api/auth/status`, `header:Authorization`, `header:X-Karucode-Client`, `header:X-Karucode-Admin-Token`, `env:KARUCODE_ADMIN_TOKEN`, `config:admin_token`, `config:[access]`, `config:access.enabled`, `ui:Settings`, `ui:AccessSettings`, `file:crates/kc-server/src/api_keys.rs`, `file:crates/kc-server/src/app.rs`, `doc:docs/API.md`, `doc:docs/SECURITY.md`
+- **Applies to:** `route:GET /api/auth/api-keys`, `route:POST /api/auth/api-keys`, `route:PATCH /api/auth/api-keys/:id`, `route:DELETE /api/auth/api-keys/:id`, `route:POST /api/auth/api-keys/:id/rotate`, `route:GET /api/auth/me`, `route:GET /api/auth/status`, `header:Authorization`, `header:X-Karucode-Client`, `header:X-Karucode-Admin-Token`, `env:KARUCODE_ADMIN_TOKEN`, `config:admin_token`, `config:[access]`, `config:access.enabled`, `ui:Settings`, `ui:AccessSettings`, `file:crates/kc-server/src/api_keys.rs`, `file:crates/kc-server/src/app.rs`, `doc:docs/API.md`, `doc:SECURITY.md`
 - **Source:** `crates/kc-server/src/api_keys.rs:1`
 
 ---
@@ -148,4 +148,4 @@ human-held credential.
   hitting the same ambiguity should do the same: list, then rotate the row
   that appeared, instead of POSTing `create` twice.
 
-Full reference: `docs/API.md` (API keys), `docs/SECURITY.md` (credentials).
+Full reference: `docs/API.md` (API keys), `SECURITY.md` (credentials).

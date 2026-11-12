@@ -109,7 +109,7 @@ plays, and only the *desktop* notification needs the page to still be open.
   `http://localhost` are treated as secure; a LAN address over plain HTTP is not,
   so the settings screen has to say "not available here" instead of failing
   silently. karucode speaks plain HTTP and expects a TLS terminator in front
-  (`docs/SECURITY.md:172`).
+  (`SECURITY.md:172`).
 * `requestPermission()` must be called from a **user gesture** (Firefox ≥ 72,
   Safari already refuse otherwise), and on most mobile browsers the constructor
   throws `TypeError` — persistent notifications need a service worker. **Decision:**

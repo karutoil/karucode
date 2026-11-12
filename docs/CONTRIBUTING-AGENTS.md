@@ -28,7 +28,8 @@ cargo clippy -p <your-crate> -- -D warnings
 cargo fmt -p <your-crate>
 ```
 
-Rust 1.96, edition 2021. Dependencies come from `[workspace.dependencies]`; add a
+Rust 1.89+ (the workspace `rust-version`; MSRV, checked by CI), edition 2021.
+Dependencies come from `[workspace.dependencies]`; add a
 new dependency to the workspace table only if necessary, and prefer none.
 
 `cargo build -p kc-server` also builds the frontend (`npm ci` + `npm run build`,

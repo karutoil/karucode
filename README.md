@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="branding/social/banner.png" alt="karucode — a self-hosted coding agent for long sessions" width="1280">
+  <img src="branding/social/banner.svg" alt="karucode — a self-hosted coding agent for long sessions" width="1280">
 </p>
 
 <h1 align="center">karucode</h1>
@@ -11,11 +11,16 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-dfb680.svg" alt="MIT license"></a>
-  <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.89%2B-dfb680.svg" alt="Rust 1.89+"></a>
+  <a href="Cargo.toml"><img src="https://img.shields.io/badge/rust-1.89%2B-dfb680.svg" alt="Rust 1.89+"></a>
   <a href="docs/API.md"><img src="https://img.shields.io/badge/API-v1-dfb680.svg" alt="API v1"></a>
+  <a href="https://github.com/karutoil/karucode/actions/workflows/ci.yml"><img src="https://github.com/karutoil/karucode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
 
 ---
+
+> **Reading this inside the release tarball?** Only this README, `LICENSE` and
+> `config.example.toml` are beside the binary; every deep link below points into
+> the source repository: <https://github.com/karutoil/karucode>.
 
 karucode reads your project, searches it, edits files, runs commands with streamed
 output, inspects git, delegates to subagents and keeps going through multi-step
@@ -47,12 +52,14 @@ workspace built for a long session, not for a dashboard demo.
 | [What it does](#what-it-does) | the runtime, tools, approvals, containment, crash recovery |
 | [Quick start](#quick-start) | build it and run a real task in two commands |
 | [Install](#install) | container or systemd, without a checkout |
+| [The browser workspace](#the-browser-workspace) | the terminal tab, notifications, titles, themes, artifacts, the control plane |
 | [Configuration](#configuration) | precedence, the keys that matter, remote access |
 | [Providers](#providers) | gateways, named profiles, model metadata, retries |
 | [Plugins and MCP](#plugins-and-mcp) | add tools with a separate process or a server |
 | [Security](#security) | the trust boundaries, and the one that is missing |
 | [Development](#development) | tests, gates, the docs contract, repository layout |
 | [Known limitations](#known-limitations) | what it does not do, stated plainly |
+| [Support](#support) | where to file bugs, report security issues, contribute |
 | [License](#license) | MIT, and where the brand rules live |
 
 ## What it does
@@ -85,11 +92,18 @@ workspace built for a long session, not for a dashboard demo.
   the binary, so they cannot drift from the build. The model reads them through
   the read-only `karucode_docs` tool; humans read the mirror in
   [docs/internal](docs/internal/).
+* **A browser workspace built for the long haul.** Sessions across projects in
+  one browser, a terminal tab that survives a reload, notifications when a run
+  settles or parks on an approval, AI-written session titles, themes, and a
+  control plane over every session. The details are a section of their own
+  below.
 
 ## Quick start
 
-Prerequisites: Linux (primary target; other Unixes should work) and Rust 1.89+
-for the backend (matching the workspace's `rust-version`). Node.js 22.12+ is needed
+Prerequisites: Linux (the primary target — the shell tool's process-group code is
+Linux-specific). macOS runs the unit-test matrix in CI but is otherwise untested;
+Windows is unsupported (`setsid`/`libc` in the shell tool). Rust 1.89+ for the
+backend (matching the workspace's `rust-version`). Node.js 22.12+ is needed
 **only** to build the frontend — it is
 embedded into the binary and not needed at runtime. Optional: `ripgrep` (a
 pure-Rust fallback is built in) and `git`.
@@ -140,6 +154,7 @@ docker run -d --name karucode -p 8787:8787 \
 
 # systemd: verified release tarball, binary + hardened unit
 sudo ./packaging/install.sh --workspace /srv/karucode/workspace
+# (inside the release tarball the installer sits at ./install.sh)
 # ... or install the build you already have, before any release exists:
 cargo build --release -p kc-server
 sudo ./packaging/install.sh --binary target/release/karucode --workspace /srv/karucode/workspace
@@ -194,10 +209,40 @@ survive. `sh packaging/update.sh --check` tells you whether there is anything to
 update, and `--dry-run` prints the plan.
 
 Two things to set before exposing it beyond loopback: `KARUCODE_AUTH_TOKEN` (a
-non-loopback bind is refused without one, minimum 16 characters) and
-`KARUCODE_ADMIN_TOKEN` (so an ordinary API client cannot turn approvals off or
-repoint the provider). There is no TLS in the binary — put it behind a reverse
-proxy or an SSH tunnel.
+non-loopback bind is refused without it — or without web sign-in configured;
+minimum 16 characters) and `KARUCODE_ADMIN_TOKEN` (so an ordinary API client
+cannot turn approvals off or repoint the provider). There is no TLS in the
+binary — put it behind a reverse proxy or an SSH tunnel.
+
+## The browser workspace
+
+The runtime above is half the product; the other half is where you watch it.
+Every feature below is shipped today:
+
+* **Terminal tab.** A real shell in the browser, one per session, its own
+  process group. It survives a page reload and a second browser; a server
+  restart kills it (the honest limit is in
+  [docs/internal/terminals.md](docs/internal/terminals.md)).
+* **Notifications.** A run that finishes, parks on an approval or fails pings
+  you: a sound per kind, desktop notifications and an unread badge. Each
+  off-switch is in Settings → Notifications; temporary (ephemeral) chats stay
+  silent by default.
+* **Session titles.** Titled from the first message; with `[titles]` on (the
+  default) a model writes a short plain-language title instead, using the
+  session's own model or a cheaper one you pick.
+* **Themes and the transcript.** Theme Studio edits palette, density, fonts and
+  the transcript view — tool calls as cards or rows, grouped calls, reasoning
+  folded or open — and a theme exports and imports as JSON.
+* **Artifacts.** A reply can carry an HTML mock, a Mermaid diagram or a table;
+  the UI draws it as a card with a live Preview/Source switch, in a sandboxed
+  opaque-origin frame (see [Security](#security)).
+* **The control plane.** The **k.** rail button lists every session across
+  projects; open one to steer, cancel or read it, or start a session in any
+  registered project. Control chats dispatch and audit work outside every
+  project, under normal approvals.
+* **Ephemeral sessions.** `"ephemeral": true` on `POST /api/sessions` makes a
+  chat for a program: it never appears in the session rail and deletes itself
+  the moment its work ends.
 
 ## Configuration
 
@@ -256,8 +301,10 @@ max_run_secs = 86400   # hard wall clock for the whole run (24h)
 What ends a run instead: the model finishing its work, you cancelling it, the wall
 clock, an operator-set `max_iterations` (a plain stop with status `limit_reached`),
 or the **loop guard** — four turns in a row that only return answers the run
-already has stop it and say why. A single identical read-only call is refused
-before that, and a stream that repeats one short block forever is abandoned and
+already has stop it and say why. Identical read-only calls are noticed first —
+the third carries a warning and the fourth is refused, unless something outside
+the run changed in which case it is eventually let through — and a stream that
+repeats one short block forever is abandoned and
 re-issued. Subagents follow the same rules with `subagents.max_iterations`
 (`0` by default) and `subagents.timeout_secs`.
 
@@ -373,7 +420,8 @@ cannot reason.
 
 Model metadata (context window, output limit, tool calling, reasoning, cost) can
 be prefilled from [models.dev](https://models.dev). The server fetches the
-catalog itself (`GET /api/models/catalog`), caches it for six hours and serves
+catalog itself (`GET /api/models/catalog`) — lazily, on the first request, then
+cached for six hours — and serves
 one provider's models at a time; `refresh=true` forces a refetch. Point it at a
 mirror or an air-gapped copy (read once at startup, `http(s)://` only):
 
@@ -471,22 +519,37 @@ Two demo plugins that rearrange the interface live in
 [`plugins/demos/`](plugins/demos/README.md) — single Python files, installable by
 config entry, and the fastest way to see what the UI layer can do.
 
+Install a collection without a checkout: `karucode plugin install owner/repo`
+(or a local directory) builds what needs building and places each plugin under
+`<data_dir>/plugins/<name>/`. Reload without a restart: `POST /api/plugins/reload`
+(or `plugins_watch = true`) starts, stops or replaces plugins, and a rebuilt
+binary counts as changed — command files are fingerprinted by mtime and size.
+
 ## Security
 
-Read [docs/SECURITY.md](docs/SECURITY.md) before exposing the server.
+Read [SECURITY.md](SECURITY.md) before exposing the server.
 
-* The server binds to loopback; a remote bind requires an auth token.
+* The server binds to loopback; a remote bind needs an auth token or web
+  sign-in (`[access]` with a password or a passkey) configured.
 * Browser clients are CSRF-protected (a custom header plus the Origin/Host check).
 * File tools are confined to the workspace — plus the temp dir, so scratch files
   work — and symlink escapes are refused.
 * Child processes get a credential-free environment allowlist, so a
-  prompt-injected `curl` cannot exfiltrate the harness token or the provider key.
+  prompt-injected `curl` cannot read the harness token or the provider key
+  **from the environment**. The agent still runs as the server user, and its
+  shell can read the config file and the database directly — treat the key as
+  readable by anything the agent can run.
+* Web sign-in: a password or a passkey exchanges for an `HttpOnly` session
+  cookie instead of pasting the bearer token into a form; the first credential
+  set turns it on, removing the last one turns it off.
+* `POST /api/auth/api-keys` mints scoped, expiring bearer keys for scripts and
+  integrations, rotatable without touching the web password.
 * Secrets are never returned to the browser or written to logs.
 * Markdown is rendered with raw HTML disabled and then sanitised. A chat artifact
   (an HTML mock from a reply) is a **separate document** in a sandboxed opaque-origin
   frame with a random per-artifact capability, never the master token. Script network,
   remote subresources and forms are blocked; directly opened top-level content can
-  still self-navigate, as [docs/SECURITY.md](docs/SECURITY.md) explains.
+  still self-navigate, as [SECURITY.md](SECURITY.md) explains.
 * **Shell commands are not sandboxed** — approvals are the gate, not isolation.
 * Plugins and MCP servers are trusted code; subagents share the workspace, and
   `owned_paths` is advisory, not locking.
@@ -540,6 +603,16 @@ the exact methodology are in [reports/bench.md](reports/bench.md), the full
 verification record — including what was checked in a real browser — in
 [docs/REPORT.md](docs/REPORT.md). No memory target is promised.
 
+### Turning the docs into a website
+
+The whole documentation tree imports into a static site generator as-is: no
+frontmatter is required (titles come from each file's single H1), and
+[docs/internal/index.json](docs/internal/index.json) is a machine-readable nav
+index (slug, title, summary, tags, identifiers) that
+`scripts/gen_docs_nav.py` turns into the site navigation. The setup — chosen
+generator, link-rewrite rules, and the known rough edges — is written down in
+[docs/WEBSITE.md](docs/WEBSITE.md).
+
 ### The documentation contract
 
 Documentation about karucode itself is compiled from `@kc-doc` blocks in the
@@ -570,7 +643,7 @@ explains the format.
 | `web/` | Preact + Vite frontend |
 | `plugins/example-hello` | a working example plugin |
 | `examples/demo-app` | a buggy Node project for trying the agent |
-| `docs/` | API, architecture, plugins, MCP, security, production readiness |
+| `docs/` | API, architecture, plugins, MCP, security |
 | `scripts/` | mock provider, e2e gates, benchmark, README checker |
 | `packaging/` | Dockerfile, systemd unit, install script |
 
@@ -584,23 +657,52 @@ Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). HTTP contract:
 * **Subagents share the parent's live workspace**, including dirty and untracked
   files. Their completed edits survive completion; `owned_paths` provides
   advisory conflict reporting, not file locking or worktree isolation.
-* **Sequential tool execution** within a turn (deterministic approvals and
-  events): parallel calls from the model are executed in order.
+* **Tool calls run in order unless they are read-only.** Calls that cannot see
+  each other's effects run concurrently; a mutating call, a pending approval, or
+  a path another call in the turn names makes the turn sequential.
+  `limits.parallel_tool_calls = false` forces fully sequential execution.
 * **MCP** supports stdio and streamable HTTP; the legacy SSE-only transport is
-  not implemented, and resources/prompts are not surfaced — tools only.
-* **Plugins** are processes, not Wasm: no filesystem sandbox, and no hot reload
-  of a changed binary (disable/enable restarts the process).
+  not implemented, and resources/prompts are not surfaced — tools only. A failed
+  server has no reconnect path: restart the process.
+* **Plugins** are processes, not Wasm: no filesystem sandbox. A changed binary
+  **is** hot-reloaded (`POST /api/plugins/reload` or `plugins_watch = true`).
 * **Providers are install-wide, not per project.** `active_provider` /
   `active_model` are the default for every project; a *session* can pin its own
   provider/model and reasoning effort (`PATCH /api/sessions/:id/model`), but
   switching project does not switch model, and per-session workspace overrides do
   not exist.
+* **Cost metadata is stored but not used.** `cost_input` / `cost_output` are
+  collected and never multiplied by usage: there are no token or cost columns on
+  `runs` and no `max_cost_usd` budget, so an operator cannot answer "what did
+  this run cost" from the database.
+* **Single operator.** There is no per-user authorization beyond the optional
+  shared token: any token holder can read every transcript and answer every
+  approval. `KARUCODE_ADMIN_TOKEN` separates operating from reconfiguring, not
+  one user from another.
 * **No built-in TLS.** Put a reverse proxy in front for remote access.
 * **Compaction is trimming**, not model-assisted summarisation: old turns are
   replaced by a digest once the context budget is exceeded, while the persisted
   transcript keeps everything.
 * Token accounting is whatever the provider reports; absent usage is shown as
   unknown rather than invented.
+
+## Support
+
+* **Bugs and feature requests:** file an issue with the output of
+  `karucode --version` and the smallest reproduction you can manage.
+* **Security:** read [SECURITY.md](SECURITY.md) before exposing the server
+  beyond loopback. It documents the trust model and how to report a
+  vulnerability.
+* **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) has the build
+  prerequisites, the gates every change passes, and the PR checklist.
+  [AGENTS.md](AGENTS.md) is the deeper contract for a change, and
+  [docs/CONTRIBUTING-AGENTS.md](docs/CONTRIBUTING-AGENTS.md) adds the
+  multi-agent collaboration rules.
+* **Reading the docs:** [docs/](docs/) holds the operator references (API,
+  architecture, plugins, MCP, security) and
+  [docs/internal/](docs/internal/) is the generated mirror of the in-binary
+  docs — read it, never edit it. [CHANGELOG.md](CHANGELOG.md) records every
+  release; every commit on `main` is one.
 
 ## License
 

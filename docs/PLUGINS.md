@@ -240,7 +240,8 @@ If a tool call finds the process dead, the host makes **one** restart attempt
 (spawn + handshake), up to **3 restarts per plugin per server lifetime**. Beyond
 that the call fails with
 `plugin `x` is not running (…) and has already been restarted 3 times; fix the
-plugin or reload it`. Enabling or reloading the plugin resets the budget. The
+plugin or restart the server`. Reloading or re-enabling the plugin resets the
+budget (a fresh slot starts with zero restarts). The
 `restart_count` field in `GET /api/plugins` shows the current count.
 
 ### Installing, upgrading and removing without a restart

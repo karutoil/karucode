@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security
+    url: https://github.com/karutoil/karucode/security
+    about: Report vulnerabilities through private vulnerability reporting, not public issues.
+  - name: Documentation
+    url: https://github.com/karutoil/karucode/tree/main/docs
+    about: HTTP API, architecture, plugins, MCP and the security model live in docs/.
+  - name: Operator guide
+    url: https://github.com/karutoil/karucode/tree/main/packaging
+    about: Installing, backing up, upgrading and running as a service.

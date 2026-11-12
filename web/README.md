@@ -66,7 +66,7 @@ UI and API are same-origin.
 
 ## Structure
 
-```
+```text
 src/
   api/        typed client, endpoint functions, fetch-based SSE stream, API types
   state/      signals store, transient Workbench Context, pure event reducer,
@@ -153,7 +153,7 @@ JSON, a CSV/TSV table, or an image. The user-facing convention (and what an agen
 should write) is the `artifacts` topic in `karucode_docs`; this section is how the
 renderer is put together.
 
-```
+```text
 lib/artifacts.ts             pure parser: fence info string + `---` header block -> ArtifactSpec
 lib/markdown.ts              renderMarkdownDocument(): the same markdown-it+DOMPurify
                              pipeline, but a recognised fence becomes an empty

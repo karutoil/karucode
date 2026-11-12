@@ -85,7 +85,7 @@
 // * Changing the mode via `PATCH /api/config` applies to the next decision, not
 //   retroactively to an approval already pending.
 //
-// Full reference: `docs/SECURITY.md`, `docs/API.md` (approvals).
+// Full reference: `SECURITY.md`, `docs/API.md` (approvals).
 
 use crate::config::ApprovalMode;
 use serde::{Deserialize, Serialize};

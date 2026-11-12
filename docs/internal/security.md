@@ -7,7 +7,7 @@
 
 - **Slug:** `security`
 - **Tags:** security, auth, csrf, sandbox, remote, trust
-- **Applies to:** `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_ALLOWED_HOSTS`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `env:KARUCODE_ADMIN_TOKEN`, `header:X-Karucode-Client`, `header:Authorization`, `header:Cookie`, `config:auth_token`, `config:admin_token`, `config:allow_temp_dir`, `config:[access]`, `config:access.public_url`, `config:access.tunnel`, `config:access.trusted_proxies`, `config:[updates]`, `config:updates.manifest_url`, `config:updates.auto_apply`, `env:KARUCODE_UPDATE_MANIFEST_URL`, `env:KARUCODE_UPDATE_AUTO_APPLY`, `route:GET /api/update`, `route:POST /api/update/apply`, `route:GET /api/auth/api-keys`, `route:POST /api/auth/api-keys`, `route:PATCH /api/auth/api-keys/:id`, `route:DELETE /api/auth/api-keys/:id`, `route:POST /api/auth/api-keys/:id/rotate`, `header:X-Karucode-Admin-Token`, `doc:docs/SECURITY.md`, `concept:approvals`, `concept:workspace containment`, `concept:sign-in`, `concept:api key scope`, `concept:update manifest`
+- **Applies to:** `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_ALLOWED_HOSTS`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `env:KARUCODE_ADMIN_TOKEN`, `header:X-Karucode-Client`, `header:Authorization`, `header:Cookie`, `config:auth_token`, `config:admin_token`, `config:allow_temp_dir`, `config:[access]`, `config:access.public_url`, `config:access.tunnel`, `config:access.trusted_proxies`, `config:[updates]`, `config:updates.manifest_url`, `config:updates.auto_apply`, `env:KARUCODE_UPDATE_MANIFEST_URL`, `env:KARUCODE_UPDATE_AUTO_APPLY`, `route:GET /api/update`, `route:POST /api/update/apply`, `route:GET /api/auth/api-keys`, `route:POST /api/auth/api-keys`, `route:PATCH /api/auth/api-keys/:id`, `route:DELETE /api/auth/api-keys/:id`, `route:POST /api/auth/api-keys/:id/rotate`, `header:X-Karucode-Admin-Token`, `doc:SECURITY.md`, `concept:approvals`, `concept:workspace containment`, `concept:sign-in`, `concept:api key scope`, `concept:update manifest`
 - **Source:** `crates/kc-server/src/app.rs:16`
 
 ---
@@ -188,4 +188,4 @@ Put the whole process in a container or VM, keep `approvals.mode =
 workspace you have not reviewed. A `read_only` run still executes read-only
 tools; it denies writes, shell and external tools.
 
-Full reference: `docs/SECURITY.md`.
+Full reference: `SECURITY.md`.

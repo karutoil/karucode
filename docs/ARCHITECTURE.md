@@ -19,8 +19,9 @@ stream and the built frontend. No Node.js at runtime.
    └── kc-store (SQLite, WAL)
 ```
 
-Dependency direction: `kc-core` has no workspace deps. `kc-store`, `kc-provider`,
-`kc-tools` depend only on `kc-core`. `kc-runtime` depends only on `kc-core` and
+Dependency direction: `kc-core` depends only on `kc-docs` (the compiled doc
+registry). `kc-store`, `kc-provider` depend only on `kc-core`; `kc-tools`
+depends on `kc-core` and `kc-docs`. `kc-runtime` depends only on `kc-core` and
 implements the loop against traits (`Store`, `ProviderFactory`, `Settings`,
 `Tool`, `Hooks`), which keeps it testable with fakes. `kc-server` wires the
 concrete implementations together.
@@ -37,6 +38,7 @@ concrete implementations together.
 | `kc-plugin-host` | discovery, supervision, JSON-RPC over stdio, hook fan-out |
 | `kc-mcp` | MCP client (stdio + streamable HTTP), tool namespacing |
 | `kc-plugin-sdk` | small crate used to write plugins |
+| `kc-docs` | `@kc-doc` block parser, compile-time doc table, `kc-docs` CLI (`--write`/`--check`), search registry |
 | `kc-server` | axum routes, SSE fan-out, auth/CSRF, static assets, wiring, shutdown |
 
 ## Agent loop

@@ -2122,7 +2122,7 @@ fn env_bool(name: &str) -> Result<Option<bool>> {
 
 /// Minimum length for both the bearer token and the admin token.
 ///
-/// Sixteen characters is the floor published in `docs/SECURITY.md`,
+/// Sixteen characters is the floor published in `SECURITY.md`,
 /// `.env.example` and the startup error, and it is what makes a human-typed
 /// token the wrong choice: `openssl rand -hex 24` is 48 characters.
 pub const MIN_TOKEN_LEN: usize = 16;

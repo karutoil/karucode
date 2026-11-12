@@ -6,9 +6,13 @@ All responses are JSON unless noted. Errors use:
 { "error": { "code": "bad_request", "message": "human readable" } }
 ```
 
-Codes: `bad_request`, `not_found`, `permission_denied`, `unauthorized`, `config`,
-`provider`, `tool`, `store`, `plugin`, `timeout`, `path_escape`,
-`payload_too_large`, `update`, `internal`.
+Codes: `bad_request`, `not_found`, `permission_denied`, `unauthorized`,
+`too_many_requests`, `config`, `provider`, `tool`, `store`, `plugin`, `timeout`,
+`path_escape`, `payload_too_large`, `update`, `internal`.
+
+`too_many_requests` is the only `429`: eight wrong sign-ins from one address within
+15 minutes lock that address out of `POST /api/auth/login` and the passkey sign-in
+steps for 5 minutes, and the lockout applies to the correct password too.
 
 `update` (a `502`) means the release source failed - an unreachable manifest, a
 malformed one, a checksum mismatch. A refusal (already up to date, no artifact for
@@ -537,7 +541,8 @@ until the Workbench result pane has an explicit pixel preference.
   empty, over-long (>80 characters) or control-character name is **not** rejected
   here: the basename is used instead. `PATCH` is the strict path.
 
-`PATCH /api/projects/:id` body `{ "name": "..." }` → `{ "project": Project }`  
+`PATCH /api/projects/:id` body `{ "name": "..." }` → `{ "project": Project }`
+
 `404 not_found` for an unknown id; `400 bad_request` when the name is empty,
 longer than 80 characters or contains control characters.
 
@@ -633,8 +638,9 @@ life is announced with the same `session_deleted` event an ordinary delete
 sends. Three ways to end one early or in bulk:
 
 - `POST /api/sessions/:id/expire` → `{ "expired": true, "session_id": … }`.
-  `400 bad_request` on a durable session (use `DELETE`), `409 conflict` while
-  steers or follow-ups are still queued for it.
+  `400 bad_request` on a durable session (use `DELETE`), `409 bad_request` while
+  steers or follow-ups are still queued for it - the status carries the conflict,
+  there is no separate `conflict` code.
 - `DELETE /api/sessions` (no id) → `{ "deleted": N, "sessions": [ … ] }`:
   retires every **idle** ephemeral session and never touches a durable one.
 - `DELETE /api/sessions/:id` still works and cancels any run in flight first.
@@ -835,7 +841,8 @@ emitting `session_model_changed`:
 
 `PATCH /api/sessions/:id` — `{ "model": { … } }` sets, `{ "model": null }`
 clears; `title` and `model` may be sent in one request. A request with neither is
-`400 bad_request`.  
+`400 bad_request`.
+
 `DELETE /api/sessions/:id` → `{ "deleted": true }`
 
 `POST /api/sessions/:id/messages` `{ "content": "..." }`
@@ -981,7 +988,7 @@ missing key the same as `null`.
 ## Subagents
 
 Subagent messages are stored in the parent session with `agent_id` set, and the
-session transcript in the web UI deliberately hides them. These two routes expose
+session transcript in the web UI deliberately hides them. These routes expose
 the delegated work itself.
 
 `GET /api/agents?project=<id>&session=<id>&status=running,failed`
@@ -1015,17 +1022,222 @@ by `?messages=` (default 2000, max 50000). It is the same `StoredMessage` shape 
 session transcript uses, so the task turn, assistant text, thinking, tool calls and
 tool results are all present. An unknown id is `404 not_found`.
 
+`POST /api/agents/:id/pause` · `POST /api/agents/:id/resume` · `POST /api/agents/:id/cancel`
+→ `{ "agent_id": "a_x", "action": "pause", "status": "paused" }`
+
+All three are one registered route, `/api/agents/:id/:action`. No body. The path
+segment is the verb: `pause`, `resume` or `cancel` (`kill` and `stop` are accepted
+aliases for `cancel`). `status` is the agent's status after the call — `paused`,
+`running` or `cancelled` — read from the store, so a terminal write that raced the
+control call is what is reported.
+
+* An unknown action is `400 bad_request` before the agent is looked up.
+* An agent that is not live is `404 not_found`; a subagent exists only in memory
+  while its run is live, so this is also what a finished agent returns.
+* Pausing an agent whose cancellation already landed is `400 bad_request`.
+  Everything else is accepted: a second pause is idempotent (`200`, `paused`), and
+  resuming an agent that is being cancelled answers `200` with `cancelled`.
+
+`pause` takes effect **between iterations**, after the turn in flight has finished
+and persisted its tool results - it is not an interrupt of a provider call.
+`cancel` kills the run and answers without waiting for it to unwind; a parked
+agent is still killable, so a paused agent cannot get stuck. The event stream
+carries what happened next: `agent_paused` (`paused: true|false`, `by: "user"`),
+`agent_progress` and `agent_finished`.
+
 Live activity arrives on the normal event stream, stamped with the agent's
 `agent_id`: `text_delta`, `reasoning_delta`, `tool_call_started/finished`,
 `command_started/output/finished`, `approval_requested/resolved`, plus the
 lifecycle events `agent_spawned`, `agent_progress` and `agent_finished`. One
 connection covers every agent in every session; there is no per-agent stream.
 
+## Missions
+
+A mission is a durable grouping owned by one **home project**; its member sessions
+may run in other projects. It holds two kinds of work: sessions an operator
+authorises explicitly, one call each, and a dependency graph of draft tasks that
+runs only after `POST /api/missions/:id/start`. The `missions` doc topic is the
+agent-side view; this section is the HTTP surface.
+
+Mission ids are `m_…`. Task ids are minted like session ids (`s_…`), and a task's
+own `session_id` stays `null` until it is dispatched, so a task id is never a
+session id. Every route here needs the ordinary bearer credential (or an API key)
+with the `write` scope; none needs the admin token.
+
+| Method and path | Body | Answer |
+| --- | --- | --- |
+| `GET /api/missions?project=<id>` | – | page of mission details |
+| `POST /api/missions` | `{project_id, title, description?, max_provider_attempts?}` | mission detail |
+| `GET /api/missions/:id` | – | mission detail |
+| `DELETE /api/missions/:id` | – | `{ "deleted": true }` |
+| `POST /api/missions/:id/sessions` | `{request_id, project_id?, title, prompt}` | `{session_id, run_id, replayed}` |
+| `POST /api/missions/:id/coordinator` | – | `{session_id, created}` |
+| `POST /api/missions/:id/tasks` | `{title, prompt, project_id?, dependencies?, artifact_ids?}` | the draft task |
+| `PATCH /api/missions/:id/tasks/:task_id` | any of `project_id`, `prompt`, `dependencies` | the revised task |
+| `POST /api/missions/:id/tasks/:task_id/replan` | `{expected, project_id?, prompt?, dependencies?}` | the revised task |
+| `POST /api/missions/:id/tasks/:task_id/verification` | `{prompt, project_id?}` | the new draft task |
+| `POST /api/missions/:id/tasks/:task_id/retry` | `{request_id, project_id?}` | `{accepted, created, task_id}` |
+| `GET`/`POST /api/missions/:id/artifacts` | publish: `{request_id, title, content, task_id?, session_id?}` | `{records}` / MissionRecord |
+| `GET`/`POST /api/missions/:id/evidence` | as artifacts, plus `artifact_id?` | `{records}` / MissionRecord |
+| `POST /api/missions/:id/start` | `{max_concurrency?}` | mission detail |
+| `POST /api/missions/:id/pause` | – | mission detail |
+| `POST /api/missions/:id/resume` | – | mission detail |
+| `POST /api/missions/:id/cancel` | – | mission detail |
+
+Every answer that names a mission returns the same detail:
+
+```json
+{ "id": "m_x", "project_id": "p_x", "title": "Upgrade", "description": "",
+  "created_at": 0, "updated_at": 0,
+  "max_provider_attempts": null, "provider_attempts": 3,
+  "usage": { "calls": 3, "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+             "cached_known_calls": 0, "last_input_tokens": 0 },
+  "cost": null, "schedule_state": null, "coordinator_session_id": null,
+  "sessions": [ { "project_id": "p_x", "session_id": "s_x", "request_id": "k",
+                  "prompt": "...", "created_at": 0, "session": Session,
+                  "latest_run": RunRecord, "running": false } ],
+  "tasks": [ { "id": "s_y", "mission_id": "m_x", "project_id": "p_x",
+               "title": "Build", "prompt": "...", "dependencies": [],
+               "artifact_ids": [], "state": "draft", "session_id": null,
+               "run_id": null, "error": null } ] }
+```
+
+* `schedule_state` is `null` until the mission starts, then `active`, `paused` or
+  `cancelled`.
+* `provider_attempts` counts the provider chat attempts charged so far against
+  `max_provider_attempts` (`null` = no limit; the limit is immutable once the
+  mission exists).
+* `usage` is best-effort, provider-reported totals; `cost` is always `null` because
+  no price is stored.
+* `sessions` keeps the `request_id` and `prompt` a session was reserved with even
+  after the session is deleted; `session` and `latest_run` are then `null`.
+* task `state` ∈ `draft|pending|running|completed|failed|cancelled|blocked|interrupted`.
+
+### Listing and creating missions
+
+`GET /api/missions` requires `project` (`400 bad_request` without it) and takes
+`offset` (default `0`) and `limit` (default `50`, rejected outside `1..=100`). It
+answers `{missions, offset, limit, has_more, next_offset}`: the missions that
+project **owns**, newest first, each already in full detail. An unregistered
+project is `404 not_found`. Follow `next_offset` while `has_more` is true; no call
+materialises the whole project implicitly.
+
+`POST /api/missions` takes `project_id` (≤128 bytes), `title` (≤200), optional
+`description` (≤65536, default `""`) and optional `max_provider_attempts` (`0`
+forbids every provider attempt). Unknown body fields, and a missing or over-long
+field, are `400 bad_request`; an unregistered project is `404 not_found`.
+
+`DELETE /api/missions/:id` removes the grouping with its tasks and records; it does
+not delete or cancel the sessions it started. An unknown id is `404 not_found`.
+
+### Mission sessions
+
+`POST /api/missions/:id/sessions` reserves one ordinary chat session and starts its
+run. `request_id` (≤128) makes the call idempotent, `title` is ≤200 and `prompt`
+≤1 MiB. `project_id` is optional and defaults to the mission's home project; it
+selects the session's workspace, not the mission owner. A new session is `202`; a
+replay with the same `request_id` and identical input is `200` with
+`"replayed": true` and the original `session_id`/`run_id`, and starts nothing.
+
+* Request ids the server reserves (`_karucode_coordinator`, `_karucode_task_…`) are
+  `400 bad_request`.
+* Reusing a `request_id` with a different project, title or prompt is
+  `400 bad_request`; an unknown mission is `404 not_found`.
+* A crash between the reservation and the submit can leave a session with no run.
+  Nothing is resubmitted on retry; inspect the session and send it a message.
+
+`POST /api/missions/:id/coordinator` reserves - does not start - exactly one
+session in the mission's home project for the coordinator chat, under the reserved
+request id, and answers `{session_id, created}` (`created: false` on a repeat). A
+reserved coordinator session whose session row was deleted cannot be recreated:
+that is `409 bad_request`. An unknown mission is `404 not_found`.
+
+### Draft tasks, start and the schedule
+
+`POST /api/missions/:id/tasks` adds one draft task: `title` (≤200), `prompt`
+(≤1 MiB), optional `project_id` (defaults to the mission home), `dependencies`
+(default `[]`; at most 256 unique ids of tasks already in this mission) and
+`artifact_ids` (default `[]`; at most 16 artifacts already published here, 256 KiB
+of content and titles combined). The answer is the task with `state: "draft"`. An
+unknown mission or project is `404 not_found`; a missing/over-long field, an
+unknown, duplicate or self-referencing dependency, an artifact over either limit,
+or a task added after start are `400 bad_request`.
+
+`PATCH …/tasks/:task_id` revises a draft before start with any of `project_id`,
+`prompt`, `dependencies` (the list replaces the whole set). A body with none of
+them, an unknown field, a mission that has started, a task that is not a draft, a
+dependency that is not a unique existing task, or a cycle is `400 bad_request`; an
+unknown task or project is `404 not_found`.
+
+`POST …/tasks/:task_id/replan` is the post-start version and needs the reviewed
+plan: `expected` is `{project_id, prompt, dependencies}` exactly as the task is now,
+plus at least one replacement among `project_id`, `prompt` and `dependencies`. Only
+never-claimed `pending` or `blocked` tasks in an `active` or `paused` mission are
+eligible. A stale `expected`, an ineligible task, or a mission that is not started
+(or is cancelled) is `400 bad_request`; the scheduler may claim the task the moment
+the replan commits.
+
+`POST …/tasks/:task_id/verification` drafts a separate task that depends on that
+task: `prompt` (≤1 MiB − 2 KiB) is wrapped in a verification instruction and
+`project_id` defaults to the source task's project. It answers the new draft; an
+unknown source task is `404 not_found`. Nothing runs before the mission starts, and
+a completed verification run is not a verdict - read its session.
+
+`POST …/tasks/:task_id/retry` re-queues a `failed`, `interrupted` or `cancelled`
+task: `request_id` (≤128, idempotent) plus an optional `project_id` for the next
+attempt. It answers `{accepted: true, created, task_id}`, where `created: false` is
+a replay. The mission must be started and not cancelled, and the task must be in
+one of those three states - anything else is `400 bad_request`; an unknown task or
+project is `404 not_found`. Blocked downstream tasks are re-evaluated, and retrying
+interrupted work can repeat its side effects.
+
+`POST /api/missions/:id/start` takes an optional `{ "max_concurrency": 2 }`; the
+body may be empty, the value must be `1..=8` (anything else is `400 bad_request`)
+and defaults to `2`. It flips every remaining draft to `pending`, and the first
+start fixes the concurrency: later starts are no-ops, so it never re-opens or
+re-throttles an approved plan. It answers the mission detail.
+
+`…/pause` stops new claims, `…/resume` restarts dispatch and `…/cancel` prevents
+new claims permanently and cancels unclaimed tasks; all three answer the detail.
+Tasks already claimed keep running through pause and cancel, and these controls do
+not touch the mission's independently started sessions. A mission that was never
+started has no schedule state, so all three are `400 bad_request` there; on a
+started mission each verb is idempotent (pausing a paused mission, resuming an
+active one and cancelling a cancelled one all succeed). Cancellation is
+irreversible: `start` does not override it.
+
+### Artifacts and evidence
+
+`POST /api/missions/:id/artifacts` and `…/evidence` publish one immutable record:
+`request_id` (≤128, unique per mission across both collections), `title` (≤200),
+`content` (≤1 MiB) and the optional provenance `task_id`, `session_id` and
+`artifact_id` (≤128 each). A new record is `201`; an identical replay is `200` with
+the original record; the same `request_id` with different fields is
+`400 bad_request`. `task_id` must be a task of this mission and, when both are
+given, `session_id` must be that task's session; `session_id` must name a session
+the mission reserved, dispatched or retried; `artifact_id` must name an artifact of
+this mission and is only accepted on evidence. Any mismatch is `400 bad_request`,
+an unknown mission is `404 not_found`. Ids beginning `_karucode_auto_evidence_` are
+reserved for records the scheduler writes itself.
+
+`GET` on either collection answers `{ "records": [...] }` in publication order,
+`404 not_found` for an unknown mission. A record is a publisher assertion: it does
+not execute a test, read a file or prove a result.
+
+```json
+{ "id": "s_r1", "mission_id": "m_x", "request_id": "k", "kind": "artifact",
+  "title": "Test result", "content": "cargo test: passed", "task_id": null,
+  "session_id": null, "artifact_id": null, "created_at": 0 }
+```
+
 ## Approvals
 
-`GET /api/approvals?session=s_ab12` → `{ "approvals": [ApprovalRecord] }` (pending only)  
-`POST /api/approvals/:id` `{ "decision": "allow_once" | "allow_session" | "deny" }`
-→ `{ "resolved": true, "decision": "allow_once" }`. `404` when unknown/expired.
+`GET /api/approvals?session=s_ab12` → `{ "approvals": [ApprovalRecord] }` (pending only)
+
+`POST /api/approvals/:id` body
+`{ "decision": "allow_once" | "allow_session" | "deny" }` →
+`{ "resolved": true, "decision": "allow_once" }`. `404 not_found` when the id is
+unknown or the approval already expired.
 
 ## Workspace files
 
@@ -1256,6 +1468,74 @@ curl -s -X POST localhost:8787/api/artifacts \
   are in-memory like their artifacts, so restart/eviction requires reposting the
   source and using the newly returned URL.
 
+## Terminals
+
+The terminal tab is a real shell on the server, owned by a durable row so a restart
+re-attaches instead of losing the tab. Every route here needs the `admin` scope on
+an API key (see [Scopes](#scopes)), and the server must have terminals enabled
+(`terminals.enabled`, `KARUCODE_TERMINALS=0` disables them). When they are disabled,
+`GET /api/terminals` still answers `{ "enabled": false, "terminals": [],
+"max_terminals": 0 }`, a create, a restart and the socket are `403
+permission_denied`, and renaming or deleting an existing row still works.
+
+`GET /api/terminals` →
+```json
+{ "enabled": true, "max_terminals": 16, "shell": "/bin/bash",
+  "scrollback_bytes": 262144,
+  "terminals": [ { "id": "t_x", "title": "karucode-1", "cwd": "/home/me/project",
+                   "project": "p_x", "position": 1, "created_at": 0,
+                   "updated_at": 0, "last_used_at": 0, "running": true,
+                   "pid": 4242, "attached": 1 } ] }
+```
+`running`, `pid` and `attached` describe the live process (`running: false`,
+`pid: 0` when there is none); the rest is the durable row, ordered by `position`.
+`max_terminals` is `terminals.max_terminals` (default 16) and `scrollback_bytes` is
+the replay buffer size kept per terminal.
+
+`POST /api/terminals` — every field is optional, and `{}` starts a shell in the
+default workspace:
+```json
+{ "title": "build", "cwd": "crates", "project": "p_x", "cols": 100, "rows": 30 }
+```
+→ `{ "terminal": Terminal }`. `cwd` is resolved inside the workspace (`project`,
+or the default workspace): `400 path_escape` for a path outside it, `400
+bad_request` for a path that exists but is not a directory, and `404 not_found` for
+a `cwd` that does not exist or an unregistered `project`. An omitted `title`
+derives one from the directory and the tab position; `cols`/`rows` default to
+`80`/`24` and are only the initial pty size. At `terminals.max_terminals` rows the
+answer is `400 bad_request` naming the limit (the cap counts rows, so deleting a
+tab frees a slot). The shell is started before the answer, so a shell that cannot
+start rolls the row back and the create fails instead of returning a tab that never
+opens.
+
+`PATCH /api/terminals/:id` body `{ "title": "logs" }` → `{ "terminal": Terminal }`.
+`title` is three-way: a string renames, `null` or `""` restores the derived default,
+and a body without `title` is a no-op that returns the current row. An unknown id is
+`404 not_found`.
+
+`DELETE /api/terminals/:id` → `{ "deleted": "t_x" }`. The shell is killed before the
+row is dropped, so a delete never leaves an orphan process. An unknown id is
+`404 not_found`.
+
+`POST /api/terminals/:id/restart[?cols=100&rows=30]` → `{ "terminal": Terminal }`.
+Kills the shell and starts a new one in the same directory with the same id, title
+and position; `cols`/`rows` default to `80`/`24`. `404 not_found` for an unknown id,
+`403 permission_denied` when terminals are disabled.
+
+`GET /api/terminals/:id/socket[?cols=…&rows=…&token=…]` — the websocket the
+browser attaches with. A handshake cannot carry the bearer header, so `?token=` is
+accepted exactly as on `/api/events`, and it needs the `admin` scope. The `Origin`
+header must match `Host` (`403 permission_denied` otherwise); an unknown id is
+`404 not_found` and `400 bad_request` means the per-terminal attachment cap is full.
+The first frame is text, `{"type":"ready","replay":true,"replay_bytes":8192,
+"pid":4242,"running":true}`; the replay bytes and every later output frame are
+binary, and a slow consumer gets `{"type":"lagged","missed":N}` instead of a
+silently truncated stream. The browser sends binary frames as keystrokes and text
+frames as control JSON: `{"type":"resize","cols":…,"rows":…}`, `{"type":"input",
+"data":"…"}` or `{"type":"ping"}` (answered with `{"type":"pong"}`, as is any control
+type this server does not know). The `terminals` doc topic covers the environment
+and the limits.
+
 ## Git
 
 The git routes are the source-control manager's backend. They are **local only**:
@@ -1420,6 +1700,97 @@ selects the workspace root and `?session=` the session handed to the plugin.
 Errors: unknown plugin or panel → `404 not_found` (the message lists the panels
 the plugin does declare); disabled or unusable plugin → `400 bad_request`; a
 plugin that fails to answer → `502 plugin`.
+
+`POST /api/plugins/:name/ui/actions/:action[?project=<id>&session=<id>]` → the
+plugin's own answer:
+```json
+{ "ok": true, "message": "Checked 3 files", "refresh": ["todo"], "open_url": null }
+```
+No body. `:action` is the **action** id the plugin declared, not the contribution
+id, because two buttons may share one handler. The host re-validates the answer
+before it reaches the page: `message` is length-capped, `refresh` may only name
+panels this plugin declares, and `open_url` is kept only when it is an absolute
+`http`/`https` URL. `ok: false` makes the client render the message as an error;
+the HTTP status stays `200`.
+
+A UI action is not a tool call: it runs because a person clicked a control the
+plugin itself contributes, so it does not go through the agent's approval policy,
+does not feed the model, and cannot add a tool to the registry. Errors: unknown
+plugin, or an action no contribution declares → `404 not_found`; a disabled or
+not-ready plugin → `400 bad_request`; a plugin that does not implement `ui/action`
+or fails to answer → `502 plugin`. `?project=` selects the workspace and
+`?session=` the session handed to the plugin; an unknown value for either is
+`404 not_found`.
+
+### Installing a plugin over HTTP
+
+These four routes are the web UI's half of `karucode plugin install`, shaped as a
+pollable job. Installing downloads a repository and **runs its build command** with
+the server's own environment, so all four take the admin gate: an `admin`-scoped
+API key, and `X-Karucode-Admin-Token` whenever `KARUCODE_ADMIN_TOKEN` is set
+(`403 permission_denied` otherwise, before anything is fetched). The three `POST`s
+are mutations and need `X-Karucode-Client: web` like any other.
+
+Preview and install accept the same body, and reject unknown fields:
+```json
+{ "source": "owner/repo", "names": ["wordy"], "git_ref": "main",
+  "force": false, "no_build": false, "build_timeout_secs": 600 }
+```
+* `source` is required: `owner/repo`, `owner/repo@ref`, a github.com URL or a local
+  directory. The preview reports the resolved form (`<owner>/<repo>@<sha>` or
+  `local:<path>`).
+* `names` selects plugins by name for the install; empty means every plugin the
+  source offers. The preview always lists every plugin in the source.
+* `git_ref` is a branch, tag or commit and defaults to `HEAD`.
+* `force` replaces an existing install instead of refusing it; `no_build` skips the
+  build; `build_timeout_secs` overrides `[install] build_timeout_secs`.
+
+`POST /api/plugins/install/preview` is synchronous: it fetches and resolves the
+source and installs nothing, so the reviewer sees what would run.
+```json
+{ "source": "owner/repo@<sha>", "kind": "remote", "resolved": "<sha>",
+  "plugins": [ { "name": "wordy", "description": "...",
+                 "permissions": ["files.read"], "builds": true,
+                 "already_installed": false } ],
+  "notes": ["stripped operator-only manifest key `env`"] }
+```
+`kind` is `remote` or `local`, `resolved` is the commit GitHub reported (or `null`),
+`permissions` is what the plugin's manifest declares, `builds` says whether a build
+step will run and `already_installed` says whether `<data_dir>/plugins/<name>`
+already exists (that install needs `force`). `notes` are non-fatal remarks gathered
+while resolving. A missing `source` or a source that will not resolve is
+`400 bad_request`.
+
+`POST /api/plugins/install` starts the job and answers immediately:
+`{ "id": "<uuid>", "status": "running", "poll": "/api/plugins/install/<uuid>" }`.
+
+`GET /api/plugins/install/:id` → the job's snapshot:
+```json
+{ "id": "...", "status": "running|completed|failed|cancelled",
+  "events": [ { "kind": "downloading", "url": "..." },
+              { "kind": "note", "message": "..." },
+              { "kind": "building", "plugin": "wordy", "command": "cargo build …" },
+              { "kind": "installed", "plugin": "wordy", "path": "…" },
+              { "kind": "done", "installed": 1 } ],
+  "error": null,
+  "result": { "installed": 1, "paths": [ { "name": "wordy", "path": "…" } ],
+              "rescan": { "added": ["wordy"], "removed": [], "restarted": [],
+                          "unchanged": [] } },
+  "elapsed_ms": 41230 }
+```
+`events` is every progress line so far, in order, tagged by `kind`
+(`downloading|note|building|installed|done`); `error` is the reason a failed job
+failed; `result` is `null` until the job completes, and `rescan` is the same report
+`POST /api/plugins/reload` returns. A completed job has already rescanned, so
+`GET /api/plugins` shows the new plugin as `ready` without a second call. The job
+registry is in memory: a finished job is served for an hour after its last read (the
+64 newest are kept regardless), and a restart drops it — both are `404 not_found`.
+
+`POST /api/plugins/install/:id/cancel` →
+`{ "id": "...", "status": "cancelling", "poll": "/api/plugins/install/<uuid>" }`.
+It kills the build child and the job settles as `cancelled`; plugins already swapped
+in stay, because the swap is atomic per plugin. Nothing to cancel (a finished job)
+is `409 bad_request` naming its status; an unknown id is `404 not_found`.
 
 `GET /api/mcp` → `{ "servers": [ { "name": "fs", "transport": "stdio",
   "status": "connected|failed|disconnected", "tools": ["mcp__fs__read"],
@@ -1618,12 +1989,9 @@ and the same id appears in the access-log line for that request, so a log entry 
 a client report can be matched. The access log records method, path, status and
 latency — never the query string (which can carry `?token=`) and never a body.
 
-Post-start mission replanning: `POST /api/missions/:id/tasks/:task_id/replan`
-requires an explicit user action and JSON `expected: {project_id, prompt,
-dependencies}` plus at least one replacement field among `project_id`, `prompt`,
-and `dependencies`. It returns the updated task; stale or ineligible changes
-return 400. Only never-claimed pending/blocked tasks in active or paused missions
-are eligible. The scheduler may claim the task immediately after approval.
+Post-start mission replanning is documented once, under
+[Missions](#draft-tasks-start-and-the-schedule): it needs the reviewed `expected`
+plan, only never-claimed tasks are eligible, and stale changes are `400`.
 
 ### Central control plane
 

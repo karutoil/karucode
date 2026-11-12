@@ -93,4 +93,4 @@ so `read_only` still denies it.
 * Changing the mode via `PATCH /api/config` applies to the next decision, not
   retroactively to an approval already pending.
 
-Full reference: `docs/SECURITY.md`, `docs/API.md` (approvals).
+Full reference: `SECURITY.md`, `docs/API.md` (approvals).

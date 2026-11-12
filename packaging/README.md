@@ -3,7 +3,7 @@
 Operator notes for running karucode as a long-lived service: install, configure,
 put it behind a proxy, back it up, upgrade it. For the build itself see the
 top-level [README](../README.md); for the threat model see
-[docs/SECURITY.md](../docs/SECURITY.md).
+[SECURITY.md](../SECURITY.md).
 
 Files in this directory:
 
@@ -148,7 +148,7 @@ Python C extensions allocate executable memory: with the knob on, every `node`,
 The paths that must match your machine (`WorkingDirectory=`, the data dir and
 `ExecStart=`) live in a drop-in, not in the unit:
 
-```
+```text
 /etc/systemd/system/karucode.service        # shipped, replaced on every install
 /etc/systemd/system/karucode.service.d/
     10-install.conf                        # generated, rewritten on every install
@@ -193,7 +193,7 @@ an existing, non-root account. **Root is never used, in any spelling**: passing
 The final summary names the account it settled on, so you can check it instead of
 trusting it:
 
-```
+```text
 Service account: you:you (who ran this installer)
 Data directory:  /home/you/.local/share/karucode
 ```
@@ -588,7 +588,7 @@ A run that builds or switches **detaches itself into its own session** before
 doing anything, with its own log, so closing the terminal or dropping an SSH
 connection cannot stop an update half way through the switch.
 
-```
+```text
 <data-dir>/update-job/
     log       everything the run printed
     pid       the detached process

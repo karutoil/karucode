@@ -12,6 +12,35 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Changed
 
+- **The documentation is release-ready.** The front door and the docs tree were
+  audited against the code (ten parallel audits plus a dedicated API writer)
+  and brought in line: the README's hero image pointed at an untracked PNG
+  (`.gitignore`d) and 404s on a fresh clone - it is the tracked SVG now; the
+  README covers the shipped browser workspace (terminal tab, notifications,
+  session titles, themes, artifacts, the control plane, ephemeral sessions,
+  web sign-in, API keys) and states the true platform support (Linux primary,
+  macOS unit-tested only, Windows unsupported); stale limitation bullets
+  (parallel tool calls, plugin hot reload, the remote-bind rule) are corrected
+  to match `agent.rs`, the plugin reload route and `[access]` sign-in.
+  `SECURITY.md` moved to the repository root (GitHub's vulnerability reporting
+  reads it there) with a real reporting section, and a stub remains at
+  `docs/SECURITY.md`; `CONTRIBUTING.md`, issue templates and a pull-request
+  template are new at the root and `.github/`. `docs/API.md` gains the missing
+  route families (missions, terminals, agent pause/resume/cancel, plugin
+  install and plugin UI actions) plus the `too_many_requests` error code.
+  Seven stale claims in the handbooks were fixed, and the production-readiness
+  audit moved out of the public tree: it is now gitignored (internal review
+  artifact with open findings and file/line pointers) and dropped from the docs
+  map.
+
+- **The docs import into a static website as-is.** `mkdocs.yml` at the root
+  configures mkdocs-material over `docs/` with no frontmatter changes, and
+  `scripts/gen_docs_nav.py` generates the site navigation from
+  `docs/internal/index.json` (the machine-readable topic index: slug, title,
+  summary, tags, identifiers), with `--check` to catch drift.
+  `docs/WEBSITE.md` records the import: the generator choice, the two
+  link-rewrite rules, and the known rough edges. The README links all three.
+
 - **Temporary (ephemeral) sessions no longer notify by default.** A temporary
   chat is created by a program - an API client, a plugin's helper - never
   appears in the session rail, and deletes itself the moment its work ends, so

@@ -10,7 +10,7 @@
 # container user (`karucode`, uid 10001). A container is a packaging and
 # blast-radius boundary, not a security boundary: the agent can read and write
 # everything that user can reach inside this image, and it can reach the network
-# unless you take that away at run time. See docs/SECURITY.md ("What is NOT
+# unless you take that away at run time. See SECURITY.md ("What is NOT
 # protected") - the approval policy is a convenience, not isolation.
 #
 # What that means in practice:
