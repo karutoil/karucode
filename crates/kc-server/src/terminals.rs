@@ -187,8 +187,16 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// and leak the descriptor.
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
-/// How long shutdown waits for the leader to be reaped, or for the `io` lock that
-/// holds it, before giving up on both.
+/// How long shutdown waits for the `io` lock, which is only ever held for a few
+/// instructions by the reader (a non-blocking `read`, taking the child out).
+///
+/// Kept well below [`REAP_GRACE`]: a lock that is busy for longer than this is a
+/// thread that is wedged elsewhere, and waiting for it would put the escalation
+/// back at its mercy. Giving up costs nothing - whoever holds the lock finishes
+/// the close itself.
+const LOCK_GRACE: Duration = Duration::from_millis(500);
+
+/// How long shutdown waits for the leader to be reaped before giving up on it.
 ///
 /// `wait(2)` on a child that is not yet gone blocks forever, and the reader
 /// thread can be inside such a wait while it owns the lock. Polling
@@ -597,8 +605,8 @@ impl Terminal {
         // Take the leader out from under the lock and reap it *after* releasing
         // it. Holding the lock across `wait` is what starved the escalation above.
         // Both acquisitions share one budget, so a lock that is busy costs
-        // `REAP_GRACE` in total, not `REAP_GRACE` twice.
-        let locked_until = Instant::now() + REAP_GRACE;
+        // `LOCK_GRACE` in total, not `LOCK_GRACE` twice.
+        let locked_until = Instant::now() + LOCK_GRACE;
         let child = {
             let mut state =
                 try_io_for(self, locked_until.saturating_duration_since(Instant::now()));
@@ -1780,20 +1788,24 @@ mod tests {
         }
         assert!(String::from_utf8_lossy(&terminal.replay()).contains("KC_HUP_IGNORED"));
         let pid = terminal.pid();
-        let elapsed = shutdown_within(&terminal, KILL_GRACE + Duration::from_secs(3));
-        assert!(elapsed >= KILL_GRACE, "HUP ignored must escalate to KILL");
-        assert!(elapsed < KILL_GRACE + Duration::from_secs(2));
+        let patience = KILL_GRACE + LOCK_GRACE + REAP_GRACE + Duration::from_secs(2);
+        let elapsed = shutdown_within(&terminal, patience);
+        let (child_left, master_left) = {
+            let state = terminal.io.lock().unwrap_or_else(|e| e.into_inner());
+            (state.child.is_some(), state.master.is_some())
+        };
+        let leader_alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        // One assertion, so a failure reports every fact at once: which part of
+        // "hang up, escalate, reap, close" the platform actually did.
         assert!(
-            terminal.io.lock().unwrap().child.is_none(),
-            "leader was not reaped"
+            elapsed >= KILL_GRACE && !child_left && !master_left && !leader_alive,
+            "shutdown in {elapsed:?}: escalated on time (>= {KILL_GRACE:?}): {}, \
+             leader reaped: {}, PTY closed: {}, leader dead: {}",
+            elapsed >= KILL_GRACE,
+            !child_left,
+            !master_left,
+            !leader_alive
         );
-        assert!(
-            terminal.io.lock().unwrap().master.is_none(),
-            "PTY was not closed"
-        );
-        // The leader is our child and has been waited on, so its id cannot still be
-        // alive. Group members received SIGKILL before the same return point.
-        assert_ne!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
         for _ in 0..40 {
             if !group_alive(pid) {
                 break;
