@@ -1000,15 +1000,23 @@ mod tests {
     /// part of the answer: macOS CI images ship `filter.lfs.*`, so a hardcoded "8"
     /// for the three drivers a test creates is a claim about the runner image.
     fn configured_filter_count(dir: &Path) -> usize {
-        // Run it directly: `git config --get-regexp` exits 1 when nothing matches,
-        // which is the ordinary "no filters configured" answer, not a failure.
-        let out = Command::new("git")
+        // Run it the way the tool does: the same hardening (`GIT_CONFIG_NOSYSTEM` and
+        // `SAFE_CONFIG`) decides which config files git reads, so asking with a plain
+        // environment would count drivers the tool deliberately never sees - CI images
+        // keep `filter.lfs.*` in `/etc/gitconfig`.
+        let mut command = Command::new("git");
+        command
+            .args(SAFE_CONFIG)
             .args(["config", "-z", "--name-only", "--get-regexp", r"^filter\."])
-            .current_dir(dir)
-            .env("LC_ALL", "C")
-            .env("GIT_TERMINAL_PROMPT", "0")
+            .current_dir(dir);
+        for (key, value) in safe_env() {
+            command.env(key, value);
+        }
+        let out = command
             .output()
             .expect("the git-tool tests need `git` on PATH");
+        // `git config --get-regexp` exits 1 when nothing matches, which is the
+        // ordinary "no filters configured" answer, not a failure.
         assert!(
             matches!(out.status.code(), Some(0) | Some(1)),
             "git config --get-regexp '^filter\\\\.' failed: {}",
