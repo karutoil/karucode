@@ -104,8 +104,10 @@
 // Each shell is its own session and process group, so closing the tab, deleting
 // the terminal or stopping the server kills the whole tree - a `make watch` left
 // running in a terminal does not survive it. Shutdown sends SIGHUP, escalates to
-// SIGKILL after two seconds when needed, and waits for the leader and PTY close;
-// a shell that ignores SIGHUP therefore cannot escape through process bootstrap.
+// SIGKILL after two seconds when needed, then reaps the leader and closes the PTY
+// within a bounded wait of its own: a shell that ignores SIGHUP cannot escape
+// through process bootstrap, and one that wedges cannot hold the shutdown open
+// either (no terminal call blocks forever on a shell).
 //
 // # Limits
 //
@@ -184,6 +186,16 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// killed. Without the second signal a stubborn child would keep its PTY open
 /// and leak the descriptor.
 const KILL_GRACE: Duration = Duration::from_secs(2);
+
+/// How long shutdown waits for the leader to be reaped, or for the `io` lock that
+/// holds it, before giving up on both.
+///
+/// `wait(2)` on a child that is not yet gone blocks forever, and the reader
+/// thread can be inside such a wait while it owns the lock. Polling
+/// `try_wait(2)` to a deadline is what keeps a wedged shell from wedging the
+/// caller: the SIGKILL has already been sent by this point, so an unreaped
+/// zombie costs a process-table slot for a moment, not the whole server.
+const REAP_GRACE: Duration = Duration::from_secs(2);
 
 /// Terminal sizes below this are not worth rendering and usually mean a
 /// hidden element measured as zero.
@@ -537,9 +549,17 @@ impl Terminal {
     /// Closing the master is what actually ends the child's `read`, so the
     /// process is signalled first (so it can run its exit handlers) and the fd
     /// is closed after the grace period or as soon as it exits. This call does not
-    /// return until escalation, `wait(2)`, and the close have completed; spawning
+    /// return until escalation, the reap and the close have completed; spawning
     /// an unjoined cleanup thread let the process exit while a HUP-ignoring shell
     /// was still alive.
+    ///
+    /// Nothing here blocks on the `io` mutex without a deadline. The reader thread
+    /// takes the same lock and may be waiting for the very leader this call is
+    /// trying to kill, so a shutdown that queued behind it could never reach its
+    /// own SIGKILL: the shell ignored SIGHUP, the reader waited for the shell, and
+    /// both sat there forever. That is a real hang - on macOS one such shutdown
+    /// parked a CI job for five hours - so escalation is driven by the deadline
+    /// and by `kill(2)` alone, never by acquiring the lock.
     pub fn shutdown(&self) {
         if self.dead.swap(true, Ordering::AcqRel) {
             return;
@@ -550,39 +570,50 @@ impl Terminal {
         }
         let deadline = Instant::now() + KILL_GRACE;
         loop {
-            if pid == 0 {
-                break;
-            }
-            {
-                let mut state = self.io.lock().unwrap_or_else(|e| e.into_inner());
+            // Opportunistic reap: `try_lock`, so a reader holding the lock just
+            // means "not now", never "not ever".
+            if let Some(mut state) = try_io_for(self, Duration::ZERO) {
                 if let Some(child) = state.child.as_mut() {
                     match child.try_wait() {
                         Ok(Some(_)) | Err(_) => {
                             // `try_wait` has reaped an exited leader. Descendants,
                             // if any, still keep the process group alive below.
-                            state.child.take();
+                            state.child = None;
                         }
                         Ok(None) => {}
                     }
                 }
             }
-            if !group_alive(pid) {
+            if pid == 0 || !group_alive(pid) {
                 break;
             }
             if Instant::now() >= deadline {
+                // The whole group, so a HUP handler cannot outlive the deadline.
                 signal_group(pid, libc::SIGKILL);
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));
         }
-        let mut state = self.io.lock().unwrap_or_else(|e| e.into_inner());
-        // Reap the leader before closing the PTY. After SIGKILL this wait cannot
-        // be survived by a HUP handler, and by this point the whole group got it.
-        if let Some(mut child) = state.child.take() {
-            let _ = child.wait();
+        // Take the leader out from under the lock and reap it *after* releasing
+        // it. Holding the lock across `wait` is what starved the escalation above.
+        // Both acquisitions share one budget, so a lock that is busy costs
+        // `REAP_GRACE` in total, not `REAP_GRACE` twice.
+        let locked_until = Instant::now() + REAP_GRACE;
+        let child = {
+            let mut state =
+                try_io_for(self, locked_until.saturating_duration_since(Instant::now()));
+            state.as_mut().and_then(|state| state.child.take())
+        };
+        if let Some(mut child) = child {
+            reap(&mut child);
         }
-        state.master = None;
-        drop(state);
+        // Close the PTY. The reader's own close (`finish`) does this too; exactly
+        // one of them wins, and an fd closed twice is an fd closed once.
+        if let Some(mut state) =
+            try_io_for(self, locked_until.saturating_duration_since(Instant::now()))
+        {
+            state.master = None;
+        }
         let _ = self.output.send(Output::Exit(None));
     }
 }
@@ -596,7 +627,7 @@ impl Drop for Terminal {
             if pid != 0 {
                 signal_group(pid, libc::SIGHUP);
             }
-            if let Ok(mut state) = self.io.lock() {
+            if let Ok(mut state) = self.io.try_lock() {
                 if let Some(mut child) = state.child.take() {
                     // Non-blocking best effort: a `try_wait` after a short sleep
                     // would stall the drop. The SIGKILL below is what matters.
@@ -672,7 +703,11 @@ fn spawn_reader(terminal: Arc<Terminal>) {
 
 /// Reap the child if it has exited and publish the status once.
 fn child_exited(terminal: &Terminal) -> bool {
-    let mut io = terminal.io.lock().unwrap_or_else(|e| e.into_inner());
+    // `try_lock`: this runs on the reader thread, and a caller that owns the lock
+    // (a shutdown deciding whether to escalate) must never wait for the reader.
+    let Ok(mut io) = terminal.io.try_lock() else {
+        return false;
+    };
     let Some(child) = io.child.as_mut() else {
         return true;
     };
@@ -688,16 +723,18 @@ fn finish(terminal: &Terminal) {
     if terminal.dead.swap(true, Ordering::AcqRel) {
         return;
     }
-    let mut status = None;
-    {
+    // Close the PTY and take the child under the lock, then wait *outside* it: a
+    // reader that waited for a live shell while owning the lock could never be
+    // interrupted, and anything that wanted the lock (a shutdown about to send
+    // SIGKILL) waited for that shell instead of killing it.
+    let child = {
         let mut io = terminal.io.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(mut child) = io.child.take() {
-            if let Ok(exit) = child.wait() {
-                status = exit.code();
-            }
-        }
         io.master = None;
-    }
+        io.child.take()
+    };
+    let status = child
+        .and_then(|mut child| reap(&mut child))
+        .and_then(|exit| exit.code());
     let _ = terminal.output.send(Output::Exit(status));
 }
 
@@ -859,6 +896,45 @@ fn group_alive(pid: u32) -> bool {
         return false;
     }
     unsafe { libc::kill(-(pid as libc::pid_t), 0) == 0 }
+}
+
+/// Take the `io` lock only while `budget` allows, so a thread that already owns
+/// it (the reader, inside [`finish`]) cannot stall a caller that must not wait.
+fn try_io_for(terminal: &Terminal, budget: Duration) -> Option<std::sync::MutexGuard<'_, IoState>> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match terminal.io.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
+/// Reap the leader without betting the caller on it.
+///
+/// `wait(2)` blocks until the child is gone, which is unbounded if the kernel
+/// never releases it; `try_wait(2)` to [`REAP_GRACE`] always returns. An
+/// unreaped child is a zombie that init reaps, not a wedged thread.
+fn reap(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + REAP_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            // A `wait` that fails has already given up on the child.
+            Err(_) => return None,
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// The live terminals, keyed by id.
@@ -1509,6 +1585,28 @@ mod tests {
         std::env::temp_dir().to_string_lossy().into_owned()
     }
 
+    /// Run the blocking `shutdown` on its own thread and fail if it never
+    /// returns.
+    ///
+    /// A shutdown that parks used to be invisible to CI: the test simply never
+    /// finished, the job sat until the next push cancelled it (one macOS job burned
+    /// 4h53m that way), and nothing named the culprit. The thread is deliberately
+    /// leaked - a process can exit with a blocked thread, it just cannot pass a
+    /// test that is still waiting for one.
+    fn shutdown_within(terminal: &Arc<Terminal>, patience: Duration) -> Duration {
+        let (done, finished) = std::sync::mpsc::channel();
+        let stopping = Arc::clone(terminal);
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            stopping.shutdown();
+            let _ = done.send(());
+        });
+        finished.recv_timeout(patience).expect(
+            "shutdown never returned: a shell was left alive and the escalation was blocked",
+        );
+        started.elapsed()
+    }
+
     fn handshake(origin: &str, host: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1682,13 +1780,9 @@ mod tests {
         }
         assert!(String::from_utf8_lossy(&terminal.replay()).contains("KC_HUP_IGNORED"));
         let pid = terminal.pid();
-        let started = std::time::Instant::now();
-        terminal.shutdown();
-        assert!(
-            started.elapsed() >= KILL_GRACE,
-            "HUP ignored must escalate to KILL"
-        );
-        assert!(started.elapsed() < KILL_GRACE + Duration::from_secs(2));
+        let elapsed = shutdown_within(&terminal, KILL_GRACE + Duration::from_secs(3));
+        assert!(elapsed >= KILL_GRACE, "HUP ignored must escalate to KILL");
+        assert!(elapsed < KILL_GRACE + Duration::from_secs(2));
         assert!(
             terminal.io.lock().unwrap().child.is_none(),
             "leader was not reaped"
@@ -1709,6 +1803,67 @@ mod tests {
         assert!(
             !group_alive(pid),
             "a stubborn process group survived shutdown"
+        );
+    }
+
+    /// Regression for the macOS CI hang: a thread that owns the `io` lock (the
+    /// reader inside `finish`, waiting for the leader) must not be able to hold
+    /// shutdown's escalation hostage.
+    ///
+    /// On 2026-11-12 the macOS job reached the test above, one such interleaving
+    /// parked shutdown before its SIGKILL deadline, and the job sat for 4h53m until
+    /// the next push cancelled it. The deadline has to be reachable without the
+    /// lock: what has to be true is that the group is dead and the call returned.
+    #[tokio::test]
+    async fn shutdown_escalates_even_when_another_thread_holds_the_io_lock() {
+        let terminal = Terminal::spawn("t_locked", &session(&cwd()), &settings(), &[], 80, 24)
+            .expect("spawn stubborn shell");
+        assert!(
+            terminal.write(b"trap '' HUP; printf 'KC_HUP_IGNORED\\n'; while :; do sleep 1; done\n")
+        );
+        for _ in 0..200 {
+            if String::from_utf8_lossy(&terminal.replay()).contains("KC_HUP_IGNORED") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(String::from_utf8_lossy(&terminal.replay()).contains("KC_HUP_IGNORED"));
+        let pid = terminal.pid();
+
+        // Stand in for a reader parked in `finish` for as long as the leader takes
+        // to die: it owns the lock, so nothing shutdown does may need it.
+        let held = terminal.io.lock().unwrap_or_else(|e| e.into_inner());
+        // Worst case: the grace, then one bounded wait for the lock, then the
+        // bounded reap - and no more. A shutdown that is still running past this
+        // would be waiting on a lock it can never get.
+        let patience = KILL_GRACE + REAP_GRACE + Duration::from_secs(2);
+        let elapsed = shutdown_within(&terminal, patience);
+        drop(held);
+
+        assert!(
+            elapsed >= KILL_GRACE,
+            "a HUP-ignoring shell must get the full grace before SIGKILL"
+        );
+        // The lock owner is the one left holding the leader (in production the
+        // reader finishes the job in `finish`); the group must already be dead.
+        let leftover = terminal
+            .io
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .child
+            .take();
+        if let Some(mut child) = leftover {
+            reap(&mut child);
+        }
+        for _ in 0..100 {
+            if !group_alive(pid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !group_alive(pid),
+            "the stubborn group survived because its shutdown queued on the io lock"
         );
     }
 
