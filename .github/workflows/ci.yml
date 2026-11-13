@@ -203,7 +203,14 @@ jobs:
       - name: shellcheck
         run: |
           sudo apt-get install -y shellcheck
-          shellcheck -s sh packaging/install.sh packaging/update.sh
+          # `--severity=warning`: the remaining findings in these scripts are
+          # SC2329 (info) on EXIT-trap-only helpers (`restore_unit`, `finish`,
+          # `release_lock`...), which shellcheck structurally cannot see being
+          # called. Info severity also differs between shellcheck releases: 0.9
+          # and 0.10 say nothing, 0.11 flags four more functions - so a
+          # version-pinned runner image cannot keep this job green. Warnings and
+          # errors are the same set in every version and still fail the job.
+          shellcheck --severity=warning -s sh packaging/install.sh packaging/update.sh
       - name: syntax
         run: sh -n packaging/install.sh && sh -n packaging/update.sh
 
