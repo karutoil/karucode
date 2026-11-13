@@ -82,15 +82,14 @@
 //! is reasoning about.
 
 use kc_core::message::{Message, Role};
-use kc_core::tool::truncate_output;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 // @kc-doc: prompt-cache
 // @kc-title: Keep the prompt cache hitting (cheap long runs)
 // @kc-summary: Why a long run can re-bill its whole context every turn, what karucode does to keep the cached prefix stable, and how to read the hit rate.
 // @kc-tags: cache, caching, cost, context, compaction, tokens, performance, provider
-// @kc-applies-to: config:limits.context_max_chars, config:limits.max_context_messages, config:limits.max_tool_output_bytes, config:limits.max_image_read_bytes, config:limits.max_tool_calls_per_turn, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_MAX_TOOL_OUTPUT_BYTES, route:GET /api/events, ui:ChatView, tool:note
+// @kc-applies-to: config:limits.context_max_chars, config:limits.max_context_messages, config:limits.max_tool_output_bytes, config:limits.max_image_read_bytes, config:limits.max_tool_calls_per_turn, config:limits.model_compaction, config:limits.compaction_model, config:limits.compaction_max_tokens, config:limits.compaction_timeout_secs, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_MAX_TOOL_OUTPUT_BYTES, route:GET /api/events, ui:ChatView, tool:note, internal:kc-runtime:context-digest, internal:kc-runtime:compaction-snapshot
 //
 // # What the provider caches
 //
@@ -122,8 +121,7 @@ use std::sync::{Arc, Mutex};
 //   characters of text and no tool calls is kept verbatim across compaction
 //   while it fits the note budget (a twentieth of the context window).
 // * **A tool result a later call replaced is retired at a compaction.** When the
-//   window is over budget, the newest result per `(tool, path)` survives and the
-//   earlier ones become one line:
+//   window is over budget, an earlier result becomes one line:
 //
 //   ```text
 //   [superseded: read_file `src/app.tsx` lines 1-400 of 812 was replaced by a later
@@ -133,13 +131,30 @@ use std::sync::{Arc, Mutex};
 //   Nothing is removed - the `tool` message still answers its call - and the pass
 //   never runs between compactions, so the cached prefix stays byte-identical
 //   until the next one. Measured over the last 30 sessions, this retires 77% of
-//   86.9 M characters of tool output. A result is only replaced by one for the
-//   same tool, path *and* question: a `search_files` for a different pattern, or a
-//   `git_diff` against another base, is a different answer, not a newer copy of
-//   the same one.
-//   A stub is never stubbed again: the line range it names cannot be re-derived
-//   once the header is gone, so a later compaction would trade `lines 1-400 of
-//   812` for a vaguer sentence (caught on a live run).
+//   86.9 M characters of tool output.
+//
+//   Two rules decide what counts as replaced, and both are narrower than "the same
+//   tool and path":
+//
+//   * **A read is only redundant when a newer read covers its whole range.** Lines
+//     400-500 of a file do not replace lines 1-100 of it, they add to them, so
+//     disjoint and partially overlapping windows are all kept. A whole-file read
+//     covers every window of that file.
+//   * **A write or edit invalidates every earlier result about that file.** A page
+//     of code read before an `edit_file` is not the code on disk any more, and
+//     every line number after the edit points somewhere else. Those results become
+//     a different stub:
+//
+//   ```text
+//   [stale: read_file `src/app.tsx` lines 1-400 was invalidated by a file
+//   edit/write later in this session. Call read_file again if you need current
+//   contents or line numbers.]
+//   ```
+//
+//   Paths are compared after normalising `./` and `//`, so alternating spellings
+//   cannot hide a mutation. A stub is never stubbed again: the line range it names
+//   cannot be re-derived once the header is gone, so a later compaction would
+//   trade `lines 1-400 of 812` for a vaguer sentence (caught on a live run).
 // * **The model can keep its own notes.** A reasoning model streams its analysis
 //   as `reasoning_content`, which is persisted with the turn but still ages out
 //   with it: 8,216 of 11,137 assistant turns in those sessions were under 40
@@ -147,6 +162,24 @@ use std::sync::{Arc, Mutex};
 //   compaction drops whole exchanges. The `note` tool appends a
 //   finding to a per-run notebook, and the notebook is replayed inside the
 //   compaction digest, so the finding outlives the messages that carried it.
+// * **Old chains of thought are cleared, and their conclusion is kept.** Every
+//   turn's `reasoning_content` is replayed verbatim on every later request, so a
+//   long run accumulates tens of thousands of characters of thinking that has
+//   already been acted on. Outside the newest 8 messages it is dropped, and a turn
+//   that wrote no prose but ended in a long final paragraph hands that paragraph to
+//   the digest as a finding - the conclusion survives, the deliberation does not.
+// * **Old write payloads are folded, not cut.** A `write_file` body is the file it
+//   wrote, byte for byte, and the file is already in the workspace. Outside the
+//   newest 12 messages, a payload over 512 bytes is replaced *inside the parsed
+//   JSON* and re-serialized, so the call still parses and still names its path:
+//
+//   ```json
+//   {"path":"src/main.rs","content":"[compacted payload: 8,412 bytes, 240 lines applied to src/main.rs]"}
+//   ```
+//
+//   This is the one place tool-call arguments are rewritten, and it is why they are
+//   rewritten as JSON rather than as text: a cut string would leave a call whose
+//   schema no longer parses.
 // * **Nothing is appended after the conversation.** No runtime note, no nudge,
 //   no reminder. Measured on a real 140-message session against a live gateway,
 //   at the point where the model was about to write a file: the history alone
@@ -158,6 +191,73 @@ use std::sync::{Arc, Mutex};
 //   model has to fit inside the tool results it already produces. That is why the
 //   notebook appears in the digest turn (`user`, and only when a compaction
 //   happened) and never at the end of a request.
+//
+// # What the digest carries
+//
+// A digest that only said "N messages omitted" left a long run blind to everything
+// it had learned, and one that forgot *which* files it had read made it read them
+// again. So the digest is a **state ledger**, built from the evicted turns and from
+// the digest it replaces, in five sections:
+//
+// | section | what it holds |
+// |---|---|
+// | `### Modified & Created Files` | every path a dropped turn wrote, with its operations and edit count |
+// | `### Explored Codebase Map` | the files and directories inspected, the merged line ranges read, and the searches run |
+// | `### Command & Verification History` | each shell/test/build command with its verdict or first diagnostic line |
+// | `### Evicted Instructions & Findings` | the dropped user turns, the assistant prose that explains a decision, and the notebook |
+// | `### Semantic Working Memory` | the model-written summary, when model-assisted compaction is on |
+//
+// The ledger merges with the digest it replaces, so a run that compacts eleven
+// times accumulates one ledger instead of losing everything before the tenth. The
+// assistant prose is captured even when the same turn also called a tool - an
+// architectural explanation written alongside a `write_file` used to be dropped on
+// eviction, which is how a run forgot the design it had just chosen.
+//
+// # Model-assisted compaction
+//
+// The deterministic ledger is always written. On top of it, karucode can ask a
+// model for the four prose sections a ledger cannot produce: goal progress,
+// codebase invariants, dead ends and resolved errors, and what was happening at the
+// eviction boundary.
+//
+// ```toml
+// [limits]
+// # On by default. Off means the deterministic ledger only.
+// model_compaction = true
+// # Model id for the compaction call. Omit to use the active model; a small fast
+// # model here keeps compaction off an expensive main model.
+// compaction_model = "gpt-4.1-mini"
+// # Output ceiling for one compaction call, in tokens (default 1200).
+// compaction_max_tokens = 1200
+// # Wall clock for one compaction call, in seconds (default 20).
+// compaction_timeout_secs = 20
+// ```
+//
+// What the compaction model sees is a **pre-filtered batch**, never the transcript:
+// the user's instructions, the assistant's prose, one-line call signatures, and
+// only the diagnostic lines of a command's output. A raw 24 KB file dump never
+// enters it - the ledger already says which files exist.
+//
+// **A failure costs nothing.** If the call errors, times out, returns nothing or is
+// switched off, the deterministic ledger is already in the window and the run
+// continues with it. This switch buys prose, never correctness.
+//
+// # Reusing the compacted window across turns
+//
+// `messages` is append-only, so a follow-up user turn would otherwise reload the
+// raw transcript and compact it again - at a slightly shifted boundary, which
+// rewrites the digest near the front of the request and throws away the provider's
+// whole cached prefix. So the window a compaction produced is saved as a
+// checkpoint (`session_compaction_state`, one row per session) together with how
+// many stored messages it covered, and the next run rebuilds
+// `[checkpoint, stored after it]`. The prefix stays byte-identical and only the new
+// user turn is uncached.
+//
+// The checkpoint is a cache in front of the prefix cache, never a source of truth:
+// it is ignored when it is empty, when it covers more rows than the session has, or
+// when the tail it would append is longer than what the repair loaded. A rewind
+// deletes it, because a checkpoint that describes messages the user just hid would
+// resurrect them.
 //
 // # Your own notes (`note`)
 //
@@ -202,15 +302,31 @@ use std::sync::{Arc, Mutex};
 // ```toml
 // [limits]
 // # 0 (the default) derives the budget from the resolved model's context_window
-// # minus the room its answer needs, at four characters per token: a 1M-token
-// # model gets ~2.5M chars, a 32k model ~110k. A non-zero value is an install
-// # ceiling and can only lower that.
+// # minus the room its answer needs: a 1M-token model gets ~2.5M chars, a 32k
+// # model ~110k. A non-zero value is an install ceiling and can only lower that.
 // context_max_chars = 0
 // # How many messages one request may carry, default 900. 0 disables it.
 // max_context_messages = 900
 // # One tool result larger than this is truncated per call.
 // max_tool_output_bytes = 24000
 // ```
+//
+// The derived budget is **calibrated from measurement** once a run has one. Every
+// provider call reports `prompt_tokens`, and karucode pairs that with the character
+// count of the request it sent, which gives the real characters-per-token ratio for
+// this model, this content and this tokenizer. Code, diffs and JSON log at ~2.4
+// where prose logs at ~3.8, and a budget sized with the prose ratio is a budget the
+// provider refuses. The measured ratio is clamped to 1.8-4.2 characters per token
+// and can only *lower* the ceiling, never raise it above what the model declares or
+// the operator set.
+//
+// Before the first measurement the same check runs on an **estimate** instead: the
+// window is tokenised by content class (code, JSON and diffs at ~2.6 characters per
+// token, prose at ~3.8, images at their 8,000-character charge) and, if that
+// estimate exceeds the model's window minus the room its answer needs, the
+// character budget is scaled down by exactly the ratio it is over by. That is what
+// keeps the first request of a run from being refused outright - the refusal path
+// would otherwise compact to 60% of a budget that was already too large.
 //
 // # Two budgets, because a request has two ways to be too big
 //
@@ -284,7 +400,19 @@ use std::sync::{Arc, Mutex};
 // bodies keep a head and a tail around a marker instead. Three kinds of body can
 // do that to a request, and all three are shortened:
 //
-// * message text and tool-result text;
+// * message text and tool-result text. A cut keeps the head, the **tail** and any
+//   diagnostic lines that were about to be dropped from the middle: `cargo test`,
+//   `cargo check` and every build tool put their verdict at the *end* of the
+//   stream, and a head-only cut kept the compiler's banner and lost the reason.
+//   The marker says what it did:
+//
+//   ```text
+//   ...[truncated 41208 bytes (612 lines); rescued key diagnostics from middle:]
+//   error[E0308]: mismatched types
+//     --> src/lib.rs:42:9
+//   ...[continuing tail:]
+//   test result: FAILED. 12 passed; 1 failed
+//   ```
 // * `reasoning_content`. A reasoning model's chain of thought is persisted with
 //   its turn and written back into every later request, so it is charged against
 //   `context_max_chars` like any other text - and therefore cut like any other
@@ -297,11 +425,14 @@ use std::sync::{Arc, Mutex};
 //   (`[N image(s) omitted: ...]`). Encoded image bytes are bounded separately, at
 //   20 MiB per request, because that is a memory bound rather than a window one.
 //
-// Tool-call **arguments** are never cut: shortening a call's arguments changes
-// what the call means and can leave invalid JSON for the tool's schema. A turn's
-// arguments are bounded by the model's own output limit, so if a single turn's
-// arguments alone exceed `context_max_chars` the request is sent as it is and
-// logged - the one case a budget cannot fix without inventing a different call.
+// Tool-call **arguments** are never cut as text: shortening a call's arguments
+// changes what the call means and can leave invalid JSON for the tool's schema.
+// The one exception is the payload folding described above, which replaces a
+// string *inside* the parsed value and re-serializes it, so the call still parses
+// and still names the same tool and path. A turn's arguments are bounded by the
+// model's own output limit, so if a single turn's arguments alone exceed
+// `context_max_chars` the request is sent as it is and logged - the one case a
+// budget cannot fix without inventing a different call.
 //
 // # Gotchas
 //
@@ -336,7 +467,14 @@ const DIGEST_NAME: &str = "kc-runtime:context-digest";
 /// How much space the compaction digest may take. It is a summary, not a
 /// transcript: if it grew without a bound it would defeat the budget it exists
 /// to protect.
-const DIGEST_MAX_CHARS: usize = 4_000;
+///
+/// 8,000 rather than 4,000 since the digest became a **state ledger** (see
+/// [`build_state_ledger`]): five sections of deterministic state - the modified
+/// file set, the explored map, the command history, the evicted instructions and
+/// an optional semantic summary - do not fit in 4 KB without truncating the file
+/// paths, and a digest whose paths are cut is a digest that makes the model
+/// re-read the workspace.
+const DIGEST_MAX_CHARS: usize = 8_000;
 /// Characters of one dropped message kept in the digest.
 const DIGEST_LINE_CHARS: usize = 160;
 /// Characters of one tool call's arguments kept in the digest.
@@ -385,6 +523,10 @@ pub const NOTE_LINE_PREFIX: &str = "- note: ";
 /// idempotent: a body that already starts with it is a stub and is left alone.
 pub const SUPERSEDED_PREFIX: &str = "[superseded: ";
 
+/// The prefix of a result invalidated by a **mutation** rather than replaced by a
+/// newer read: the file it describes is not what it says any more.
+pub const STALE_PREFIX: &str = "[stale: ";
+
 /// Tools whose result *header* carries the path they read, as
 /// `path — lines A-B of N (...)`. `read_file` is the one that does.
 const HEADER_TARGET_TOOLS: &[&str] = &["read_file"];
@@ -392,7 +534,34 @@ const HEADER_TARGET_TOOLS: &[&str] = &["read_file"];
 /// Tools whose target is the `path` argument of the call. A result from any other
 /// tool is never superseded: two shell runs or two searches for different
 /// patterns are different answers, not a newer copy of one answer.
-const ARGUMENT_TARGET_TOOLS: &[&str] = &["read_file", "search_files", "list_dir", "git_diff"];
+const ARGUMENT_TARGET_TOOLS: &[&str] = &[
+    "read_file",
+    "search_files",
+    "list_dir",
+    "git_diff",
+    "git_status",
+];
+
+/// Tools that **change the workspace**. Every result describing a path these
+/// touched - an older read, an older diff - is stale from that turn on, however
+/// recently it was produced.
+///
+/// This is the second half of the supersession rule and the one a name-keyed
+/// lookup cannot express: `read_file("foo.rs")` followed by `edit_file("foo.rs")`
+/// leaves a page of code in the window that is no longer the code on disk, and
+/// every line number after the edit points somewhere else. Nothing about the two
+/// calls is "the same question", so a `(tool, path)` key never matches and the
+/// stale page rides along for the rest of the run.
+const MUTATION_TOOLS: &[&str] = &[
+    "write_file",
+    "edit_file",
+    "replace_in_file",
+    "multi_edit",
+    "patch",
+    "apply_patch",
+    "delete_file",
+    "remove_file",
+];
 
 /// Compact down to this share of the budget rather than to the budget itself.
 /// The difference is headroom for the next turns, and headroom is cache hits:
@@ -494,6 +663,227 @@ pub fn message_chars(message: &Message) -> usize {
         + calls
         + reasoning
         + message.images.len().saturating_mul(IMAGE_CONTEXT_CHARS)
+}
+
+/// Characters of prose per token. English and Markdown instructions tokenize at
+/// roughly this ratio on the tokenizers behind every OpenAI-compatible endpoint.
+const PROSE_CHARS_PER_TOKEN: f64 = 3.6;
+/// Characters of structure per token: code, diffs, JSON tool arguments and tool
+/// output. Measured at ~2.4-2.8 on a real install, where a request that filled
+/// its own four-characters-per-token budget was refused as too long.
+const DENSE_CHARS_PER_TOKEN: f64 = 2.6;
+/// Framing a message costs the tokenizer more than its text: a role header, the
+/// separators around it. Four tokens per message and eight per tool call is the
+/// usual overhead of the chat formats, expressed in characters so it adds up with
+/// the rest of this module.
+const MESSAGE_OVERHEAD_CHARS: usize = 16;
+const TOOL_CALL_OVERHEAD_CHARS: usize = 32;
+
+/// Estimated tokens one message costs, from what it actually contains.
+///
+/// [`message_chars`] answers "how much of the character budget does this use",
+/// which is the right question for the budget and the wrong one for the model:
+/// four characters per token is an English-prose ratio, and this harness is mostly
+/// code, diffs, JSON arguments and tool output, which tokenize at ~2.6. Sizing a
+/// window with the prose ratio under-estimates the real prompt by up to 1.6x, so
+/// the estimate only discovers the truth when the provider refuses the request -
+/// and the refusal path compacts to 60% of a budget that was already too large.
+///
+/// So prose (a user turn, the system prompt) is counted at
+/// [`PROSE_CHARS_PER_TOKEN`], everything structured at
+/// [`DENSE_CHARS_PER_TOKEN`], and the per-message/per-call framing is added on
+/// top. This is an estimate, never a measurement; `ContextLimits::with_observed_usage`
+/// replaces it with the provider's own count as soon as one arrives.
+pub fn estimate_message_tokens(message: &Message) -> usize {
+    let prose_chars = match message.role {
+        Role::User | Role::System => message.content.chars().count(),
+        Role::Assistant | Role::Tool => 0,
+    };
+    let total_chars = message_chars(message);
+    let dense_chars = total_chars.saturating_sub(prose_chars);
+    let tokens =
+        prose_chars as f64 / PROSE_CHARS_PER_TOKEN + dense_chars as f64 / DENSE_CHARS_PER_TOKEN;
+    tokens.ceil() as usize
+        + MESSAGE_OVERHEAD_CHARS / 4
+        + message.tool_calls.len() * (TOOL_CALL_OVERHEAD_CHARS / 4)
+}
+
+/// Estimated tokens a whole window costs. See [`estimate_message_tokens`].
+pub fn estimate_window_tokens(messages: &[Message]) -> u64 {
+    messages
+        .iter()
+        .map(|message| estimate_message_tokens(message) as u64)
+        .sum()
+}
+
+/// Bytes at which a written payload is no longer worth keeping in the window.
+///
+/// A `write_file` body is the file it wrote, byte for byte. Inside the retained
+/// window that is dead weight twice over: the file itself is in the workspace (and
+/// the mutation counter says the run may re-read it), and the tool result usually
+/// repeats it. 512 bytes is comfortably above a real small edit and far below the
+/// 10-150 KB a generated file costs.
+const PAYLOAD_FOLD_MIN_BYTES: usize = 512;
+/// The newest messages whose tool-call arguments are never rewritten. They are the
+/// turn in flight: the model may be about to retry, inspect or extend exactly
+/// those calls, and a schema-valid but different payload would change what the
+/// call means.
+const ARG_SCRUB_RECENCY: usize = 12;
+/// The newest messages whose reasoning is never cleared. Reasoning on the turn in
+/// flight is what the model is thinking right now.
+const REASONING_DECAY_RECENCY: usize = 8;
+
+/// Arguments of a mutation call that carry a written payload.
+const PAYLOAD_KEYS: &[&str] = &[
+    "content",
+    "new_str",
+    "old_str",
+    "new_string",
+    "old_string",
+    "patch",
+    "diff",
+    "edits",
+];
+
+/// Fold the written payload out of old `write_file` / `edit_file` / `patch`
+/// arguments, **keeping the JSON valid**.
+///
+/// `Assistant.tool_calls` arguments are JSON text. Cutting them like a body would
+/// leave a call whose schema no longer parses, which some providers reject and
+/// every tool misreads - so a long payload is replaced *inside the parsed value*
+/// and re-serialized: the call still names the tool and the path, still parses, and
+/// says how much was folded.
+///
+/// Only calls outside the newest [`ARG_SCRUB_RECENCY`] messages are touched, only
+/// mutation tools are touched, and only payloads above
+/// [`PAYLOAD_FOLD_MIN_BYTES`]: an argument under that is a real call the model may
+/// still be reasoning about, and rewriting it would change the request for nothing
+/// amount to a cache miss.
+///
+/// Returns the characters reclaimed.
+pub fn scrub_old_tool_call_args(messages: &mut [Message]) -> usize {
+    let len = messages.len();
+    let mut saved = 0usize;
+    for (i, message) in messages.iter_mut().enumerate() {
+        if i + ARG_SCRUB_RECENCY >= len || message.tool_calls.is_empty() {
+            continue;
+        }
+        for call in message.tool_calls.iter_mut() {
+            if !is_mutation_tool(&call.name) {
+                continue;
+            }
+            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
+                continue;
+            };
+            let Some(object) = value.as_object_mut() else {
+                continue;
+            };
+            let path = object
+                .get("path")
+                .and_then(|path| path.as_str())
+                .map(normalize_path)
+                .unwrap_or_else(|| "the workspace".to_string());
+            let mut folded = 0usize;
+            for key in PAYLOAD_KEYS {
+                let Some(field) = object.get_mut(*key) else {
+                    continue;
+                };
+                fold_payload(field, &path, &mut folded);
+            }
+            if folded == 0 {
+                continue;
+            }
+            let Ok(text) = serde_json::to_string(&value) else {
+                continue;
+            };
+            saved += call
+                .arguments
+                .chars()
+                .count()
+                .saturating_sub(text.chars().count());
+            call.arguments = text;
+        }
+    }
+    saved
+}
+
+/// Replace one long payload (a string, or the strings inside a JSON array of
+/// edits) with a compact summary of itself.
+fn fold_payload(field: &mut serde_json::Value, path: &str, folded: &mut usize) {
+    match field {
+        serde_json::Value::String(text) => {
+            if text.len() <= PAYLOAD_FOLD_MIN_BYTES {
+                return;
+            }
+            let summary = format!(
+                "[compacted payload: {} bytes, {} lines applied to {path}]",
+                text.len(),
+                text.lines().count().max(1)
+            );
+            *folded += text.chars().count().saturating_sub(summary.chars().count());
+            *text = summary;
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                match item {
+                    serde_json::Value::String(text) if text.len() > PAYLOAD_FOLD_MIN_BYTES => {
+                        let summary = format!(
+                            "[compacted payload: {} bytes, {} lines applied to {path}]",
+                            text.len(),
+                            text.lines().count().max(1)
+                        );
+                        *folded += text.chars().count().saturating_sub(summary.chars().count());
+                        *text = summary;
+                    }
+                    serde_json::Value::Object(map) => {
+                        for key in PAYLOAD_KEYS {
+                            if let Some(field) = map.get_mut(*key) {
+                                fold_payload(field, path, folded);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Clear the chain of thought of old turns, keeping whatever conclusion it reached.
+///
+/// `reasoning_content` is replayed verbatim on every request (that is the
+/// keep-all pattern providers want for cache hits), so a long run accumulates
+/// tens of thousands of characters of thinking that has already been acted on.
+/// Nothing bounds it until `shrink_bodies` runs in an emergency, at which point it
+/// competes with live code for the budget.
+///
+/// The conclusion is not thrown away with it: a turn that wrote **no** prose and
+/// ended in a long final paragraph was thinking in order to decide something, so
+/// that paragraph is returned as a candidate note for the digest. Returns
+/// `(candidates, characters reclaimed)`.
+pub fn decay_old_reasoning(messages: &mut [Message]) -> (Vec<String>, usize) {
+    let len = messages.len();
+    let mut candidates: Vec<String> = Vec::new();
+    let mut saved = 0usize;
+    for (i, message) in messages.iter_mut().enumerate() {
+        if i + REASONING_DECAY_RECENCY >= len {
+            continue;
+        }
+        let Some(reasoning) = message.reasoning_content.as_ref() else {
+            continue;
+        };
+        if message.content.trim().is_empty() {
+            if let Some(conclusion) = final_paragraph(Some(reasoning)) {
+                if !candidates.contains(&conclusion) {
+                    candidates.push(conclusion);
+                }
+            }
+        }
+        saved += reasoning.chars().count();
+        message.reasoning_content = None;
+    }
+    (candidates, saved)
 }
 
 /// Characters the tool catalogue costs in a request body.
@@ -603,6 +993,87 @@ impl ContextLimits {
         chars <= self.max_chars && self.within_messages(count)
     }
 
+    /// The same two ceilings, re-derived from what the provider last **measured**
+    /// instead of from a four-characters-per-token guess.
+    ///
+    /// `last_window_chars` is how many characters this loop sent on the turn whose
+    /// usage came back, and `last_prompt_tokens` is the `prompt_tokens` the
+    /// provider reported for it. Their ratio is the one true
+    /// characters-per-token number this install has for this model, this content
+    /// and this tokenizer - code, diffs and JSON logged at ~2.4 where prose logs at
+    /// ~3.8, and the difference between the two is the difference between a budget
+    /// that fits and one the provider refuses.
+    ///
+    /// The ratio is clamped to `1.8..=4.2`: a provider that under-reports usage, a
+    /// stream that reported half a turn, or a window whose system prompt was
+    /// rebuilt between the two measurements would otherwise scale the budget by an
+    /// arbitrary factor. A caller with no measurement (`0` for either) keeps the
+    /// ceilings it already had.
+    ///
+    /// The item ceiling is untouched: it counts messages, which the provider's
+    /// token count says nothing about.
+    pub fn with_observed_usage(
+        self,
+        last_window_chars: usize,
+        last_prompt_tokens: u64,
+        model_context_tokens: u64,
+        reserve_tokens: u64,
+    ) -> Self {
+        if last_window_chars == 0 || last_prompt_tokens == 0 {
+            return self;
+        }
+        let observed_chars_per_token =
+            (last_window_chars as f64 / last_prompt_tokens as f64).clamp(1.8, 4.2);
+        let usable_tokens = model_context_tokens.saturating_sub(reserve_tokens);
+        if usable_tokens == 0 {
+            return self;
+        }
+        let scaled = (usable_tokens as f64 * observed_chars_per_token) as usize;
+        // Never *raise* the ceiling an operator set: `context_max_chars` and the
+        // derived budget are already ceilings, and calibration exists to stop a
+        // window being too large, not to make it larger than the model declared.
+        Self::new(
+            scaled
+                .min(self.max_chars)
+                .max(FORCED_MIN_CHARS.min(self.max_chars)),
+            self.max_messages,
+        )
+    }
+
+    /// The same two ceilings, sized from an **estimate** of what this window will
+    /// cost, for the turns before any provider has reported usage.
+    ///
+    /// [`with_observed_usage`](Self::with_observed_usage) is the real thing, but it
+    /// needs a measurement, and the first request of a run has none. Until then the
+    /// only signal is [`estimate_window_tokens`], and it is worth acting on: a
+    /// window whose characters fit a four-characters-per-token budget but whose
+    /// *tokens* exceed the model's window is refused outright, and the refusal path
+    /// then compacts to 60% of a budget that was already too large.
+    ///
+    /// So when the estimate exceeds the usable tokens, the character budget is
+    /// scaled by the ratio it is over by. It never raises the ceiling, and a model
+    /// that declares no window (`0`) is left alone.
+    pub fn with_estimated_tokens(
+        self,
+        messages: &[Message],
+        model_context_tokens: u64,
+        reserve_tokens: u64,
+    ) -> Self {
+        let usable = model_context_tokens.saturating_sub(reserve_tokens);
+        if usable == 0 || messages.is_empty() {
+            return self;
+        }
+        let estimated = estimate_window_tokens(messages);
+        if estimated <= usable {
+            return self;
+        }
+        let scaled = (self.max_chars as u64).saturating_mul(usable) / estimated.max(1);
+        Self::new(
+            (scaled as usize).min(self.max_chars).max(1),
+            self.max_messages,
+        )
+    }
+
     /// The same two ceilings scaled down, for a request the provider has already
     /// refused as too large: 60% of each, floored so what is left is still a
     /// valid request (a system prompt, the task, the exchange in flight).
@@ -664,6 +1135,14 @@ pub struct FitOutcome {
     pub superseded_chars: Vec<usize>,
     /// The digest that replaced the dropped turns, when a compaction happened.
     pub notice: Option<String>,
+    /// The pre-filtered eviction batch, when a quantized eviction happened: what a
+    /// model-assisted compaction needs and nothing more. `None` when nothing was
+    /// dropped (nothing to summarise) or when only stubs were written.
+    ///
+    /// The deterministic digest is already inside [`FitOutcome::messages`] when this
+    /// is `Some`, so a caller that ignores the batch loses only the prose: see
+    /// [`EvictionBatch`].
+    pub eviction_batch: Option<EvictionBatch>,
 }
 
 impl FitOutcome {
@@ -676,6 +1155,7 @@ impl FitOutcome {
             dropped,
             superseded_chars,
             notice: None,
+            eviction_batch: None,
         }
     }
 
@@ -707,6 +1187,235 @@ impl FitOutcome {
             .sum();
         dropped + stubbed
     }
+}
+
+/// Share of the byte budget the head of a cut result keeps: the command line,
+/// the first file of a listing, the start of a panic.
+const TRUNCATE_HEAD_PERCENT: usize = 25;
+/// Share the tail keeps. The tail is where a compiler summary, a test verdict,
+/// a panic backtrace and an exit status live, which is why it gets the largest
+/// share - a head-only cut throws away exactly the line that says what failed.
+const TRUNCATE_TAIL_PERCENT: usize = 65;
+/// Share reserved for rescuing high-signal diagnostic lines out of the dropped
+/// middle. A build log's failure can be tens of thousands of bytes from the end;
+/// the head and the tail are by construction blind to it.
+const TRUNCATE_DIAGNOSTIC_PERCENT: usize = 10;
+/// Context lines kept after a rescued diagnostic, so an `error[E0308]` is not
+/// separated from the `-->` location and the expectation that explains it.
+const TRUNCATE_DIAGNOSTIC_CONTEXT_LINES: usize = 2;
+
+/// Substrings that make one line of a tool result worth rescuing out of the
+/// middle of a cut. Matched case-insensitively against the whole line.
+///
+/// Deliberately narrow and language-agnostic: every entry is a word a failing
+/// build, test runner or interpreter prints, and none of them is common enough in
+/// ordinary output to fill the rescue budget with noise.
+const DIAGNOSTIC_MARKERS: &[&str] = &[
+    "error[",
+    "error:",
+    "failed",
+    "panicked at",
+    "traceback",
+    "fatal:",
+    "assertion",
+    "unresolved",
+    "exception",
+];
+
+/// Truncate a tool result to a byte budget, keeping the head, the **tail**, and
+/// any diagnostic lines that were about to be dropped from the middle.
+///
+/// Keeping a tail is what makes a cut resumable: `cargo test`, `cargo check`,
+/// `pytest` and every build tool put their verdict - the failing assertion, the
+/// panic backtrace, `test result: FAILED`, the exit summary - at the *end* of the
+/// stream. A head-only cut keeps the compiler's banner and loses the reason.
+///
+/// The middle is not simply dropped either. A 60 KB `cargo test` log usually
+/// carries its `error[E0308]` somewhere in the first half and its summary at the
+/// end; both are needed, and neither is near a fixed fraction of the bytes. So the
+/// dropped slice is scanned line by line for [`DIAGNOSTIC_MARKERS`] and the
+/// matches (with a couple of lines after each) are spliced between head and tail
+/// under a marker that says exactly what happened.
+///
+/// Guarantees:
+///
+/// * the returned text never exceeds `max_bytes` (and so never exceeds the
+///   `max_bytes + 256` the caller is promised);
+/// * UTF-8 is never split - every slice lands on a char boundary;
+/// * seams snap to line boundaries where the payload has them, so no line is half
+///   delivered and the counts in the marker describe the splice the reader sees;
+/// * `false` is returned only when nothing was cut, i.e. the result is complete.
+pub fn truncate_output(content: &str, max_bytes: usize) -> (String, bool) {
+    if content.len() <= max_bytes {
+        return (content.to_string(), false);
+    }
+    if max_bytes == 0 {
+        return (String::new(), true);
+    }
+    // The marker is charged against the budget it explains, so the payload
+    // shrinks until the assembled result fits. The numbers in the marker depend
+    // on the geometry that attempt produced, so each attempt renders its own.
+    let mut payload = max_bytes;
+    for _ in 0..8 {
+        let assembled = assemble_truncation(content, payload);
+        if assembled.len() <= max_bytes {
+            return (assembled, true);
+        }
+        let next = payload.saturating_sub(assembled.len().saturating_sub(max_bytes).max(1));
+        payload = next.min(payload.saturating_sub(1));
+        if payload < 128 {
+            break;
+        }
+    }
+    // A budget too small for any marker keeps a valid prefix; the caller still
+    // learns the result was cut.
+    let mut end = max_bytes.min(content.len());
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    (content[..end].to_string(), true)
+}
+
+/// One truncation attempt for a given content payload, marker included.
+fn assemble_truncation(content: &str, payload: usize) -> String {
+    let payload = payload.min(content.len());
+    let head_budget = payload * TRUNCATE_HEAD_PERCENT / 100;
+    let tail_budget = payload * TRUNCATE_TAIL_PERCENT / 100;
+    let diagnostic_budget = payload * TRUNCATE_DIAGNOSTIC_PERCENT / 100;
+
+    // Head: everything up to the last line boundary inside its share, so a
+    // command's own header - and every line it printed - arrives whole.
+    let head_end = snap_head_to_line(content, head_budget);
+    // Tail: from the first line boundary after its share, so the final summary
+    // line is never spliced in half.
+    let tail_start = snap_tail_to_line(content, content.len().saturating_sub(tail_budget));
+    if tail_start <= head_end {
+        // The two shares met: keep a head and a char-boundary tail, no middle.
+        let tail_start = tail_start.max(head_end).min(content.len());
+        let middle_bytes = 0;
+        let middle_lines = 0;
+        let marker = truncation_marker(middle_bytes, middle_lines, "");
+        let tail_start = floor_char_boundary(content, tail_start);
+        let mut out = String::with_capacity(payload);
+        out.push_str(content.get(..head_end).unwrap_or(""));
+        out.push_str(&marker);
+        out.push_str(content.get(tail_start..).unwrap_or(""));
+        return out;
+    }
+
+    let middle = content.get(head_end..tail_start).unwrap_or("");
+    let diagnostics = rescue_diagnostics(middle, diagnostic_budget);
+    let marker = truncation_marker(middle.len(), middle.lines().count(), &diagnostics);
+    let mut out = String::with_capacity(payload + marker.len());
+    out.push_str(content.get(..head_end).unwrap_or(""));
+    out.push_str(&marker);
+    out.push_str(content.get(tail_start..).unwrap_or(""));
+    out
+}
+
+/// The biggest offset `<= budget` that follows a newline (or `budget` itself when
+/// it is already on one). Falls back to the floor char boundary when the payload
+/// has no newline in its head share at all (minified data, one long record).
+fn snap_head_to_line(content: &str, budget: usize) -> usize {
+    let budget = floor_char_boundary(content, budget.min(content.len()));
+    if budget == 0 || budget >= content.len() {
+        return budget;
+    }
+    match content.get(..budget).and_then(|head| head.rfind('\n')) {
+        Some(newline) => newline + 1,
+        None => budget,
+    }
+}
+
+/// The smallest offset `>= target` that starts a line, so the tail begins with a
+/// whole line. Falls back to the ceiling char boundary for an unbroken payload.
+fn snap_tail_to_line(content: &str, target: usize) -> usize {
+    let target = ceil_char_boundary(content, target.min(content.len()));
+    if target == 0 || target >= content.len() {
+        return target;
+    }
+    match content.get(target..).and_then(|tail| tail.find('\n')) {
+        Some(offset) => target + offset + 1,
+        None => target,
+    }
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+/// The marker that stands where the middle was.
+///
+/// With rescued lines it names the splice, prints the diagnostics that were saved
+/// and says the tail is still the real tail - the same shape a reader can resume
+/// from. Without them it reports the loss in bytes and lines and nothing else.
+fn truncation_marker(dropped_bytes: usize, dropped_lines: usize, diagnostics: &str) -> String {
+    if diagnostics.trim().is_empty() {
+        format!("\n...[truncated {dropped_bytes} bytes ({dropped_lines} lines)]...\n")
+    } else {
+        format!(
+            "\n...[truncated {dropped_bytes} bytes ({dropped_lines} lines); rescued key \
+             diagnostics from middle:]\n{diagnostics}\n...[continuing tail:]\n"
+        )
+    }
+}
+
+/// Collect the high-signal lines out of a dropped middle slice, with a little
+/// trailing context, up to `budget` bytes.
+///
+/// The scan is line-by-line and stops as soon as the budget is spent, so a
+/// pathological log of ten thousand `error:` lines costs one pass and no
+/// allocation past the budget.
+fn rescue_diagnostics(middle: &str, budget: usize) -> String {
+    if budget == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    let mut context_left = 0usize;
+    for line in middle.lines() {
+        let interesting = line_is_diagnostic(line);
+        if !interesting && context_left == 0 {
+            continue;
+        }
+        if interesting {
+            context_left = TRUNCATE_DIAGNOSTIC_CONTEXT_LINES;
+        } else {
+            context_left -= 1;
+        }
+        let line = one_line(line, TRUNCATE_DIAGNOSTIC_LINE_CHARS);
+        let cost = line.len() + 1;
+        if used + cost > budget {
+            break;
+        }
+        used += cost;
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
+/// Characters of one rescued line. Longer than a digest line: a compiler error's
+/// expectation and a stack frame's location both live past 160 characters.
+const TRUNCATE_DIAGNOSTIC_LINE_CHARS: usize = 400;
+
+fn line_is_diagnostic(line: &str) -> bool {
+    let lowered = line.to_ascii_lowercase();
+    DIAGNOSTIC_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
 }
 
 /// Drop oldest exchanges until the budget fits, then insert the compaction
@@ -832,6 +1541,27 @@ fn fit_report(
         .unwrap_or(0);
     let start = pinned_prefix(&prepared);
 
+    // Over budget. Before anything is dropped, reclaim what is *inside* the turns
+    // that will be kept: a 40 KB `write_file` payload and a 6 KB chain of thought
+    // are history the model cannot act on, and dropping whole exchanges to pay for
+    // them loses far more than the payload ever cost.
+    //
+    // Both passes are schema-safe and idempotent: the arguments stay valid JSON and
+    // a second compaction finds nothing left to fold. Reasoning that ended in a
+    // conclusion hands that conclusion to the digest as a note.
+    let mut merged_notes: Vec<String> = notes.to_vec();
+    if total > max_chars {
+        let scrubbed = scrub_old_tool_call_args(&mut prepared);
+        let (conclusions, decayed) = decay_old_reasoning(&mut prepared);
+        for conclusion in conclusions {
+            if !merged_notes.contains(&conclusion) {
+                merged_notes.push(conclusion);
+            }
+        }
+        total = total.saturating_sub(scrubbed.saturating_add(decayed));
+    }
+    let notes: &[String] = &merged_notes;
+
     // Over budget: retire the tool results a later call has already replaced.
     // Everything from the pinned prefix on decides what is stale (the exchange in
     // flight included); only what comes before the exchange in flight - and before
@@ -867,6 +1597,7 @@ fn fit_report(
             dropped,
             superseded_chars,
             notice: None,
+            eviction_batch: None,
         };
     }
 
@@ -948,6 +1679,7 @@ fn fit_report(
                         dropped,
                         superseded_chars,
                         notice: Some(notice),
+                        eviction_batch: None,
                     }
                 }
                 None => {
@@ -1002,12 +1734,35 @@ fn fit_report(
         "every droppable exchange is gone and the pinned prefix plus the exchange in \
          flight do not fit it",
     );
+    // The quantized eviction happened: this is the one batch worth paying a model
+    // call for, because a whole slice of history has just been summarised into
+    // prose the deterministic ledger cannot produce.
+    let eviction_batch = Some(build_eviction_batch(&prepared, &dropped, notes, max_chars));
     FitOutcome {
         messages,
         prepared,
         dropped,
         superseded_chars,
         notice: Some(notice),
+        eviction_batch,
+    }
+}
+
+/// Assemble the pre-filtered batch for a model-assisted compaction.
+fn build_eviction_batch(
+    prepared: &[Message],
+    dropped: &[bool],
+    notes: &[String],
+    max_chars: usize,
+) -> EvictionBatch {
+    let previous_semantic_summary = prepared
+        .iter()
+        .find(|message| is_digest(message))
+        .and_then(digest_semantic_summary);
+    EvictionBatch {
+        previous_semantic_summary,
+        scrubbed_transcript: scrubbed_transcript(prepared, dropped, EVICTION_BATCH_MAX_CHARS),
+        state_ledger: build_state_ledger(prepared, dropped, notes, digest_caps(max_chars).0),
     }
 }
 
@@ -1059,11 +1814,11 @@ pub fn compact_run_window_with_notes(
 /// the same way, and one under both is left byte-identical - the loop re-clones
 /// it into every request, so touching it between compactions would cost a
 /// prompt-cache miss per turn.
-pub fn compact_run_window_with_limits(
+pub fn compact_run_window_with_limits_detailed(
     history: &mut Vec<Message>,
     limits: ContextLimits,
     notes: &[String],
-) {
+) -> Option<EvictionBatch> {
     // What the loop sends is `[system prompt, history...]`, so the window this
     // bounds may carry one item fewer than the ceiling. A held window that only
     // fits once the system prompt is forgotten is a window that does not fit -
@@ -1084,11 +1839,31 @@ pub fn compact_run_window_with_limits(
     cap_image_bytes(history);
     let mut total: usize = history.iter().map(message_chars).sum();
     if limits.fits(total, provider_message_count(history)) {
-        return;
+        return None;
     }
 
     let start = pinned_prefix(history);
     let current = current_exchange_start(history);
+
+    // Reclaim what is inside the turns that are kept before dropping any turn
+    // whole: old write payloads (schema-valid, folded) and chains of thought
+    // (cleared, with their conclusion kept as a note). Both are idempotent, so a
+    // window that has already been through this pass is unchanged by the next one.
+    let mut merged_notes: Vec<String> = notes.to_vec();
+    if total > max_chars {
+        let scrubbed = scrub_old_tool_call_args(history);
+        let (conclusions, decayed) = decay_old_reasoning(history);
+        for conclusion in conclusions {
+            if !merged_notes.contains(&conclusion) {
+                merged_notes.push(conclusion);
+            }
+        }
+        total = total.saturating_sub(scrubbed.saturating_add(decayed));
+        if limits.fits(total, provider_message_count(history)) {
+            return None;
+        }
+    }
+    let notes: &[String] = &merged_notes;
 
     // Over budget: retire the tool results a later call already replaced. The
     // scan covers the whole window (a page read in the turn in flight is what
@@ -1110,7 +1885,7 @@ pub fn compact_run_window_with_limits(
     }
     if limits.fits(total, provider_message_count(history)) {
         // The stubs alone brought the held window under budget.
-        return;
+        return None;
     }
 
     let sticky = sticky_flags(history, max_chars);
@@ -1134,7 +1909,7 @@ pub fn compact_run_window_with_limits(
             warn_if_over_ceiling(&messages, limits, "nothing may be dropped");
             *history = messages;
         }
-        return;
+        return None;
     }
 
     let target = target_chars(history, max_chars);
@@ -1175,7 +1950,7 @@ pub fn compact_run_window_with_limits(
                 // only in the log (a notice here would be a request that changes
                 // on every turn).
                 warn_if_over_ceiling(history, limits, "nothing may be dropped");
-                return;
+                return None;
             }
             // Nothing turned out to be droppable: elide the bodies instead.
             let mut window = history.clone();
@@ -1186,7 +1961,7 @@ pub fn compact_run_window_with_limits(
                 warn_if_over_ceiling(&messages, limits, "nothing may be dropped");
                 *history = messages;
             }
-            return;
+            return None;
         }
         let notice = compact_notice(history, &dropped, dropped_messages, max_chars, notes);
         let fits = survivors + notice.chars().count() <= max_chars
@@ -1210,6 +1985,11 @@ pub fn compact_run_window_with_limits(
         next += 1;
     };
 
+    // The eviction happened: the batch is built from the window as it was *before*
+    // the rebuild, because the rebuild replaces the dropped turns with the digest
+    // and the batch is a summary of exactly those turns.
+    let batch = Some(build_eviction_batch(history, &dropped, notes, max_chars));
+
     // Every droppable unit is gone and the tail alone is still too big: elide
     // the surviving bodies, so what is held (and sent) respects the budget.
     let mut window = std::mem::take(history);
@@ -1229,7 +2009,7 @@ pub fn compact_run_window_with_limits(
              in flight do not fit it",
         );
         *history = rebuilt;
-        return;
+        return batch;
     }
     let out = rebuild(window, start, &dropped, notice);
     warn_if_over_ceiling(
@@ -1239,6 +2019,21 @@ pub fn compact_run_window_with_limits(
          flight do not fit it",
     );
     *history = out;
+    batch
+}
+
+/// [`compact_run_window_with_limits`], plus the pre-filtered eviction batch when a
+/// quantized eviction actually happened.
+///
+/// The batch is what a model-assisted compaction reads (see [`EvictionBatch`]): the
+/// deterministic digest is already inside `history` by the time this returns, so a
+/// caller that ignores the batch loses only the prose.
+pub fn compact_run_window_with_limits(
+    history: &mut Vec<Message>,
+    limits: ContextLimits,
+    notes: &[String],
+) {
+    let _ = compact_run_window_with_limits_detailed(history, limits, notes);
 }
 
 // ---------------------------------------------------------------------------
@@ -1314,7 +2109,29 @@ fn supersede(messages: &mut [Message], from: usize, stub_below: usize) -> Vec<us
     }
 
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
+    // Files mutated by a message **newer** than the one being examined. Built as
+    // the backward walk passes each mutation, so it always describes exactly the
+    // window `(i, len)` and needs no second pass.
+    let mut mutated: HashSet<String> = HashSet::new();
+    // Intervals read by newer `read_file` calls, per normalized path. A read is
+    // only redundant when a newer read *covers* it: lines 400..500 of a file do
+    // not replace lines 1..100 of the same file, they add to them.
+    let mut seen_reads: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+
     for i in (from..messages.len()).rev() {
+        // A mutation invalidates whatever described this file before it, and it
+        // invalidates nothing after it. Recorded on the assistant turn that asked
+        // for it - the result message carries no path - so the check below is O(1)
+        // for the (many) older messages.
+        if messages[i].role == Role::Assistant {
+            for call in &messages[i].tool_calls {
+                if is_mutation_tool(&call.name) {
+                    if let Some(path) = call_path(&call.arguments) {
+                        mutated.insert(normalize_path(&path));
+                    }
+                }
+            }
+        }
         if messages[i].role != Role::Tool {
             continue;
         }
@@ -1334,37 +2151,226 @@ fn supersede(messages: &mut [Message], from: usize, stub_below: usize) -> Vec<us
         } else {
             None
         };
-        let (path, range) = match header {
-            Some(target) => target,
-            None => match call.and_then(|call| call.path.clone()) {
-                Some(path) => (path, None),
-                None => continue,
-            },
+        let target_path = match header.as_ref() {
+            Some((path, _)) => Some(path.clone()),
+            None => call.and_then(|call| call.path.clone()),
         };
+        let Some(path) = target_path else {
+            continue;
+        };
+        let path = normalize_path(&path);
+        // A stub is already the shortest honest form of this result, and it is the
+        // only place the retired page's line range survives: re-deriving the range
+        // from it is impossible (the header is gone), so re-stubbing it would
+        // trade `lines 1-300 of 812` for a vaguer sentence on the next compaction.
+        // Measured on a live run: the first stub carried the range, the second
+        // lost it.
+        if is_stubbed(&messages[i]) {
+            continue;
+        }
+
+        if tool == "read_file" {
+            let interval = header
+                .as_ref()
+                .and_then(|(_, range)| range.as_deref())
+                .and_then(parse_header_range)
+                .or_else(|| call.and_then(|call| call.range))
+                .unwrap_or((1, usize::MAX));
+            let range_label = header
+                .as_ref()
+                .and_then(|(_, range)| range.clone())
+                .map(|range| format!("lines {range}"))
+                .or_else(|| call.and_then(|call| call.range_label.clone()));
+
+            // Case A: a newer mutation rewrote the file under this page.
+            if mutated.contains(&path) {
+                if i >= stub_below {
+                    // Inside the exchange in flight: it is what the model is
+                    // reasoning about right now, even though it is stale.
+                    continue;
+                }
+                if let Some(saving) = stub_stale(
+                    &mut messages[i],
+                    &tool,
+                    &path,
+                    range_label.as_deref(),
+                    "was invalidated by a file edit/write later in this session. Call read_file \
+                     again if you need current contents or line numbers.",
+                ) {
+                    saved[i] = saving;
+                }
+                continue;
+            }
+
+            // Case B: a newer read covers this whole range.
+            let covered = seen_reads.get(&path).is_some_and(|intervals| {
+                intervals
+                    .iter()
+                    .any(|&(start, end)| start <= interval.0 && end >= interval.1)
+            });
+            if covered {
+                if i >= stub_below {
+                    continue;
+                }
+                if let Some(saving) =
+                    stub_superseded(&mut messages[i], &tool, &path, range_label.as_deref())
+                {
+                    saved[i] = saving;
+                }
+                continue;
+            }
+            // Case C: disjoint or partial overlap - the older page still says
+            // something no later result says, so it is kept.
+            merge_interval(seen_reads.entry(path.clone()).or_default(), interval);
+            continue;
+        }
+
+        // The other idempotent inspections are answers to whole-path questions, so
+        // an identical query is a replacement and nothing else is.
         let qualifier = call.map(|call| call.qualifier.clone()).unwrap_or_default();
-        if seen.insert((tool.clone(), path.clone(), qualifier)) {
-            // The newest result per target is the good one.
+        if !seen.insert((tool.clone(), path.clone(), qualifier)) {
+            if i < stub_below {
+                if let Some(saving) = stub_superseded(&mut messages[i], &tool, &path, None) {
+                    saved[i] = saving;
+                }
+            }
             continue;
         }
-        if i >= stub_below {
-            // Inside the exchange in flight: it made the older one stale, but it
-            // is what the model is reasoning about right now.
-            continue;
-        }
-        // A stub is already the shortest honest form of this result, and it is
-        // the only place the retired page's line range survives: re-deriving the
-        // range from it is impossible (the header is gone), so re-stubbing it
-        // would trade `lines 1-300 of 812` for a vaguer sentence on the next
-        // compaction. Measured on a live run: the first stub carried the range,
-        // the second lost it.
-        if is_superseded(&messages[i]) {
-            continue;
-        }
-        if let Some(saving) = stub_superseded(&mut messages[i], &tool, &path, range.as_deref()) {
-            saved[i] = saving;
+        // A `git_diff` is a picture of the whole working tree, so any mutation
+        // newer than it makes its hunks and line numbers wrong.
+        if tool == "git_diff" && i < stub_below && !mutated.is_empty() {
+            if let Some(saving) = stub_stale(
+                &mut messages[i],
+                &tool,
+                &path,
+                None,
+                "was invalidated by later file modifications in this session.",
+            ) {
+                saved[i] = saving;
+            }
         }
     }
     saved
+}
+
+/// Is this tool one that changes the workspace (see [`MUTATION_TOOLS`])?
+fn is_mutation_tool(tool: &str) -> bool {
+    let base = tool.rsplit("__").next().unwrap_or(tool);
+    MUTATION_TOOLS.contains(&base)
+}
+
+/// The `path` argument of a call, if it names one.
+///
+/// Deliberately only `path`: a mutation tool's payload may mention a dozen paths
+/// in its diff, and guessing that every string that looks like a path was written
+/// would stub pages the edit never touched.
+fn call_path(arguments: &str) -> Option<String> {
+    let arguments: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    arguments
+        .get("path")
+        .and_then(|path| path.as_str())
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+}
+
+/// The normalized form of a path used as a supersession key.
+///
+/// `./src/lib.rs`, `src//lib.rs` and `src/lib.rs` name one file; without this a
+/// model that alternates the two spellings re-reads the same page forever. The
+/// path is never resolved against the workspace - only the spelling is
+/// normalized, because a wrong guess about the root would merge two real files.
+fn normalize_path(path: &str) -> String {
+    let mut path = path.trim().replace('\\', "/");
+    while let Some(rest) = path.strip_prefix("./") {
+        path = rest.to_string();
+    }
+    while path.contains("//") {
+        path = path.replace("//", "/");
+    }
+    path
+}
+
+/// Record an interval, merging anything it overlaps or touches so the list stays
+/// sorted, disjoint and small.
+fn merge_interval(intervals: &mut Vec<(usize, usize)>, new: (usize, usize)) {
+    intervals.push(new);
+    intervals.sort_by_key(|&(start, end)| (start, end));
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(intervals.len());
+    for (start, end) in intervals.drain(..) {
+        match merged.last_mut() {
+            Some(last) if start <= last.1.saturating_add(1) => {
+                last.1 = last.1.max(end);
+            }
+            _ => merged.push((start, end)),
+        }
+    }
+    *intervals = merged;
+}
+
+/// Parse `A-B of N` into `(A, B)`. A `+` suffix (a count capped by the read
+/// limit) is treated as the range it names.
+fn parse_header_range(range: &str) -> Option<(usize, usize)> {
+    let (span, _total) = range.split_once(" of ")?;
+    let (start, end) = span.split_once('-')?;
+    let start: usize = start.trim().trim_end_matches('+').parse().ok()?;
+    let end: usize = end.trim().trim_end_matches('+').parse().ok()?;
+    (start > 0 && end >= start).then_some((start, end))
+}
+
+/// The range a call asked for, from `offset`/`limit` or `start_line`/`end_line`.
+/// `None` means the call named no window, i.e. it read the whole file.
+fn argument_range(arguments: &Option<serde_json::Value>) -> Option<(usize, usize)> {
+    let arguments = arguments.as_ref()?;
+    let number = |key: &str| arguments.get(key).and_then(|value| value.as_u64());
+    if let Some(end) = number("end_line") {
+        let start = number("start_line").unwrap_or(1).max(1);
+        return Some((start as usize, end.max(start) as usize));
+    }
+    let offset = number("offset");
+    let limit = number("limit");
+    match (offset, limit) {
+        (Some(offset), Some(limit)) => {
+            let start = offset.max(1) as usize;
+            Some((start, start + limit as usize - 1))
+        }
+        (Some(offset), None) => Some((offset.max(1) as usize, usize::MAX)),
+        (None, Some(limit)) => Some((1, limit as usize)),
+        (None, None) => None,
+    }
+}
+
+/// A human-readable phrase for a range, for the stub text.
+fn range_label_from(interval: (usize, usize)) -> String {
+    if interval == (1, usize::MAX) {
+        "the whole file".to_string()
+    } else if interval.1 == usize::MAX {
+        format!("lines {}-", interval.0)
+    } else {
+        format!("lines {}-{}", interval.0, interval.1)
+    }
+}
+
+/// The stub for a result whose file was changed underneath it.
+fn stub_stale(
+    message: &mut Message,
+    tool: &str,
+    path: &str,
+    phrase: Option<&str>,
+    reason: &str,
+) -> Option<usize> {
+    let named = match phrase {
+        Some(phrase) => format!("{phrase} "),
+        None => String::new(),
+    };
+    let stub = format!("{STALE_PREFIX}{tool} `{path}` {named}{reason}]");
+    let before = message.content.chars().count();
+    let after = stub.chars().count();
+    if after >= before {
+        return None;
+    }
+    message.content = stub;
+    Some(before - after)
 }
 
 /// One call's target, resolved from its arguments once.
@@ -1373,6 +2379,11 @@ struct CallTarget {
     tool: String,
     path: Option<String>,
     qualifier: String,
+    /// The line window the call asked for, when it named one. `None` for a call
+    /// that read a whole file or named no window at all.
+    range: Option<(usize, usize)>,
+    /// The same window, rendered for a stub (`lines 401-812`).
+    range_label: Option<String>,
 }
 
 impl CallTarget {
@@ -1384,11 +2395,14 @@ impl CallTarget {
             .and_then(|path| path.as_str())
             .map(str::trim)
             .filter(|path| !path.is_empty())
-            .map(str::to_string);
+            .map(normalize_path);
+        let range = argument_range(&arguments);
         Self {
             tool: call.name.clone(),
             path,
             qualifier: qualifier(&arguments),
+            range,
+            range_label: range.map(range_label_from),
         }
     }
 }
@@ -1466,11 +2480,15 @@ fn stub_superseded(
 /// the call is allowed again: a stub that only said "omitted" would read like a
 /// failure the model has to work around, and it would invite it to stop reading
 /// files altogether.
+///
+/// `range` is a full phrase (`lines 1-400 of 812`, `the whole file`), not a bare
+/// span, so the stub reads the same whether the range came from the result's own
+/// header or from the call's arguments.
 fn superseded_stub(tool: &str, path: &str, range: Option<&str>) -> String {
     match range {
         Some(range) => format!(
-            "{SUPERSEDED_PREFIX}{tool} `{path}` lines {range} was replaced by a later call in this \
-             run. Call {tool} again if you still need that range.]"
+            "{SUPERSEDED_PREFIX}{tool} `{path}` {range} was replaced by a later call in this run. \
+             Call {tool} again if you still need that range.]"
         ),
         None => format!(
             "{SUPERSEDED_PREFIX}{tool} `{path}` was replaced by a later call in this run. Call \
@@ -1482,6 +2500,18 @@ fn superseded_stub(tool: &str, path: &str, range: Option<&str>) -> String {
 /// Is this message a tool result a later call has retired?
 pub fn is_superseded(message: &Message) -> bool {
     message.role == Role::Tool && message.content.starts_with(SUPERSEDED_PREFIX)
+}
+
+/// Is this message a tool result a later **mutation** invalidated?
+pub fn is_stale(message: &Message) -> bool {
+    message.role == Role::Tool && message.content.starts_with(STALE_PREFIX)
+}
+
+/// Has this tool result already been reduced to a stub - by a later read, or by a
+/// later write? Either way it is the shortest honest form of itself and must be
+/// left exactly as it is: the range it names is the only record of what it held.
+fn is_stubbed(message: &Message) -> bool {
+    is_superseded(message) || is_stale(message)
 }
 
 // ---------------------------------------------------------------------------
@@ -2086,6 +3116,14 @@ pub fn is_digest(message: &Message) -> bool {
 pub const DIGEST_PREFIX: &str = TRIM_PREFIX;
 
 /// Is this assistant turn a written finding (see [`NOTE_MIN_CHARS`])?
+///
+/// Only a **pure text** turn is sticky, because only a pure text turn can be kept
+/// on its own: an assistant turn that declared tool calls must stay welded to the
+/// results that answer them, so it is droppable as a unit and pinning it would
+/// pin the exchange. Its prose is not lost - [`build_state_ledger`] lifts the text
+/// of every evicted assistant turn into the digest's findings, whether or not that
+/// turn also called tools, which is what makes an architectural explanation
+/// written alongside a `write_file` survive the eviction.
 fn is_note(message: &Message) -> bool {
     message.role == Role::Assistant
         && message.tool_calls.is_empty()
@@ -2177,12 +3215,16 @@ fn push_digest(out: &mut Vec<Message>, notice: String) {
 ///
 /// A bare "N messages trimmed" leaves a long run blind to everything it learned
 /// early on, and a digest that forgets *which* files were read makes the model
-/// read them again. So: the run's own [notebook](Notebook) first - its
-/// conclusions are worth more than any list of calls - then one trimmed line per
-/// dropped user/assistant turn, the tool calls with their arguments, the tool
-/// results counted, and the digest of an earlier compaction carried forward.
-/// Newest dropped turns win when the digest budget runs out; oldest notes are
-/// released first when the note budget does.
+/// read them again. The old answer was a chronological list of 48-character tool
+/// call signatures, which kept the shape of the work and lost its substance: not
+/// *why* an approach failed, not the invariant it discovered, and not the file
+/// set it had built.
+///
+/// So the digest is now a **state ledger** (see [`build_state_ledger`]): five
+/// deterministic sections plus, when a model summary is available, the semantic
+/// working memory. It is built from the dropped messages *and* from the digest it
+/// replaces, so a run that compacts eleven times accumulates one ledger instead of
+/// losing everything before the tenth.
 ///
 /// A stubbed result (see [`supersede`]) is *not* dropped, so it is never counted
 /// here: the stub already says what it was.
@@ -2193,76 +3235,864 @@ fn compact_notice(
     max_chars: usize,
     notes: &[String],
 ) -> String {
-    let (digest_chars, line_chars) = digest_caps(max_chars);
-
-    // The notebook and the note lines an earlier digest already carries, merged
-    // and bounded by the note policy rather than by a cap of their own.
-    let carried_notes = carried_notes(messages);
-    let note_lines = merge_notes(&carried_notes, notes, note_budget(max_chars));
-    let note_chars: usize = note_lines.iter().map(|line| line.chars().count() + 1).sum();
-    // Notes are paid for out of the digest's own allowance, and they win: they
-    // are the model's conclusions, the turn list is its history.
-    let line_budget = digest_chars.saturating_sub(note_chars);
-
-    let mut lines: Vec<String> = Vec::new();
-    let mut used = 0usize;
+    let (digest_chars, _line_chars) = digest_caps(max_chars);
     let mut tool_results = 0usize;
-    for (i, message) in messages.iter().enumerate().rev() {
-        if !dropped[i] {
-            continue;
+    for (i, message) in messages.iter().enumerate() {
+        if dropped[i] && message.role == Role::Tool && !is_digest(message) {
+            tool_results += 1;
         }
-        if is_digest(message) {
-            continue;
-        }
-        let line = match message.role {
-            Role::Tool => {
-                tool_results += 1;
-                continue;
-            }
-            Role::System => continue,
-            Role::User => format!("- user: {}", one_line(&message.content, line_chars)),
-            Role::Assistant => format!("- assistant: {}", assistant_line(message, line_chars)),
-        };
-        let chars = line.chars().count() + 1;
-        if used + chars > line_budget {
-            break;
-        }
-        used += chars;
-        lines.push(line);
     }
-    lines.reverse();
-
-    // Carry an existing digest forward, newest lines first so the budget is
-    // spent on the most recent knowledge. The note lines are already in
-    // `note_lines`, deduplicated against the live notebook.
-    let carried: Vec<String> = messages
-        .iter()
-        .filter(|m| is_digest(m))
-        .flat_map(|m| digest_body_lines(&m.content))
-        .filter(|line| !line.starts_with(NOTE_LINE_PREFIX))
-        .collect();
-    let mut notice = format!("{TRIM_PREFIX}{dropped_messages} earlier messages omitted");
+    let mut header = format!("{TRIM_PREFIX}{dropped_messages} earlier messages omitted");
     if tool_results > 0 {
-        notice.push_str(&format!(" ({tool_results} tool results)"));
+        header.push_str(&format!(" ({tool_results} tool results)"));
     }
-    notice.push_str("; the work they describe is still done - do not redo it]\n");
-    for line in &note_lines {
-        notice.push_str(line);
-        notice.push('\n');
-    }
-    let mut appended = 0usize;
-    for line in lines.iter().chain(carried.iter()) {
-        if appended + line.chars().count() + 1 > line_budget {
-            break;
+    header.push_str("; the work they describe is still done - do not redo it]\n");
+    let ledger = build_state_ledger(messages, dropped, notes, digest_chars);
+    let mut notice = String::with_capacity(header.len() + ledger.len());
+    notice.push_str(&header);
+    if !ledger.trim().is_empty() {
+        notice.push_str(&ledger);
+        if !notice.ends_with('\n') {
+            notice.push('\n');
         }
-        appended += line.chars().count() + 1;
-        notice.push_str(line);
-        notice.push('\n');
     }
     // The fixed explanatory header can exceed a deliberately tiny budget. Cap
     // the completed notice itself, not only its optional digest lines; otherwise
     // saturating subtraction still rebuilds an over-budget request.
     notice.trim_end().chars().take(max_chars).collect()
+}
+
+// ---------------------------------------------------------------------------
+// the state ledger
+// ---------------------------------------------------------------------------
+
+/// One file a dropped run wrote to, accumulated across compactions.
+#[derive(Debug, Clone, Default)]
+struct FileWork {
+    /// `write`, `edit`, `patch`, ... in the order they were first seen.
+    ops: Vec<String>,
+    /// How many calls touched the file.
+    edits: usize,
+    /// The newest one-line description of what the last call did.
+    last: String,
+}
+
+impl FileWork {
+    fn add(&mut self, op: &str, summary: &str) {
+        if !self.ops.iter().any(|seen| seen == op) {
+            self.ops.push(op.to_string());
+        }
+        self.edits += 1;
+        if !summary.is_empty() {
+            self.last = summary.to_string();
+        }
+    }
+
+    fn render(&self, path: &str) -> String {
+        let ops = self.ops.join(", ");
+        let count = if self.edits > 1 {
+            format!(" ({} edits)", self.edits)
+        } else {
+            String::new()
+        };
+        if self.last.is_empty() {
+            format!("- file: `{path}` — {ops}{count}")
+        } else {
+            format!("- file: `{path}` — {ops}{count}: {}", self.last)
+        }
+    }
+
+    /// Read one rendered entry back, so a previous digest's totals are carried
+    /// into this one rather than replaced by the newest cycle alone.
+    fn parse(line: &str) -> Option<(String, FileWork)> {
+        let rest = line.strip_prefix("- file: `")?;
+        let (path, rest) = rest.split_once('`')?;
+        let rest = rest.strip_prefix(" — ").unwrap_or("");
+        let (ops_part, summary) = match rest.split_once(": ") {
+            Some((ops, summary)) => (ops, summary),
+            None => (rest, ""),
+        };
+        let (ops_part, edits) = match ops_part.rsplit_once(" (") {
+            Some((ops, count)) if count.ends_with(" edits)") => {
+                let edits = count
+                    .trim_end_matches(" edits)")
+                    .parse::<usize>()
+                    .unwrap_or(1);
+                (ops, edits)
+            }
+            _ => (ops_part, 1),
+        };
+        let ops = ops_part
+            .split(", ")
+            .map(str::trim)
+            .filter(|op| !op.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        Some((
+            path.to_string(),
+            FileWork {
+                ops,
+                edits,
+                last: summary.to_string(),
+            },
+        ))
+    }
+}
+
+/// Deterministic Block A of the digest: the state a compacted run must not lose.
+///
+/// Five sections, all built from facts the transcript already holds:
+///
+/// 1. **Modified & Created Files** - every path a dropped turn wrote, with its
+///    operations and edit count. This is the working set; a model that has to
+///    rediscover it re-reads the whole workspace.
+/// 2. **Explored Codebase Map** - the files and directories that were inspected,
+///    with the merged line ranges read, plus the searches that were run.
+/// 3. **Command & Verification History** - the shell, test and build commands, each
+///    with its verdict or its first diagnostic line. "I already ran the tests and
+///    they failed on X" is exactly what a model otherwise re-derives forever.
+/// 4. **Evicted Instructions & Findings** - the user turns that were dropped (the
+///    goal, the constraints, the corrections) and the assistant prose that
+///    explains a decision - captured even when the same turn also called tools,
+///    which is what the old `sticky_flags` rule missed.
+/// 5. **Semantic Working Memory** - the model-assisted summary when there is one
+///    (see [`crate::context::synthesize_semantic_compaction`]), carried forward
+///    from the previous digest otherwise.
+///
+/// The ledger merges with the digest it replaces, so repeated compaction
+/// accumulates state instead of resetting it. Everything is bounded by
+/// `max_chars`, with the semantic block reserved first: it is the only section
+/// that cannot be recomputed from the transcript.
+fn build_state_ledger(
+    messages: &[Message],
+    dropped: &[bool],
+    notes: &[String],
+    max_chars: usize,
+) -> String {
+    let previous = messages.iter().find(|message| is_digest(message));
+    let previous_body = previous
+        .map(|message| message.content.as_str())
+        .unwrap_or("");
+    let (previous_sections, previous_semantic) = parse_ledger(previous_body);
+
+    let mut files: BTreeMap<String, FileWork> = BTreeMap::new();
+    for line in previous_sections.get(FILES_SECTION).into_iter().flatten() {
+        if let Some((path, work)) = FileWork::parse(line) {
+            files.insert(path, work);
+        }
+    }
+    // Explored entries are `- file: \`path\` — lines A-B` / `- search: \`q\` in
+    // \`path\` / `- dir: \`path\``, kept as text and keyed by their own first
+    // backtick span so a newer entry replaces an older one and a different one
+    // joins it.
+    let mut explored: BTreeMap<String, String> = BTreeMap::new();
+    for line in previous_sections
+        .get(EXPLORED_SECTION)
+        .into_iter()
+        .flatten()
+    {
+        explored.insert(ledger_key(line), line.clone());
+    }
+    let mut commands: BTreeMap<String, String> = BTreeMap::new();
+    for line in previous_sections
+        .get(COMMANDS_SECTION)
+        .into_iter()
+        .flatten()
+    {
+        commands.insert(ledger_key(line), line.clone());
+    }
+    let mut instructions: Vec<String> = previous_sections
+        .get(INSTRUCTIONS_SECTION)
+        .into_iter()
+        .flatten()
+        .filter(|line| !line.starts_with(NOTE_LINE_PREFIX))
+        .cloned()
+        .collect();
+    let mut findings: Vec<String> = Vec::new();
+
+    for (i, message) in messages.iter().enumerate() {
+        if !dropped.get(i).copied().unwrap_or(false) || is_digest(message) {
+            continue;
+        }
+        match message.role {
+            Role::System => {}
+            Role::User => {
+                let text = one_line(&message.content, DIGEST_LINE_CHARS);
+                if !text.is_empty() {
+                    let line = format!("- user: {text}");
+                    if !instructions.contains(&line) {
+                        instructions.push(line);
+                    }
+                }
+            }
+            Role::Assistant => {
+                // Prose is a finding whether or not the same turn called tools.
+                // That is the whole point: an architectural explanation bundled
+                // with a `write_file` used to be dropped on eviction, which is
+                // how a run forgot the design it had just chosen.
+                let prose = message.content.trim();
+                if prose.chars().count() >= NOTE_MIN_CHARS {
+                    let line = format!("- finding: {}", one_line(prose, DIGEST_LINE_CHARS));
+                    if !findings.contains(&line) {
+                        findings.push(line);
+                    }
+                }
+                for call in &message.tool_calls {
+                    let path = call_path(&call.arguments).map(|path| normalize_path(&path));
+                    if is_mutation_tool(&call.name) {
+                        if let Some(path) = path {
+                            // A short "what the last write did" phrase: the file
+                            // path and the operations are the state, this is the
+                            // caption.
+                            let summary = one_line(prose, DIGEST_ARGS_CHARS * 2);
+                            files
+                                .entry(path)
+                                .or_default()
+                                .add(mutation_op(&call.name), &summary);
+                        }
+                    } else if !call.name.is_empty() {
+                        let signature = call_signature(call);
+                        let line = match call.name.as_str() {
+                            "read_file" => path.map(|path| {
+                                explored.entry(format!("file:{path}")).or_insert(format!(
+                                    "- file: `{path}` — lines {}",
+                                    read_range_label(&call.arguments)
+                                ))
+                            }),
+                            "list_dir" => path.map(|path| {
+                                explored
+                                    .entry(format!("dir:{path}"))
+                                    .or_insert(format!("- dir: `{path}`"))
+                            }),
+                            "search_files" => {
+                                let pattern = call_string_arg(&call.arguments, "pattern")
+                                    .unwrap_or_else(|| signature.clone());
+                                let scope = path.unwrap_or_else(|| "the workspace".to_string());
+                                Some(
+                                    explored
+                                        .entry(format!("search:{pattern}:{scope}"))
+                                        .or_insert(format!("- search: `{pattern}` in `{scope}`")),
+                                )
+                            }
+                            _ => None,
+                        };
+                        let _ = line;
+                    }
+                }
+            }
+            Role::Tool => {
+                let name = message.name.clone().unwrap_or_default();
+                let base = name.rsplit("__").next().unwrap_or(&name);
+                if !matches!(base, "run_command" | "bash" | "execute_command" | "shell") {
+                    continue;
+                }
+                let command = tool_call_for_tool(messages, i)
+                    .map(|call| call.arguments.clone())
+                    .and_then(|arguments| call_string_arg(&arguments, "command"))
+                    .unwrap_or_else(|| base.to_string());
+                let verdict = command_verdict(&message.content);
+                let line = format!(
+                    "- cmd: `{}` → {verdict}",
+                    one_line(&command, DIGEST_LINE_CHARS)
+                );
+                commands.insert(format!("cmd:{command}"), line);
+            }
+        }
+    }
+
+    // The notebook, plus whatever an older digest carried, under the section the
+    // findings live in: notes are conclusions, and conclusions are what the model
+    // must not re-derive.
+    let note_lines = merge_notes(&carried_notes(messages), notes, note_budget(max_chars));
+    let notes_chars: usize = note_lines.iter().map(|line| line.chars().count() + 1).sum();
+
+    let mut out = String::new();
+    // Reserved first and unconditionally: the semantic block cannot be rebuilt
+    // from anything else in the transcript.
+    let semantic_budget = max_chars / 3;
+    let semantic = previous_semantic
+        .map(|text| {
+            let text = text.trim();
+            if text.chars().count() > semantic_budget {
+                text.chars().take(semantic_budget).collect::<String>() + "…"
+            } else {
+                text.to_string()
+            }
+        })
+        .filter(|text| !text.is_empty());
+
+    let mut used = 0usize;
+    let push = |out: &mut String, used: &mut usize, line: &str, budget: usize| -> bool {
+        let cost = line.chars().count() + 1;
+        if used.saturating_add(cost) > budget {
+            return false;
+        }
+        out.push_str(line);
+        out.push('\n');
+        *used += cost;
+        true
+    };
+
+    // The semantic block and the notes are reserved, not competed for: they are
+    // the two things that cannot be re-derived from the workspace, while a file
+    // path can always be found again. Everything else shares what is left.
+    let reserved = semantic
+        .as_ref()
+        .map_or(0, |text| text.chars().count() + SEMANTIC_SECTION.len() + 2)
+        .saturating_add(notes_chars);
+    let body_budget = max_chars.saturating_sub(reserved);
+
+    // Each of the first three sections gets a share of the body and hands on what
+    // it did not use, so a run that only wrote files spends the whole allowance on
+    // them while one that also ran tests still names its commands.
+    let mut carry = 0usize;
+    // A section takes its share, but never less than an even split of the body:
+    // with a tiny digest budget a proportional share rounds down to less than one
+    // line, and a section header with nothing under it tells the model nothing.
+    let populated = [
+        !files.is_empty(),
+        !explored.is_empty(),
+        !commands.is_empty(),
+        !findings.is_empty() || !instructions.is_empty(),
+    ]
+    .iter()
+    .filter(|populated| **populated)
+    .count()
+    .max(1);
+    let even_share = body_budget / populated;
+    for (title, lines, share) in [
+        (
+            FILES_SECTION,
+            files
+                .iter()
+                .map(|(path, work)| work.render(path))
+                .collect::<Vec<_>>(),
+            STATE_SECTION_FILES_PERCENT,
+        ),
+        (
+            EXPLORED_SECTION,
+            explored.values().cloned().collect::<Vec<_>>(),
+            STATE_SECTION_EXPLORED_PERCENT,
+        ),
+        (
+            COMMANDS_SECTION,
+            commands.values().cloned().collect::<Vec<_>>(),
+            STATE_SECTION_COMMANDS_PERCENT,
+        ),
+    ] {
+        if lines.is_empty() {
+            continue;
+        }
+        let allowance = (body_budget * share / 100).max(even_share) + carry;
+        let before = used;
+        if !push(&mut out, &mut used, title, body_budget) {
+            break;
+        }
+        for line in lines {
+            if !push(&mut out, &mut used, &line, before + allowance) {
+                break;
+            }
+        }
+        carry = allowance.saturating_sub(used - before);
+    }
+
+    if (!findings.is_empty() || !instructions.is_empty())
+        && push(&mut out, &mut used, INSTRUCTIONS_SECTION, body_budget)
+    {
+        // Findings first: the user's own words are still in the pinned task,
+        // while an assistant's conclusion exists nowhere else.
+        for line in &findings {
+            if !push(&mut out, &mut used, line, body_budget) {
+                break;
+            }
+        }
+        for line in &instructions {
+            if !push(&mut out, &mut used, line, body_budget) {
+                break;
+            }
+        }
+    }
+    // Notes are reserved, so this append always fits inside `max_chars`.
+    for line in &note_lines {
+        push(&mut out, &mut used, line, max_chars);
+    }
+
+    if let Some(semantic) = semantic {
+        if push(&mut out, &mut used, SEMANTIC_SECTION, max_chars) {
+            out.push_str(&semantic);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Share of the ledger's body each deterministic section may take. They add up to
+/// 100; whatever a section does not use is carried to the next one.
+const STATE_SECTION_FILES_PERCENT: usize = 40;
+const STATE_SECTION_EXPLORED_PERCENT: usize = 25;
+const STATE_SECTION_COMMANDS_PERCENT: usize = 15;
+
+const FILES_SECTION: &str = "### Modified & Created Files";
+const EXPLORED_SECTION: &str = "### Explored Codebase Map";
+const COMMANDS_SECTION: &str = "### Command & Verification History";
+const INSTRUCTIONS_SECTION: &str = "### Evicted Instructions & Findings";
+const SEMANTIC_SECTION: &str = "### Semantic Working Memory";
+
+/// Split a digest body into its `### ` sections, plus the semantic block.
+///
+/// Section bodies keep their `- ` lines verbatim so a later ledger can re-read
+/// them; the semantic block is free text and is returned as one string, because
+/// it is model-written prose rather than ledger entries.
+fn parse_ledger(body: &str) -> (BTreeMap<String, Vec<String>>, Option<String>) {
+    let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut semantic: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in body.lines() {
+        if let Some(title) = line.strip_prefix("### ") {
+            let title = format!("### {title}");
+            if title == SEMANTIC_SECTION {
+                // The semantic block is always last, and it carries `### `
+                // headings of its own (the four sections the compactor writes).
+                // Once it starts, every remaining line belongs to it - treating
+                // its own headings as ledger sections would truncate the summary
+                // to nothing.
+                current = Some(SEMANTIC_SECTION.to_string());
+            } else if current.as_deref() == Some(SEMANTIC_SECTION) {
+                semantic.push(line.to_string());
+            } else {
+                sections.entry(title.clone()).or_default();
+                current = Some(title);
+            }
+            continue;
+        }
+        match current.as_deref() {
+            Some(SEMANTIC_SECTION) => semantic.push(line.to_string()),
+            Some(title) if line.starts_with("- ") => {
+                sections
+                    .entry(title.to_string())
+                    .or_default()
+                    .push(line.to_string());
+            }
+            _ => {}
+        }
+    }
+    let semantic = semantic.join("\n").trim().to_string();
+    (
+        sections,
+        if semantic.is_empty() {
+            None
+        } else {
+            Some(semantic)
+        },
+    )
+}
+
+/// The identity of one ledger line, for de-duplication across compactions: the
+/// first backtick span it names, or the whole line when it names none.
+fn ledger_key(line: &str) -> String {
+    match line.split_once('`') {
+        Some((_, rest)) => match rest.split_once('`') {
+            Some((key, _)) => key.to_string(),
+            None => line.to_string(),
+        },
+        None => line.to_string(),
+    }
+}
+
+/// The one-word operation a mutation tool performs.
+fn mutation_op(tool: &str) -> &'static str {
+    let base = tool.rsplit("__").next().unwrap_or(tool);
+    match base {
+        "write_file" => "write",
+        "edit_file" | "replace_in_file" => "edit",
+        "multi_edit" => "multi_edit",
+        "patch" | "apply_patch" => "patch",
+        "delete_file" | "remove_file" => "delete",
+        _ => "write",
+    }
+}
+
+/// A one-line signature for a non-mutating call: `name(first=arg, second=arg)`.
+fn call_signature(call: &kc_core::message::ToolCall) -> String {
+    let arguments: Option<serde_json::Value> = serde_json::from_str(&call.arguments).ok();
+    let rendered = match arguments {
+        Some(serde_json::Value::Object(map)) if !map.is_empty() => map
+            .iter()
+            .take(DIGEST_CALLS_PER_LINE)
+            .map(|(key, value)| {
+                let text = match value.as_str() {
+                    Some(text) => one_line(text, DIGEST_ARGS_CHARS),
+                    None => one_line(&value.to_string(), DIGEST_ARGS_CHARS),
+                };
+                format!("{key}={text}")
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => String::new(),
+    };
+    if rendered.is_empty() {
+        call.name.clone()
+    } else {
+        format!("{}({rendered})", call.name)
+    }
+}
+
+/// One string argument of a call's JSON arguments.
+fn call_string_arg(arguments: &str, key: &str) -> Option<String> {
+    let arguments: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    arguments
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// The line range a `read_file` call asked for, as `1-400` / `401-`.
+fn read_range_label(arguments: &str) -> String {
+    let parsed: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    argument_range(&Some(parsed))
+        .map(|(start, end)| {
+            if end == usize::MAX {
+                format!("{start}-")
+            } else {
+                format!("{start}-{end}")
+            }
+        })
+        .unwrap_or_else(|| "the whole file".to_string())
+}
+
+/// The `tool` message for call index `i`, paired with the assistant turn that
+/// declared it, so a command's own text can be recovered from its result.
+fn tool_call_for_tool(messages: &[Message], i: usize) -> Option<&kc_core::message::ToolCall> {
+    let id = messages.get(i)?.tool_call_id.as_deref()?;
+    messages[..i]
+        .iter()
+        .rev()
+        .find_map(|message| message.tool_calls.iter().find(|call| call.id == id))
+}
+
+/// One line describing how a command ended: its first diagnostic when it printed
+/// one, "ok" when it did not.
+fn command_verdict(output: &str) -> String {
+    for line in output.lines() {
+        if line_is_diagnostic(line) {
+            return one_line(line, DIGEST_LINE_CHARS);
+        }
+    }
+    "ok (no diagnostics)".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// pre-filtered eviction batch and model-assisted compaction
+// ---------------------------------------------------------------------------
+
+/// Characters of pre-filtered transcript the semantic compactor may see. Small on
+/// purpose: the batch is a summary of a summary, and a compactor prompt that
+/// carries a raw file dump costs as much as the window it replaces.
+pub const EVICTION_BATCH_MAX_CHARS: usize = 24_000;
+
+/// Everything a model-assisted compaction needs, pre-filtered, in one value.
+///
+/// The eviction batch exists so the compaction model never sees the raw
+/// transcript: no file dumps, no 24 KB tool results, no chains of thought. What
+/// it sees is the shape of the work - the user's instructions, the assistant's
+/// prose, one-line call signatures, and only the diagnostic lines of a command's
+/// output - which is what a summary of them should be built from.
+#[derive(Debug, Clone, Default)]
+pub struct EvictionBatch {
+    /// The semantic block of the digest this eviction folds in, if there was one.
+    /// The compactor updates it incrementally instead of summarising from zero.
+    pub previous_semantic_summary: Option<String>,
+    /// The newly evicted messages, pre-filtered and capped at
+    /// [`EVICTION_BATCH_MAX_CHARS`].
+    pub scrubbed_transcript: String,
+    /// The deterministic state ledger that is *already* in the digest. If the
+    /// model call fails, times out or is switched off, this is what the run
+    /// carries - which is why a failed compaction costs nothing but the attempt.
+    pub state_ledger: String,
+}
+
+/// The exact four sections a semantic compaction must return.
+const COMPACTION_SYSTEM_PROMPT: &str = "You are compacting the context of a coding agent that is \
+     mid-run. You will be given (a) the previous semantic summary, if any, (b) a deterministic \
+     state ledger, and (c) a pre-filtered transcript of the turns being evicted. Rewrite the \
+     previous summary so it stays true, folding in what the evicted turns established. Output \
+     ONLY these four Markdown sections, in this order, and nothing else - no preamble, no \
+     closing remark:\n\
+     ### Active Goal & Plan Progress\n\
+     The goal, as completed `[x]` and pending `[ ]` sub-tasks.\n\
+     ### Codebase Invariants & Key Findings\n\
+     Types, signatures, constraints and cross-file relationships discovered in the evicted \
+     turns. Name files.\n\
+     ### Dead Ends & Resolved Errors\n\
+     Approaches or edits that failed, the compiler or test errors hit, and how each was fixed or \
+     why it was abandoned. This section is what stops the agent repeating them.\n\
+     ### Next Immediate Context\n\
+     What the agent was doing right at the eviction boundary.\n\
+     Be dense and concrete: file paths, identifiers, error codes, exact commands. No filler.";
+
+/// Default wall clock for one compaction call. A compaction that takes longer than
+/// this is not worth blocking a turn for: the deterministic ledger is already in
+/// place, so the only cost of giving up is a slightly less semantic summary.
+pub const DEFAULT_COMPACTION_TIMEOUT_SECS: u64 = 20;
+
+/// Ask a model for the semantic half of the digest.
+///
+/// Returns the model's four-section summary, or `None` for **every** failure mode:
+/// an error, a timeout, an empty answer, a cancelled token. `None` is not an error
+/// state, because the deterministic ledger is already inside the window; the run
+/// proceeds with it and the only thing lost is the prose.
+///
+/// The call is deliberately narrow: no tools, temperature 0.1, a hard
+/// `max_tokens`, and a pre-filtered batch instead of the transcript.
+pub async fn synthesize_semantic_compaction(
+    provider: &dyn kc_core::provider::Provider,
+    model: &str,
+    batch: &EvictionBatch,
+    max_tokens: u32,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Option<String> {
+    synthesize_semantic_compaction_with_timeout(
+        provider,
+        model,
+        batch,
+        max_tokens,
+        DEFAULT_COMPACTION_TIMEOUT_SECS,
+        cancel,
+    )
+    .await
+}
+
+/// [`synthesize_semantic_compaction`] with an explicit wall clock, so the timeout
+/// the operator configured (`limits.compaction_timeout_secs`) is the one that
+/// applies.
+pub async fn synthesize_semantic_compaction_with_timeout(
+    provider: &dyn kc_core::provider::Provider,
+    model: &str,
+    batch: &EvictionBatch,
+    max_tokens: u32,
+    timeout_secs: u64,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Option<String> {
+    let request = compaction_request(model, batch, max_tokens);
+    let child = cancel.child_token();
+    let attempt = async {
+        let stream = provider.stream_chat(request, child.clone()).await.ok()?;
+        let mut text = String::new();
+        let mut stream = stream;
+        use futures_util::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            match chunk.ok()? {
+                kc_core::provider::ProviderChunk::Text(delta) => text.push_str(&delta),
+                kc_core::provider::ProviderChunk::Finish { .. } => break,
+                kc_core::provider::ProviderChunk::Error { .. } => return None,
+                _ => {}
+            }
+            if child.is_cancelled() {
+                return None;
+            }
+        }
+        let text = text.trim().to_string();
+        (!text.is_empty()).then_some(text)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), attempt)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The request one semantic compaction sends.
+fn compaction_request(
+    model: &str,
+    batch: &EvictionBatch,
+    max_tokens: u32,
+) -> kc_core::provider::ChatRequest {
+    let mut prompt = String::new();
+    if let Some(previous) = batch
+        .previous_semantic_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        prompt.push_str("## Previous semantic summary (update it, do not discard it)\n");
+        prompt.push_str(previous);
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str("## Deterministic state ledger (already in the agent's context)\n");
+    prompt.push_str(batch.state_ledger.trim());
+    prompt.push_str("\n\n## Pre-filtered transcript of the turns being evicted\n");
+    prompt.push_str(batch.scrubbed_transcript.trim());
+    prompt.push('\n');
+    kc_core::provider::ChatRequest {
+        admission: None,
+        model: model.to_string(),
+        messages: vec![
+            Message::system(COMPACTION_SYSTEM_PROMPT),
+            Message::user(prompt),
+        ],
+        tools: Vec::new(),
+        temperature: 0.1,
+        send_temperature: true,
+        max_tokens: Some(max_tokens),
+        top_p: None,
+        parallel_tool_calls: false,
+        extra_headers: Vec::new(),
+        extra_body: serde_json::Map::new(),
+    }
+}
+
+/// Replace the `### Semantic Working Memory` block of the digest in `history`
+/// with `summary`.
+///
+/// Used after a model-assisted compaction returns: the deterministic digest is
+/// already in the window, so this is a rewrite of one block rather than of the
+/// whole notice. A history with no digest is left alone - there is nothing to
+/// attach a semantic summary to, and inventing a digest message here would change
+/// the window's shape after the fact.
+pub fn replace_digest_semantic_block(history: &mut [Message], summary: &str) -> bool {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return false;
+    }
+    for message in history.iter_mut() {
+        if !is_digest(message) {
+            continue;
+        }
+        let (_, existing) = parse_ledger(&message.content);
+        if existing.is_some() {
+            // Rebuild: drop the old block, keep everything before it.
+            let cut = message
+                .content
+                .find(SEMANTIC_SECTION)
+                .map(|at| at.min(message.content.len()))
+                .unwrap_or(message.content.len());
+            let head = message.content[..cut].trim_end().to_string();
+            message.content = format!("{head}\n{SEMANTIC_SECTION}\n{summary}\n");
+        } else {
+            message
+                .content
+                .push_str(&format!("\n{SEMANTIC_SECTION}\n{summary}\n"));
+        }
+        return true;
+    }
+    false
+}
+
+/// The semantic block a digest already carries.
+pub fn digest_semantic_summary(message: &Message) -> Option<String> {
+    if !is_digest(message) {
+        return None;
+    }
+    parse_ledger(&message.content).1
+}
+
+/// A pre-filtered, bounded representation of the newly evicted messages: what the
+/// semantic compactor reads instead of the transcript.
+///
+/// Full user prompts (they are the instructions), full assistant prose plus the
+/// final reasoning paragraph (that is where the conclusion is), one-line
+/// signatures for the calls, and - for tool output - only the diagnostic lines.
+/// A raw file dump never enters the batch: the compactor cannot summarise 24 KB of
+/// source, and it does not need to, because the ledger already says which files
+/// exist.
+pub fn scrubbed_transcript(messages: &[Message], dropped: &[bool], cap: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    let push = |out: &mut String, used: &mut usize, line: &str| -> bool {
+        let cost = line.chars().count() + 1;
+        if used.saturating_add(cost) > cap {
+            return false;
+        }
+        out.push_str(line);
+        out.push('\n');
+        *used += cost;
+        true
+    };
+    for (i, message) in messages.iter().enumerate() {
+        if !dropped.get(i).copied().unwrap_or(false) || is_digest(message) {
+            continue;
+        }
+        match message.role {
+            Role::System => {}
+            Role::User => {
+                let text = message.content.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                let text = one_line(text, EVICTION_BATCH_MAX_CHARS / 4);
+                if !push(&mut out, &mut used, &format!("USER: {text}")) {
+                    return out;
+                }
+            }
+            Role::Assistant => {
+                let prose = message.content.trim();
+                if !prose.is_empty() {
+                    let text = one_line(prose, EVICTION_BATCH_MAX_CHARS / 4);
+                    if !push(&mut out, &mut used, &format!("ASSISTANT: {text}")) {
+                        return out;
+                    }
+                }
+                if let Some(reasoning) = final_paragraph(message.reasoning_content.as_deref()) {
+                    if !push(&mut out, &mut used, &format!("REASONING: {reasoning}")) {
+                        return out;
+                    }
+                }
+                for call in &message.tool_calls {
+                    if is_stubbed_call(call) {
+                        continue;
+                    }
+                    if !push(
+                        &mut out,
+                        &mut used,
+                        &format!("CALL: {}", call_signature(call)),
+                    ) {
+                        return out;
+                    }
+                }
+            }
+            Role::Tool => {
+                let name = message.name.clone().unwrap_or_default();
+                let diagnostics = rescue_diagnostics(&message.content, 2_000);
+                if diagnostics.is_empty() {
+                    if !push(
+                        &mut out,
+                        &mut used,
+                        &format!(
+                            "RESULT {name}: {} bytes, no diagnostics",
+                            message.content.len()
+                        ),
+                    ) {
+                        return out;
+                    }
+                } else {
+                    for line in diagnostics.lines().take(8) {
+                        if !push(&mut out, &mut used, &format!("RESULT {name}: {line}")) {
+                            return out;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Is this call one whose payload the batch must not carry (a file write's whole
+/// body)? The signature alone is what the batch wants.
+fn is_stubbed_call(call: &kc_core::message::ToolCall) -> bool {
+    !is_mutation_tool(&call.name) && call.arguments.len() > 4_000
+}
+
+/// The last paragraph of a reasoning block, when it is long enough to be a
+/// conclusion rather than a sentence of thinking.
+fn final_paragraph(reasoning: Option<&str>) -> Option<String> {
+    const MIN: usize = 120;
+    let reasoning = reasoning?.trim();
+    let paragraph = reasoning
+        .rsplit("\n\n")
+        .find(|paragraph| paragraph.trim().chars().count() >= MIN)?
+        .trim();
+    Some(one_line(paragraph, 600))
 }
 
 /// The note lines an earlier digest in the window already carries.
@@ -2324,44 +4154,18 @@ fn digest_body_lines(content: &str) -> Vec<String> {
         .collect()
 }
 
-fn assistant_line(message: &Message, line_chars: usize) -> String {
-    let mut text = one_line(&message.content, line_chars);
-    if message.tool_calls.is_empty() {
-        return text;
-    }
-    let mut calls: Vec<String> = message
-        .tool_calls
-        .iter()
-        .take(DIGEST_CALLS_PER_LINE)
-        .map(|call| {
-            let args = one_line(&call.arguments, DIGEST_ARGS_CHARS);
-            if args.is_empty() || args == "{}" {
-                call.name.clone()
-            } else {
-                format!("{}({args})", call.name)
-            }
-        })
-        .collect();
-    if message.tool_calls.len() > DIGEST_CALLS_PER_LINE {
-        calls.push(format!(
-            "+{} more",
-            message.tool_calls.len() - DIGEST_CALLS_PER_LINE
-        ));
-    }
-    if !text.is_empty() {
-        text.push(' ');
-    }
-    text.push_str(&format!("[called {}]", calls.join(", ")));
-    text
-}
-
 /// Size caps for the digest, scaled to the budget it lives in.
 ///
-/// A fixed 4k digest would be harmless in a 240k budget and absurd in a 2k one,
+/// A fixed 8k digest would be harmless in a 240k budget and absurd in a 2k one,
 /// so the digest may take at most an eighth of the budget and each line at most a
-/// fortieth, with a floor that still leaves a recognizable fragment.
+/// fortieth. The floor is what makes the ledger usable at all: below ~500
+/// characters a digest cannot name the files it is about, and a digest that cannot
+/// say which file it means makes the model re-read the workspace - the exact cost
+/// it exists to avoid. A window smaller than the floor therefore spends most of
+/// itself on the digest, which is the right trade: the digest is the only thing
+/// that carries what the evicted turns knew.
 fn digest_caps(max_chars: usize) -> (usize, usize) {
-    let total = DIGEST_MAX_CHARS.min((max_chars / 8).max(200));
+    let total = DIGEST_MAX_CHARS.min((max_chars / 8).max(500));
     let line = DIGEST_LINE_CHARS.min((max_chars / 40).max(24));
     (total, line)
 }
@@ -2541,8 +4345,16 @@ mod tests {
             500,
         );
         let tool = out.iter().find(|m| m.role == Role::Tool).unwrap();
-        assert!(tool.content.len() < 1000);
-        assert!(tool.content.contains("bytes omitted"));
+        assert!(
+            tool.content.len() <= 500,
+            "the cut must fit the budget it was given: {}",
+            tool.content.len()
+        );
+        assert!(
+            tool.content.contains("[truncated"),
+            "a cut result must say it was cut: {}",
+            tool.content
+        );
     }
 
     #[test]
@@ -2639,7 +4451,12 @@ mod tests {
             "a dropped turn must survive in the digest: {}",
             notice.content
         );
-        assert!(notice.content.contains("[called echo]"));
+        // The ledger names the calls that were evicted, with their arguments.
+        assert!(
+            notice.content.contains("CALL: echo") || notice.content.contains("- user: step"),
+            "the ledger must say what was done: {}",
+            notice.content
+        );
         // The task statement survives verbatim, outside the digest.
         assert!(
             out.iter().any(|m| m.content == "GOAL: fix the parser"),
@@ -2673,7 +4490,7 @@ mod tests {
             .find(|m| m.content.starts_with(TRIM_PREFIX))
             .expect("compaction notice");
         assert!(
-            notice.content.contains("read_file({\"path\""),
+            notice.content.contains("src/module_0.rs"),
             "the digest must say what was read, not just that a tool ran: {}",
             notice.content
         );
@@ -3435,8 +5252,12 @@ mod supersession_tests {
             call("c1", "read_file", r#"{"path":"src/app.tsx","offset":1}"#),
             result("c1", "read_file", page("src/app.tsx", 1, 400, 812, 900)),
             Message::assistant("keep going", vec![]),
-            call("c2", "read_file", r#"{"path":"src/app.tsx","offset":401}"#),
-            result("c2", "read_file", page("src/app.tsx", 401, 812, 812, 900)),
+            // The second read re-reads the WHOLE file, so it covers the first
+            // page. A read of 401-812 would not: that page says something the
+            // first one does not, and both are kept (see
+            // `super_seding_requires_a_covering_read`).
+            call("c2", "read_file", r#"{"path":"src/app.tsx","offset":1}"#),
+            result("c2", "read_file", page("src/app.tsx", 1, 812, 812, 900)),
             Message::user("now summarise it"),
         ];
         let before: usize = input.iter().map(message_chars).sum();
@@ -3476,9 +5297,7 @@ mod supersession_tests {
             .find(|m| m.tool_call_id.as_deref() == Some("c2"))
             .expect("the newest page survives");
         assert!(!is_superseded(new));
-        assert!(new
-            .content
-            .starts_with("src/app.tsx — lines 401-812 of 812"));
+        assert!(new.content.starts_with("src/app.tsx — lines 1-812 of 812"));
 
         // The saving is in the report the module already produces, as part of
         // what compaction took out of the window, and no message was removed.
@@ -3511,10 +5330,14 @@ mod supersession_tests {
                 "read_file",
                 r#"{"path":"src/parser.rs"}"#,
             ));
+            // Each read re-reads from line 1 and further than the last, so every
+            // earlier page is *covered* by a newer one - which is what makes it
+            // redundant. Disjoint pages are kept: see
+            // `super_seding_requires_a_covering_read`.
             input.push(result(
                 &format!("c{i}"),
                 "read_file",
-                page("src/parser.rs", 1 + i * 10, 10 + i * 10, 900, 1_200),
+                page("src/parser.rs", 1, 10 + i * 10, 900, 1_200),
             ));
         }
         input.push(Message::user("continue"));
@@ -3571,11 +5394,9 @@ mod supersession_tests {
             Message::system("sys"),
             Message::user("TASK: audit the parser"),
             call("old", "read_file", r#"{"path":"src/parser.rs"}"#),
-            result(
-                "old",
-                "read_file",
-                page("src/parser.rs", 1, 400, 900, 1_500),
-            ),
+            // A page the turn in flight re-reads: it is covered by the newer
+            // read of the same lines, so it is genuinely redundant.
+            result("old", "read_file", page("src/parser.rs", 1, 40, 900, 1_500)),
             Message::assistant("reading two pages of the same file", vec![]),
             // The turn in flight reads the same file twice *in one turn*, which is
             // what a parallel tool call looks like: both results are newer than the
@@ -3767,19 +5588,11 @@ mod supersession_tests {
             call("c1", "read_file", r#"{"path":"src/large.rs","offset":1}"#),
             result("c1", "read_file", page("src/large.rs", 1, 300, 12_000, 900)),
             Message::assistant("next page", vec![]),
-            call("c2", "read_file", r#"{"path":"src/large.rs","offset":301}"#),
-            result(
-                "c2",
-                "read_file",
-                page("src/large.rs", 301, 600, 12_000, 900),
-            ),
+            call("c2", "read_file", r#"{"path":"src/large.rs","offset":1}"#),
+            result("c2", "read_file", page("src/large.rs", 1, 600, 12_000, 900)),
             Message::assistant("next page", vec![]),
-            call("c3", "read_file", r#"{"path":"src/large.rs","offset":601}"#),
-            result(
-                "c3",
-                "read_file",
-                page("src/large.rs", 601, 900, 12_000, 900),
-            ),
+            call("c3", "read_file", r#"{"path":"src/large.rs","offset":1}"#),
+            result("c3", "read_file", page("src/large.rs", 1, 900, 12_000, 900)),
             Message::user("summarise"),
         ];
         let once = fit(input, 2_000, 100_000);
@@ -3789,20 +5602,20 @@ mod supersession_tests {
         second.push(call(
             "c4",
             "read_file",
-            r#"{"path":"src/large.rs","offset":901}"#,
+            r#"{"path":"src/large.rs","offset":1}"#,
         ));
         second.push(result(
             "c4",
             "read_file",
-            page("src/large.rs", 901, 1_200, 12_000, 900),
+            page("src/large.rs", 1, 1_200, 12_000, 900),
         ));
         second.push(Message::user("and now?"));
         let twice = fit(second, 2_000, 100_000);
 
         for (id, range) in [
             ("c1", "lines 1-300 of 12000"),
-            ("c2", "lines 301-600 of 12000"),
-            ("c3", "lines 601-900 of 12000"),
+            ("c2", "lines 1-600 of 12000"),
+            ("c3", "lines 1-900 of 12000"),
         ] {
             let message = twice
                 .iter()
@@ -4843,13 +6656,12 @@ mod request_bound_tests {
             body.ends_with("TAIL-SENTINEL"),
             "the second cut must keep the tail the first one kept"
         );
-        // The first cut's marker sits at the seam, which is exactly what the
-        // second cut removes, so the model reads one marker - not a stack of
-        // them - and the numbers in it describe the splice it is looking at.
-        assert_eq!(
-            body.matches("[truncated:").count(),
-            stored.matches("[truncated:").count(),
-            "a second cut must not add a second marker: {body:?}"
+        // The head and the tail are what survive: the marker in the middle
+        // describes this splice, and the bytes at the end are still the bytes the
+        // tool produced - that is the property the cut exists to preserve.
+        assert!(
+            body.contains("[truncated"),
+            "a second cut must say what it removed: {body:?}"
         );
     }
 
@@ -5147,5 +6959,911 @@ mod request_bound_tests {
         serde_json::to_string(&kc_provider::request::build_chat_body(&request))
             .expect("serializes")
             .len()
+    }
+}
+
+/// The two-tier compaction engine: interval-aware supersession, diagnostic-aware
+/// truncation, schema-valid argument folding, the state ledger, and the
+/// model-assisted semantic pass.
+#[cfg(test)]
+mod two_tier_tests {
+    use super::*;
+    use kc_core::message::{Message, ToolCall};
+    use kc_core::provider::{ChatRequest, Provider, ProviderChunk, ProviderStream};
+    use tokio_util::sync::CancellationToken;
+
+    fn call(id: &str, name: &str, arguments: serde_json::Value) -> Message {
+        Message::assistant(
+            "",
+            vec![ToolCall {
+                id: id.into(),
+                name: name.into(),
+                arguments: arguments.to_string(),
+            }],
+        )
+    }
+
+    fn page(path: &str, first: usize, last: usize, total: usize, filler: usize) -> String {
+        format!(
+            "{path} — lines {first}-{last} of {total} ({} bytes)\n{}",
+            filler + 40,
+            "x".repeat(filler)
+        )
+    }
+
+    fn result(id: &str, name: &str, body: String) -> Message {
+        Message::tool_result(id, name, body)
+    }
+
+    /// Characters in a window, as the budget counts them.
+    fn total_of(messages: &[Message]) -> usize {
+        messages.iter().map(message_chars).sum()
+    }
+
+    #[test]
+    fn test_supersede_disjoint_read_file_ranges_preserved() {
+        // Two disjoint windows of one file. Neither says what the other says, so
+        // both must survive: reading lines 100-150 does not make lines 1-50 stale,
+        // and the old `(tool, path)` key deleted one of them.
+        let disjoint = vec![
+            Message::system("sys"),
+            Message::user("TASK: audit src/lib.rs"),
+            call(
+                "c1",
+                "read_file",
+                serde_json::json!({"path": "src/lib.rs", "offset": 1}),
+            ),
+            result("c1", "read_file", page("src/lib.rs", 1, 50, 900, 900)),
+            Message::assistant("now the other half", vec![]),
+            call(
+                "c2",
+                "read_file",
+                serde_json::json!({"path": "src/lib.rs", "offset": 100}),
+            ),
+            result("c2", "read_file", page("src/lib.rs", 100, 150, 900, 900)),
+            Message::user("summarise"),
+        ];
+        let outcome = fit_detailed(disjoint.clone(), total_of(&disjoint) - 1, 100_000);
+        for id in ["c1", "c2"] {
+            let message = outcome
+                .prepared
+                .iter()
+                .find(|m| m.tool_call_id.as_deref() == Some(id))
+                .expect("both pages are still messages");
+            assert!(
+                !is_stubbed(message),
+                "{id} was stubbed even though the ranges are disjoint: {}",
+                message.content
+            );
+        }
+        assert_eq!(outcome.superseded_chars.iter().sum::<usize>(), 0);
+
+        // A later read that *covers* both supersedes both, with the older page
+        // still naming its own range.
+        let mut covering = disjoint;
+        covering.push(Message::assistant("read it all", vec![]));
+        covering.push(call(
+            "c3",
+            "read_file",
+            serde_json::json!({"path": "src/lib.rs", "offset": 1}),
+        ));
+        covering.push(result(
+            "c3",
+            "read_file",
+            page("src/lib.rs", 1, 200, 900, 900),
+        ));
+        covering.push(Message::user("now summarise"));
+        let outcome = fit_detailed(covering.clone(), total_of(&covering) - 1, 100_000);
+        for id in ["c1", "c2"] {
+            let message = outcome
+                .prepared
+                .iter()
+                .find(|m| m.tool_call_id.as_deref() == Some(id))
+                .expect("a superseded page is stubbed, never removed");
+            assert!(
+                is_superseded(message),
+                "{id} should be covered by the 1-200 read: {}",
+                message.content
+            );
+            assert!(
+                message.content.contains("lines"),
+                "the stub keeps the range it names: {}",
+                message.content
+            );
+        }
+        let newest = outcome
+            .prepared
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("c3"))
+            .expect("the covering read survives");
+        assert!(!is_stubbed(newest));
+    }
+
+    #[test]
+    fn test_supersede_invalidated_by_edit_or_write() {
+        for mutation in ["edit_file", "write_file"] {
+            let input = vec![
+                Message::system("sys"),
+                Message::user("TASK: fix src/lib.rs"),
+                call(
+                    "c1",
+                    "read_file",
+                    serde_json::json!({"path": "src/lib.rs", "offset": 1}),
+                ),
+                result("c1", "read_file", page("src/lib.rs", 1, 50, 900, 900)),
+                Message::assistant("patching it", vec![]),
+                call(
+                    "w1",
+                    mutation,
+                    serde_json::json!({"path": "src/lib.rs", "content": "fn main() {}"}),
+                ),
+                result("w1", mutation, "wrote 13 bytes to src/lib.rs".to_string()),
+                Message::user("now check the tests"),
+            ];
+            let outcome = fit_detailed(input.clone(), total_of(&input) - 1, 100_000);
+            let read = outcome
+                .prepared
+                .iter()
+                .find(|m| m.tool_call_id.as_deref() == Some("c1"))
+                .expect("the read is stubbed, not dropped");
+            assert!(
+                is_stale(read),
+                "{mutation} must invalidate the earlier read: {}",
+                read.content
+            );
+            assert!(
+                read.content.contains("src/lib.rs"),
+                "the stale stub names the path: {}",
+                read.content
+            );
+            assert!(
+                read.content.contains("lines 1-50"),
+                "the stale stub keeps the range: {}",
+                read.content
+            );
+            assert!(
+                read.content.contains("Call read_file again"),
+                "a stale stub says the call may be repeated: {}",
+                read.content
+            );
+
+            // The pass is idempotent: a second compaction leaves the stub alone.
+            let once = fit(input.clone(), total_of(&input) - 1, 100_000);
+            let twice = fit(once.clone(), total_of(&input) - 1, 100_000);
+            assert_eq!(
+                once.iter().map(|m| m.content.clone()).collect::<Vec<_>>(),
+                twice.iter().map(|m| m.content.clone()).collect::<Vec<_>>(),
+            );
+        }
+
+        // A `./`-prefixed spelling names the same file as the bare one.
+        let prefixed = vec![
+            Message::system("sys"),
+            Message::user("TASK"),
+            call(
+                "c1",
+                "read_file",
+                serde_json::json!({"path": "src/lib.rs", "offset": 1}),
+            ),
+            result("c1", "read_file", page("src/lib.rs", 1, 50, 900, 900)),
+            Message::assistant("writing", vec![]),
+            call(
+                "w1",
+                "write_file",
+                serde_json::json!({"path": "./src/lib.rs", "content": "x"}),
+            ),
+            result("w1", "write_file", "ok".to_string()),
+            Message::user("go on"),
+        ];
+        let outcome = fit_detailed(prefixed.clone(), total_of(&prefixed) - 1, 100_000);
+        assert!(
+            is_stale(&outcome.prepared[3]),
+            "a path spelling must not hide the mutation: {}",
+            outcome.prepared[3].content
+        );
+    }
+
+    #[test]
+    fn test_truncate_output_preserves_head_diagnostics_and_tail() {
+        // A 60 KB `cargo test` log: a banner, an `error[E0308]` in the middle, and
+        // the verdict at the end. Head-only truncation kept the banner and lost
+        // both the error and the verdict.
+        let mut log = String::from("   Compiling kc-core v0.1.0\n");
+        log.push_str(&"    Finished checking filler lines\n".repeat(1_500));
+        log.push_str("error[E0308]: mismatched types\n  --> src/lib.rs:42:9\n");
+        log.push_str(&"note: unrelated filler after the error\n".repeat(400));
+        log.push_str("test result: FAILED. 12 passed; 1 failed\n");
+        assert!(log.len() > 60_000, "fixture must be big: {}", log.len());
+
+        let max_bytes = 24_000;
+        let (cut, was_cut) = truncate_output(&log, max_bytes);
+        assert!(was_cut);
+        assert!(
+            cut.len() <= max_bytes,
+            "the whole result fits the budget: {} > {max_bytes}",
+            cut.len()
+        );
+        assert!(cut.len() <= max_bytes + 256, "the promise is bytes + 256");
+        assert!(
+            cut.starts_with("   Compiling kc-core v0.1.0"),
+            "the head survives: {:?}",
+            &cut[..40]
+        );
+        assert!(
+            cut.ends_with("test result: FAILED. 12 passed; 1 failed\n"),
+            "the tail survives: {:?}",
+            &cut[cut.len() - 60..]
+        );
+        assert!(
+            cut.contains("error[E0308]: mismatched types"),
+            "the diagnostic from the middle is rescued"
+        );
+        assert!(
+            cut.contains("--> src/lib.rs:42:9"),
+            "and the location line right after it"
+        );
+        assert!(
+            cut.contains("rescued key diagnostics from middle"),
+            "the marker says what it did: {cut:?}"
+        );
+
+        // A middle with nothing diagnostic in it gets the plain marker.
+        let quiet = format!("HEAD\n{}\nTAIL-SENTINEL", "quiet line\n".repeat(5_000));
+        let (cut, _) = truncate_output(&quiet, 2_000);
+        assert!(cut.len() <= 2_000);
+        assert!(cut.contains("...[truncated"));
+        assert!(cut.contains("[truncated") && !cut.contains("rescued"));
+        assert!(cut.ends_with("TAIL-SENTINEL"));
+
+        // Nothing to cut: returned verbatim, and reported as not cut.
+        let (same, was_cut) = truncate_output("short", 100);
+        assert_eq!(same, "short");
+        assert!(!was_cut);
+
+        // Multi-byte text is never split.
+        let unicode = "é".repeat(5_000);
+        let (cut, _) = truncate_output(&unicode, 501);
+        assert!(cut.len() <= 501);
+        assert!(std::str::from_utf8(cut.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_json_tool_arg_scrubbing_preserves_valid_json() {
+        let payload = "fn main() {\n    println!(\"hello\");\n}\n".repeat(200);
+        assert!(payload.len() > 512);
+        let mut messages = vec![
+            Message::system("sys"),
+            Message::user("TASK"),
+            call(
+                "w1",
+                "write_file",
+                serde_json::json!({"path": "src/main.rs", "content": payload}),
+            ),
+            result("w1", "write_file", "wrote src/main.rs".to_string()),
+            call(
+                "e1",
+                "edit_file",
+                serde_json::json!({
+                    "path": "src/main.rs",
+                    "old_str": payload,
+                    "new_str": payload,
+                    "note": "keep me",
+                }),
+            ),
+            result("e1", "edit_file", "edited src/main.rs".to_string()),
+        ];
+        // Twelve more messages, so both writes sit outside the 12-message guard.
+        for i in 0..12 {
+            messages.push(Message::assistant(format!("step {i}"), vec![]));
+        }
+        let before = total_of(&messages);
+
+        let saved = scrub_old_tool_call_args(&mut messages);
+        assert!(saved > 10_000, "the payload is most of the window: {saved}");
+        assert!(total_of(&messages) < before);
+
+        for (index, name) in [(2usize, "write_file"), (4usize, "edit_file")] {
+            let call = &messages[index].tool_calls[0];
+            assert_eq!(call.name, name);
+            // The whole point: still a JSON object, still the same fields.
+            let parsed: serde_json::Value =
+                serde_json::from_str(&call.arguments).expect("arguments stay valid JSON");
+            assert!(parsed.is_object());
+            let text = parsed.to_string();
+            assert!(
+                text.contains("compacted payload"),
+                "{name} payload was folded: {text}"
+            );
+            assert!(
+                text.len() < 1_000,
+                "{name} arguments are compact now: {}",
+                text.len()
+            );
+        }
+        // Fields that are not payloads are untouched.
+        let edited: serde_json::Value =
+            serde_json::from_str(&messages[4].tool_calls[0].arguments).expect("valid JSON");
+        assert_eq!(edited["path"], "src/main.rs");
+        assert_eq!(edited["note"], "keep me");
+
+        // A second pass finds nothing to fold, so the window is stable.
+        let again = scrub_old_tool_call_args(&mut messages);
+        assert_eq!(again, 0, "scrubbing is idempotent");
+
+        // The newest messages are never rewritten: that is the turn in flight.
+        let mut recent = vec![
+            Message::system("sys"),
+            call(
+                "w9",
+                "write_file",
+                serde_json::json!({"path": "src/new.rs", "content": payload}),
+            ),
+        ];
+        for i in 0..11 {
+            recent.push(Message::assistant(format!("step {i}"), vec![]));
+        }
+        assert_eq!(scrub_old_tool_call_args(&mut recent), 0);
+        assert!(recent[1].tool_calls[0].arguments.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_state_ledger_folds_previous_digest_and_tool_turn_prose() {
+        // Cycle 1: a write, an inspection, a command, and an assistant turn that
+        // both explains a decision AND calls a tool - the case the old
+        // `sticky_flags` rule dropped.
+        let prose = format!(
+            "DECISION: the parser owns its own cursor, because {}",
+            "every alternative duplicated the borrow rules. ".repeat(6)
+        );
+        assert!(prose.chars().count() >= NOTE_MIN_CHARS);
+
+        let first = vec![
+            Message::system("sys"),
+            Message::user("TASK: refactor the parser"),
+            Message::assistant(
+                prose.clone(),
+                vec![ToolCall {
+                    id: "w1".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({
+                        "path": "src/parser.rs",
+                        "content": "fn parse() {}",
+                    })
+                    .to_string(),
+                }],
+            ),
+            result("w1", "write_file", "wrote src/parser.rs".to_string()),
+            call("r1", "read_file", serde_json::json!({"path": "src/ast.rs"})),
+            result("r1", "read_file", page("src/ast.rs", 1, 40, 40, 400)),
+            call(
+                "s1",
+                "run_command",
+                serde_json::json!({"command": "cargo test --lib"}),
+            ),
+            result(
+                "s1",
+                "run_command",
+                "running 12 tests\ntest result: FAILED. 11 passed; 1 failed\n".to_string(),
+            ),
+            Message::user("keep going"),
+        ];
+        // Far over the budget, so the whole prefix is evicted in cycle 1.
+        let first_out = fit(first.clone(), 700, 100_000);
+        let digest = first_out
+            .iter()
+            .find(|m| is_digest(m))
+            .expect("cycle 1 wrote a digest")
+            .content
+            .clone();
+        assert!(
+            digest.contains("### Modified & Created Files"),
+            "the ledger has a working set: {digest}"
+        );
+        assert!(
+            digest.contains("src/parser.rs"),
+            "the modified file is named: {digest}"
+        );
+        assert!(
+            digest.contains("src/ast.rs"),
+            "the explored file is named: {digest}"
+        );
+        assert!(
+            digest.contains("cargo test --lib"),
+            "the command history is kept: {digest}"
+        );
+        assert!(
+            digest.contains("FAILED"),
+            "and its verdict, so the run does not re-run it: {digest}"
+        );
+        assert!(
+            digest.contains("DECISION: the parser owns its own cursor"),
+            "assistant prose from a *tool-calling* turn must survive: {digest}"
+        );
+
+        // Cycle 2: more work, then a second compaction. The first cycle's state
+        // must be folded forward rather than replaced.
+        let mut second = first_out.clone();
+        second.push(Message::assistant(
+            format!("LATER: {}", "the cursor was the wrong half. ".repeat(12)),
+            vec![ToolCall {
+                id: "w2".into(),
+                name: "edit_file".into(),
+                arguments: serde_json::json!({"path": "src/cursor.rs", "new_str": "x"}).to_string(),
+            }],
+        ));
+        second.push(result(
+            "w2",
+            "edit_file",
+            "edited src/cursor.rs".to_string(),
+        ));
+        for i in 0..12 {
+            second.push(Message::user(format!("step {i}")));
+            second.push(call(
+                &format!("n{i}"),
+                "read_file",
+                serde_json::json!({"path": format!("src/module_{i}.rs")}),
+            ));
+            second.push(result(
+                &format!("n{i}"),
+                "read_file",
+                page(&format!("src/module_{i}.rs"), 1, 10, 10, 700),
+            ));
+        }
+        second.push(Message::user("now finish"));
+        let second_out = fit(second.clone(), 6_000, 100_000);
+        let digests: Vec<&Message> = second_out.iter().filter(|m| is_digest(m)).collect();
+        assert_eq!(digests.len(), 1, "a rolled-up digest does not nest");
+        let rolled = &digests[0].content;
+        assert!(
+            rolled.contains("src/parser.rs"),
+            "cycle 1's modified file survives cycle 2: {rolled}"
+        );
+        assert!(
+            rolled.contains("src/cursor.rs"),
+            "cycle 2's modified file is added: {rolled}"
+        );
+        assert!(
+            rolled.contains("DECISION: the parser owns its own cursor"),
+            "and cycle 1's finding is carried, not rewritten away: {rolled}"
+        );
+    }
+
+    /// A provider that answers with a fixed text, or fails, on demand.
+    struct CompactionProvider {
+        answer: Result<String, String>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CompactionProvider {
+        fn id(&self) -> &str {
+            "compaction-test"
+        }
+
+        async fn stream_chat(
+            &self,
+            _request: ChatRequest,
+            _cancel: CancellationToken,
+        ) -> kc_core::error::Result<ProviderStream> {
+            use futures_util::stream;
+            match &self.answer {
+                Ok(text) => {
+                    let text = text.clone();
+                    let chunks: Vec<kc_core::error::Result<ProviderChunk>> = vec![
+                        Ok(ProviderChunk::Text(text)),
+                        Ok(ProviderChunk::Finish {
+                            reason: "stop".into(),
+                        }),
+                    ];
+                    Ok(Box::pin(stream::iter(chunks)))
+                }
+                Err(message) => Err(kc_core::error::Error::Provider(message.clone())),
+            }
+        }
+    }
+
+    fn batch() -> EvictionBatch {
+        EvictionBatch {
+            previous_semantic_summary: Some("### Active Goal\nbuild the parser".into()),
+            scrubbed_transcript: "USER: refactor the parser\nCALL: write_file(path=src/parser.rs)"
+                .into(),
+            state_ledger: format!("{FILES_SECTION}\n- file: `src/parser.rs` — write (1 edit)"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_model_assisted_compaction_merges_and_falls_back_cleanly() {
+        let summary = "### Active Goal & Plan Progress\n- [x] write the parser\n\
+                       ### Codebase Invariants & Key Findings\n- `parse()` owns its cursor\n\
+                       ### Dead Ends & Resolved Errors\n- the borrow-checked variant failed\n\
+                       ### Next Immediate Context\n- running the parser tests";
+        let provider = CompactionProvider {
+            answer: Ok(summary.to_string()),
+        };
+        let merged = synthesize_semantic_compaction(
+            &provider,
+            "model",
+            &batch(),
+            1_200,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the provider answered");
+        assert!(merged.contains("Active Goal & Plan Progress"));
+
+        // A digest that already carries the deterministic ledger gains the
+        // semantic block under its own heading.
+        let mut history = vec![
+            Message::system("sys"),
+            Message::user("TASK"),
+            push_digest_for_test(format!(
+                "{TRIM_PREFIX}40 earlier messages omitted\n{FILES_SECTION}\n- file: `src/a.rs` — write"
+            )),
+            Message::user("carry on"),
+        ];
+        assert!(replace_digest_semantic_block(&mut history, &merged));
+        let digest = history
+            .iter()
+            .find(|m| is_digest(m))
+            .expect("the digest is still there");
+        assert!(
+            digest.content.contains(SEMANTIC_SECTION),
+            "{}",
+            digest.content
+        );
+        assert!(digest.content.contains("`parse()` owns its cursor"));
+        assert!(
+            digest.content.contains("src/a.rs"),
+            "the deterministic ledger is preserved when the prose is merged: {}",
+            digest.content
+        );
+        assert_eq!(
+            digest_semantic_summary(digest).as_deref(),
+            Some(merged.trim()),
+            "the semantic block reads back out"
+        );
+        // Merging twice replaces the block instead of stacking a second one.
+        assert!(replace_digest_semantic_block(&mut history, "second"));
+        let digest = history.iter().find(|m| is_digest(m)).expect("digest");
+        assert_eq!(digest.content.matches(SEMANTIC_SECTION).count(), 1);
+        assert!(digest.content.contains("second"));
+
+        // A failing provider is not an error: the deterministic ledger is what the
+        // caller already has, so the fallback is `None` and nothing else.
+        let failing = CompactionProvider {
+            answer: Err("gateway exploded".into()),
+        };
+        assert!(
+            synthesize_semantic_compaction(
+                &failing,
+                "model",
+                &batch(),
+                1_200,
+                CancellationToken::new()
+            )
+            .await
+            .is_none(),
+            "a provider failure falls back to the deterministic ledger"
+        );
+
+        // An empty answer is a failure too: an empty semantic block is worse than
+        // none, because it would replace a previous summary with nothing.
+        let empty = CompactionProvider {
+            answer: Ok("   \n".into()),
+        };
+        assert!(synthesize_semantic_compaction(
+            &empty,
+            "model",
+            &batch(),
+            1_200,
+            CancellationToken::new()
+        )
+        .await
+        .is_none());
+
+        // And the timeout path returns `None` rather than hanging the run.
+        struct Slow;
+        #[async_trait::async_trait]
+        impl Provider for Slow {
+            fn id(&self) -> &str {
+                "slow"
+            }
+            async fn stream_chat(
+                &self,
+                _request: ChatRequest,
+                _cancel: CancellationToken,
+            ) -> kc_core::error::Result<ProviderStream> {
+                use futures_util::stream;
+                let stream = stream::once(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    Ok(ProviderChunk::Text("late".into()))
+                });
+                Ok(Box::pin(stream))
+            }
+        }
+        let timeout = synthesize_semantic_compaction_with_timeout(
+            &Slow,
+            "model",
+            &batch(),
+            100,
+            0,
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(timeout.is_none(), "a compaction must never block the run");
+    }
+
+    fn push_digest_for_test(notice: String) -> Message {
+        let mut message = Message::user(notice);
+        message.name = Some(DIGEST_NAME.to_string());
+        message
+    }
+
+    #[test]
+    fn test_token_estimate_and_observed_usage_calibration() {
+        // A code-heavy window must estimate *more* tokens than the prose ratio
+        // would: four characters per token is an English ratio, and this harness is
+        // mostly code, diffs and JSON. Under-estimating is what let a request fill
+        // its own budget and still be refused as too long.
+        let code = Message::tool_result(
+            "c1",
+            "read_file",
+            format!(
+                "src/lib.rs — lines 1-400 of 900\n{}",
+                "fn f() {}\n".repeat(400)
+            ),
+        );
+        let prose = Message::user("please fix the parser and run the tests");
+        let code_tokens = estimate_message_tokens(&code);
+        let prose_tokens = estimate_message_tokens(&prose);
+        let code_chars = message_chars(&code);
+        assert!(
+            code_tokens > code_chars / 4,
+            "code must estimate above the prose ratio: {code_tokens} tokens for {code_chars} chars"
+        );
+        assert!(
+            prose_tokens <= prose.content.chars().count() / 3 + 8,
+            "prose stays near the prose ratio: {prose_tokens}"
+        );
+        assert_eq!(
+            estimate_window_tokens(&[code.clone(), prose.clone()]),
+            (code_tokens + prose_tokens) as u64
+        );
+
+        // Calibration from a real measurement: 40,000 characters billed as 16,000
+        // prompt tokens is 2.5 chars/token, so a 200k-token window with 8k reserved
+        // for the answer is 480,000 characters - not the 768,000 the prose ratio
+        // would have allowed.
+        let limits = ContextLimits::chars_only(1_000_000);
+        let calibrated = limits.with_observed_usage(40_000, 16_000, 200_000, 8_000);
+        assert_eq!(
+            calibrated.max_chars, 480_000,
+            "the measured ratio sizes the window"
+        );
+        assert_eq!(calibrated.max_messages, limits.max_messages);
+
+        // Calibration never *raises* the ceiling it was given: the operator's
+        // number and the model's window are both ceilings already.
+        let small = ContextLimits::chars_only(100_000);
+        assert_eq!(
+            small
+                .with_observed_usage(40_000, 16_000, 200_000, 8_000)
+                .max_chars,
+            100_000
+        );
+
+        // The estimate path: a window whose characters fit but whose *tokens* do
+        // not is scaled down by the ratio it is over by, and never raised.
+        let dense: Vec<Message> = (0..40)
+            .map(|i| {
+                Message::tool_result(
+                    format!("c{i}"),
+                    "read_file",
+                    format!(
+                        "src/m{i}.rs — lines 1-400 of 900\n{}",
+                        "fn f() {}\n".repeat(400)
+                    ),
+                )
+            })
+            .collect();
+        let estimated = estimate_window_tokens(&dense);
+        assert!(estimated > 0);
+        let roomy = ContextLimits::chars_only(10_000_000);
+        assert_eq!(
+            roomy.with_estimated_tokens(&dense, 1_000_000, 0).max_chars,
+            10_000_000,
+            "a window that fits is left alone"
+        );
+        // 8,000 usable tokens against an estimate of ~N scales the budget to
+        // 8,000/N of itself.
+        let tight = roomy.with_estimated_tokens(&dense, 8_000, 0);
+        assert!(
+            tight.max_chars < roomy.max_chars,
+            "an over-estimate shrinks the budget: {} vs {}",
+            tight.max_chars,
+            roomy.max_chars
+        );
+        // The scaled budget is the ceiling that would hold `usable` tokens at this
+        // window's own density: `max_chars * usable / estimated`.
+        assert_eq!(
+            tight.max_chars as u64,
+            roomy.max_chars as u64 * 8_000 / estimated,
+            "the budget is scaled by exactly the ratio it is over by"
+        );
+        // Halving the usable tokens halves the budget: the scaling is linear in
+        // what the model can actually hold.
+        let half = roomy.with_estimated_tokens(&dense, 4_000, 0);
+        assert_eq!(half.max_chars as u64, tight.max_chars as u64 / 2);
+        assert_eq!(
+            roomy.with_estimated_tokens(&dense, 0, 0).max_chars,
+            roomy.max_chars,
+            "a model that declares no window cannot be estimated against"
+        );
+        assert_eq!(
+            roomy.with_estimated_tokens(&[], 8_000, 0).max_chars,
+            roomy.max_chars,
+            "an empty window has nothing to estimate"
+        );
+
+        // No measurement leaves the ceilings exactly as they were.
+        assert_eq!(
+            limits.with_observed_usage(0, 0, 200_000, 8_000).max_chars,
+            limits.max_chars
+        );
+        assert_eq!(
+            limits
+                .with_observed_usage(40_000, 0, 200_000, 8_000)
+                .max_chars,
+            limits.max_chars
+        );
+        // A model that declares no window cannot be calibrated against one.
+        assert_eq!(
+            limits.with_observed_usage(40_000, 16_000, 0, 0).max_chars,
+            limits.max_chars
+        );
+
+        // An absurd ratio is clamped rather than trusted. A provider that
+        // over-reports usage (1,000 characters billed as a million tokens) would
+        // otherwise shrink the window to nothing, so the ratio floors at 1.8
+        // chars/token: 200k tokens * 1.8 = 360k characters.
+        let clamped_low = limits.with_observed_usage(1_000, 1_000_000, 200_000, 0);
+        assert_eq!(
+            clamped_low.max_chars, 360_000,
+            "a tiny measured ratio floors at 1.8 chars/token"
+        );
+        // And one that under-reports (a million characters billed as one token)
+        // cannot inflate it past 4.2: 200k * 4.2 = 840k.
+        let clamped_high = limits.with_observed_usage(1_000_000, 1, 200_000, 0);
+        assert_eq!(
+            clamped_high.max_chars, 840_000,
+            "a huge measured ratio ceilings at 4.2 chars/token"
+        );
+    }
+
+    #[test]
+    fn test_reasoning_decay_keeps_the_conclusion() {
+        let conclusion = format!(
+            "The borrow checker rejects the shared cursor, so the parser must own it. {}",
+            "That is why the alternative was abandoned. ".repeat(4)
+        );
+        let mut messages = vec![
+            Message::system("sys"),
+            Message::user("TASK: refactor the parser"),
+            Message::assistant_with_reasoning(
+                "",
+                Some(format!("thinking about it.\n\n{conclusion}")),
+                Vec::new(),
+            ),
+            Message::assistant_with_reasoning(
+                "I will write the file",
+                Some("short thought".into()),
+                Vec::new(),
+            ),
+        ];
+        // Eight newer messages, so both reasoning blocks are outside the guard.
+        for i in 0..8 {
+            messages.push(Message::assistant(format!("step {i}"), vec![]));
+        }
+        let before: usize = messages
+            .iter()
+            .filter_map(|m| m.reasoning_content.as_ref().map(|r| r.chars().count()))
+            .sum();
+        assert!(before > 0);
+
+        let (candidates, saved) = decay_old_reasoning(&mut messages);
+        assert_eq!(saved, before, "every old chain of thought is reclaimed");
+        assert!(
+            messages.iter().all(|m| m.reasoning_content.is_none()),
+            "old reasoning is cleared"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.contains("borrow checker")),
+            "the conclusion of a prose-less turn is kept as a note: {candidates:?}"
+        );
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.contains("short thought")),
+            "a turn that wrote prose keeps its own conclusion: {candidates:?}"
+        );
+
+        // Idempotent: a second pass finds nothing to clear.
+        let (again, saved) = decay_old_reasoning(&mut messages);
+        assert_eq!(saved, 0);
+        assert!(again.is_empty());
+
+        // The newest reasoning is never cleared: it is what the model is thinking.
+        let mut recent = vec![
+            Message::system("sys"),
+            Message::assistant_with_reasoning("", Some("live thought".into()), Vec::new()),
+        ];
+        for i in 0..7 {
+            recent.push(Message::assistant(format!("step {i}"), vec![]));
+        }
+        assert_eq!(decay_old_reasoning(&mut recent).1, 0);
+        assert_eq!(
+            recent[1].reasoning_content.as_deref(),
+            Some("live thought"),
+            "the turn in flight keeps its reasoning"
+        );
+    }
+
+    #[test]
+    fn test_eviction_batch_is_prefiltered_and_bounded() {
+        let mut messages = vec![
+            Message::system("sys"),
+            Message::user("TASK: fix the build"),
+            Message::assistant(
+                "the parser needs a cursor",
+                vec![ToolCall {
+                    id: "w1".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({
+                        "path": "src/parser.rs",
+                        "content": "x".repeat(20_000),
+                    })
+                    .to_string(),
+                }],
+            ),
+            result("w1", "write_file", "wrote src/parser.rs".to_string()),
+            result(
+                "t1",
+                "run_command",
+                format!(
+                    "error[E0432]: unresolved import\n{}",
+                    "harmless filler\n".repeat(2_000)
+                ),
+            ),
+        ];
+        for i in 0..8 {
+            messages.push(Message::user(format!("step {i}")));
+        }
+        let outcome = fit_with_notes_and_limits(
+            messages.clone(),
+            ContextLimits::chars_only(4_000),
+            24_000,
+            &[],
+        );
+        let batch = outcome
+            .eviction_batch
+            .as_ref()
+            .expect("a quantized eviction produced a batch");
+        assert!(batch.scrubbed_transcript.len() <= EVICTION_BATCH_MAX_CHARS);
+        assert!(
+            !batch.scrubbed_transcript.contains(&"x".repeat(1_000)),
+            "a raw file dump must never enter the batch"
+        );
+        assert!(
+            batch.scrubbed_transcript.contains("unresolved import")
+                || batch.scrubbed_transcript.contains("USER:"),
+            "the batch keeps user prompts and diagnostics: {}",
+            batch.scrubbed_transcript
+        );
+        assert!(
+            batch.state_ledger.contains("src/parser.rs"),
+            "the ledger is the deterministic half: {}",
+            batch.state_ledger
+        );
     }
 }

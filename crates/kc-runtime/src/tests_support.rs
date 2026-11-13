@@ -89,6 +89,9 @@ struct Db {
     next_checkpoint_id: i64,
     /// One entry per recorded provider call, in arrival order.
     usage: Vec<UsageRecord>,
+    /// Session id -> `(watermark, compacted window)`: what a compaction saved so a
+    /// follow-up turn could reuse the window instead of reloading the transcript.
+    compaction_snapshots: HashMap<String, (usize, Vec<kc_core::message::Message>)>,
 }
 
 pub(crate) struct StoreFaultGate {
@@ -575,6 +578,39 @@ impl Store for FakeStore {
         Ok(out)
     }
 
+    /// The counts the runtime uses to size a compaction checkpoint: how many
+    /// main-agent messages the session has stored. The default trait body answers
+    /// zero, which would make every snapshot look empty, so the fake counts its own
+    /// rows the way the SQLite store does.
+    async fn session_stats(&self, session_id: &str) -> Result<kc_core::store::SessionStats> {
+        let db = self.db();
+        let main: Vec<&StoredMessage> = db
+            .messages
+            .iter()
+            .filter(|m| m.session_id == session_id && m.agent_id.is_none())
+            .collect();
+        let mut by_role: BTreeMap<String, u64> = BTreeMap::new();
+        for message in &main {
+            *by_role.entry(message.role.clone()).or_default() += 1;
+        }
+        Ok(kc_core::store::SessionStats {
+            messages_total: db
+                .messages
+                .iter()
+                .filter(|m| m.session_id == session_id)
+                .count() as u64,
+            messages_main: main.len() as u64,
+            messages_subagent: db
+                .messages
+                .iter()
+                .filter(|m| m.session_id == session_id && m.agent_id.is_some())
+                .count() as u64,
+            messages_by_role: by_role.clone(),
+            messages_main_by_role: by_role,
+            ..kc_core::store::SessionStats::default()
+        })
+    }
+
     async fn list_history_page(
         &self,
         session_id: &str,
@@ -659,6 +695,31 @@ impl Store for FakeStore {
             .take(limit)
             .cloned()
             .collect())
+    }
+
+    async fn save_compaction_snapshot(
+        &self,
+        session_id: &str,
+        watermark_count: usize,
+        snapshot_messages: &[kc_core::message::Message],
+    ) -> Result<()> {
+        self.db().compaction_snapshots.insert(
+            session_id.to_string(),
+            (watermark_count, snapshot_messages.to_vec()),
+        );
+        Ok(())
+    }
+
+    async fn load_compaction_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(usize, Vec<kc_core::message::Message>)>> {
+        Ok(self.db().compaction_snapshots.get(session_id).cloned())
+    }
+
+    async fn clear_compaction_snapshot(&self, session_id: &str) -> Result<()> {
+        self.db().compaction_snapshots.remove(session_id);
+        Ok(())
     }
 
     async fn create_run(

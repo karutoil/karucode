@@ -6,6 +6,8 @@ import type {
   CatalogResponse,
   Config,
   ConfigPatch,
+  McpRescanReport,
+  McpServer,
   PluginDiagnostics,
   PluginRescanReport,
   ProviderTestResult,
@@ -226,11 +228,17 @@ function applyPatches(config: Config, patch: ConfigPatch): Config {
 
 function installFetch(
   config: Config,
-  options: { testResult?: ProviderTestResult; plugins?: PluginDiagnostics[] } = {},
+  options: {
+    testResult?: ProviderTestResult;
+    plugins?: PluginDiagnostics[];
+    mcpServers?: McpServer[];
+  } = {},
 ) {
   const patches: ConfigPatch[] = [];
   /** POST paths the sheet sent to the plugin lifecycle routes, in order. */
   const pluginPosts: string[] = [];
+  const mcpPosts: string[] = [];
+  let mcpServers: McpServer[] = options.mcpServers ?? [];
   let pluginListCalls = 0;
   /** What a plugin *contributes* lives in `/api/config`, so this counts re-reads. */
   let configReads = 0;
@@ -286,7 +294,37 @@ function installFetch(
       );
       return jsonResponse(plugins.find((plugin) => plugin.name === name));
     }
-    if (url === '/api/mcp') return jsonResponse({ servers: [] });
+    if (url === '/api/mcp' && method === 'GET') {
+      return jsonResponse({ servers: mcpServers });
+    }
+    if (url === '/api/mcp/reload' && method === 'POST') {
+      mcpPosts.push(url);
+      const report: McpRescanReport = {
+        added: [],
+        removed: [],
+        restarted: [],
+        retried: [],
+        unchanged: mcpServers.map((server) => server.name),
+      };
+      return jsonResponse({ report, servers: mcpServers });
+    }
+    if (url.startsWith('/api/mcp/') && url.endsWith('/reload') && method === 'POST') {
+      mcpPosts.push(url);
+      const name = decodeURIComponent(url.split('/')[3] ?? '');
+      const found = mcpServers.find((server) => server.name === name);
+      if (!found) {
+        return jsonResponse(
+          { error: { code: 'not_found', message: `MCP server ${name} is not configured` } },
+          404,
+        );
+      }
+      // A reload replaces the connection, so the row is re-read afterwards; the
+      // mock keeps the same tool list and reports the fresh status.
+      mcpServers = mcpServers.map((server) =>
+        server.name === name ? { ...server, status: 'connected' } : server,
+      );
+      return jsonResponse(mcpServers.find((server) => server.name === name));
+    }
     if (url === '/api/health') {
       return jsonResponse({
         status: 'ok',
@@ -320,6 +358,7 @@ function installFetch(
     fetchMock,
     patches,
     pluginPosts,
+    mcpPosts,
     pluginListCalls: () => pluginListCalls,
     configReads: () => configReads,
   };
@@ -1096,6 +1135,11 @@ describe('SettingsSheet appearance', () => {
         'settings-results-mode-hint',
         'Docked: Results keeps its own column beside the conversation.',
       ],
+      [
+        'Project dropdown',
+        'settings-project-dropdown-hint',
+        'Hover: resting on the project name opens the list of projects.',
+      ],
     ] as const;
 
     for (const [label, hintId, hintText] of controls) {
@@ -1103,6 +1147,30 @@ describe('SettingsSheet appearance', () => {
       expect(control.getAttribute('aria-describedby')).toBe(hintId);
       expect(document.getElementById(hintId)?.textContent).toBe(hintText);
     }
+  });
+
+  it('offers the project dropdown as a hover-or-click browser choice', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    await openTab('Appearance');
+    const appearance = await screen.findByRole('region', { name: 'Theme and layout' });
+    const select = within(appearance).getByLabelText('Project dropdown') as HTMLSelectElement;
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['hover', 'click']);
+    expect(select.value).toBe('hover');
+
+    fireEvent.change(select, { target: { value: 'click' } });
+    expect(store.projectMenuOpen.value).toBe('click');
+    expect(localStorage.getItem('karucode.projectMenuOpen')).toBe('click');
+    // The hint follows the choice, so the sentence describes the mode in force.
+    expect(document.getElementById('settings-project-dropdown-hint')?.textContent).toContain('Click:');
+    // Browser preference, not config: the shared Save button must not send it on.
+    expect(patches).toHaveLength(0);
+
+    fireEvent.change(select, { target: { value: 'hover' } });
+    expect(store.projectMenuOpen.value).toBe('hover');
+    expect(localStorage.getItem('karucode.projectMenuOpen')).toBe('hover');
+    expect(patches).toHaveLength(0);
   });
 
   it('offers Results panel as a browser-stored presentation choice', async () => {
@@ -1790,6 +1858,39 @@ describe('SettingsSheet plugins', () => {
 
     await waitFor(() => expect(pluginPosts).toEqual(['/api/plugins/reload']));
     await waitFor(() => expect(configReads()).toBeGreaterThan(before));
+  });
+
+  it('reloads every MCP entry and one server without a restart', async () => {
+    const mcpServers: McpServer[] = [
+      {
+        name: 'fs',
+        transport: 'stdio',
+        status: 'connected',
+        tools: ['mcp__fs__read'],
+        error: null,
+      },
+      {
+        name: 'db',
+        transport: 'http',
+        status: 'failed',
+        tools: [],
+        error: 'connection refused',
+      },
+    ];
+    const { mcpPosts } = installFetch(twoProfileConfig(), { mcpServers });
+    renderSheet(twoProfileConfig());
+
+    await openTab('Plugins & MCP');
+    fireEvent.click(await screen.findByRole('button', { name: 'Reload MCP' }));
+    await waitFor(() => expect(mcpPosts).toEqual(['/api/mcp/reload']));
+
+    // The per-server button is the "I rebuilt it" path and targets one name.
+    const row = (await screen.findByText('fs')).closest('.diagnostics-row');
+    if (!(row instanceof HTMLElement)) throw new Error('no MCP row');
+    fireEvent.click(within(row).getByRole('button', { name: 'Reload' }));
+    await waitFor(() =>
+      expect(mcpPosts).toEqual(['/api/mcp/reload', '/api/mcp/fs/reload']),
+    );
   });
 
   it('disables a running plugin and enables a disabled one', async () => {

@@ -7991,6 +7991,125 @@ async fn projectless_preview_and_revert_use_the_saved_session_workspace() {
     );
 }
 
+/// A rewind invalidates the compaction checkpoint.
+///
+/// The checkpoint lets a follow-up turn append to the window the previous run
+/// actually sent, instead of reloading the raw transcript and compacting it again.
+/// After a rewind that window describes messages the user just hid, so hydrating
+/// it would resurrect them - the runtime clears it as part of the rewind.
+#[tokio::test]
+async fn a_rewind_clears_the_compaction_snapshot() {
+    let mut h = HarnessBuilder::new(vec![Script::text("first answer")])
+        .build()
+        .await;
+    h.run_to_finish("first prompt").await;
+    h.wait_idle().await;
+
+    let prompt = visible(&h)
+        .await
+        .into_iter()
+        .find(|message| message.role == "user")
+        .expect("prompt")
+        .id;
+    h.store
+        .save_compaction_snapshot(
+            h.session(),
+            2,
+            &[
+                kc_core::message::Message::user("compacted prefix"),
+                kc_core::message::Message::assistant("old answer", Vec::new()),
+            ],
+        )
+        .await
+        .expect("save snapshot");
+    assert!(
+        h.store
+            .load_compaction_snapshot(h.session())
+            .await
+            .expect("load")
+            .is_some(),
+        "fixture: the snapshot is stored"
+    );
+
+    h.runtime
+        .rewind(h.session(), prompt, false, true)
+        .await
+        .expect("rewind");
+
+    assert!(
+        h.store
+            .load_compaction_snapshot(h.session())
+            .await
+            .expect("load")
+            .is_none(),
+        "a rewind must invalidate the compaction checkpoint"
+    );
+}
+
+/// A follow-up turn appends to the compacted window instead of reloading the raw
+/// transcript and compacting it again.
+///
+/// This is the whole point of the checkpoint: re-compacting at a slightly shifted
+/// boundary rewrites the digest near the front of the request, which invalidates
+/// the provider's cached prefix for every token after it. Reusing the window the
+/// last run actually sent keeps the prefix byte-identical and only the new user
+/// turn is uncached.
+#[tokio::test]
+async fn a_follow_up_turn_reuses_the_compaction_snapshot() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::text("first answer"),
+        Script::text("second answer"),
+    ])
+    .build()
+    .await;
+    h.run_to_finish("first prompt").await;
+    h.wait_idle().await;
+
+    // What the previous run ended with: a digest and a pinned task, plus the
+    // answer. The watermark is the number of stored main-agent messages it covers.
+    let stored = visible(&h).await;
+    let watermark = stored.len();
+    let mut digest = kc_core::message::Message::user(
+        "[context digest: 40 earlier messages omitted; the work they describe is still done - \
+         do not redo it]\n### Modified & Created Files\n- file: `src/parser.rs` — write (1 edit)",
+    );
+    digest.name = Some("kc-runtime:context-digest".into());
+    let snapshot = vec![
+        kc_core::message::Message::user("TASK: fix the parser"),
+        digest,
+        kc_core::message::Message::assistant("first answer", Vec::new()),
+    ];
+    h.store
+        .save_compaction_snapshot(h.session(), watermark, &snapshot)
+        .await
+        .expect("save snapshot");
+
+    h.run_to_finish("second prompt").await;
+    h.wait_idle().await;
+
+    let requests = h.factory.requests();
+    let last = requests.last().expect("the second turn was sent");
+    let contents: Vec<&str> = last
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect();
+    assert!(
+        contents
+            .iter()
+            .any(|content| content.contains("src/parser.rs")),
+        "the compacted window is reused, digest and all: {contents:?}"
+    );
+    assert!(
+        contents.contains(&"second prompt"),
+        "and the new user turn is appended to it: {contents:?}"
+    );
+    assert!(
+        !contents.contains(&"first prompt"),
+        "the raw transcript is not reloaded on top of the snapshot: {contents:?}"
+    );
+}
+
 /// Visible (non-rewound) messages of the harness session, oldest first.
 async fn visible(h: &Harness) -> Vec<kc_core::store::StoredMessage> {
     h.store

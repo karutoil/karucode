@@ -1,10 +1,11 @@
 import type { JSX } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
-import { formatCount } from '../lib/format';
+import { useEffect, useId, useRef, useState } from 'preact/hooks';
+import type { Config } from '../api/types';
+import { formatContextWindow } from '../lib/format';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import type { ModelSelection } from '../state/store';
-import { CheckIcon, ChevronDownIcon, CpuIcon, SparkIcon } from './icons';
+import { CheckIcon, ChevronDownIcon, CpuIcon, SearchIcon, SparkIcon } from './icons';
 
 /**
  * Composer model + reasoning controls.
@@ -104,7 +105,13 @@ function usePopover(
   }, [open, close, root, trigger]);
 }
 
-/** Focus one real option and keep exactly that option in the listbox tab order. */
+/**
+ * Focus one real option and keep exactly that option in the listbox tab order.
+ *
+ * The reasoning picker's list is short and fixed, so it keeps this walk. The
+ * model picker does not: it has a filter field, and a hook that moves focus on
+ * every key would pull the caret out of the field the reader is typing in.
+ */
 function useRovingOptions(
   open: boolean,
   selectedKey: string,
@@ -185,23 +192,151 @@ async function applyReasoningEffort(value: string): Promise<boolean> {
   return true;
 }
 
+/**
+ * One model the picker can offer, flattened out of the provider config.
+ *
+ * The picker used to walk `config.providers` and draw a row per model inline,
+ * which is why every row repeated the same context-window string, why a
+ * single-profile install showed no provider name anywhere, and why the list
+ * could not be filtered or counted. Flattening first is what lets the list be
+ * searched, counted and grouped without three copies of the same traversal.
+ */
+export interface ModelOption {
+  providerId: string;
+  /** The profile's display name, falling back to its id. */
+  providerName: string;
+  /** Whether the profile has a key: a model on a keyless profile cannot run. */
+  providerKeySet: boolean;
+  modelId: string;
+  /** The model's display name, falling back to its id. */
+  modelName: string;
+  contextWindow: number | null;
+  toolCall: boolean | null;
+  reasoning: boolean | null;
+  vision: boolean | null;
+}
+
+/** Every model the install offers, in config order. */
+export function modelOptions(config: Config | null): ModelOption[] {
+  if (!config) return [];
+  return config.providers.flatMap((profile) =>
+    profile.models.map((model) => ({
+      providerId: profile.id,
+      providerName: profile.name?.trim() || profile.id,
+      providerKeySet: profile.api_key_set,
+      modelId: model.id,
+      modelName: model.name?.trim() || model.id,
+      contextWindow: model.context_window ?? null,
+      toolCall: model.tool_call ?? null,
+      reasoning: model.reasoning ?? null,
+      vision: model.vision ?? null,
+    })),
+  );
+}
+
+/**
+ * The models a filter query reaches.
+ *
+ * Every word has to appear somewhere in the model's name, its id, or its
+ * provider's name or id — the same "all the words, anywhere" rule the settings
+ * search uses, so a second word narrows the list instead of widening it.
+ *
+ * Capability words are deliberately *not* in the haystack: a model whose only
+ * mention of tools is the warning "no tools" would otherwise match a search for
+ * "tools", which is the opposite of what the reader asked for.
+ */
+export function filterModelOptions(options: readonly ModelOption[], query: string): ModelOption[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [...options];
+  return options.filter((option) => {
+    const haystack =
+      `${option.modelName} ${option.modelId} ${option.providerName} ${option.providerId}`.toLowerCase();
+    return words.every((word) => haystack.includes(word));
+  });
+}
+
+/** The key a row is addressed by, in the DOM and in the roving tab stop. */
+function optionKey(option: ModelOption): string {
+  return `${option.providerId}:${option.modelId}`;
+}
+
+/**
+ * What a row says to a screen reader: the model, where it runs, and the facts
+ * the chips draw. The chips themselves are decorative — this is the sentence
+ * that carries them, so the visible abbreviations ("1M ctx") never have to be
+ * read out as letters.
+ */
+function optionLabel(option: ModelOption): string {
+  const facts = [
+    option.contextWindow ? `${formatContextWindow(option.contextWindow)} context` : '',
+    option.toolCall === false ? 'no tool calling' : '',
+    option.vision ? 'vision' : '',
+    option.reasoning ? 'reasoning' : '',
+  ].filter((fact) => fact !== '');
+  return `${option.modelName} on ${option.providerName}${facts.length > 0 ? `, ${facts.join(', ')}` : ''}`;
+}
+
 /** Per-session model picker; opens upward from the composer. */
 export function ModelSwitcher(): JSX.Element | null {
   const config = store.config.value;
   const sessionId = store.currentSessionId.value;
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [traversalKey, setTraversalKey] = useState('');
   const [pendingTarget, setPendingTarget] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const listbox = useRef<HTMLDivElement>(null);
+  const search = useRef<HTMLInputElement>(null);
+  const listboxId = useId();
   const mutationPending = sessionId !== null && store.sessionModelMutationPending.value === sessionId;
   const { providerId, modelId, pinned, effort } = effectiveSelection();
   const selectedKey = providerId && modelId ? `${providerId}:${modelId}` : '';
-  const optionKeys = (config?.providers ?? []).flatMap((profile) =>
-    profile.models.map((model) => `${profile.id}:${model.id}`),
-  );
-  const roving = useRovingOptions(open, selectedKey, optionKeys, listbox);
+  const phone = store.phoneViewport.value;
+  const options = modelOptions(config);
+  const filtered = filterModelOptions(options, query);
+  const filteredKeys = filtered.map(optionKey);
+  // The roving tab stop follows the filter: a query that hides the current
+  // model must not leave the list with no reachable row.
+  const activeKey = filteredKeys.includes(traversalKey)
+    ? traversalKey
+    : filteredKeys.includes(selectedKey)
+      ? selectedKey
+      : (filteredKeys[0] ?? '');
   usePopover(open, () => setOpen(false), root, trigger);
+
+  // A closed menu forgets its query: reopening it is a fresh look at the list,
+  // not a continuation of a search the reader has already finished with. Doing
+  // it here rather than in each close path is what makes the trigger, Escape,
+  // an outside press and a selection all leave the same state behind.
+  useEffect(() => {
+    if (open) return;
+    setQuery('');
+    setTraversalKey('');
+  }, [open]);
+
+  // A desktop picker opens with the caret in the filter: the list is long enough
+  // that typing a name is the fastest way through it, and the field is the one
+  // place a keystroke means "narrow this". A phone does not autofocus — a
+  // programmatic focus opens the on-screen keyboard, which would cover the sheet
+  // the tap just opened — so it lands on the current model instead.
+  useEffect(() => {
+    if (!open) return;
+    if (!phone) {
+      search.current?.focus();
+      return;
+    }
+    const rows = Array.from(listbox.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? []);
+    (rows.find((row) => row.dataset.optionKey === selectedKey) ?? rows[0])?.focus();
+  }, [open, phone, selectedKey]);
+
+  // A long list opens at the top; the model this session is on may be far down
+  // it. Scrolling the row into view is what makes the checkmark findable.
+  useEffect(() => {
+    if (!open) return;
+    const rows = Array.from(listbox.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? []);
+    rows.find((row) => row.dataset.optionKey === selectedKey)?.scrollIntoView({ block: 'nearest' });
+  }, [open, selectedKey]);
 
   // A session is open - or a draft, which is a conversation that has not been
   // created yet: the pills stay mounted, and a choice made here travels in the
@@ -241,7 +376,6 @@ export function ModelSwitcher(): JSX.Element | null {
   // name (where a desktop shows the provider) and its choices are a group at the
   // bottom of the model list. Two 24px pills with truncated labels - "Claud…",
   // "Def…" - told the reader nothing and gave them two targets to hit.
-  const phone = store.phoneViewport.value;
   const reasoningAvailable = entry?.reasoning !== false;
   const currentEffort =
     REASONING_OPTIONS.find((option) => option.value === (effort ?? 'default')) ?? REASONING_OPTIONS[0]!;
@@ -254,17 +388,22 @@ export function ModelSwitcher(): JSX.Element | null {
     trigger.current?.focus();
   };
 
-  const choose = async (nextProviderId: string, nextModelId: string): Promise<void> => {
+  const choose = async (option: ModelOption): Promise<void> => {
     if (mutationPending) return;
     closeAndRestoreFocus();
-    if (nextProviderId === providerId && nextModelId === modelId) return;
-    setPendingTarget(`${nextProviderId}:${nextModelId}`);
+    if (option.providerId === providerId && option.modelId === modelId) return;
+    setPendingTarget(optionKey(option));
     try {
       // The pinned effort (when there is one) carries over to the new model.
-      await actions.setSessionModelSelection(nextProviderId, nextModelId, effort);
+      await actions.setSessionModelSelection(option.providerId, option.modelId, effort);
     } finally {
       setPendingTarget(null);
     }
+  };
+
+  const chooseKey = (key: string): void => {
+    const option = filtered.find((candidate) => optionKey(candidate) === key);
+    if (option) void choose(option);
   };
 
   const chooseEffort = async (value: string): Promise<void> => {
@@ -283,6 +422,78 @@ export function ModelSwitcher(): JSX.Element | null {
       setPendingTarget(null);
     }
   };
+
+  /** Move the roving tab stop and the real focus onto one row. */
+  const focusOption = (key: string): void => {
+    setTraversalKey(key);
+    const rows = Array.from(listbox.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? []);
+    rows.find((row) => row.dataset.optionKey === key)?.focus();
+  };
+
+  /**
+   * Arrow keys walk the filtered list from the filter field or from a row.
+   *
+   * The field is where a desktop reader starts, so ArrowDown has to cross from
+   * the field into the list; from a row the walk stays inside the list. Home and
+   * End jump to the ends of the list that is on screen — the filtered one — so
+   * they never land on a row the query hid.
+   */
+  const onMenuKeyDown = (event: KeyboardEvent): void => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const onRow = target?.getAttribute('role') === 'option';
+    const onFilter = target === search.current;
+    if (!onRow && !onFilter) return;
+
+    if (event.key === 'Escape') {
+      // A query is a thing to clear before the menu is a thing to close. The
+      // popover's own Escape listener is on `document`, so stopping here is what
+      // keeps the first Escape from taking the whole list away.
+      if (query !== '') {
+        event.preventDefault();
+        event.stopPropagation();
+        setQuery('');
+        setTraversalKey('');
+        search.current?.focus();
+      }
+      return;
+    }
+
+    if (event.key === 'Enter' && onFilter) {
+      // Enter in the field takes the first match, the way a search box does.
+      event.preventDefault();
+      const first = filteredKeys[0];
+      if (first) chooseKey(first);
+      return;
+    }
+
+    const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
+    if (step === 0 && event.key !== 'Home' && event.key !== 'End') return;
+    if (filteredKeys.length === 0) return;
+    event.preventDefault();
+    const current = Math.max(0, filteredKeys.indexOf(activeKey));
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? filteredKeys.length - 1
+          : (current + step + filteredKeys.length) % filteredKeys.length;
+    focusOption(filteredKeys[next] ?? filteredKeys[0]!);
+  };
+
+  // Grouped by provider, in config order: a model id alone does not say which
+  // endpoint will answer, and two profiles can offer the same model name.
+  const groups: { providerId: string; providerName: string; providerKeySet: boolean; models: ModelOption[] }[] = [];
+  for (const option of filtered) {
+    const group = groups.find((candidate) => candidate.providerId === option.providerId);
+    if (group) group.models.push(option);
+    else
+      groups.push({
+        providerId: option.providerId,
+        providerName: option.providerName,
+        providerKeySet: option.providerKeySet,
+        models: [option],
+      });
+  }
 
   return (
     <div class="model-switcher" ref={root}>
@@ -318,72 +529,145 @@ export function ModelSwitcher(): JSX.Element | null {
 
       {open ? (
         <div
-          ref={listbox}
-          class="model-switcher-menu dropup"
-          role="listbox"
+          class="model-switcher-menu model-switcher-menu-models dropup"
           aria-label={
             phone
               ? 'Choose a model and reasoning effort for this session'
               : 'Choose a model for this session'
           }
-          onKeyDown={roving.onKeyDown}
+          onKeyDown={onMenuKeyDown}
         >
-          {config.providers.map((profile) => (
-            <div class="model-switcher-group" key={profile.id}>
-              {config.providers.length > 1 ? (
-                <p class="model-switcher-group-title">
-                  {profile.name}
-                  {profile.api_key_set ? null : <span class="model-switcher-warn">no key</span>}
-                </p>
-              ) : null}
-              {profile.models.length === 0 ? (
-                <p class="model-switcher-empty">No models on this provider yet.</p>
-              ) : null}
-              {profile.models.map((model) => {
-                const active = profile.id === providerId && model.id === modelId;
-                const optionKey = `${profile.id}:${model.id}`;
-                const busy = mutationPending && pendingTarget === optionKey;
-                return (
-                  <button
-                    type="button"
-                    role="option"
-                    aria-selected={active}
-                    class={`model-switcher-option${active ? ' is-active' : ''}`}
-                    key={optionKey}
-                    data-option-key={optionKey}
-                    tabIndex={roving.activeKey === optionKey ? 0 : -1}
-                    disabled={mutationPending}
-                    onClick={() => void choose(profile.id, model.id)}
+          <label class="model-switcher-search">
+            <SearchIcon size={13} />
+            <input
+              ref={search}
+              type="search"
+              class="model-switcher-filter"
+              placeholder="Filter models"
+              aria-label="Filter models"
+              aria-controls={filtered.length > 0 ? listboxId : undefined}
+              autocomplete="off"
+              spellcheck={false}
+              value={query}
+              onInput={(event) => {
+                setQuery(event.currentTarget.value);
+                // A new query is a new list: the tab stop starts at its first row.
+                setTraversalKey('');
+              }}
+            />
+            <span class="model-switcher-count" aria-live="polite">
+              {query.trim() === ''
+                ? `${options.length} ${options.length === 1 ? 'model' : 'models'}`
+                : `${filtered.length} of ${options.length}`}
+            </span>
+          </label>
+
+          <div class="model-switcher-scroll">
+            {options.length === 0 ? (
+              // A fresh install with no models is not a filter that matched
+              // nothing: there is no query to clear, and the fix is the footer's
+              // own door into Settings.
+              <p class="model-switcher-empty" role="status">
+                No models configured yet. Add one under <strong>Models &amp; providers</strong>.
+              </p>
+            ) : filtered.length === 0 ? (
+              <p class="model-switcher-empty" role="status">
+                No model matches “{query.trim()}”.
+                <button
+                  type="button"
+                  class="link-button"
+                  onClick={() => {
+                    setQuery('');
+                    setTraversalKey('');
+                    search.current?.focus();
+                  }}
+                >
+                  Clear filter
+                </button>
+              </p>
+            ) : (
+              <div
+                ref={listbox}
+                id={listboxId}
+                class="model-switcher-list"
+                role="listbox"
+                aria-label={
+                  phone
+                    ? 'Choose a model and reasoning effort for this session'
+                    : 'Choose a model for this session'
+                }
+              >
+                {groups.map((group) => (
+                  <div
+                    class="model-switcher-group"
+                    key={group.providerId}
+                    role="group"
+                    aria-label={`${group.providerName}${group.providerKeySet ? '' : ', no API key'}`}
                   >
-                    <span class="model-switcher-option-main">
-                      <span class="model-switcher-option-name">{model.name?.trim() || model.id}</span>
-                      {model.name?.trim() && model.name.trim() !== model.id ? (
-                        <code class="model-switcher-option-id">{model.id}</code>
-                      ) : null}
-                    </span>
-                    <span class="model-switcher-option-meta">
-                      {busy ? (
-                        'Switching…'
-                      ) : (
-                        <>
-                          {model.context_window ? (
-                            <span title="Context window">{formatCount(model.context_window)} ctx</span>
-                          ) : null}
-                          {model.tool_call === false ? <span title="No tool calling">no tools</span> : null}
-                          {active ? <CheckIcon size={13} /> : null}
-                        </>
-                      )}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-          {phone && reasoningAvailable ? (
+                    <p class="model-switcher-group-title">
+                      {group.providerName}
+                      {group.providerKeySet ? null : <span class="model-switcher-warn">no key</span>}
+                    </p>
+                    {group.models.map((option) => {
+                      const key = optionKey(option);
+                      const active = option.providerId === providerId && option.modelId === modelId;
+                      const busy = mutationPending && pendingTarget === key;
+                      return (
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={active}
+                          aria-label={optionLabel(option)}
+                          class={`model-switcher-option${active ? ' is-active' : ''}`}
+                          key={key}
+                          data-option-key={key}
+                          tabIndex={activeKey === key ? 0 : -1}
+                          disabled={mutationPending}
+                          onClick={() => void choose(option)}
+                        >
+                          <span class="model-switcher-option-main">
+                            <span class="model-switcher-option-name">{option.modelName}</span>
+                            <code class="model-switcher-option-id">{option.modelId}</code>
+                          </span>
+                          <span class="model-switcher-option-meta">
+                            {busy ? (
+                              'Switching…'
+                            ) : (
+                              <span class="model-switcher-chips" aria-hidden="true">
+                                {option.contextWindow ? (
+                                  <span
+                                    class="model-chip"
+                                    title={`${option.contextWindow.toLocaleString()} tokens of context`}
+                                  >
+                                    {formatContextWindow(option.contextWindow)} ctx
+                                  </span>
+                                ) : null}
+                                {option.toolCall === false ? (
+                                  <span class="model-chip model-chip-warn">no tools</span>
+                                ) : null}
+                                {option.vision ? <span class="model-chip">vision</span> : null}
+                                {option.reasoning ? <span class="model-chip">reasoning</span> : null}
+                                {active ? <CheckIcon size={13} /> : null}
+                              </span>
+                            )}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {phone && reasoningAvailable ? (
             // The same choices the standalone pill offers, in the same order, on
             // the sheet the model list already opened. `aria-pressed` rather than
             // `role="option"`: this is a group of toggles, not a second listbox,
             // so the model list's arrow-key walk never moves the reader's focus.
+            //
+            // It scrolls with the list rather than sitting under it: the model
+            // rows are what the sheet is for, and a pinned effort block would
+            // take a third of a 42dvh sheet away from them.
             <div
               class="model-switcher-group model-switcher-reasoning"
               role="group"
@@ -413,7 +697,9 @@ export function ModelSwitcher(): JSX.Element | null {
                 })}
               </div>
             </div>
-          ) : null}
+            ) : null}
+          </div>
+
           <div class="model-switcher-footer">
             {pinned ? (
               <button

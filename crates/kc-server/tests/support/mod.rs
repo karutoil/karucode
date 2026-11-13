@@ -35,6 +35,15 @@ use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 use tower::ServiceExt;
 
+/// How long a `wait_until_*` poll may take before the environment is assumed
+/// broken rather than slow.
+///
+/// These polls wait on a background task, and a shared CI runner is slow: the
+/// macOS job runs this whole suite on three cores, and a 3s budget (300 × 10ms)
+/// turns a correct server under load into "session … never went idle". A real
+/// hang still fails, just thirty seconds later.
+const POLL_BUDGET: Duration = Duration::from_secs(30);
+
 // ---------------------------------------------------------------------------
 // Scripted provider
 // ---------------------------------------------------------------------------
@@ -276,6 +285,9 @@ pub struct HarnessBuilder {
     extra_tools: Vec<Arc<dyn Tool>>,
     plugin_configs: Vec<PluginConfig>,
     mcp_configs: Vec<McpServerConfig>,
+    /// Put `mcp_configs` in a config file and point the snapshot at it, so a
+    /// reload re-reads the file like a real install.
+    mcp_config_file: bool,
     bind_host: String,
     /// `None` = read `KARUCODE_ALLOWED_HOSTS` like the bootstrap does.
     allowed_hosts: Option<Option<String>>,
@@ -310,6 +322,7 @@ impl HarnessBuilder {
             extra_tools: Vec::new(),
             plugin_configs: Vec::new(),
             mcp_configs: Vec::new(),
+            mcp_config_file: false,
             bind_host: "127.0.0.1".into(),
             allowed_hosts: None,
             project_roots: Vec::new(),
@@ -432,6 +445,15 @@ impl HarnessBuilder {
         self
     }
 
+    /// Write the MCP entries to `<data_dir>/config.toml` and point the settings
+    /// snapshot at it, so `POST /api/mcp/reload` reads a file the way a real
+    /// install does. Rewrite it from a test with
+    /// [`Harness::write_mcp_config`].
+    pub fn mcp_config_file(mut self) -> Self {
+        self.mcp_config_file = true;
+        self
+    }
+
     /// Bind address the fake process reports (`KARUCODE_HOST`).
     pub fn bind_host(mut self, host: &str) -> Self {
         self.bind_host = host.to_string();
@@ -445,7 +467,11 @@ impl HarnessBuilder {
         self
     }
 
-    pub async fn build(self) -> Harness {
+    pub fn build(self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Harness>>> {
+        Box::pin(self.build_inner())
+    }
+
+    async fn build_inner(self) -> Harness {
         let root = std::env::temp_dir().join(format!(
             "kc-server-test-{}-{}",
             std::process::id(),
@@ -460,6 +486,18 @@ impl HarnessBuilder {
 
         let web_dir = self.web_dir;
         let db_path = data_dir.join("karucode.db");
+        let config_path = if self.mcp_config_file {
+            let path = data_dir.join("config.toml");
+            let file = kc_core::config::ConfigFile {
+                mcp_servers: self.mcp_configs.clone(),
+                ..Default::default()
+            };
+            std::fs::write(&path, toml::to_string(&file).expect("config toml"))
+                .expect("config file");
+            Some(path)
+        } else {
+            None
+        };
         let allowed_hosts = self
             .allowed_hosts
             .unwrap_or_else(|| std::env::var(kc_server::host::ALLOWED_HOSTS_ENV).ok());
@@ -475,6 +513,8 @@ impl HarnessBuilder {
             // list the entries the host was actually given — the bootstrap wires
             // it that way too.
             plugins: self.plugin_configs.clone(),
+            mcp_servers: self.mcp_configs.clone(),
+            config_path,
             terminals: self.terminals.clone().unwrap_or_default(),
             limits: self.limits.clone().unwrap_or_default(),
             project_roots: self.project_roots.clone(),
@@ -648,15 +688,33 @@ impl Harness {
         &self.workspace_dir
     }
 
+    /// Rewrite the harness's config file with `entries`.
+    ///
+    /// Only meaningful with [`HarnessBuilder::mcp_config_file`]; panics without
+    /// one so a test cannot silently assert against the in-memory fallback.
+    pub fn write_mcp_config(&self, entries: &[McpServerConfig]) {
+        let path = self
+            .state
+            .settings()
+            .snapshot()
+            .config_path
+            .expect("harness was built without a config file");
+        let file = kc_core::config::ConfigFile {
+            mcp_servers: entries.to_vec(),
+            ..Default::default()
+        };
+        std::fs::write(path, toml::to_string(&file).expect("config toml")).expect("config file");
+    }
+
     /// Send a request with the CSRF header added automatically for mutations.
-    pub async fn send(
-        &self,
+    pub fn send<'a>(
+        &'a self,
         method: Method,
-        path: &str,
+        path: &'a str,
         body: Option<Value>,
-        headers: &[(&str, &str)],
-    ) -> TestResponse {
-        self.send_with(method, path, body, headers, true).await
+        headers: &'a [(&'a str, &'a str)],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = TestResponse> + 'a>> {
+        Box::pin(self.send_with(method, path, body, headers, true))
     }
 
     pub async fn send_with(
@@ -700,10 +758,7 @@ impl Harness {
             None => Body::empty(),
         };
         let request = builder.body(body).expect("request");
-        let response = self
-            .router
-            .clone()
-            .oneshot(request)
+        let response = Box::pin(self.router.clone().oneshot(request))
             .await
             .expect("router call");
         let status = response.status();
@@ -773,7 +828,8 @@ impl Harness {
 
     /// Poll `GET /api/approvals` until one pending approval exists.
     pub async fn wait_for_approval(&self, session_id: &str) -> Value {
-        for _ in 0..300 {
+        let deadline = std::time::Instant::now() + POLL_BUDGET;
+        loop {
             let response = self
                 .get(&format!("/api/approvals?session={session_id}"))
                 .await;
@@ -782,22 +838,29 @@ impl Harness {
             if let Some(first) = approvals.as_array().and_then(|list| list.first()) {
                 return first.clone();
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no pending approval appeared for {session_id}"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("no pending approval appeared for {session_id}");
     }
 
     /// Poll the session detail until it reports no active run.
     pub async fn wait_until_idle(&self, session_id: &str) {
-        for _ in 0..300 {
+        let deadline = std::time::Instant::now() + POLL_BUDGET;
+        loop {
             let response = self.get(&format!("/api/sessions/{session_id}")).await;
             assert_eq!(response.status, StatusCode::OK);
             if response.json()["running"] == json!(false) {
                 return;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "session {session_id} never went idle"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("session {session_id} never went idle");
     }
 
     /// Poll the session detail until it reports an active run.
@@ -806,15 +869,19 @@ impl Harness {
     /// once the run row exists, but `running` is derived from the runtime's map,
     /// which the background task registers a moment later.
     pub async fn wait_until_running(&self, session_id: &str) {
-        for _ in 0..300 {
+        let deadline = std::time::Instant::now() + POLL_BUDGET;
+        loop {
             let response = self.get(&format!("/api/sessions/{session_id}")).await;
             assert_eq!(response.status, StatusCode::OK);
             if response.json()["running"] == json!(true) {
                 return;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "session {session_id} never started running"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("session {session_id} never started running");
     }
 }
 

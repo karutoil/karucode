@@ -1,7 +1,7 @@
 import type { ComponentChildren, JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { ApiError, toErrorMessage } from '../api/client';
-import { listMcpServers, listPlugins, reloadPlugin, rescanPlugins, setPluginEnabled } from '../api/endpoints';
+import { listMcpServers, listPlugins, reloadMcpServer, reloadMcpServers, reloadPlugin, rescanPlugins, setPluginEnabled } from '../api/endpoints';
 import type {
   ApprovalMode,
   NotificationsPatch,
@@ -2124,6 +2124,8 @@ export function SettingsSheet(): JSX.Element | null {
   const [diagnosticsKey, setDiagnosticsKey] = useState(0);
   const [pluginBusy, setPluginBusy] = useState<string | null>(null);
   const [pluginActionError, setPluginActionError] = useState<string | null>(null);
+  const [mcpBusy, setMcpBusy] = useState<string | null>(null);
+  const [mcpActionError, setMcpActionError] = useState<string | null>(null);
 
   /**
    * Run one plugin lifecycle action and re-read the diagnostics afterwards.
@@ -2156,6 +2158,23 @@ export function SettingsSheet(): JSX.Element | null {
       })
       .catch((cause: unknown) => setPluginActionError(toErrorMessage(cause)))
       .finally(() => setPluginBusy(null));
+  };
+
+  /**
+   * Run one MCP lifecycle action and re-read the diagnostics afterwards.
+   *
+   * A reload replaces processes, so the list on screen is stale the moment it
+   * returns; bumping `diagnosticsKey` is what makes the rows show the new status
+   * and tool counts instead of the old ones.
+   */
+  const runMcpAction = (name: string | null): void => {
+    setMcpBusy(name ?? 'all');
+    setMcpActionError(null);
+    const request = name === null ? reloadMcpServers() : reloadMcpServer(name);
+    request
+      .then(() => setDiagnosticsKey((key) => key + 1))
+      .catch((cause: unknown) => setMcpActionError(toErrorMessage(cause)))
+      .finally(() => setMcpBusy(null));
   };
 
   useEffect(() => {
@@ -2571,6 +2590,28 @@ export function SettingsSheet(): JSX.Element | null {
                             >
                               <option value="docked">Docked</option>
                               <option value="popout">Pop out</option>
+                            </select>
+                          </Field>
+                          <Field
+                            id="settings-project-dropdown"
+                            label="Project dropdown"
+                            hint={
+                              store.projectMenuOpen.value === 'click'
+                                ? 'Click: the project name opens the list when you press it, and the pointer may cross it freely.'
+                                : 'Hover: resting on the project name opens the list of projects.'
+                            }
+                          >
+                            <select
+                              id="settings-project-dropdown"
+                              class="input"
+                              aria-describedby="settings-project-dropdown-hint"
+                              value={store.projectMenuOpen.value}
+                              onChange={(event) =>
+                                actions.setProjectMenuOpen(event.currentTarget.value as store.ProjectMenuOpen)
+                              }
+                            >
+                              <option value="hover">Open on hover</option>
+                              <option value="click">Open on click</option>
                             </select>
                           </Field>
                         </div>
@@ -3181,6 +3222,15 @@ export function SettingsSheet(): JSX.Element | null {
                             <button
                               type="button"
                               class="button button-small"
+                              onClick={() => runMcpAction(null)}
+                              disabled={mcpBusy !== null}
+                              title="Re-read [[mcp_servers]]: start new servers, stop removed ones, replace changed ones"
+                            >
+                              {mcpBusy === 'all' ? 'Reloading…' : 'Reload MCP'}
+                            </button>
+                            <button
+                              type="button"
+                              class="button button-small"
                               onClick={() => setDiagnosticsKey((key) => key + 1)}
                               disabled={diagnosticsLoading}
                             >
@@ -3195,6 +3245,9 @@ export function SettingsSheet(): JSX.Element | null {
                           {store.config.value?.plugins_watch
                             ? ` Plugin sources are watched every ${store.config.value.plugins_watch_secs ?? 2}s; edits apply without a click.`
                             : ' Reload or rescan after changing a plugin. Nothing is applied automatically.'}
+                          {store.config.value?.mcp_watch
+                            ? ` MCP entries are watched every ${store.config.value.mcp_watch_secs ?? 2}s; edits apply without a click.`
+                            : ' MCP entries apply on Reload MCP.'}
                         </p>
                         {diagnosticsError ? (
                           <div class="inline-error" role="alert">
@@ -3253,6 +3306,11 @@ export function SettingsSheet(): JSX.Element | null {
                           </div>
                           <div class="diagnostics-block">
                             <span class="eyebrow">MCP servers</span>
+                            {mcpActionError ? (
+                              <div class="inline-error" role="alert">
+                                <p>{mcpActionError}</p>
+                              </div>
+                            ) : null}
                             {diagnosticsLoading && mcpServers === null ? <p class="muted small">Loading…</p> : null}
                             {mcpServers && mcpServers.length === 0 ? (
                               <p class="muted small">No MCP servers configured.</p>
@@ -3268,6 +3326,17 @@ export function SettingsSheet(): JSX.Element | null {
                                     {server.tools.length === 1 ? '' : 's'}
                                   </span>
                                   {server.error ? <span class="diagnostics-error">{server.error}</span> : null}
+                                  <span class="diagnostics-actions">
+                                    <button
+                                      type="button"
+                                      class="button button-small"
+                                      onClick={() => runMcpAction(server.name)}
+                                      disabled={mcpBusy !== null}
+                                      title="Restart this MCP server's process/connection (pick up a rebuilt binary or an edited entry)"
+                                    >
+                                      {mcpBusy === server.name ? 'Reloading…' : 'Reload'}
+                                    </button>
+                                  </span>
                                 </li>
                               ))}
                             </ul>

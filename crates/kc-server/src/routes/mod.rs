@@ -7,6 +7,7 @@ pub mod auth;
 pub mod config;
 pub mod events;
 pub mod git;
+pub mod github;
 pub mod health;
 pub mod info;
 pub mod missions;
@@ -212,21 +213,8 @@ pub fn api_router() -> Router<AppState> {
         // body limit), `GET` serves it as a page with its own policy — see
         // `crate::artifacts`.
         .route("/artifacts/:id", get(artifacts::get_artifact))
-        .route("/git/status", get(git::status))
-        .route("/git/diff", get(git::diff))
-        // The source-control manager: reads that describe the repository, then
-        // the local mutations. Nothing here touches the network (see
-        // `routes::git`), so there is no fetch/pull/push route.
-        .route("/git/branches", get(git::branches).post(git::create_branch))
-        .route("/git/branches/delete", post(git::delete_branch))
-        .route("/git/checkout", post(git::checkout))
-        .route("/git/log", get(git::log))
-        .route("/git/commits/:sha", get(git::commit_detail))
-        .route("/git/stage", post(git::stage))
-        .route("/git/unstage", post(git::unstage))
-        .route("/git/discard", post(git::discard))
-        .route("/git/commit", post(git::commit))
-        .route("/git/stash", get(git::stash_list).post(git::stash))
+        .merge(git_routes())
+        .merge(github_routes())
         .route(
             "/terminals",
             get(terminals::list_terminals).post(terminals::create_terminal),
@@ -260,6 +248,11 @@ pub fn api_router() -> Router<AppState> {
             post(plugins::run_ui_action),
         )
         .route("/mcp", get(plugins::list_mcp))
+        // MCP servers are read from `[[mcp_servers]]` on demand, so adding,
+        // removing or changing one is a reload rather than a restart. The
+        // per-name route is the "I rebuilt the server binary" path.
+        .route("/mcp/reload", post(plugins::reload_mcp))
+        .route("/mcp/:name/reload", post(plugins::reload_mcp_server))
         // Agent skills: reusable instruction packs the agent loads on demand.
         // The list is discovery, not a table (there is no skills table), so
         // `GET` is a live scan of the workspace and the conventional folders.
@@ -325,6 +318,79 @@ pub fn api_router() -> Router<AppState> {
         // Outermost, so a transport-level rejection from *any* extractor is
         // rewritten into the documented JSON error shape.
         .layer(axum::middleware::from_fn(json_error_shape))
+}
+
+#[inline(never)]
+fn git_routes() -> Router<AppState> {
+    let mut r = Router::new();
+    r = r.route("/git/status", get(git::status));
+    r = r.route("/git/diff", get(git::diff));
+    r = r.route("/git/init", post(git::init));
+    r = r.route("/git/config", post(git::config_identity));
+    r = r.route("/git/branches", get(git::branches).post(git::create_branch));
+    r = r.route("/git/branches/rename", post(git::rename_branch));
+    r = r.route("/git/branches/delete", post(git::delete_branch));
+    r = r.route("/git/checkout", post(git::checkout));
+    r = r.route("/git/tags", get(git::tags).post(git::manage_tag));
+    r = r.route("/git/remotes", get(git::remotes).post(git::manage_remote));
+    r = r.route("/git/fetch", post(git::fetch));
+    r = r.route("/git/pull", post(git::pull));
+    r = r.route("/git/push", post(git::push));
+    r = r.route("/git/merge", post(git::merge));
+    r = r.route("/git/rebase", post(git::rebase));
+    r = r.route("/git/cherry-pick", post(git::cherry_pick));
+    r = r.route("/git/revert", post(git::revert_commit));
+    r = r.route("/git/reset", post(git::reset));
+    r = r.route("/git/resolve", post(git::resolve_conflict));
+    r = r.route("/git/log", get(git::log));
+    r = r.route("/git/commits/:sha", get(git::commit_detail));
+    r = r.route("/git/stage", post(git::stage));
+    r = r.route("/git/unstage", post(git::unstage));
+    r = r.route("/git/discard", post(git::discard));
+    r = r.route("/git/commit", post(git::commit));
+    r = r.route("/git/stash", get(git::stash_list).post(git::stash));
+    r = r.route("/git/stash/:index", get(git::stash_detail));
+    r
+}
+
+#[inline(never)]
+fn github_routes() -> Router<AppState> {
+    let mut r = Router::new();
+    r = r.route("/git/github/status", get(github::status));
+    r = r.route("/git/github/repo", post(github::create_repo));
+    r = r.route(
+        "/git/github/pulls",
+        get(github::list_pulls).post(github::create_pull),
+    );
+    r = r.route("/git/github/pulls/:number", get(github::get_pull));
+    r = r.route("/git/github/pulls/:number/diff", get(github::pull_diff));
+    r = r.route(
+        "/git/github/pulls/:number/checkout",
+        post(github::checkout_pull),
+    );
+    r = r.route("/git/github/pulls/:number/merge", post(github::merge_pull));
+    r = r.route(
+        "/git/github/pulls/:number/state",
+        post(github::set_pull_state),
+    );
+    r = r.route(
+        "/git/github/pulls/:number/comment",
+        post(github::comment_pull),
+    );
+    r = r.route(
+        "/git/github/issues",
+        get(github::list_issues).post(github::create_issue),
+    );
+    r = r.route("/git/github/issues/:number", get(github::get_issue));
+    r = r.route(
+        "/git/github/issues/:number/state",
+        post(github::set_issue_state),
+    );
+    r = r.route(
+        "/git/github/issues/:number/comment",
+        post(github::comment_issue),
+    );
+    r
 }
 
 /// `PATCH /api/config`, with the admin gate in front of it.
