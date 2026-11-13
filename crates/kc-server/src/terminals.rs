@@ -1640,6 +1640,25 @@ mod tests {
         std::env::temp_dir().to_string_lossy().into_owned()
     }
 
+    /// What the platform says about a pid shutdown was supposed to end: its state
+    /// from `ps`, and whether a fresh SIGKILL is even accepted. Only called from a
+    /// failure path, so it never disturbs a passing test.
+    fn describe_process(pid: u32) -> String {
+        let state = std::process::Command::new("ps")
+            .args([
+                "-o",
+                "pid=,stat=,pgid=,sid=,command=",
+                "-p",
+                &pid.to_string(),
+            ])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_else(|error| format!("ps failed: {error}"));
+        let accepted = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        let errno = std::io::Error::last_os_error();
+        format!("ps: {state:?}; a fresh SIGKILL of {pid} returned {accepted} (errno: {errno})")
+    }
+
     /// Run the blocking `shutdown` on its own thread and fail if it never
     /// returns.
     ///
@@ -1846,16 +1865,18 @@ mod tests {
         let leader_alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
         // One assertion, so a failure reports every fact at once: which part of
         // "hang up, escalate, reap, close" the platform actually did.
-        assert!(
-            elapsed >= KILL_GRACE && !child_left && !master_left && !leader_alive,
-            "shutdown in {elapsed:?}: escalated on time (>= {KILL_GRACE:?}): {}, \
-             leader reaped: {}, PTY closed: {}, leader dead: {}, \
-             pgid {pgid}, sid {sid} (spawned pid {pid})",
-            elapsed >= KILL_GRACE,
-            !child_left,
-            !master_left,
-            !leader_alive
-        );
+        if !(elapsed >= KILL_GRACE && !child_left && !master_left && !leader_alive) {
+            panic!(
+                "shutdown in {elapsed:?}: escalated on time (>= {KILL_GRACE:?}): {}, \
+                 leader reaped: {}, PTY closed: {}, leader dead: {}, \
+                 pgid {pgid}, sid {sid} (spawned pid {pid})\n{}",
+                elapsed >= KILL_GRACE,
+                !child_left,
+                !master_left,
+                !leader_alive,
+                describe_process(pid)
+            );
+        }
         for _ in 0..40 {
             if !group_alive(pid) {
                 break;
@@ -1924,9 +1945,10 @@ mod tests {
         assert!(
             elapsed >= KILL_GRACE && !leader_alive,
             "shutdown in {elapsed:?}: grace spent {}, shell gone {} \
-             (group alive at return: {group_at_return}, pgid {pgid}, sid {sid})",
+             (group alive at return: {group_at_return}, pgid {pgid}, sid {sid})\n{}",
             elapsed >= KILL_GRACE,
-            !leader_alive
+            !leader_alive,
+            describe_process(pid)
         );
     }
 
