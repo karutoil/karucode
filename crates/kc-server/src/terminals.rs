@@ -896,6 +896,13 @@ fn signal_group(pid: u32, signal: libc::c_int) {
         // Negative pid = the whole process group. The shell is a group leader
         // (`setsid`), so this reaches every child.
         libc::kill(-(pid as libc::pid_t), signal);
+        // ...and the leader by pid as well. The group id *is* the leader's pid by
+        // construction, so this is a no-op when the group is intact; when it is
+        // not (a shell that left the group, a group id the kernel no longer
+        // resolves) the leader is still the process this module reaps, and leaving
+        // it unsignalled is what turns a reap into a wait for a process nobody
+        // asked to stop.
+        libc::kill(pid as libc::pid_t, signal);
     }
 }
 
@@ -1788,6 +1795,8 @@ mod tests {
         }
         assert!(String::from_utf8_lossy(&terminal.replay()).contains("KC_HUP_IGNORED"));
         let pid = terminal.pid();
+        let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+        let sid = unsafe { libc::getsid(pid as libc::pid_t) };
         let patience = KILL_GRACE + LOCK_GRACE + REAP_GRACE + Duration::from_secs(2);
         let elapsed = shutdown_within(&terminal, patience);
         let (child_left, master_left) = {
@@ -1800,7 +1809,8 @@ mod tests {
         assert!(
             elapsed >= KILL_GRACE && !child_left && !master_left && !leader_alive,
             "shutdown in {elapsed:?}: escalated on time (>= {KILL_GRACE:?}): {}, \
-             leader reaped: {}, PTY closed: {}, leader dead: {}",
+             leader reaped: {}, PTY closed: {}, leader dead: {}, \
+             pgid {pgid}, sid {sid} (spawned pid {pid})",
             elapsed >= KILL_GRACE,
             !child_left,
             !master_left,
