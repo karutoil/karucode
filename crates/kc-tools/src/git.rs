@@ -993,6 +993,40 @@ mod tests {
         out
     }
 
+    /// How many `GIT_CONFIG_*` overrides the environment needs for `dir`: four per
+    /// filter driver, counted from git itself.
+    ///
+    /// Asked of git (not of `filter_driver_names`) because a machine-wide config is
+    /// part of the answer: macOS CI images ship `filter.lfs.*`, so a hardcoded "8"
+    /// for the three drivers a test creates is a claim about the runner image.
+    fn configured_filter_count(dir: &Path) -> usize {
+        // Run it directly: `git config --get-regexp` exits 1 when nothing matches,
+        // which is the ordinary "no filters configured" answer, not a failure.
+        let out = Command::new("git")
+            .args(["config", "-z", "--name-only", "--get-regexp", r"^filter\."])
+            .current_dir(dir)
+            .env("LC_ALL", "C")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("the git-tool tests need `git` on PATH");
+        assert!(
+            matches!(out.status.code(), Some(0) | Some(1)),
+            "git config --get-regexp '^filter\\\\.' failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let drivers: std::collections::BTreeSet<&str> = text
+            .split('\0')
+            .filter(|key| !key.is_empty())
+            .filter_map(|key| {
+                key.strip_prefix("filter.")?
+                    .rsplit_once('.')
+                    .map(|(name, _)| name)
+            })
+            .collect();
+        drivers.len() * 4
+    }
+
     #[test]
     fn ref_and_branch_names_are_validated_before_they_reach_git() {
         // Revisions allow `~`/`^`/`..` (HEAD~3, main..feat) and dots in a path.
@@ -1469,7 +1503,16 @@ mod tests {
         let env = filter_env(&dir).await.unwrap();
         let map: std::collections::HashMap<&str, &str> =
             env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        assert_eq!(map.get("GIT_CONFIG_COUNT"), Some(&"8"));
+        // The machine's own git config can declare filters too (`filter.lfs.*` on a CI
+        // image, a smudge driver on a developer's box), so the expected count comes
+        // from git itself rather than from this test's three `git config` lines: four
+        // keys per driver git reports.
+        let expected = configured_filter_count(&dir);
+        assert_eq!(
+            map.get("GIT_CONFIG_COUNT"),
+            Some(&expected.to_string().as_str()),
+            "four keys per configured filter driver"
+        );
 
         let keys: Vec<&str> = env
             .iter()
@@ -1505,11 +1548,22 @@ mod tests {
             }
         }
 
-        // A repository with no filters needs no overrides at all.
+        // A repository with no filters of its own gets exactly the machine-wide ones -
+        // none on a clean box, `filter.lfs.*` on an image that ships git-lfs. Four
+        // neutralised keys per driver, and nothing else.
         let plain = temp_dir("filter-env-plain");
         git_in(&plain, &["init", "-q", "."]);
         let env = filter_env(&plain).await.unwrap();
-        assert_eq!(env, vec![("GIT_CONFIG_COUNT".to_string(), "0".to_string())]);
+        let expected = configured_filter_count(&plain);
+        assert_eq!(
+            env.first()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+            Some(("GIT_CONFIG_COUNT", expected.to_string().as_str())),
+            "the count follows the drivers git reports, machine-wide ones included"
+        );
+        // Each override is a `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` pair, so the vector
+        // is the count entry plus two entries per key.
+        assert_eq!(env.len(), 1 + 2 * expected);
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&plain).ok();
