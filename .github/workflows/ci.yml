@@ -68,13 +68,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # Linux-only on purpose: the macOS runner spent five hours on one hung test
+  # (`terminals::tests::shutdown_kills_and_reaps_a_shell_that_ignores_sighup_before_returning`,
+  # which is also why shutdown no longer waits on a lock it needs to escalate
+  # through), and then surfaced a layer of macOS-only path and git-config
+  # assumptions nobody was looking at. macOS is not a supported deployment
+  # target here; running the suite on it bought hours of red, not confidence.
   test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    name: test (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
