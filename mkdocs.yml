@@ -60,6 +60,7 @@ nav:
       - Run a temporary chat: internal/ephemeral-sessions.md
       - Call the HTTP API: internal/http-api.md
       - Connect MCP servers: internal/mcp.md
+      - Reload MCP servers without a restart: internal/mcp-hot-reload.md
       - Organize work into missions: internal/missions.md
       - Get told when a run finishes or needs an answer: internal/notifications.md
       - Write and install a plugin: internal/plugins.md
