@@ -15,11 +15,20 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The graph is deliberately wide: every job that does not need another job's
+# output runs at the same time, and the two slow ones (the e2e and the release)
+# consume artifacts instead of rebuilding. The budget for a push is therefore the
+# slowest single lane, not the sum of the lanes.
+#
+# `timeout-minutes` on every job is not decoration. A hung test once held the
+# macOS job (since removed) open for 4h53m, because the default per-job limit is
+# six hours; a stuck job now fails in minutes and names itself.
 jobs:
   # Cheap, fast, and the one gate people actually notice. Kept separate so a
   # formatting nit reports in seconds instead of after a full test run.
   fmt:
     name: rustfmt
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,11 +49,14 @@ jobs:
   # untracked one). The second build is the one the old job was reaching for.
   tracked:
     name: no untracked sources
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
       - name: build exactly what git tracks
         run: |
           # Remove anything not in the index (generated bundles, stray files) so
@@ -59,6 +71,7 @@ jobs:
 
   clippy:
     name: clippy
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,33 +79,99 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # The suite is split over three runners rather than one `cargo test
+  # --workspace`. Two things get parallelised that cargo does serially: the
+  # linking of kc-server's twenty integration-test binaries, and the test
+  # execution of every crate at once. Each shard restores the same shared build
+  # cache, so the split costs runner minutes (free here: the repository is
+  # public) and saves wall clock.
+  #
   # Linux-only on purpose: the macOS runner spent five hours on one hung test
   # (`terminals::tests::shutdown_kills_and_reaps_a_shell_that_ignores_sighup_before_returning`,
   # which is also why shutdown no longer waits on a lock it needs to escalate
   # through), and then surfaced a layer of macOS-only path and git-config
   # assumptions nobody was looking at. macOS is not a supported deployment
   # target here; running the suite on it bought hours of red, not confidence.
-  test:
-    name: test (ubuntu-latest)
+  test-core:
+    name: test (core crates)
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+        with:
+          shared-key: workspace
+      # kc-core, kc-store, kc-provider, kc-runtime, the plugin SDK and host, MCP,
+      # kc-docs and the example plugin (its `handshake` test spawns the real
+      # binary: a plugin that only answers at EOF passed every unit test here).
+      - run: cargo test --workspace --exclude kc-server
+
+  test-server:
+    name: test (server, harness)
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+      # The unit tests and the harness-level integration targets.
+      - run: >
+          cargo test -p kc-server --lib
+          --test api --test auth --test plugin_hooks --test plugin_install
+          --test plugin_install_http --test terminals --test terminal_bootstrap
+          --test security_ui --test queues --test skills_api
+
+  test-server-rest:
+    name: test (server, rest)
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+      # Everything kc-server has left, so a new integration target cannot be
+      # forgotten: list them, subtract the two groups above, run the remainder.
+      - name: run the remaining integration targets
+        run: |
+          set -eu
+          covered="api auth plugin_hooks plugin_install plugin_install_http terminals terminal_bootstrap security_ui queues skills_api"
+          args=""
+          for path in crates/kc-server/tests/*.rs; do
+            target="$(basename "${path}" .rs)"
+            case " ${covered} " in
+              *" ${target} "*) continue ;;
+            esac
+            args="${args} --test ${target}"
+          done
+          if [ -z "${args}" ]; then
+            echo "every integration target is covered by the other shards"
+            exit 0
+          fi
+          echo "cargo test -p kc-server${args}"
+          cargo test -p kc-server ${args}
 
   # The release profile is not the tested profile: `panic = "abort"` used to
   # disable the runtime's catch_unwind guards in release builds only. Running
   # the runtime suite under --release keeps that class of divergence visible.
   test-release:
     name: test release profile
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
       - run: cargo test --release -p kc-runtime -p kc-tools
 
   # The README is the front door and the only prose file in the release tarball,
@@ -101,6 +180,7 @@ jobs:
   # Runs on its own: no toolchain, no cache, seconds to finish.
   readme:
     name: readme links
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -111,8 +191,12 @@ jobs:
   # shell: no type system will find its mistakes. Its tests run it as a real
   # process against a real git repo with systemctl/cargo/install.sh stubbed, so
   # shellcheck plus a green run here is the whole safety net.
+  #
+  # Split from the suites below because the linter needs no Python and the suites
+  # need no network install: they are two lanes, not two steps.
   packaging:
-    name: packaging scripts
+    name: packaging lint
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -122,6 +206,13 @@ jobs:
           shellcheck -s sh packaging/install.sh packaging/update.sh
       - name: syntax
         run: sh -n packaging/install.sh && sh -n packaging/update.sh
+
+  packaging-tests:
+    name: packaging tests
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - name: update.sh tests
         run: python3 tests/test_update.py
       # install.sh's own suite: who the service account is, and where the data
@@ -137,11 +228,14 @@ jobs:
 
   docs:
     name: docs gate
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
       - run: cargo test -p kc-docs
       - name: docs/internal is up to date
         run: cargo run -p kc-docs -- --check
@@ -153,6 +247,7 @@ jobs:
   # repository - and nobody would notice until someone tried to publish it.
   site:
     name: docs site
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -168,8 +263,12 @@ jobs:
         env:
           KARUCODE_SITE_DOCS: .site-docs
 
+  # Two lanes for the frontend: the checks that read the source, and the bundle
+  # the server embeds. They share nothing but `npm ci`, so running them in
+  # parallel halves the job instead of stacking a build behind a test run.
   web:
-    name: web
+    name: web (checks)
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -185,6 +284,22 @@ jobs:
       - run: npm audit --audit-level=moderate
       - run: npm run typecheck
       - run: npm test
+
+  web-build:
+    name: web (build)
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
       - run: npm run build
 
   # The version is the commit count, so it is only right when the build can see
@@ -194,6 +309,7 @@ jobs:
   # a binary that reports the number the repository says.
   version:
     name: version stamp
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -201,6 +317,8 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
       - name: --version is the commit count
         run: |
           set -eu
@@ -218,12 +336,17 @@ jobs:
               ;;
           esac
 
-  # End-to-end against the deterministic mock provider: no network, no API key,
-  # no cost. This is the regression gate for the harness itself.
-  e2e:
-    name: e2e smoke
+  # The binary the e2e suite boots, built once and handed over as an artifact.
+  # It used to be built inside the e2e job, which also meant the e2e could not
+  # start until the whole test job had finished - five minutes of one lane spent
+  # waiting for another lane's result it does not depend on.
+  #
+  # The build has to produce the embedded UI (`embed-ui` is a default feature),
+  # hence npm before cargo, exactly like a release build.
+  server-binary:
+    name: build server (release)
+    timeout-minutes: 30
     runs-on: ubuntu-latest
-    needs: [test]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -233,27 +356,64 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
       - run: cd web && npm ci && npm run build
-      - run: cargo build --release -p kc-server -p example-hello
+      - run: cargo build --release --locked -p kc-server -p example-hello
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-binaries
+          # Both binaries: the suite's plugin checks are a SKIP without
+          # example-hello, and a skipped check is not a passing one.
+          path: |
+            target/release/karucode
+            target/release/example-hello
+          if-no-files-found: error
+          retention-days: 3
+
+  # End-to-end against the deterministic mock provider: no network, no API key,
+  # no cost. This is the regression gate for the harness itself.
+  #
+  # It runs as soon as the binary exists: no toolchain, no node, no cache, nothing
+  # to compile. `needs` is only the artifact jobs, and artifacts do not carry the
+  # executable bit, hence the chmod.
+  e2e:
+    name: e2e smoke
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    needs: [server-binary]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-binaries
+          path: target/release
+      - run: chmod +x target/release/karucode target/release/example-hello
       - run: python3 scripts/e2e_smoke.py --binary target/release/karucode
 
   audit:
     name: dependency audit
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check
 
   msrv:
     name: msrv (1.89)
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
       - run: cargo check --locked --workspace
 
   # Every commit on `main` is a release. The version is the commit count, so there
@@ -268,13 +428,34 @@ jobs:
   #   SHA256SUMS      what packaging/install.sh and the staged apply verify against
   #   install.sh      so the tarball can be installed without a checkout
   #
-  # Every gate that can fail a normal run also gates a release. The e2e job is
-  # deliberately excluded: it boots the real binary, which makes it the slowest job
-  # by far, and it already ran on the same commit in this workflow.
+  # Every gate gates a release, e2e included: it boots the real binary against a
+  # deterministic provider, which is exactly the thing a release must not break,
+  # and it no longer costs wall clock - it runs in its own lane beside this one.
   release:
     name: release build
+    timeout-minutes: 45
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs: [fmt, tracked, clippy, test, test-release, readme, packaging, docs, web, audit, msrv, version]
+    needs:
+      [
+        fmt,
+        tracked,
+        clippy,
+        test-core,
+        test-server,
+        test-server-rest,
+        test-release,
+        readme,
+        packaging,
+        packaging-tests,
+        docs,
+        site,
+        web,
+        web-build,
+        audit,
+        msrv,
+        version,
+        e2e,
+      ]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -310,6 +491,8 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
       - name: build
         env:
           KARUCODE_BUILD_NUMBER: ${{ steps.version.outputs.build }}
