@@ -38,6 +38,7 @@ use_directory_urls: true
 nav:
   - Home: README.md
   - Handbooks:
+      - Quick start: QUICKSTART.md
       - HTTP API: API.md
       - Architecture: ARCHITECTURE.md
       - MCP client: MCP.md
