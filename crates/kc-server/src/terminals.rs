@@ -568,6 +568,11 @@ impl Terminal {
     /// both sat there forever. That is a real hang - on macOS one such shutdown
     /// parked a CI job for five hours - so escalation is driven by the deadline
     /// and by `kill(2)` alone, never by acquiring the lock.
+    ///
+    /// Two signals go out per step (the group and the leader's pid) because macOS
+    /// was seen answering `kill(-pgid, …)` with a group that its live leader had
+    /// supposedly left; signalling the pid is what actually stops the process this
+    /// call reaps, and signalling the group is what reaches `make watch`.
     pub fn shutdown(&self) {
         if self.dead.swap(true, Ordering::AcqRel) {
             return;
@@ -577,30 +582,47 @@ impl Terminal {
             signal_group(pid, libc::SIGHUP);
         }
         let deadline = Instant::now() + KILL_GRACE;
+        let mut escalated = false;
         loop {
             // Opportunistic reap: `try_lock`, so a reader holding the lock just
-            // means "not now", never "not ever".
-            if let Some(mut state) = try_io_for(self, Duration::ZERO) {
-                if let Some(child) = state.child.as_mut() {
-                    match child.try_wait() {
+            // means "not now", never "not ever". The leader is the process this
+            // call has to answer for, so its own state settles the loop.
+            let settled = match try_io_for(self, Duration::ZERO) {
+                Some(mut state) => match state.child.as_mut() {
+                    Some(child) => match child.try_wait() {
                         Ok(Some(_)) | Err(_) => {
-                            // `try_wait` has reaped an exited leader. Descendants,
-                            // if any, still keep the process group alive below.
+                            // `try_wait` has reaped an exited leader.
                             state.child = None;
+                            true
                         }
-                        Ok(None) => {}
-                    }
-                }
-            }
-            if pid == 0 || !group_alive(pid) {
+                        Ok(None) => false,
+                    },
+                    // The reader owns the reap; there is nothing left to wait for.
+                    None => true,
+                },
+                // The lock is busy, so ask the pid instead - `kill(2)` needs no
+                // lock, which is the whole point.
+                None => !process_alive(pid),
+            };
+            if settled {
                 break;
             }
             if Instant::now() >= deadline {
                 // The whole group, so a HUP handler cannot outlive the deadline.
                 signal_group(pid, libc::SIGKILL);
+                escalated = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));
+        }
+        // A leader that exited on its own can still leave a `make watch` behind, so a
+        // surviving group or a surviving leader gets one more SIGKILL. Two checks
+        // because neither is authoritative: on macOS `kill(-pgid, 0)` was seen
+        // answering "gone" for a group whose leader was alive and looping, and a
+        // check that can lie in that direction must never be able to cut this
+        // escalation short. Killing an empty group is an `ESRCH`, nothing more.
+        if !escalated && pid != 0 && (group_alive(pid) || process_alive(pid)) {
+            signal_group(pid, libc::SIGKILL);
         }
         // Take the leader out from under the lock and reap it *after* releasing
         // it. Holding the lock across `wait` is what starved the escalation above.
@@ -906,6 +928,24 @@ fn signal_group(pid: u32, signal: libc::c_int) {
     }
 }
 
+/// True while the process with this pid exists (a zombie counts: it has not been
+/// reaped, and `kill(pid, 0)` succeeds).
+///
+/// This is the liveness check shutdown relies on, because it asks about exactly
+/// the process shutdown reaps.
+fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// True when the shell's *process group* still has members.
+///
+/// Only ever used to decide whether a tree needs another SIGKILL, never to decide
+/// that a shutdown is finished: macOS was observed answering "gone" for a group
+/// whose leader was alive and looping (run 43351960141, pgid == sid == pid), and a
+/// check that can lie in that direction must not be able to cut a shutdown short.
 fn group_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -1878,13 +1918,15 @@ mod tests {
         }
         let leader_alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
         // What this test owes: shutdown returned despite the busy lock (enforced by
-        // `shutdown_within`), and the shell it was closing is gone. The escalation
-        // timing is the other test's business - breaking out early because the OS
-        // already reports the group gone is correct, not a skipped escalation.
+        // `shutdown_within`), the grace it promised was actually spent (a shell that
+        // ignores SIGHUP only dies by SIGKILL at the deadline), and the shell it was
+        // closing is gone.
         assert!(
-            !leader_alive,
-            "shutdown returned in {elapsed:?} and left the shell running \
-             (group alive at return: {group_at_return}, pgid {pgid}, sid {sid})"
+            elapsed >= KILL_GRACE && !leader_alive,
+            "shutdown in {elapsed:?}: grace spent {}, shell gone {} \
+             (group alive at return: {group_at_return}, pgid {pgid}, sid {sid})",
+            elapsed >= KILL_GRACE,
+            !leader_alive
         );
     }
 
