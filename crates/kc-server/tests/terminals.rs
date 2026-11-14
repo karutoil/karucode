@@ -290,7 +290,7 @@ async fn json_ping_gets_a_private_text_pong_not_broadcast_pty_bytes() {
 
     first
         .send(tokio_tungstenite::tungstenite::Message::Text(
-            r#"{"type":"ping"}"#.to_string(),
+            r#"{"type":"ping"}"#.into(),
         ))
         .await
         .unwrap();
@@ -382,7 +382,7 @@ async fn terminal_socket_uses_sanitized_live_command_env_passthrough() {
     let command = "printf 'KC_ENV_RESULT value=<%s> secret=<%s> missing=<%s>\\n' \"$(printenv KC_SERVER_TERMINAL_TEST_VALUE || printf ABSENT)\" \"$(printenv KC_SERVER_TERMINAL_TEST_TOKEN || printf ABSENT)\" \"$(printenv KC_SERVER_TERMINAL_TEST_MISSING || printf ABSENT)\"\n";
     socket
         .send(tokio_tungstenite::tungstenite::Message::Binary(
-            command.as_bytes().to_vec(),
+            command.as_bytes().to_vec().into(),
         ))
         .await
         .unwrap();
