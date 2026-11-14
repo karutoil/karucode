@@ -763,6 +763,15 @@ function estimateEntryHeight(entry: Entry): number {
   return clampEstimate(height);
 }
 
+/**
+ * Below this many rows the transcript renders every row instead of windowing.
+ *
+ * A window is only worth its padding above this size: the padding changes on
+ * every scroll, and a padding change moves the content under the reader no
+ * matter how the scroll is corrected afterwards. A short conversation has
+ * nothing to gain from it.
+ */
+const VIRTUAL_MIN_ENTRIES = 150;
 /** Kept mounted above and below the viewport, so a wheel tick never reveals a hole. */
 const OVERSCAN_MIN_PX = 480;
 /** How long a row that just joined the conversation keeps its entry animation. */
@@ -891,6 +900,17 @@ export function ChatTranscript({
    * anything - jsdom, an embedded renderer - falls back to rendering every row.
    */
   const seenHeight = useRef(0);
+  /**
+   * The `scrollTop` this component wrote itself, so the scroll event it produces
+   * is not mistaken for the reader moving the view.
+   *
+   * The measuring pass corrects the scroll, that correction fires a scroll
+   * event, and re-reading the window from it changes the row range, which
+   * changes the padding, which the next correction corrects again - a loop that
+   * runs at frame rate and shows as the transcript flashing. A correction is
+   * already the last word on that geometry, so its own scroll is ignored.
+   */
+  const selfScroll = useRef<number | null>(null);
 
   useEffect(() => {
     const element = viewportRef?.current;
@@ -939,6 +959,13 @@ export function ChatTranscript({
      * delta on top of the layout shift).
      */
     const onScroll = (): void => {
+      // Our own correction wrote this position. Re-reading the window from it
+      // closes a feedback loop - correction, scroll, new row range, correction -
+      // that runs at frame rate and shows as the transcript flashing.
+      if (selfScroll.current !== null && Math.abs(element.scrollTop - selfScroll.current) <= 1) {
+        return;
+      }
+      selfScroll.current = null;
       anchor();
       readWindow();
     };
@@ -981,8 +1008,9 @@ export function ChatTranscript({
   // yet); it still windows the tail so a long session never mounts every row.
   // A measured zero (jsdom, or a hidden panel) renders everything, because a
   // window without a viewport would hide most of the transcript for good.
-  const virtual = viewportRef !== undefined && viewportHeight !== null && viewportHeight > 0;
-  const pending = viewportRef !== undefined && viewportHeight === null;
+  const windowed = entries.length > VIRTUAL_MIN_ENTRIES;
+  const virtual = windowed && viewportRef !== undefined && viewportHeight !== null && viewportHeight > 0;
+  const pending = windowed && viewportRef !== undefined && viewportHeight === null;
   const bandHeight = viewportHeight !== null && viewportHeight > 0 ? viewportHeight : FALLBACK_VIEWPORT_PX;
   const bandTop = windowTop ?? geometry.total;
   const overscan = Math.max(bandHeight, OVERSCAN_MIN_PX);
@@ -1046,7 +1074,12 @@ export function ChatTranscript({
         // down the screen by 90px), so any change in it is a layout shift, and
         // moving the scroll by exactly that much keeps the row still.
         const shift = box.top - before.top + (element.scrollTop - before.scrollTop);
-        if (Number.isFinite(shift) && Math.abs(shift) >= 0.5) element.scrollTop += shift;
+        if (Number.isFinite(shift) && Math.abs(shift) >= 0.5) {
+          element.scrollTop += shift;
+          // Remember our own write: the scroll event it produces must not be
+          // read back as a new window position (see `onScroll`).
+          selfScroll.current = element.scrollTop;
+        }
         break;
       }
     }

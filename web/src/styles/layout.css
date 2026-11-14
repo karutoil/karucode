@@ -1465,6 +1465,11 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  /* The transcript moves its own scroll when the row set changes (the measuring
+   * effect and the history loader both do). The browser's scroll anchoring is a
+   * second, independent adjustment for the same shift - it belongs on the scroll
+   * container, not on a descendant, or it keeps firing and the view jumps. */
+  overflow-anchor: none;
   /* Keep "Jump to latest" (and anything else the browser scrolls into view)
    * clear of the floating dock. */
   scroll-padding-bottom: var(--composer-h, 24px);

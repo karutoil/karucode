@@ -244,7 +244,7 @@ describe('windowed transcript', () => {
     }
 
     try {
-      const { container, rerender } = render(<AnchorHarness items={conversation(50)} />);
+      const { container, rerender } = render(<AnchorHarness items={conversation(100)} />);
       const viewport = container.querySelector('#anchor-viewport') as HTMLElement;
       viewport.scrollTop = 4_000;
       fireEvent.scroll(viewport);
@@ -256,7 +256,7 @@ describe('windowed transcript', () => {
       // pass without changing any mounted row's height, so the correction below
       // is the only thing that can move the scroll.
       layout.shift = 300;
-      rerender(<AnchorHarness items={[...conversation(50), message({ id: 'tail', content: 'tail' })]} />);
+      rerender(<AnchorHarness items={[...conversation(100), message({ id: 'tail', content: 'tail' })]} />);
       await waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(before + 200));
       // Exactly the shift: the reader's row stays where it was on screen.
       expect(Math.abs(viewport.scrollTop - (before + 300))).toBeLessThanOrEqual(1);
