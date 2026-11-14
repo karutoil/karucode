@@ -1,4 +1,10 @@
-import type { GitFile, GitStatus } from '../../api/types';
+import type {
+  GitFile,
+  GitHubIssueSummary,
+  GitHubPullSummary,
+  GitRepoOperation,
+  GitStatus,
+} from '../../api/types';
 
 /**
  * How a changed file is presented: the badge letter, the words next to it and
@@ -27,7 +33,8 @@ export type GitTone = 'ok' | 'warn' | 'danger' | 'info';
  */
 export type GitSelection =
   | { kind: 'file'; path: string; staged: boolean; group: GitGroupId }
-  | { kind: 'commit'; sha: string; subject: string };
+  | { kind: 'commit'; sha: string; subject: string }
+  | { kind: 'stash'; index: number; ref: string; subject: string };
 
 /** The file a selection points at, for a caller that only needs that. */
 export function selectedFile(
@@ -281,4 +288,110 @@ export function canCommit(
   if (message.trim() === '') return { enabled: false, reason: 'Write a commit message first' };
   if (counts.total === 0) return { enabled: false, reason: 'Nothing to commit' };
   return { enabled: true, reason: null };
+}
+
+export function operationLabel(operation: GitRepoOperation | null | undefined): string | null {
+  switch (operation) {
+    case 'merge':
+      return 'Merge in progress';
+    case 'rebase':
+      return 'Rebase in progress';
+    case 'cherry-pick':
+      return 'Cherry-pick in progress';
+    case 'revert':
+      return 'Revert in progress';
+    default:
+      return null;
+  }
+}
+
+export function remoteNameProblem(name: string): string | null {
+  const value = name.trim();
+  if (value === '') return 'Enter a remote name';
+  if (value.length > 100) return 'Remote name may be at most 100 characters';
+  if (value.startsWith('-')) return 'Remote name may not start with `-`';
+  if (!/^[A-Za-z0-9._-]+$/.test(value)) {
+    return 'Remote name may only contain letters, digits, `.`, `_`, or `-`';
+  }
+  return null;
+}
+
+export function issueSessionSpec(issue: GitHubIssueSummary): { title: string; prompt: string } {
+  const labels = issue.labels.map((l) => l.name).filter(Boolean).join(', ');
+  const body = (issue.body ?? '').trim();
+  const truncatedBody = body.length > 8000 ? `${body.slice(0, 8000)}\n\n…(truncated)` : body;
+  const lines = [
+    `Work on GitHub Issue #${issue.number}: ${issue.title}`,
+    `URL: ${issue.url}`,
+    issue.author?.login ? `Author: @${issue.author.login}` : null,
+    labels ? `Labels: ${labels}` : null,
+    '',
+    truncatedBody ? `Description:\n${truncatedBody}` : 'No description provided.',
+    '',
+    'Inspect the codebase, diagnose the root cause or requirements, implement the fix/feature, and run the project tests to verify.',
+  ].filter((line): line is string => line !== null);
+  return {
+    title: `Issue #${issue.number}: ${issue.title}`.slice(0, 120),
+    prompt: lines.join('\n'),
+  };
+}
+
+export function pullSessionSpec(pull: GitHubPullSummary): { title: string; prompt: string } {
+  const labels = pull.labels.map((l) => l.name).filter(Boolean).join(', ');
+  const body = (pull.body ?? '').trim();
+  const truncatedBody = body.length > 8000 ? `${body.slice(0, 8000)}\n\n…(truncated)` : body;
+  const lines = [
+    `Work on GitHub Pull Request #${pull.number}: ${pull.title}`,
+    `Branch: ${pull.headRefName} -> ${pull.baseRefName}`,
+    `URL: ${pull.url}`,
+    pull.author?.login ? `Author: @${pull.author.login}` : null,
+    labels ? `Labels: ${labels}` : null,
+    pull.mergeable ? `Mergeable: ${pull.mergeable}` : null,
+    '',
+    truncatedBody ? `Description:\n${truncatedBody}` : 'No description provided.',
+    '',
+    'Review the PR changes and any failing checks or feedback, inspect the relevant files in this repository, and propose or implement the needed updates.',
+  ].filter((line): line is string => line !== null);
+  return {
+    title: `PR #${pull.number}: ${pull.title}`.slice(0, 120),
+    prompt: lines.join('\n'),
+  };
+}
+
+export function batchIssuesSessionSpec(issues: readonly GitHubIssueSummary[]): { title: string; prompt: string } {
+  const list = issues
+    .map((issue) => {
+      const summary = (issue.body ?? '').trim().split('\n')[0]?.slice(0, 180) ?? '';
+      return `- #${issue.number}: ${issue.title} (${issue.url})${summary ? `\n  ${summary}` : ''}`;
+    })
+    .join('\n');
+  return {
+    title: `Issues (${issues.length}): ${issues.map((i) => `#${i.number}`).join(', ')}`.slice(0, 120),
+    prompt: [
+      `Triage and address the following ${issues.length} GitHub issue(s) in this project:`,
+      '',
+      list,
+      '',
+      'Inspect the codebase, prioritize and address each issue, and verify with the project test suite.',
+    ].join('\n'),
+  };
+}
+
+export function batchPullsSessionSpec(pulls: readonly GitHubPullSummary[]): { title: string; prompt: string } {
+  const list = pulls
+    .map(
+      (pull) =>
+        `- #${pull.number}: ${pull.title} [${pull.headRefName} -> ${pull.baseRefName}] (${pull.url})`,
+    )
+    .join('\n');
+  return {
+    title: `PRs (${pulls.length}): ${pulls.map((p) => `#${p.number}`).join(', ')}`.slice(0, 120),
+    prompt: [
+      `Review and work through the following ${pulls.length} GitHub pull request(s) in this project:`,
+      '',
+      list,
+      '',
+      'Inspect each PR’s branch/changes, check for conflicts or failing checks, and summarize or fix what is needed.',
+    ].join('\n'),
+  };
 }

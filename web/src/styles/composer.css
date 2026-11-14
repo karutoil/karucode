@@ -759,6 +759,169 @@
   width: 210px;
 }
 
+/* The model picker is a searchable list, not a short menu: a filter band, a
+ * scrolling list of provider groups and the footer are three bands, and only the
+ * middle one scrolls. The old card was 250px wide and scrolled as a whole, which
+ * is why a 40-character model name arrived as "DeepSeek V…", why the provider
+ * was invisible on a single-profile install, and why a list of sixty models had
+ * to be read rather than searched. */
+.compose-bottom .model-switcher-menu-models.dropup {
+  display: flex;
+  flex-direction: column;
+  width: min(400px, calc(100vw - 24px));
+  max-height: min(70dvh, 520px);
+  padding: 0;
+  overflow: hidden;
+}
+
+.compose-bottom .model-switcher-search {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--faint);
+}
+
+/* The field is borderless inside the band, so the band is what has to show the
+ * focus: a caret with no ring anywhere is a field nobody can find. */
+.compose-bottom .model-switcher-search:focus-within {
+  background: var(--surface-hover);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+  color: var(--text-2);
+}
+
+.compose-bottom .model-switcher-filter {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-tiny);
+}
+
+.compose-bottom .model-switcher-filter:focus {
+  outline: none;
+}
+
+.compose-bottom .model-switcher-filter::placeholder {
+  color: var(--faint);
+}
+
+.compose-bottom .model-switcher-count {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+.compose-bottom .model-switcher-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--space-3) var(--space-3);
+}
+
+.compose-bottom .model-switcher-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* A provider header sticks to the top of the list: with sixty models the reader
+ * is always somewhere inside one provider's block, and a header that scrolls
+ * away leaves the model id as the only clue to which endpoint will answer. */
+.compose-bottom .model-switcher-menu-models .model-switcher-group-title {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0;
+  padding: var(--space-4) var(--space-5) var(--space-3);
+  background: var(--surface-menu);
+}
+
+.compose-bottom .model-switcher-menu-models .model-switcher-group + .model-switcher-group {
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+}
+
+/* The name wraps instead of ellipsising: the row is the one place the full name
+ * has to be readable, and "DeepSeek V…" beside "DeepSeek V4.1 Flash" is a choice
+ * between two rows that look the same. */
+.compose-bottom .model-switcher-menu-models .model-switcher-option {
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+}
+
+.compose-bottom .model-switcher-menu-models .model-switcher-option-name {
+  overflow: visible;
+  font-size: var(--fs-tiny);
+  font-weight: 500;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.compose-bottom .model-switcher-menu-models .model-switcher-option-id {
+  overflow: visible;
+  font-size: var(--fs-micro);
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.compose-bottom .model-switcher-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  max-width: 160px;
+}
+
+.compose-bottom .model-chip {
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.compose-bottom .model-chip-warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  color: var(--warn);
+}
+
+.compose-bottom .model-switcher-menu-models .model-switcher-empty {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-5);
+}
+
+.compose-bottom .model-switcher-menu-models .model-switcher-footer {
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--line-soft);
+}
+
 .compose-bottom .model-switcher-group + .model-switcher-group {
   margin-top: var(--space-1);
   padding-top: var(--space-2);
@@ -1180,6 +1343,16 @@
   .compose-bottom .reasoning-selector .model-switcher-menu.dropup {
     right: var(--space-6);
     left: auto;
+  }
+
+  /* The searchable list needs the room the short menu did not: a filter band and
+   * a footer inside a 42dvh card would leave two rows of models under them. The
+   * second term is the real ceiling — the sheet is anchored above the dock, so
+   * what is left of the viewport above that anchor is all it may take. */
+  .compose-bottom .model-switcher-menu-models.dropup {
+    width: min(340px, calc(100vw - var(--space-9)));
+    max-height: min(52dvh, calc(100dvh - var(--composer-h, 96px) - var(--space-6)));
+    overflow: hidden;
   }
 
   /* Room for the real label, not for a 145px stub. Below the phone tier the row

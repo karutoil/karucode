@@ -1162,6 +1162,43 @@ impl Plugin {
             })
             .expect("spawn the plugin writer thread");
 
+        // Workers hand replies to `reply_tx`, and this thread moves them to the
+        // writer the moment they exist. Without it the replies sat in the channel
+        // until EOF and a live plugin never answered its host at all: the host saw
+        // every `initialize` handshake time out after ten seconds.
+        let pump_finished = Arc::new(AtomicBool::new(false));
+        let pump_stop = Arc::new(AtomicBool::new(false));
+        let pump = {
+            let out = write_tx.clone();
+            let finished = Arc::clone(&pump_finished);
+            let stop = Arc::clone(&pump_stop);
+            std::thread::Builder::new()
+                .name("plugin-replies".into())
+                .spawn(move || {
+                    loop {
+                        // A tick, not a blocking receive: the loop has to notice
+                        // `stop` after a worker that never returns, so a shut-down
+                        // plugin cannot outlive its host.
+                        match reply_rx.recv_timeout(REPLY_TICK) {
+                            Ok(reply) => {
+                                if out.send(reply).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                if stop.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                            }
+                            // Every worker is gone, so nothing more can arrive.
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    }
+                    finished.store(true, Ordering::SeqCst);
+                })
+                .expect("spawn the plugin reply thread")
+        };
+
         for _ in 0..RUN_WORKERS {
             let jobs = Arc::clone(&job_rx);
             let replies = reply_tx.clone();
@@ -1215,16 +1252,16 @@ impl Plugin {
                 break;
             }
         }
-        // EOF or shutdown. Drain in-flight work, then unwind: closing the job
-        // channel frees the workers; a quiet reply channel frees the writer.
+        // EOF or shutdown. Stop taking work, give the workers `SHUTDOWN_GRACE` to
+        // finish what they hold - their replies still reach the writer through the
+        // pump - then unwind: stopping the pump closes the writer's channel.
         drop(job_tx);
-        while reply_rx.recv_timeout(SHUTDOWN_GRACE).is_ok() {
-            std::thread::yield_now();
+        let drain_until = std::time::Instant::now() + SHUTDOWN_GRACE;
+        while !pump_finished.load(Ordering::SeqCst) && std::time::Instant::now() < drain_until {
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        // Forward anything the workers produced after the drain loop stopped.
-        while let Ok(reply) = reply_rx.try_recv() {
-            write_tx.send(reply).map_err(std::io::Error::other)?;
-        }
+        pump_stop.store(true, Ordering::SeqCst);
+        let _ = pump.join();
         drop(write_tx);
         let wrote_everything = writer.join().unwrap_or(false);
         if !wrote_everything {
@@ -1247,6 +1284,12 @@ const RUN_WORKERS: usize = 8;
 
 /// How long the run loop waits for in-flight work after EOF or `shutdown`.
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often the reply pump looks at its stop flag while it has nothing to write.
+///
+/// Short enough that a shut-down plugin exits promptly even when a worker is
+/// wedged, long enough that an idle plugin does not spin.
+const REPLY_TICK: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Builds a [`Plugin`]: declares the manifest, the tools and the hooks.
 pub struct PluginBuilder {

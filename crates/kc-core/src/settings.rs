@@ -23,6 +23,17 @@ pub trait Settings: Send + Sync {
     async fn approval_policy(&self) -> ApprovalPolicy;
     async fn subagent_config(&self) -> SubagentConfig;
 
+    /// Live `[skills]` settings: the switches, the hand-added skills and the ids
+    /// the user turned off.
+    ///
+    /// The runtime and the `skill` tool both resolve skills through this, so a
+    /// skill added in the UI is usable on the very next run without a restart. A
+    /// simple embedding or a test that does not care keeps the empty default,
+    /// which is "skills on, nothing found".
+    async fn skills(&self) -> crate::skill::SkillsConfig {
+        crate::skill::SkillsConfig::default()
+    }
+
     /// Resolve the `model` argument of `spawn_agent`/`spawn_agents` - one id
     /// that came from *outside* the config, typed by the caller and derived
     /// by nothing - against the models this install actually made available.

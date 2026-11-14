@@ -145,7 +145,7 @@ use kc_core::plugin::{PluginDiagnostics, PluginStatus};
 use kc_core::provider::ProviderFactory;
 use kc_core::store::Store;
 use kc_core::tool::{Tool, ToolRegistry};
-use kc_mcp::McpManager;
+use kc_mcp::{McpManager, McpRescanReport, McpServerStatus};
 use kc_plugin_host::{namespaced_name, PluginHost, RescanReport};
 use kc_runtime::Runtime;
 use kc_runtime::WorkspaceProvider;
@@ -784,6 +784,38 @@ impl AppState {
         Ok(diagnostics)
     }
 
+    /// Re-read `[[mcp_servers]]` and reconcile the running servers with it.
+    ///
+    /// This is what `POST /api/mcp/reload` and the MCP watcher call. It reads the
+    /// entries from the config file again (see
+    /// [`Config::reload_mcp_entries`]), then adds, removes or replaces
+    /// connections as needed and rebuilds the tool registry, so the model sees
+    /// the new set on its very next call.
+    pub async fn reload_mcp(&self) -> McpRescanReport {
+        let configs = self.inner.settings.snapshot().reload_mcp_entries();
+        let report = {
+            let mut mcp = self.inner.mcp.lock().await;
+            mcp.rescan(&configs).await
+        };
+        self.reload_tools().await;
+        report
+    }
+
+    /// Reload one MCP server by name: close its connection and start it again
+    /// from the current config entry.
+    ///
+    /// `Err` carries the manager's own error (`NotFound` for a name that is not
+    /// configured), which the HTTP layer maps to `404`.
+    pub async fn reload_mcp_server(&self, name: &str) -> kc_core::Result<McpServerStatus> {
+        let configs = self.inner.settings.snapshot().reload_mcp_entries();
+        let status = {
+            let mut mcp = self.inner.mcp.lock().await;
+            mcp.reload(name, &configs).await?
+        };
+        self.reload_tools().await;
+        Ok(status)
+    }
+
     /// A cheap number that changes when a plugin source changes: the manifests
     /// and command files the host knows about, plus the config file itself (which
     /// is where `[[plugins]]` entries live). The watcher polls it and reloads only
@@ -796,18 +828,41 @@ impl AppState {
             let host = self.inner.plugins.lock().await;
             host.source_stamp().hash(&mut hasher);
         }
-        if let Some(path) = self.inner.settings.snapshot().config_path {
+        if let Some((path, len, mtime)) = self.config_file_stamp() {
             path.hash(&mut hasher);
-            if let Ok(meta) = std::fs::metadata(&path) {
-                meta.len().hash(&mut hasher);
-                meta.modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos() as u64)
-                    .hash(&mut hasher);
-            }
+            len.hash(&mut hasher);
+            mtime.hash(&mut hasher);
         }
         hasher.finish()
+    }
+
+    /// A cheap number that changes when the config file changes.
+    ///
+    /// `[[mcp_servers]]` lives in that file and nowhere else, so a change to the
+    /// file is the only thing an MCP reload could pick up. The watcher polls this
+    /// and reloads only when it moves.
+    pub async fn mcp_source_stamp(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if let Some((path, len, mtime)) = self.config_file_stamp() {
+            path.hash(&mut hasher);
+            len.hash(&mut hasher);
+            mtime.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// `(path, len, mtime)` of the config file, for the watcher stamps.
+    fn config_file_stamp(&self) -> Option<(std::path::PathBuf, u64, u64)> {
+        let path = self.inner.settings.snapshot().config_path?;
+        let meta = std::fs::metadata(&path).ok()?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        Some((path, meta.len(), mtime))
     }
 
     /// `GET/PATCH /api/config` payload.
