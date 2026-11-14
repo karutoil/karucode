@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef } from 'preact/hooks';
-import type { JSX } from 'preact';
+import type { JSX, TargetedKeyboardEvent } from 'preact';
 import { CloseIcon } from './icons';
 
 export interface TabItem<T extends string> {
@@ -98,7 +98,7 @@ export function Tabs<T extends string>({
     return () => window.removeEventListener('resize', reveal);
   }, [active, prefix, items.length]);
 
-  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
+  const onKeyDown = (event: TargetedKeyboardEvent<HTMLDivElement>): void => {
     const index = items.findIndex((item) => item.id === active);
     if (index === -1) return;
     // Delete/Backspace closes the selected tab, the way a browser's own tab strip

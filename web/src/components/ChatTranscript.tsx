@@ -44,13 +44,13 @@ export interface ChatTranscriptProps {
    * only the rows around the viewport are mounted (see `lib/virtualWindow.ts`);
    * without it — tests, embedded renderers — every entry is rendered as before.
    */
-  viewportRef?: RefObject<HTMLElement>;
+  viewportRef?: RefObject<HTMLElement | null>;
   /**
    * Filled with the transcript element itself, whose top edge is the start of
    * the loaded rows. The history loader anchors on it to reveal a page that
    * arrived while the reader was above every row (`lib/historyLoader.ts`).
    */
-  contentRef?: RefObject<HTMLElement>;
+  contentRef?: RefObject<HTMLElement | null>;
   /**
    * Which conversation the rows belong to. A change resets the window to the
    * tail before the sticky-bottom pin moves the viewport, so a session opened

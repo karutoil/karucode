@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { render } from '@testing-library/preact';
+import { act, render } from '@testing-library/preact';
 import { useRef } from 'preact/hooks';
 import { useHeightVariable } from './dockHeight';
 
@@ -115,12 +115,15 @@ describe('useHeightVariable', () => {
     expect(host.style.getPropertyValue('--composer-h')).toBe('90px');
   });
 
-  it('removes the property when the dock unmounts', () => {
+  it('removes the property when the dock unmounts', async () => {
     layoutHeight = 120;
     const { container, unmount } = render(<Harness />);
     const host = container.firstElementChild as HTMLElement;
     expect(host.style.getPropertyValue('--composer-h')).toBe('120px');
     unmount();
+    // preact 11 runs passive-effect cleanup on unmount asynchronously, so the
+    // removal is awaited rather than assumed synchronous.
+    await act(async () => { await Promise.resolve(); });
     expect(host.style.getPropertyValue('--composer-h')).toBe('');
   });
 

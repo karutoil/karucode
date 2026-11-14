@@ -191,17 +191,16 @@ describe('the menu primitive', () => {
  * "copy what the row shows" rows shipped unreachable on a phone.
  */
 describe('the menu primitive on touch', () => {
-  /** jsdom has no native `onpointer*` properties, so Preact registers CamelCase
-   *  names there while real Chromium uses the lowercase ones. */
+  /** jsdom has no native `onpointer*` properties. Preact 10 used to register
+   *  CamelCase handlers as expando properties there, which a `in` check could
+   *  find; preact 11 attaches real listeners for the lowercase event types, so
+   *  the plain lowercase name is what reaches the handler. */
   function press(
     target: HTMLElement,
     type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel',
     init: { clientX: number; clientY: number; pointerType?: 'mouse' | 'touch'; button?: number },
   ): void {
-    const registered = `on${type}` in target
-      ? type
-      : type.replace(/^pointer(.)/, (_match, letter: string) => `Pointer${letter.toUpperCase()}`);
-    const event = new MouseEvent(registered, {
+    const event = new MouseEvent(type, {
       bubbles: true,
       cancelable: true,
       clientX: init.clientX,

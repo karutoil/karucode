@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
-import type { JSX } from 'preact';
+import type { JSX, TargetedSubmitEvent } from 'preact';
 import type { Project } from '../api/types';
 import { modKey } from '../lib/platform';
 import { Menu, MenuItem, useMenu } from '../lib/menu';
@@ -128,7 +128,7 @@ export function AddProjectDialog({ open, onClose }: AddProjectDialogProps): JSX.
     setBusy(false);
   }, [open]);
 
-  const submit = async (event: JSX.TargetedSubmitEvent<HTMLFormElement>): Promise<void> => {
+  const submit = async (event: TargetedSubmitEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (busy) return;
     const trimmedPath = path.trim();
@@ -233,7 +233,7 @@ export function RenameProjectDialog({ project, open, onClose }: RenameProjectDia
     window.setTimeout(() => inputRef.current?.select(), 0);
   }, [open, project?.id, project?.name]);
 
-  const submit = async (event: JSX.TargetedSubmitEvent<HTMLFormElement>): Promise<void> => {
+  const submit = async (event: TargetedSubmitEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (!project || busy) return;
     const next = draft.trim();

@@ -25,6 +25,7 @@
 
 import type { JSX } from 'preact';
 import { useRef } from 'preact/hooks';
+import type { TargetedKeyboardEvent } from 'preact';
 import {
   AgentsIcon,
   BellIcon,
@@ -294,7 +295,7 @@ export function SettingsNav({
    * — typing "timeout" hides Appearance, which is still the panel on screen — so
    * an arrow key starts from the first visible row instead of doing nothing.
    */
-  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
+  const onKeyDown = (event: TargetedKeyboardEvent<HTMLDivElement>): void => {
     if (visible.length === 0) return;
     const index = visible.findIndex((section) => section.id === active);
     let next = index;
@@ -314,7 +315,7 @@ export function SettingsNav({
       ?.focus();
   };
 
-  const onSearchKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLInputElement>): void => {
+  const onSearchKeyDown = (event: TargetedKeyboardEvent<HTMLInputElement>): void => {
     // Escape belongs to the field while it holds a query, and to the sheet when
     // it does not: `data-escape-local` is what tells the dialog's focus trap to
     // keep its hands off. Without it the sheet would close and take the query

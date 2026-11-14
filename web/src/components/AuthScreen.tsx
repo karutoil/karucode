@@ -43,6 +43,13 @@ export function AuthScreen(): JSX.Element {
   const pending = store.authPending.value;
   const passwordInput = useRef<HTMLInputElement>(null);
   const tokenInput = useRef<HTMLInputElement>(null);
+  // preact 11 types the input props as a union discriminated by `type`; a
+  // reveal-toggle genuinely spans the 'text' and 'password' branches, and a
+  // union attribute does not distribute over that discriminated union. The
+  // cast names the exact two literals the render can produce.
+  const passwordFieldType = (
+    revealPassword ? 'text' : 'password'
+  ) as 'text' | 'password';
 
   useEffect(() => {
     // Ask what this server offers; without it the screen would have to guess.
@@ -174,7 +181,7 @@ export function AuthScreen(): JSX.Element {
                     id="auth-password"
                     ref={passwordInput}
                     class="auth-input"
-                    type={revealPassword ? 'text' : 'password'}
+                    type={passwordFieldType as 'password'}
                     autoComplete="current-password"
                     value={password}
                     data-autofocus

@@ -303,7 +303,7 @@ export function ContextDrawer({
   const open = workbench.contextOpen.value;
   const section = workbench.contextSection.value;
   const narrow = store.narrowViewport.value;
-  const drawerRef = useRef<HTMLElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
   useFocusTrap(drawerRef, open && narrow, workbench.closeContext);
 
   // A resize into the phone layout while Context is open still gives the drawer
@@ -321,7 +321,7 @@ export function ContextDrawer({
   if (!open) return null;
 
   return (
-    <aside
+    <div
       ref={drawerRef}
       id="workbench-context"
       class="context-drawer is-open"
@@ -361,6 +361,6 @@ export function ContextDrawer({
       <TabPanel idPrefix="context" id="access" active={section === 'access'}>
         <AccessSection />
       </TabPanel>
-    </aside>
+    </div>
   );
 }

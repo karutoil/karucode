@@ -422,9 +422,12 @@ describe('Composer', () => {
 
       fireEvent.input(textarea, { target: { value: '@src' } });
       await screen.findByRole('listbox');
-      expect(textarea.getAttribute('role')).toBe('combobox');
-      expect(textarea.getAttribute('aria-expanded')).toBe('true');
+      // A textarea is a textbox, not a combobox (combobox is a single-line
+      // widget per HTML-ARIA), so the mention popup is described through
+      // aria-autocomplete/aria-expanded/aria-controls on the implicit textbox
+      // role instead of overriding it.
       expect(textarea.getAttribute('aria-autocomplete')).toBe('list');
+      expect(textarea.getAttribute('aria-expanded')).toBe('true');
       const controls = textarea.getAttribute('aria-controls');
       expect(controls).toBe('composer-mention-menu');
       expect(document.getElementById(controls as string)).not.toBeNull();
