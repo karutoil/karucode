@@ -52,4 +52,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.30"
