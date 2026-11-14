@@ -112,8 +112,10 @@ do not reach a shell's environment: an interactive session is exactly where
 Each shell is its own session and process group, so closing the tab, deleting
 the terminal or stopping the server kills the whole tree - a `make watch` left
 running in a terminal does not survive it. Shutdown sends SIGHUP, escalates to
-SIGKILL after two seconds when needed, and waits for the leader and PTY close;
-a shell that ignores SIGHUP therefore cannot escape through process bootstrap.
+SIGKILL after two seconds when needed, then reaps the leader and closes the PTY
+within a bounded wait of its own: a shell that ignores SIGHUP cannot escape
+through process bootstrap, and one that wedges cannot hold the shutdown open
+either (no terminal call blocks forever on a shell).
 
 ## Limits
 

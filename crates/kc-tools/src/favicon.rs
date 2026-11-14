@@ -203,6 +203,11 @@ mod tests {
             ));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).expect("project dir");
+            // Canonical, because that is what `Workspace` and the walker report back:
+            // on macOS `temp_dir()` is `/var/folders/...`, whose canonical form is
+            // `/private/var/folders/...`, so a comparison against the raw path can
+            // never pass there.
+            let root = std::fs::canonicalize(&root).expect("canonical project dir");
             Self { root }
         }
 
