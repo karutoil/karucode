@@ -366,6 +366,9 @@ export function resetAppState(): void {
   store.narrowViewport.value = false;
   store.inspectorCollapsed.value = false;
   store.inspectorMode.value = 'docked';
+  // The project dropdown's open mode is a stored browser preference too: a test
+  // that switched it to click must not hand a click-only rail to the next one.
+  store.projectMenuOpen.value = 'hover';
   store.mobileSheet.value = null;
   store.inspectorTab.value = 'workspace';
   store.settingsOpen.value = false;

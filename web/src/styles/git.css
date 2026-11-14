@@ -1228,3 +1228,711 @@
   padding: var(--space-3) 0;
   overflow-y: auto;
 }
+
+/* ---------- navigation tabs & sync bar --------------------------------- */
+
+.gitm-sync-bar {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.gitm-gh-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 24px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: var(--fs-tiny);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.gitm-gh-pill:hover {
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+
+.gitm-nav {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-7);
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.gitm-nav-tab {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-3);
+  height: 36px;
+  padding: 0 var(--space-5);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--fs-small);
+  font-weight: 560;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.gitm-nav-tab:hover {
+  color: var(--text);
+}
+
+.gitm-nav-tab:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
+}
+
+.gitm-nav-tab.is-active {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  font-weight: 640;
+}
+
+.gitm-nav-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 17px;
+  height: 16px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-size: var(--fs-tiny);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- operation & identity banners ------------------------------- */
+
+.gitm-op-banner,
+.gitm-id-banner {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-7);
+  border-bottom: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--warn) 10%, var(--surface));
+  font-size: var(--fs-small);
+}
+
+.gitm-op-banner {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.gitm-op-label,
+.gitm-id-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text);
+}
+
+.gitm-op-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.gitm-id-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.gitm-id-form .gitm-input {
+  flex: 1 1 180px;
+}
+
+/* ---------- repo setup (not-a-repo) ------------------------------------ */
+
+.gitm-setup {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-9) var(--space-6);
+}
+
+.gitm-setup-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  width: min(560px, 100%);
+  padding: var(--space-7);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.gitm-setup-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-5);
+}
+
+.gitm-setup-icon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius);
+  background: var(--accent-bg);
+  color: var(--accent-on-tint);
+}
+
+.gitm-setup-sub {
+  margin: var(--space-2) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+}
+
+.gitm-setup-form,
+.gitm-subform {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.gitm-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  align-items: end;
+}
+
+.gitm-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.gitm-input-icon {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.gitm-input-icon > svg {
+  position: absolute;
+  left: var(--space-4);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.gitm-input-icon > .gitm-input {
+  padding-left: var(--space-9);
+}
+
+.gitm-select {
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--line-input);
+  border-radius: var(--radius-sm);
+  background: var(--surface-input);
+  color: var(--input-ink);
+  font-family: inherit;
+  font-size: var(--fs-small);
+}
+
+.gitm-select:focus-visible {
+  border-color: var(--focus-input);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.gitm-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+
+.gitm-check input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.gitm-field-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--fs-tiny);
+}
+
+.gitm-setup-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
+/* ---------- multi-column cards (Remotes, Branches, Tags, Stashes) ------- */
+
+.gitm-pane-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--space-6) var(--space-7);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.gitm-two-col {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-6);
+  align-items: start;
+}
+
+.gitm-col-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  min-width: 0;
+}
+
+.gitm-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+  padding: var(--space-6);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.gitm-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.gitm-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-body);
+  font-weight: 620;
+}
+
+.gitm-card-sub {
+  margin: var(--space-1) 0 0;
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+}
+
+.gitm-search-compact {
+  width: min(210px, 100%);
+}
+
+.gitm-remote-list,
+.gitm-ref-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gitm-remote-row,
+.gitm-ref-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.gitm-ref-row.is-current {
+  border-color: var(--accent-line);
+  background: color-mix(in srgb, var(--accent-bg) 45%, var(--bg));
+}
+
+.gitm-remote-info,
+.gitm-ref-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.gitm-remote-title-row,
+.gitm-ref-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.gitm-remote-name,
+.gitm-ref-name {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gitm-remote-url,
+.gitm-ref-meta {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gitm-remote-actions,
+.gitm-ref-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.gitm-inline-edit,
+.gitm-inline-create {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.gitm-inline-edit .gitm-input,
+.gitm-inline-create .gitm-input {
+  flex: 1 1 150px;
+}
+
+.gitm-sync-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line-soft);
+}
+
+.gitm-sync-toggles,
+.gitm-sync-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.gitm-note-box {
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+}
+
+.gitm-note-box p {
+  margin: 0;
+}
+
+.gitm-gh-repo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.gitm-gh-repo-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.gitm-gh-desc {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+}
+
+.gitm-gh-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-5);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+}
+
+.gitm-subsection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line-soft);
+}
+
+.gitm-stash-inspect {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gitm-branches-layout {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.gitm-stash-preview {
+  max-height: 44vh;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+/* ---------- history filter, graph & commit actions ---------------------- */
+
+.gitm-filter-bar {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.gitm-filter-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.gitm-filter-row .gitm-select {
+  flex: 1 1 auto;
+}
+
+.gitm-search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.gitm-search-wrap > svg {
+  position: absolute;
+  left: var(--space-4);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.gitm-search-wrap > .gitm-input {
+  padding-left: var(--space-9);
+}
+
+.gitm-graph-node {
+  display: inline-grid;
+  flex: 0 0 18px;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  color: var(--accent);
+}
+
+.gitm-graph-node.is-merge {
+  color: var(--info);
+}
+
+.gitm-commit-actions-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--surface);
+}
+
+.gitm-inline-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.gitm-inline-mini .gitm-input {
+  width: 150px;
+  height: 26px;
+}
+
+/* ---------- GitHub PRs & Issues ---------------------------------------- */
+
+.gitm-gh-side {
+  --gitm-side-w: 360px;
+}
+
+.gitm-batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.gitm-row-check {
+  flex: 0 0 auto;
+  margin: 0 0 0 var(--space-2);
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.gitm-gh-create {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: 680px;
+  padding: var(--space-7);
+}
+
+.gitm-subtabs {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.gitm-gh-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  padding: var(--space-6);
+}
+
+.gitm-label-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.gitm-checks-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.gitm-checks-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gitm-check-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: var(--fs-small);
+}
+
+.gitm-check-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gitm-gh-markdown {
+  font-size: var(--fs-body);
+  line-height: 1.55;
+}
+
+.gitm-comments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line-soft);
+}
+
+.gitm-comment {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.gitm-comment-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+}
+
+.gitm-comment-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line-soft);
+}
+
+@media (max-width: 900px) {
+  .gitm-two-col,
+  .gitm-field-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gitm-pane-scroll {
+    padding: var(--space-5);
+  }
+}

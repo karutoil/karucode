@@ -177,8 +177,10 @@ before the exemption is consulted.
   the HTTP request / forgets the stdio waiter.
 * **Dead servers**: when a call fails at the transport level (child exited, HTTP
   connection refused) the server's status flips to `failed` with the reason, and
-  its tools disappear from the registry. `GET /api/mcp` shows it; there is no
-  reconnect path — restart the process to reconnect a failed server.
+  its tools disappear from the registry. `GET /api/mcp` shows it;
+  `POST /api/mcp/reload` retries an unchanged entry whose connection is not alive,
+  and `POST /api/mcp/:name/reload` replaces one server. There is no health-check
+  loop.
 * **Error mapping**:
   * JSON-RPC `error` → failed tool outcome:
     `MCP server `fs` reported an error for tool `mcp__fs__read`: <message> (code -32601)`.
@@ -234,7 +236,47 @@ current state.
 
 ---
 
-## 7. Not implemented
+## 7. Hot reload
+
+`[[mcp_servers]]` is re-read on demand, so adding, removing or editing a server
+does not need a karucode restart:
+
+```bash
+# apply every change in the config file now
+curl -s -X POST localhost:8787/api/mcp/reload \
+  -H "X-Karucode-Admin-Token: $KARUCODE_ADMIN_TOKEN" | jq
+
+# replace one server (after rebuilding its binary or editing its entry)
+curl -s -X POST localhost:8787/api/mcp/filesystem/reload \
+  -H "X-Karucode-Admin-Token: $KARUCODE_ADMIN_TOKEN" | jq
+```
+
+The reload route answers with a report — `added`, `removed`, `restarted`,
+`retried`, `unchanged` — plus the live statuses. It reconciles the running
+connections with the file: a new name is started, a name that disappeared is
+stopped and dropped, a changed entry is closed and started again, an unchanged
+entry whose connection is not alive is retried, and everything else is left
+running untouched. An empty `[[mcp_servers]]` table means no servers; an
+unreadable or unparseable file keeps what is running and logs a warning.
+
+To apply edits automatically:
+
+```toml
+mcp_watch = true          # KARUCODE_MCP_WATCH=1
+mcp_watch_secs = 2        # KARUCODE_MCP_WATCH_SECS, clamped to 1..=600
+```
+
+The watcher stats the config file on that interval and applies a change once two
+polls agree (so a truncate-then-write is not read as an empty list). It is off by
+default because a reload replaces processes. `POST` routes need the admin
+credential; `GET /api/mcp` needs `read`.
+
+A run already in flight keeps the tool list it started with; the new set applies
+to the next run, in every existing session. A tool-list change on a connected
+server needs a reload — `notifications/tools/list_changed` is still not
+subscribed to.
+
+## 8. Not implemented
 
 Stated plainly so nobody is surprised:
 
@@ -244,22 +286,23 @@ Stated plainly so nobody is surprised:
 * **Resources, prompts and completions** (`resources/*`, `prompts/*`,
   `completion/complete`). Only tools are discovered and exposed.
 * **Subscriptions and change notifications**: `notifications/tools/list_changed`
-  is logged but does not refresh the registry; restart the server (or the
-  process) to pick up new tools.
+  is logged but does not refresh the registry; reload the server
+  (`POST /api/mcp/:name/reload`) to pick up new tools.
 * **Progress**: `notifications/progress` is logged at `debug`, not surfaced in the
   UI.
 * **Legacy HTTP+SSE transport** (the pre-streamable two-endpoint dialect).
 * **OAuth / interactive auth**: only static `headers` are supported. Tokens from
   a browser flow are not handled.
-* **Automatic reconnect/backoff**: a failed server stays failed until the process
-  is restarted. There is no health-check loop.
+* **Automatic reconnect/backoff**: a failed server stays failed until it is
+  reloaded (`POST /api/mcp/reload` retries an unchanged entry whose connection is
+  not alive). There is no health-check loop.
 * **`ping` keepalive**: not sent.
 * **Concurrency limits per server**: requests are multiplexed freely; the MCP
   spec's `maxConcurrency` hints are ignored.
 
 ---
 
-## 8. Testing
+## 9. Testing
 
 `cargo test -p kc-mcp` covers, against
 [`tests/fixtures/fake_mcp_server.sh`](../tests/fixtures/fake_mcp_server.sh) (POSIX

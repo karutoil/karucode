@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
-import { ModelControls, ModelSwitcher, REASONING_OPTIONS, ReasoningSelector } from './ModelSwitcher';
+import { ModelControls, ModelSwitcher, REASONING_OPTIONS, ReasoningSelector, filterModelOptions, modelOptions } from './ModelSwitcher';
 import type { Config, SessionModelSelection, SessionSummary } from '../api/types';
 import { jsonResponse, resetAppState, summaryFixture } from '../test/fixtures';
 import * as store from '../state/store';
@@ -200,7 +200,7 @@ describe('ModelSwitcher (per-session)', () => {
     expect(store.toasts.value.some((toast) => toast.message.includes('install default'))).toBe(true);
   });
 
-  it('uses roving focus for arrows/Home/End and restores the trigger after selection', async () => {
+  it('opens on the filter and walks the list from there, restoring the trigger after selection', async () => {
     const { calls } = installModelFetch();
     openSession();
     render(<ModelSwitcher />);
@@ -209,9 +209,15 @@ describe('ModelSwitcher (per-session)', () => {
 
     const options = screen.getAllByRole('option');
     expect(options.map((option) => option.getAttribute('tabindex'))).toEqual(['-1', '0', '-1']);
-    await waitFor(() => expect(document.activeElement).toBe(options[1]));
+    // A desktop picker opens with the caret in the filter: typing a name is the
+    // fastest way through a long list, and the field is the one place a keystroke
+    // narrows it. The roving tab stop still starts on the current model.
+    const filter = screen.getByRole('searchbox', { name: 'Filter models' });
+    await waitFor(() => expect(document.activeElement).toBe(filter));
 
-    fireEvent.keyDown(options[1]!, { key: 'ArrowDown' });
+    // ArrowDown crosses from the field into the list, one row past the current
+    // model, and from there the walk stays inside the list.
+    fireEvent.keyDown(filter, { key: 'ArrowDown' });
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /Tiny/ })));
     expect(screen.getAllByRole('option').map((option) => option.getAttribute('tabindex'))).toEqual(['-1', '-1', '0']);
     fireEvent.keyDown(document.activeElement!, { key: 'Home' });
@@ -272,6 +278,209 @@ describe('ModelSwitcher (per-session)', () => {
     act(() => {
       store.sessionModelMutationPending.value = null;
     });
+  });
+});
+
+describe('ModelSwitcher picker: search, facts and grouping', () => {
+  beforeEach(() => {
+    resetAppState();
+    store.config.value = twoProfileConfig();
+  });
+
+  afterEach(() => {
+    resetAppState();
+    vi.unstubAllGlobals();
+  });
+
+  it('renders a context window as tokens, never as a message count', () => {
+    openSession();
+    render(<ModelSwitcher />);
+    fireEvent.click(screen.getByRole('button', { name: /Model for this session/ }));
+
+    // The bug this pins: the row used `formatCount`, which is the *message*
+    // counter, so a 1,000,000-token window read "1000000 messages ctx".
+    expect(screen.queryByText(/messages ctx/)).toBeNull();
+    expect(screen.getByText('128K ctx')).not.toBeNull();
+    expect(screen.getByText('200K ctx')).not.toBeNull();
+    // The exact figure is still available, in the chip's tooltip.
+    expect(screen.getByText('200K ctx').getAttribute('title')).toBe('200,000 tokens of context');
+  });
+
+  it('names the provider on every row, even when the install has one profile', () => {
+    const single = twoProfileConfig();
+    store.config.value = { ...single, providers: [single.providers[0]!] };
+    openSession();
+    render(<ModelSwitcher />);
+    fireEvent.click(screen.getByRole('button', { name: /Model for this session/ }));
+
+    // A model id alone does not say which endpoint will answer, and the old
+    // picker hid the provider entirely when there was only one profile.
+    const group = screen.getByRole('group', { name: 'Gateway' });
+    expect(group.textContent).toContain('Gateway');
+  });
+
+  it('carries the facts in the row’s accessible name, not only in the chips', () => {
+    openSession();
+    render(<ModelSwitcher />);
+    fireEvent.click(screen.getByRole('button', { name: /Model for this session/ }));
+
+    expect(
+      screen.getByRole('option', { name: 'Model B on Gateway, 200K context, no tool calling' }),
+    ).not.toBeNull();
+    expect(screen.getByRole('option', { name: 'Model A on Gateway, 128K context, reasoning' })).not.toBeNull();
+  });
+
+  it('filters by model name, id or provider and counts what is left', async () => {
+    openSession();
+    render(<ModelSwitcher />);
+    fireEvent.click(screen.getByRole('button', { name: /Model for this session/ }));
+    const filter = screen.getByRole('searchbox', { name: 'Filter models' });
+    expect(screen.getByText('3 models')).not.toBeNull();
+
+    fireEvent.input(filter, { target: { value: 'tiny' } });
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(1));
+    expect(screen.getByText('1 of 3')).not.toBeNull();
+    expect(screen.getByRole('option', { name: /Tiny/ })).not.toBeNull();
+
+    // The provider is part of the haystack, so "local" reaches the same row.
+    fireEvent.input(filter, { target: { value: 'local' } });
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(1));
+    expect(screen.getByRole('option', { name: /Tiny/ })).not.toBeNull();
+  });
+
+  it('says so when nothing matches, and clears the filter from there', async () => {
+    openSession();
+    render(<ModelSwitcher />);
+    fireEvent.click(screen.getByRole('button', { name: /Model for this session/ }));
+    const filter = screen.getByRole('searchbox', { name: 'Filter models' });
+
+    fireEvent.input(filter, { target: { value: 'zzz' } });
+    await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
+    expect(screen.getByText(/No model matches/)).not.toBeNull();
+    expect(screen.getByText('0 of 3')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filter' }));
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
+    expect((filter as HTMLInputElement).value).toBe('');
+  });
+
+  it('takes the first match on Enter in the filter', async () => {
+    const { calls } = installModelFetch();
+    openSession();
+    render(<ModelSwitcher />);
+    fireEvent.click(screen.getByRole('button', { name: /Model for this session/ }));
+    const filter = screen.getByRole('searchbox', { name: 'Filter models' });
+
+    fireEvent.input(filter, { target: { value: 'model-a' } });
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(1));
+    fireEvent.keyDown(filter, { key: 'Enter' });
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]?.body).toEqual({ provider: 'gateway', model: 'model-a' });
+  });
+
+  it('clears the filter on Escape before it closes the menu', async () => {
+    openSession();
+    render(<ModelSwitcher />);
+    fireEvent.click(screen.getByRole('button', { name: /Model for this session/ }));
+    const filter = screen.getByRole('searchbox', { name: 'Filter models' });
+
+    fireEvent.input(filter, { target: { value: 'tiny' } });
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(1));
+
+    // The first Escape is the query's: the list comes back, the menu stays.
+    fireEvent.keyDown(filter, { key: 'Escape' });
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
+    expect(screen.queryByRole('listbox')).not.toBeNull();
+    expect((filter as HTMLInputElement).value).toBe('');
+
+    // The second Escape has nothing left to clear, so it closes the menu.
+    fireEvent.keyDown(filter, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
+  });
+
+  it('says there are no models at all, rather than blaming a filter', () => {
+    const bare = twoProfileConfig();
+    bare.providers = [{ ...bare.providers[0]!, models: [] }];
+    store.config.value = bare;
+    openSession();
+    render(<ModelSwitcher />);
+    fireEvent.click(screen.getByRole('button', { name: /Model for this session/ }));
+
+    // A fresh install is not a query that matched nothing: there is nothing to
+    // clear, and the fix is the footer's own door into Settings.
+    expect(screen.getByText(/No models configured yet/)).not.toBeNull();
+    expect(screen.queryByText(/No model matches/)).toBeNull();
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(screen.getByText('0 models')).not.toBeNull();
+  });
+
+  it('starts a reopened menu with an empty filter', async () => {
+    openSession();
+    render(<ModelSwitcher />);
+    const trigger = screen.getByRole('button', { name: /Model for this session/ });
+    fireEvent.click(trigger);
+    fireEvent.input(screen.getByRole('searchbox', { name: 'Filter models' }), {
+      target: { value: 'tiny' },
+    });
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(1));
+
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
+    expect((screen.getByRole('searchbox', { name: 'Filter models' }) as HTMLInputElement).value).toBe('');
+  });
+});
+
+describe('modelOptions / filterModelOptions', () => {
+  it('flattens every profile and model, keeping config order', () => {
+    const options = modelOptions(twoProfileConfig());
+    expect(options.map((option) => `${option.providerId}:${option.modelId}`)).toEqual([
+      'gateway:model-a',
+      'gateway:model-b',
+      'local:tiny',
+    ]);
+    expect(options[0]).toMatchObject({
+      providerName: 'Gateway',
+      providerKeySet: true,
+      modelName: 'Model A',
+      contextWindow: 128000,
+      reasoning: true,
+    });
+    expect(options[2]).toMatchObject({ providerName: 'Local', providerKeySet: false, modelName: 'Tiny' });
+  });
+
+  it('is empty without a config, so a caller never has to guard first', () => {
+    expect(modelOptions(null)).toEqual([]);
+  });
+
+  it('matches every word anywhere in the name, id or provider', () => {
+    const options = modelOptions(twoProfileConfig());
+    expect(filterModelOptions(options, '').map((option) => option.modelId)).toEqual([
+      'model-a',
+      'model-b',
+      'tiny',
+    ]);
+    expect(filterModelOptions(options, 'gateway').map((option) => option.modelId)).toEqual([
+      'model-a',
+      'model-b',
+    ]);
+    expect(filterModelOptions(options, 'MODEL-B').map((option) => option.modelId)).toEqual(['model-b']);
+    // Two words narrow rather than widen: "model" alone reaches two rows.
+    expect(filterModelOptions(options, 'model tiny')).toEqual([]);
+    expect(filterModelOptions(options, '  ').map((option) => option.modelId)).toEqual([
+      'model-a',
+      'model-b',
+      'tiny',
+    ]);
+  });
+
+  it('does not match capability words, so "tools" cannot reach a model without them', () => {
+    const options = modelOptions(twoProfileConfig());
+    // Model B is the one with `tool_call: false`; its row says "no tools", and a
+    // search for "tools" must not be answered with it.
+    expect(filterModelOptions(options, 'tools')).toEqual([]);
   });
 });
 

@@ -2035,6 +2035,207 @@ async fn a_workspace_without_instructions_sends_no_instructions_block() {
 }
 
 // ---------------------------------------------------------------------------
+// the workspace's skills
+// ---------------------------------------------------------------------------
+
+/// One skill file at the conventional workspace root, with frontmatter.
+fn seed_workspace_skill(workspace: &std::path::Path, id: &str, description: &str) {
+    let dir = workspace.join(".karucode/skills").join(id);
+    std::fs::create_dir_all(&dir).expect("create the skills folder");
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {id}\ndescription: {description}\n---\n\n# {id}\n\n1. run the gates\n"),
+    )
+    .expect("seed the skill file");
+}
+
+/// The product's `[skills]` default: on, auto-detect on, so `<workspace>/
+/// .karucode/skills` is scanned.
+///
+/// The harness turns auto-detect off by default (`FakeSettings::skills`), because
+/// it would otherwise also scan the *user's* folders and make a developer's
+/// `~/.agents/skills` part of the assertion; a test that wants discovery says so
+/// with this.
+fn product_skills() -> kc_core::skill::SkillsConfig {
+    kc_core::skill::SkillsConfig::default()
+}
+
+#[tokio::test]
+async fn a_workspace_skill_is_advertised_in_the_prompt_without_its_body() {
+    let mut h = HarnessBuilder::new(vec![Script::text("hi")])
+        .settings(FakeSettings::default().with_skills(product_skills()))
+        .build()
+        .await;
+    seed_workspace_skill(
+        &h.workspace_dir,
+        "release",
+        "Cut a release: bump versions, run the gates, tag, push.",
+    );
+
+    h.run_to_finish("cut a release").await;
+
+    let requests = h.factory.requests();
+    let prompt = &requests[0].messages[0].content;
+    assert!(prompt.contains("Skills:"), "no skills block: {prompt}");
+    // The id and the description are what make the skill findable...
+    assert!(
+        prompt.contains(
+            "`release` (workspace): Cut a release: bump versions, run the gates, tag, push."
+        ),
+        "the skill line is missing its id, source or description: {prompt}"
+    );
+    // ...and the call it names is the one the `skill` tool answers.
+    assert!(
+        prompt.contains(r#""action":"read""#),
+        "the block must name the call that opens a skill: {prompt}"
+    );
+    // The point of the feature: the body is *not* in the prompt, which is
+    // re-sent and re-billed on every turn.
+    assert!(
+        !prompt.contains("1. run the gates"),
+        "the skill's body leaked into the prompt"
+    );
+}
+
+#[tokio::test]
+async fn a_workspace_without_skills_sends_no_skills_block() {
+    // No skills anywhere: the harness's own default (auto-detect off, nothing
+    // configured, nothing hand-added) is the "install with no skills" case, and
+    // the prompt must be the one this feature never touching it produces.
+    let mut h = HarnessBuilder::new(vec![Script::text("hi")]).build().await;
+    h.run_to_finish("hello").await;
+    let requests = h.factory.requests();
+    assert!(
+        !requests[0].messages[0].content.contains("Skills:"),
+        "an empty workspace grew a skills block"
+    );
+    assert!(
+        !requests[0].messages[0].content.contains("`skill` tool"),
+        "an empty workspace advertised the skill tool's listing"
+    );
+}
+
+#[tokio::test]
+async fn skills_turned_off_send_no_skills_block_even_when_skill_files_exist() {
+    // Two runs over the same seeded skill, differing only in `skills.enabled`: the
+    // first proves the file *is* discoverable under these settings (or the second
+    // assertion would hold for the wrong reason), the second proves the master
+    // switch hides it.
+    let mut on = HarnessBuilder::new(vec![Script::text("hi")])
+        .settings(FakeSettings::default().with_skills(product_skills()))
+        .build()
+        .await;
+    seed_workspace_skill(&on.workspace_dir, "release", "Cut a release.");
+    on.run_to_finish("cut a release").await;
+    let listed = &on.factory.requests()[0].messages[0].content;
+    assert!(
+        listed.contains("`release` (workspace)"),
+        "the skill must be discoverable with the feature on: {listed}"
+    );
+
+    let mut off = HarnessBuilder::new(vec![Script::text("hi")])
+        .settings(
+            FakeSettings::default().with_skills(kc_core::skill::SkillsConfig {
+                enabled: false,
+                ..product_skills()
+            }),
+        )
+        .build()
+        .await;
+    seed_workspace_skill(&off.workspace_dir, "release", "Cut a release.");
+    off.run_to_finish("cut a release").await;
+
+    let prompt = &off.factory.requests()[0].messages[0].content;
+    assert!(
+        !prompt.contains("Skills:") && !prompt.contains("`release`"),
+        "skills.enabled = false must hide the listing: {prompt}"
+    );
+}
+
+#[tokio::test]
+async fn a_skill_edited_mid_run_does_not_change_that_runs_prompt() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "rewrite", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(WriteWorkspaceFileTool::boxed(
+        "rewrite",
+        ".karucode/skills/release/SKILL.md",
+        "---\nname: release\ndescription: CHANGED MID-RUN: this must not reach the prompt.\n---\n\nbody\n",
+    ))
+    .settings(FakeSettings::default().with_skills(product_skills()))
+    .build()
+    .await;
+    seed_workspace_skill(
+        &h.workspace_dir,
+        "release",
+        "ORIGINAL: run the gates before reporting.",
+    );
+
+    h.run_to_finish("cut a release").await;
+
+    let requests = h.factory.requests();
+    assert!(requests.len() >= 2, "the run should take two model turns");
+    for (index, request) in requests.iter().enumerate() {
+        let prompt = &request.messages[0].content;
+        assert!(
+            prompt.contains("ORIGINAL: run the gates before reporting."),
+            "request {index} lost the skill it started with"
+        );
+        assert!(
+            !prompt.contains("CHANGED MID-RUN"),
+            "request {index} re-discovered skills instead of reusing the run's block"
+        );
+    }
+    // Byte-identical, not merely equivalent: the cached prefix must not move.
+    assert_eq!(
+        requests[0].messages[0].content, requests[1].messages[0].content,
+        "the skills block changed between turns of one run"
+    );
+    // And the file really did change mid-run, or the assertion is vacuous.
+    let on_disk =
+        std::fs::read_to_string(h.workspace_dir.join(".karucode/skills/release/SKILL.md")).unwrap();
+    assert!(on_disk.contains("CHANGED MID-RUN"));
+}
+
+#[tokio::test]
+async fn a_subagents_own_prompt_lists_the_workspaces_skills() {
+    let mut h = HarnessBuilder::new(vec![
+        spawn_call("do the delegated work", None, false),
+        Script::text("child summary"),
+        Script::text("parent done"),
+    ])
+    .settings(FakeSettings::default().with_skills(product_skills()))
+    .build()
+    .await;
+    seed_workspace_skill(&h.workspace_dir, "release", "Cut a release.");
+
+    let events = h.run_to_finish("delegate").await;
+    assert_eq!(finished_status(&events), "completed");
+
+    let requests = h.factory.requests();
+    assert!(requests.len() >= 2, "the child must make its own request");
+    // The parent's prompt, then the child's: the child runs the same loop
+    // against the same workspace, so it inherits the skill list with no extra
+    // plumbing.
+    assert!(
+        requests[0].messages[0]
+            .content
+            .contains("`release` (workspace)"),
+        "the parent's prompt lost the skill"
+    );
+    let child = &requests[1].messages[0].content;
+    assert!(
+        child.contains("You are a focused subagent"),
+        "request 1 is not the child's prompt: {child}"
+    );
+    assert!(
+        child.contains("`release` (workspace): Cut a release."),
+        "the subagent's prompt must list the workspace's skills: {child}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // the prompt hook and the turn it answers
 // ---------------------------------------------------------------------------
 
@@ -7787,6 +7988,125 @@ async fn projectless_preview_and_revert_use_the_saved_session_workspace() {
         calls.len(),
         2,
         "preview and revert each resolve the session: {calls:?}"
+    );
+}
+
+/// A rewind invalidates the compaction checkpoint.
+///
+/// The checkpoint lets a follow-up turn append to the window the previous run
+/// actually sent, instead of reloading the raw transcript and compacting it again.
+/// After a rewind that window describes messages the user just hid, so hydrating
+/// it would resurrect them - the runtime clears it as part of the rewind.
+#[tokio::test]
+async fn a_rewind_clears_the_compaction_snapshot() {
+    let mut h = HarnessBuilder::new(vec![Script::text("first answer")])
+        .build()
+        .await;
+    h.run_to_finish("first prompt").await;
+    h.wait_idle().await;
+
+    let prompt = visible(&h)
+        .await
+        .into_iter()
+        .find(|message| message.role == "user")
+        .expect("prompt")
+        .id;
+    h.store
+        .save_compaction_snapshot(
+            h.session(),
+            2,
+            &[
+                kc_core::message::Message::user("compacted prefix"),
+                kc_core::message::Message::assistant("old answer", Vec::new()),
+            ],
+        )
+        .await
+        .expect("save snapshot");
+    assert!(
+        h.store
+            .load_compaction_snapshot(h.session())
+            .await
+            .expect("load")
+            .is_some(),
+        "fixture: the snapshot is stored"
+    );
+
+    h.runtime
+        .rewind(h.session(), prompt, false, true)
+        .await
+        .expect("rewind");
+
+    assert!(
+        h.store
+            .load_compaction_snapshot(h.session())
+            .await
+            .expect("load")
+            .is_none(),
+        "a rewind must invalidate the compaction checkpoint"
+    );
+}
+
+/// A follow-up turn appends to the compacted window instead of reloading the raw
+/// transcript and compacting it again.
+///
+/// This is the whole point of the checkpoint: re-compacting at a slightly shifted
+/// boundary rewrites the digest near the front of the request, which invalidates
+/// the provider's cached prefix for every token after it. Reusing the window the
+/// last run actually sent keeps the prefix byte-identical and only the new user
+/// turn is uncached.
+#[tokio::test]
+async fn a_follow_up_turn_reuses_the_compaction_snapshot() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::text("first answer"),
+        Script::text("second answer"),
+    ])
+    .build()
+    .await;
+    h.run_to_finish("first prompt").await;
+    h.wait_idle().await;
+
+    // What the previous run ended with: a digest and a pinned task, plus the
+    // answer. The watermark is the number of stored main-agent messages it covers.
+    let stored = visible(&h).await;
+    let watermark = stored.len();
+    let mut digest = kc_core::message::Message::user(
+        "[context digest: 40 earlier messages omitted; the work they describe is still done - \
+         do not redo it]\n### Modified & Created Files\n- file: `src/parser.rs` — write (1 edit)",
+    );
+    digest.name = Some("kc-runtime:context-digest".into());
+    let snapshot = vec![
+        kc_core::message::Message::user("TASK: fix the parser"),
+        digest,
+        kc_core::message::Message::assistant("first answer", Vec::new()),
+    ];
+    h.store
+        .save_compaction_snapshot(h.session(), watermark, &snapshot)
+        .await
+        .expect("save snapshot");
+
+    h.run_to_finish("second prompt").await;
+    h.wait_idle().await;
+
+    let requests = h.factory.requests();
+    let last = requests.last().expect("the second turn was sent");
+    let contents: Vec<&str> = last
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect();
+    assert!(
+        contents
+            .iter()
+            .any(|content| content.contains("src/parser.rs")),
+        "the compacted window is reused, digest and all: {contents:?}"
+    );
+    assert!(
+        contents.contains(&"second prompt"),
+        "and the new user turn is appended to it: {contents:?}"
+    );
+    assert!(
+        !contents.contains(&"first prompt"),
+        "the raw transcript is not reloaded on top of the snapshot: {contents:?}"
     );
 }
 
