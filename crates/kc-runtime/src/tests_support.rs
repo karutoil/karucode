@@ -110,7 +110,13 @@ impl StoreFaultGate {
     }
 
     pub(crate) async fn wait_entered(&self) {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        // Generous on purpose: this is a bug detector, not a latency bound. The
+        // spawned task has to cross several store round-trips before it reaches
+        // the gate, and on a loaded CI runner (a whole test binary sharing two
+        // worker threads) that can outlast a tight deadline; the test still
+        // fails when the store call truly never arrives — it just takes longer
+        // to say so.
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let notified = self.entered_notify.notified();
                 tokio::pin!(notified);
@@ -190,7 +196,10 @@ impl FakeStore {
         };
         gate.entered.store(true, Ordering::SeqCst);
         gate.entered_notify.notify_waiters();
-        let permit = tokio::time::timeout(Duration::from_secs(5), gate.release.acquire())
+        // Same generosity as `wait_entered`: a test holding this gate open
+        // releases it from its own thread, which on a loaded runner can be
+        // delayed well past a tight deadline.
+        let permit = tokio::time::timeout(Duration::from_secs(30), gate.release.acquire())
             .await
             .expect("store fault barrier was never released")
             .expect("store fault barrier semaphore closed");
