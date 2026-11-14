@@ -38,7 +38,7 @@ kc-docs = { path = "crates/kc-docs" }
 
 anyhow = "1"
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 futures-util = "0.3"
 futures-core = "0.3"
