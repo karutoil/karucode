@@ -45,12 +45,10 @@ function pointer(
   type: string,
   init: { pointerId: number; pointerType: 'mouse' | 'touch'; clientX: number; isPrimary?: boolean; button?: number },
 ): void {
-  // jsdom lacks native `onpointer*` properties, so Preact registers CamelCase
-  // event names there. Real Chromium advertises them and uses native lowercase.
-  const registeredType = `on${type}` in target
-    ? type
-    : type.replace(/^pointer(.)/, (_match, letter: string) => `Pointer${letter.toUpperCase()}`);
-  const event = new MouseEvent(registeredType, {
+  // jsdom lacks native `onpointer*` properties. Preact 10 registered CamelCase
+  // handlers as expandos there (findable with an `in` check); preact 11 attaches
+  // real listeners for the lowercase event types, so dispatch those directly.
+  const event = new MouseEvent(type, {
     bubbles: true,
     cancelable: true,
     clientX: init.clientX,
@@ -185,12 +183,15 @@ describe('ResultResizer', () => {
     expect(actions.saveProjectResultPanelWidth).not.toHaveBeenCalled();
   });
 
-  it('flushes a pending keyboard burst on unmount', () => {
+  it('flushes a pending keyboard burst on unmount', async () => {
     vi.useFakeTimers();
     const view = render(<Harness preferredWidth={600} />);
     const { separator } = geometry();
     fireEvent.keyDown(separator, { key: 'ArrowRight' });
     view.unmount();
+    // preact 11 runs passive-effect cleanup on unmount asynchronously (a
+    // microtask later), so the flush is awaited rather than assumed synchronous.
+    await act(async () => { await Promise.resolve(); });
     expect(actions.saveProjectResultPanelWidth).toHaveBeenCalledWith('p_one', 590);
   });
 });

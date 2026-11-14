@@ -9,7 +9,7 @@
  * hoisted per test file, so a shared fixture module cannot register them.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import * as store from '../../state/store';
 import * as actions from '../../state/actions';
 import { controlPlaneOpen, resetControlPlane } from '../../state/controlPlane';
@@ -223,6 +223,9 @@ describe('opening conversations', () => {
     await screen.findByLabelText('Sessions across projects');
     expect(actions.refreshSessions).not.toHaveBeenCalled();
     unmount();
+    // preact 11 runs passive-effect cleanup on unmount asynchronously, so the
+    // refresh is awaited rather than assumed synchronous.
+    await act(async () => { await Promise.resolve(); });
     expect(actions.refreshSessions).toHaveBeenCalledTimes(1);
   });
 });

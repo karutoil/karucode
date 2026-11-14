@@ -170,7 +170,7 @@ export interface StickyBottomOptions {
 }
 
 export interface StickyBottom {
-  scrollRef: RefObject<HTMLDivElement>;
+  scrollRef: RefObject<HTMLDivElement | null>;
   /** True while the newest content is out of view and worth jumping to. */
   showJump: boolean;
   /**

@@ -17,9 +17,9 @@ import type { RefObject } from 'preact';
  */
 export function useHeightVariable(options: {
   /** The element to measure. */
-  ref: RefObject<HTMLElement>;
+  ref: RefObject<HTMLElement | null>;
   /** The element to publish `--<name>` on. */
-  target: RefObject<HTMLElement>;
+  target: RefObject<HTMLElement | null>;
   /** Property name without the leading `--`. */
   name: string;
   /**

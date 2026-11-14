@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
+import type { TargetedSubmitEvent } from 'preact';
 import { apiRequest } from '../../api/client';
 import { listAgents, listSessions } from '../../api/endpoints';
 import type { AgentSummary, ControlChatSummary, SessionSummary } from '../../api/types';
@@ -254,7 +255,7 @@ export function ControlPlane(): JSX.Element {
     }
   };
 
-  const launch = async (event: JSX.TargetedSubmitEvent<HTMLFormElement>): Promise<void> => {
+  const launch = async (event: TargetedSubmitEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const text = draft.trim();
     const target = store.projects.value.find((project) => project.id === launchProject);

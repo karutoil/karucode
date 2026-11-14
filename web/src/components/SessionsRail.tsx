@@ -928,7 +928,7 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
   };
 
   return (
-    <aside
+    <div
       class="rail rail-peek"
       aria-label={`Sessions in ${project?.name ?? 'this project'}`}
       data-project-id={projectId}
@@ -1040,7 +1040,7 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
           )}
         </nav>
       </div>
-    </aside>
+    </div>
   );
 }
 
@@ -1050,7 +1050,7 @@ export function SessionsRail(): JSX.Element {
   const isSheetOpen = store.mobileSheet.value === 'sessions';
   const isNarrow = store.narrowViewport.value;
   const project = store.currentProject.value;
-  const railRef = useRef<HTMLElement>(null);
+  const railRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>('all');
@@ -1145,11 +1145,15 @@ export function SessionsRail(): JSX.Element {
   if (peekActive && peekId !== null) return <RailPeek projectId={peekId} />;
 
   return (
-    <aside
+    <div
       ref={railRef}
       class={`rail${isSheetOpen ? ' is-open' : ''}`}
       aria-label="Sessions"
-      role={isSheetOpen ? 'dialog' : undefined}
+      // A plain div has no implicit role, so the rail's landmark (complementary,
+      // what an <aside> would have been) and the phone sheet's dialog are both
+      // explicit. preact 11's per-element ARIA unions do not allow dialog on an
+      // aside, so the element is a div.
+      role={isSheetOpen ? 'dialog' : 'complementary'}
       aria-modal={isSheetOpen ? 'true' : undefined}
     >
       <div class="rail-inner">
@@ -1343,6 +1347,6 @@ export function SessionsRail(): JSX.Element {
         </div>
       </div>
 
-    </aside>
+    </div>
   );
 }

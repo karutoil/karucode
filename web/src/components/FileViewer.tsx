@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import type { TargetedKeyboardEvent } from 'preact';
 import { ApiError, toErrorMessage } from '../api/client';
 import { getWorkspaceFile, saveWorkspaceFile } from '../api/endpoints';
 import type { WorkspaceFile } from '../api/types';
@@ -279,7 +280,7 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
     }
   };
 
-  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
+  const onKeyDown = (event: TargetedKeyboardEvent<HTMLDivElement>): void => {
     if (!editing) return;
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
       event.preventDefault();

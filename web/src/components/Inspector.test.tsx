@@ -170,6 +170,9 @@ describe('Workbench result dock', () => {
     await waitFor(() => expect(document.body.style.overflow).toBe('hidden'));
 
     view.unmount();
+    // preact 11 runs passive-effect cleanup on unmount asynchronously, so the
+    // Context teardown is awaited rather than assumed synchronous.
+    await act(async () => { await Promise.resolve(); });
     expect(workbench.contextOpen.value).toBe(false);
     expect(store.mobileSheet.value).toBeNull();
     expect(store.inspectorTab.value).toBe('agents');

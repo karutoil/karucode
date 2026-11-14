@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import type { TargetedMouseEvent } from 'preact';
 import { apiRequestBlob, getAuthToken, toErrorMessage } from '../api/client';
 import { workspacePreviewUrl, workspaceRawUrl } from '../api/endpoints';
 import { copyText } from '../lib/clipboard';
@@ -102,7 +103,7 @@ export function FilePreview({
   const media = useWorkspaceObjectUrl(render === 'image' || render === 'pdf' ? path : null, project);
 
   if (render === 'markdown') {
-    const onClick = (event: JSX.TargetedMouseEvent<HTMLDivElement>): void => {
+    const onClick = (event: TargetedMouseEvent<HTMLDivElement>): void => {
       const target = event.target;
       if (!(target instanceof Element)) return;
       if (handleCopyClick(target, content)) return;

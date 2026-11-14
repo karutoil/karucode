@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import type { TargetedKeyboardEvent } from 'preact';
 import type { Activity } from '../state/selectors';
 import * as store from '../state/store';
 import * as actions from '../state/actions';
@@ -119,7 +120,7 @@ function QueueModeToggle({
     buttons.current.get(next)?.focus();
   };
 
-  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLButtonElement>): void => {
+  const onKeyDown = (event: TargetedKeyboardEvent<HTMLButtonElement>): void => {
     const index = kinds.indexOf(mode);
     let next: QueuedKind | undefined;
     if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
@@ -957,7 +958,6 @@ export function Composer({
             value={draft}
             placeholder={placeholder}
             disabled={!canType}
-            role="combobox"
             aria-expanded={menuOpen}
             aria-controls={menuOpen ? MENTION_MENU_ID : undefined}
             aria-autocomplete="list"

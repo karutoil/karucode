@@ -1,6 +1,7 @@
 import type { JSX } from 'preact';
 import type { SessionSummary } from '../../api/types';
 import { useMemo } from 'preact/hooks';
+import type { TargetedSubmitEvent } from 'preact';
 import type {
   Config,
   ControlOverview as ControlSnapshot,
@@ -102,7 +103,7 @@ export interface ControlOverviewProps {
   onLaunchEffort: (effort: string) => void;
   /** A launch is in flight; the submit button is disabled but stays visible. */
   opening: boolean;
-  onLaunch: (event: JSX.TargetedSubmitEvent<HTMLFormElement>) => void;
+  onLaunch: (event: TargetedSubmitEvent<HTMLFormElement>) => void;
   /** A session's project name, or "No project". */
   projectName: (id: string | null | undefined) => string;
   onNavigate: (session: { id: string; project_id: string | null }) => void;
@@ -165,7 +166,6 @@ function RecentRow({ session, projectName, onNavigate, onOpenInProject }: {
   return <>
     <button
       type="button"
-      role="row"
       class="cp-table-row"
       title={title}
       aria-haspopup="menu"
@@ -173,14 +173,14 @@ function RecentRow({ session, projectName, onNavigate, onOpenInProject }: {
       onClick={() => onNavigate(session)}
       {...contextMenuProps(menu, () => true, () => menu.triggerRef.current)}
     >
-      <span class="cp-table-session" role="cell">
+      <span class="cp-table-session">
         <span class="rail-avatar" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
         <strong class="cp-table-title">{title}</strong>
       </span>
-      <span class="cp-table-cell cp-col-meta" role="cell">{projectName(session.project_id)}</span>
-      <span class="cp-table-cell cp-col-meta" role="cell">{relativeTime(session.updated_at)}</span>
-      <span class="cp-table-cell cp-col-meta num" role="cell">{session.message_count.toLocaleString()}</span>
-      <span class={`session-state session-state-${status.tone}`} role="cell">{status.label}</span>
+      <span class="cp-table-cell cp-col-meta">{projectName(session.project_id)}</span>
+      <span class="cp-table-cell cp-col-meta">{relativeTime(session.updated_at)}</span>
+      <span class="cp-table-cell cp-col-meta num">{session.message_count.toLocaleString()}</span>
+      <span class={`session-state session-state-${status.tone}`}>{status.label}</span>
     </button>
     <Menu menu={menu} float label={`Session actions for ${title}`}>
       <MenuItem menu={menu} action={{ label: 'Open conversation', onSelect: () => onNavigate(session) }} />
@@ -447,13 +447,13 @@ export function ControlOverview({
                the same grid inside every row. So `.cp-table*` stays, and stays
                cheap: shared tokens for type/spacing/radius, and an `.eyebrow` head
                rather than a fourth micro-kicker definition. */
-            : <div class="cp-table" role="table" aria-label="Recent sessions">
-                <div class="cp-table-head eyebrow" role="row">
-                  <span role="columnheader">Session</span>
-                  <span role="columnheader" class="cp-col-meta">Project</span>
-                  <span role="columnheader" class="cp-col-meta">Updated</span>
-                  <span role="columnheader" class="cp-col-meta">Msgs</span>
-                  <span role="columnheader">State</span>
+            : <div class="cp-table" role="group" aria-label="Recent sessions">
+                <div class="cp-table-head eyebrow">
+                  <span class="cp-col-head">Session</span>
+                  <span class="cp-col-meta">Project</span>
+                  <span class="cp-col-meta">Updated</span>
+                  <span class="cp-col-meta">Msgs</span>
+                  <span class="cp-col-head">State</span>
                 </div>
                 {recentList.slice(0, 12).map((session) => (
                   <RecentRow

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { Markdown } from './Markdown';
 import { invalidateArtifact, publishArtifact, resetArtifactCache } from '../lib/artifactPreview';
 import { renderMermaid } from '../lib/mermaid';
@@ -268,6 +268,9 @@ describe('a path image artifact', () => {
     expect(document.body.innerHTML).not.toContain('image-master-secret');
 
     view.unmount();
+    // preact 11 runs passive-effect cleanup on unmount asynchronously, so the
+    // revoke is awaited rather than assumed synchronous.
+    await act(async () => { await Promise.resolve(); });
     expect(revoke).toHaveBeenCalledWith('blob:artifact-image');
     setAuthToken(null);
     store.currentProjectId.value = null;

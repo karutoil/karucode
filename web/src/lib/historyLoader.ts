@@ -28,9 +28,9 @@ export function sentinelReached(
 
 export interface HistoryLoaderOptions {
   /** The transcript's scroll container; `null` follows the page viewport. */
-  scroller: RefObject<HTMLElement>;
+  scroller: RefObject<HTMLElement | null>;
   /** The marker rendered above the oldest loaded row. */
-  sentinel: RefObject<HTMLElement>;
+  sentinel: RefObject<HTMLElement | null>;
   /**
    * The element whose top edge is the start of the loaded rows — the transcript,
    * an agent's step list. Optional, because a windowed transcript is not the only
@@ -41,7 +41,7 @@ export interface HistoryLoaderOptions {
    * every loaded row is put back on: they are shown the start of the page that
    * just arrived instead of being carried down by its height.
    */
-  content?: RefObject<HTMLElement>;
+  content?: RefObject<HTMLElement | null>;
   /** True while the server may still have older rows. */
   canLoad: boolean;
   /** True while a page is already in flight. */
