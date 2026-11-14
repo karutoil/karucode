@@ -15,7 +15,7 @@
 // @kc-title: Change karucode's configuration
 // @kc-summary: The four config layers, which settings apply live, and how secrets and invalid values are handled.
 // @kc-tags: config, settings, configuration, toml, env
-// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_PARALLEL_TOOL_CALLS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:limits.parallel_tool_calls, config:limits.max_turn_retries, config:limits.turn_retry_delay_ms, config:notifications.enabled, config:notifications.min_run_secs, config:notifications.ephemeral_sessions, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings, config:[updates], config:updates.check, config:updates.check_secs, config:updates.manifest_url, config:updates.auto_apply, env:KARUCODE_UPDATE_CHECK, env:KARUCODE_UPDATE_CHECK_SECS, env:KARUCODE_UPDATE_MANIFEST_URL, env:KARUCODE_UPDATE_AUTO_APPLY, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, ui:Settings > Updates
+// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_PARALLEL_TOOL_CALLS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_MCP_WATCH, env:KARUCODE_MCP_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:mcp_watch, config:mcp_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:limits.parallel_tool_calls, config:limits.max_turn_retries, config:limits.turn_retry_delay_ms, config:limits.model_compaction, config:limits.compaction_model, config:limits.compaction_max_tokens, config:limits.compaction_timeout_secs, config:notifications.enabled, config:notifications.min_run_secs, config:notifications.ephemeral_sessions, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings, config:[updates], config:updates.check, config:updates.check_secs, config:updates.manifest_url, config:updates.auto_apply, env:KARUCODE_UPDATE_CHECK, env:KARUCODE_UPDATE_CHECK_SECS, env:KARUCODE_UPDATE_MANIFEST_URL, env:KARUCODE_UPDATE_AUTO_APPLY, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, ui:Settings > Updates
 //
 // # Where the settings come from
 //
@@ -46,19 +46,24 @@
 // # Which settings apply without a restart
 //
 // Model, sampling, limits, approvals and subagents are hot-swapped by a saved
-// change. The plugin list is not part of `PATCH /api/config` - installing a
-// plugin is not a settings tweak - so it has its own refresh:
+// change. The plugin list and the MCP server list are not part of
+// `PATCH /api/config` - installing a plugin or starting a server is not a
+// settings tweak - so each has its own refresh:
 //
 // ```toml
 // plugins_watch = true      # KARUCODE_PLUGINS_WATCH=1
 // plugins_watch_secs = 2    # KARUCODE_PLUGINS_WATCH_SECS, clamped to 1..=600
+// mcp_watch = true          # KARUCODE_MCP_WATCH=1
+// mcp_watch_secs = 2        # KARUCODE_MCP_WATCH_SECS, clamped to 1..=600
 // ```
 //
 // With `plugins_watch` on, the server re-reads `[[plugins]]` from this file and
 // every `<data_dir>/plugins/*/plugin.toml` on a timer and applies additions,
-// removals and rebuilt binaries without a restart. It is off by default because a
-// reload replaces processes; `POST /api/plugins/reload` does the same thing on
-// demand, and `POST /api/plugins/:name/reload` refreshes one plugin. Bind
+// removals and rebuilt binaries without a restart. `mcp_watch` does the same for
+// `[[mcp_servers]]`: a new entry is started, a deleted one is stopped and a
+// changed one is replaced. Both are off by default because a reload replaces
+// processes; `POST /api/plugins/reload` and `POST /api/mcp/reload` do the same
+// thing on demand, and the per-name routes refresh one plugin or server. Bind
 // address, port, data directory and auth token still need a restart.
 //
 // # Update checking
@@ -276,6 +281,28 @@
 // Nothing of a failed attempt is persisted, so a retry can never duplicate an
 // answer, and the run's own wall clock still applies: if the next wait would run
 // past `max_run_secs`, the run fails now instead.
+//
+// ## Compaction is two-tier, and the second tier is optional
+//
+// When a run finally evicts a whole slice of history, the digest it leaves behind
+// is a deterministic **state ledger**: the modified file set, the explored map, the
+// command verdicts and the evicted instructions (see the `prompt-cache` topic). On
+// top of that, a model can be asked for the four prose sections a ledger cannot
+// produce - goal progress, codebase invariants, dead ends, and what was happening at
+// the boundary.
+//
+// ```toml
+// [limits]
+// model_compaction = true      # off means the deterministic ledger only
+// compaction_model = "gpt-4.1-mini"  # omit to use the active model
+// compaction_max_tokens = 1200 # output ceiling for one compaction call
+// compaction_timeout_secs = 20 # wall clock; a slower call is abandoned
+// ```
+//
+// A failure costs nothing: if the call errors, times out or returns nothing, the
+// ledger is already in the window and the run continues with it. The compaction
+// model never sees the transcript - only a pre-filtered batch of user prompts,
+// assistant prose, one-line call signatures and command diagnostics.
 //
 // Environment: `KARUCODE_MAX_ITERATIONS`, `KARUCODE_MAX_RUN_SECS`,
 // `KARUCODE_CONTEXT_MAX_CHARS`, `KARUCODE_PARALLEL_TOOL_CALLS`.
@@ -550,6 +577,20 @@ mod keys {
     pub const ACCESS_TUNNEL: &str = "access.tunnel";
     /// JSON array of CIDR/IP strings.
     pub const ACCESS_TRUSTED_PROXIES: &str = "access.trusted_proxies";
+
+    pub const SKILLS_ENABLED: &str = "skills.enabled";
+    pub const SKILLS_AUTO_DETECT: &str = "skills.auto_detect";
+    pub const SKILLS_PROMPT: &str = "skills.prompt";
+    pub const SKILLS_PROMPT_MAX_CHARS: &str = "skills.prompt_max_chars";
+    pub const SKILLS_MAX_SKILLS: &str = "skills.max_skills";
+    /// JSON array of folder strings.
+    pub const SKILLS_DIRECTORIES: &str = "skills.directories";
+    /// JSON array of skill ids the user turned off. Written by
+    /// `PATCH /api/skills/:id`, never by `PATCH /api/config`.
+    pub const SKILLS_DISABLED: &str = "skills.disabled";
+    /// JSON array of [`kc_core::skill::CustomSkill`]. Written by
+    /// `POST`/`PATCH`/`DELETE /api/skills`, never by `PATCH /api/config`.
+    pub const SKILLS_CUSTOM: &str = "skills.custom";
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +656,16 @@ pub struct LimitsPatch {
     /// Run a turn's independent calls at the same time. Only meaningful for a
     /// session run's execution order; a boolean has no invalid value.
     pub parallel_tool_calls: Option<bool>,
+    /// Ask a model for the semantic half of a compaction digest. Off means the
+    /// deterministic state ledger only.
+    pub model_compaction: Option<bool>,
+    /// Model id for the compaction call. `null` clears it, so the active model is
+    /// used again.
+    pub compaction_model: Option<String>,
+    /// Output ceiling for one compaction call, in tokens.
+    pub compaction_max_tokens: Option<u32>,
+    /// Wall clock for one compaction call, in seconds.
+    pub compaction_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -742,6 +793,28 @@ pub struct AccessPatch {
     pub trusted_proxies: Option<Vec<String>>,
 }
 
+/// `[skills]` section of `PATCH /api/config`.
+///
+/// Only the six operator switches are patchable. `skills.disabled` and
+/// `skills.custom` are written by `PATCH /api/skills/:id` and
+/// `POST`/`DELETE /api/skills` instead, because they are per-skill edits that
+/// must be checked against what discovery actually found - and because a config
+/// patch that silently dropped one would delete a skill someone pasted in.
+///
+/// `directories` is the full replacement list (not a delta), the way
+/// `approvals.allow_commands` behaves: the settings screen always sends the list
+/// it is showing.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsPatch {
+    pub enabled: Option<bool>,
+    pub auto_detect: Option<bool>,
+    pub prompt: Option<bool>,
+    pub prompt_max_chars: Option<usize>,
+    pub max_skills: Option<usize>,
+    pub directories: Option<Vec<String>>,
+}
+
 /// Body of `PATCH /api/config`. Every section is optional; unknown fields are
 /// rejected so a typo in the browser cannot silently do nothing.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -757,6 +830,7 @@ pub struct ConfigPatch {
     pub notifications: Option<NotificationsPatch>,
     pub access: Option<AccessPatch>,
     pub updates: Option<UpdatesPatch>,
+    pub skills: Option<SkillsPatch>,
 }
 
 impl ConfigPatch {
@@ -1044,9 +1118,51 @@ impl SettingsHandle {
         let mut next = old.clone();
         apply_patch(&mut next, patch)?;
         validate_settings(&next)?;
+        self.persist(&old, &next).await?;
+        Ok(next)
+    }
 
-        let old_rows = rows_for(&old);
-        let new_rows = rows_for(&next);
+    /// Read-modify-write the `[skills]` section and persist it.
+    ///
+    /// The `/api/skills` routes cannot go through [`Self::update`]: they change
+    /// `skills.disabled` and `skills.custom`, which are deliberately absent from
+    /// [`SkillsPatch`] because they are per-skill edits checked against what
+    /// discovery found, not a settings form. Everything else is the same - the
+    /// lock check, the update mutex, the validate-then-persist order and the
+    /// "a failed write changes nothing" rule - so a skills edit is as safe as a
+    /// config save.
+    ///
+    /// `mutate` gets a copy of the live section; `normalize` runs after it, so a
+    /// caller can hand over a 70,000-character body or a duplicate id and get the
+    /// clamped, deduplicated result rather than an invalid config. Returning
+    /// `Ok(section)` means the change is live *and* on disk.
+    pub async fn update_skills<F>(&self, mutate: F) -> Result<kc_core::skill::SkillsConfig>
+    where
+        F: FnOnce(&mut kc_core::skill::SkillsConfig) -> Result<()>,
+    {
+        if self.is_locked() {
+            return Err(Error::PermissionDenied(
+                "settings are locked (KARUCODE_LOCK_SETTINGS); change them in the config file or environment"
+                    .into(),
+            ));
+        }
+
+        let _update = self.update_lock.lock().await;
+        let old = self.snapshot();
+        let mut next = old.clone();
+        mutate(&mut next.skills)?;
+        next.skills.normalize();
+        validate_settings(&next)?;
+        self.persist(&old, &next).await?;
+        Ok(next.skills)
+    }
+
+    /// Write the rows that differ between `old` and `next`, then swap the live
+    /// config. Shared by [`Self::update`] and [`Self::update_skills`] so the two
+    /// cannot drift apart on rollback behaviour.
+    async fn persist(&self, old: &Config, next: &Config) -> Result<()> {
+        let old_rows = rows_for(old);
+        let new_rows = rows_for(next);
         let mut changed: Vec<(&'static str, String, String)> = Vec::new();
         for (key, value) in &new_rows {
             let previous = old_rows.get(key).cloned().unwrap_or_default();
@@ -1076,7 +1192,7 @@ impl SettingsHandle {
         }
 
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = next.clone();
-        Ok(next)
+        Ok(())
     }
 
     /// Persist and apply an empty API key (the `clear_api_key` flow).
@@ -1131,6 +1247,8 @@ impl SettingsHandle {
             // is loading" and "my edit will never load".
             "plugins_watch": cfg.plugins_watch,
             "plugins_watch_secs": cfg.plugins_watch_secs,
+            "mcp_watch": cfg.mcp_watch,
+            "mcp_watch_secs": cfg.mcp_watch_secs,
             "updates": public_updates(&cfg.updates),
             // The browser terminal. `shell` is resolved so the UI can say what
             // would actually be spawned, and `enabled` is what hides the tab: a
@@ -1159,9 +1277,39 @@ impl SettingsHandle {
                     == kc_core::config::TunnelKind::Cloudflare,
                 "public_authority": cfg.access.public_authority(),
             },
+            // Agent skills. The switches only: `disabled` and `custom` are
+            // per-skill edits made through `/api/skills` and are not part of
+            // `PATCH /api/config` (see `public_skills`).
+            "skills": public_skills(&cfg.skills),
             "version": crate::VERSION,
         })
     }
+}
+
+/// The `skills` slice of `GET /api/config`.
+///
+/// Split out like [`public_notifications`] so a test can assert the wire shape
+/// without a database, and so the settings screen reads the field names from one
+/// place.
+///
+/// Deliberately *not* included: `skills.disabled` and `skills.custom`. Those are
+/// per-skill edits made through `/api/skills`, and echoing them here would invite
+/// a settings save to send them back - which `SkillsPatch` rejects, because a
+/// whole-list replacement of "every skill you turned off" is exactly the kind of
+/// edit that silently re-enables one.
+pub fn public_skills(skills: &kc_core::skill::SkillsConfig) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": skills.enabled,
+        "auto_detect": skills.auto_detect,
+        "directories": skills
+            .directories
+            .iter()
+            .map(|dir| dir.to_string_lossy().to_string())
+            .collect::<Vec<_>>(),
+        "prompt": skills.prompt,
+        "prompt_max_chars": skills.prompt_max_chars,
+        "max_skills": skills.max_skills,
+    })
 }
 
 /// The `notifications` slice of `GET /api/config`.
@@ -1244,6 +1392,13 @@ impl Settings for SettingsHandle {
 
     async fn notify_config(&self) -> kc_core::config::NotificationsConfig {
         self.read().notifications.clone()
+    }
+
+    async fn skills(&self) -> kc_core::skill::SkillsConfig {
+        // The whole section, not a summary: the caller needs `disabled` and
+        // `custom` to build the registry, and they are already normalised on
+        // every write (see `SettingsHandle::update_skills`).
+        self.read().skills.clone()
     }
 }
 
@@ -1646,6 +1801,21 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         if let Some(v) = limits.parallel_tool_calls {
             config.limits.parallel_tool_calls = v;
         }
+        if let Some(v) = limits.model_compaction {
+            config.limits.model_compaction = v;
+        }
+        if let Some(v) = &limits.compaction_model {
+            // An empty string clears the override, so the active model is used
+            // again; `null` (absent) leaves whatever is configured alone.
+            let trimmed = v.trim();
+            config.limits.compaction_model = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        }
+        if let Some(v) = limits.compaction_max_tokens {
+            config.limits.compaction_max_tokens = v.max(1);
+        }
+        if let Some(v) = limits.compaction_timeout_secs {
+            config.limits.compaction_timeout_secs = v.max(1);
+        }
     }
 
     if let Some(approvals) = &patch.approvals {
@@ -1786,6 +1956,37 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
             target.auto_apply = v;
         }
         target.check_secs = target.interval();
+    }
+
+    if let Some(skills) = &patch.skills {
+        let target = &mut config.skills;
+        if let Some(v) = skills.enabled {
+            target.enabled = v;
+        }
+        if let Some(v) = skills.auto_detect {
+            target.auto_detect = v;
+        }
+        if let Some(v) = skills.prompt {
+            target.prompt = v;
+        }
+        if let Some(v) = skills.prompt_max_chars {
+            target.prompt_max_chars = v;
+        }
+        if let Some(v) = skills.max_skills {
+            target.max_skills = v;
+        }
+        if let Some(list) = &skills.directories {
+            // Empty entries are a mistake worth naming rather than silently
+            // dropping: an empty folder would scan the workspace root and list
+            // every `*.md` in it as a skill.
+            target.directories = clean_list("skills.directories", list)?
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect();
+        }
+        // `disabled`/`custom` are absent from the patch on purpose; the ids and
+        // the stored skills survive a settings save untouched.
+        config.skills.normalize();
     }
 
     // Repair a missing selection (first profile added, active profile deleted)
@@ -2738,6 +2939,30 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
         serde_json::to_string(&access.trusted_proxies).unwrap_or_else(|_| "[]".into()),
     );
 
+    let skills = &config.skills;
+    rows.insert(keys::SKILLS_ENABLED, skills.enabled.to_string());
+    rows.insert(keys::SKILLS_AUTO_DETECT, skills.auto_detect.to_string());
+    rows.insert(keys::SKILLS_PROMPT, skills.prompt.to_string());
+    rows.insert(
+        keys::SKILLS_PROMPT_MAX_CHARS,
+        skills.prompt_max_chars.to_string(),
+    );
+    rows.insert(keys::SKILLS_MAX_SKILLS, skills.max_skills.to_string());
+    // One row for the folder list and one for all the stored skills, so a list
+    // and its entries can never be torn apart by a half-applied write.
+    rows.insert(
+        keys::SKILLS_DIRECTORIES,
+        serde_json::to_string(&skills.directories).unwrap_or_else(|_| "[]".into()),
+    );
+    rows.insert(
+        keys::SKILLS_DISABLED,
+        serde_json::to_string(&skills.disabled).unwrap_or_else(|_| "[]".into()),
+    );
+    rows.insert(
+        keys::SKILLS_CUSTOM,
+        serde_json::to_string(&skills.custom).unwrap_or_else(|_| "[]".into()),
+    );
+
     rows
 }
 
@@ -3070,6 +3295,58 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
         keys::ACCESS_TRUSTED_PROXIES => {
             if let Ok(list) = serde_json::from_str::<Vec<String>>(value) {
                 config.access.trusted_proxies = list;
+            }
+        }
+
+        keys::SKILLS_ENABLED => {
+            if let Some(v) = parse_bool(key, value) {
+                config.skills.enabled = v;
+            }
+        }
+        keys::SKILLS_AUTO_DETECT => {
+            if let Some(v) = parse_bool(key, value) {
+                config.skills.auto_detect = v;
+            }
+        }
+        keys::SKILLS_PROMPT => {
+            if let Some(v) = parse_bool(key, value) {
+                config.skills.prompt = v;
+            }
+        }
+        keys::SKILLS_PROMPT_MAX_CHARS => {
+            if let Some(v) = parse_value(key, value) {
+                config.skills.prompt_max_chars = v;
+            }
+        }
+        keys::SKILLS_MAX_SKILLS => {
+            if let Some(v) = parse_value(key, value) {
+                config.skills.max_skills = v;
+            }
+        }
+        keys::SKILLS_DIRECTORIES => {
+            if let Some(list) = parse_list(key, value) {
+                config.skills.directories =
+                    list.into_iter().map(std::path::PathBuf::from).collect();
+            }
+        }
+        keys::SKILLS_DISABLED => {
+            if let Some(list) = parse_list(key, value) {
+                config.skills.disabled = list;
+            }
+        }
+        keys::SKILLS_CUSTOM => {
+            if value.trim().is_empty() {
+                return;
+            }
+            match serde_json::from_str::<Vec<kc_core::skill::CustomSkill>>(value) {
+                Ok(skills) => config.skills.custom = skills,
+                Err(e) => {
+                    warn!(
+                        key,
+                        error = %e,
+                        "ignoring a stored-skill row that is not valid JSON"
+                    );
+                }
             }
         }
 
@@ -4190,6 +4467,105 @@ mod tests {
         assert_eq!(restored.approvals.mode, ApprovalMode::AskCommands);
         assert_eq!(restored.approvals.allow_commands.len(), 2);
         assert_eq!(restored.subagents.max_depth, 2);
+    }
+
+    #[test]
+    fn skills_settings_survive_a_row_round_trip() {
+        let mut cfg = Config::default();
+        cfg.skills.enabled = false;
+        cfg.skills.auto_detect = false;
+        cfg.skills.prompt = false;
+        cfg.skills.prompt_max_chars = 900;
+        cfg.skills.max_skills = 7;
+        cfg.skills.directories = vec![
+            std::path::PathBuf::from("/tmp/kc-skills"),
+            std::path::PathBuf::from("relative/skills"),
+        ];
+        cfg.skills.disabled = vec!["release".into(), "house-style".into()];
+        cfg.skills.custom = vec![kc_core::skill::CustomSkill {
+            id: "note".into(),
+            name: "Note".into(),
+            description: "How we write notes.".into(),
+            body: "# Notes\n\nShort.".into(),
+        }];
+        let rows: Vec<(String, String)> = rows_for(&cfg)
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+
+        // A restart is `apply_rows` over a fresh config; the whole section - the
+        // switches, the off list and the stored skills - has to come back.
+        let mut restored = Config::default();
+        apply_rows(&mut restored, &rows);
+        assert_eq!(restored.skills, cfg.skills);
+
+        // A hand-edited comma list for the folders still reads.
+        let mut legacy = Config::default();
+        apply_rows(
+            &mut legacy,
+            &[(
+                keys::SKILLS_DIRECTORIES.to_string(),
+                "/a/skills, /b/skills".to_string(),
+            )],
+        );
+        assert_eq!(
+            legacy.skills.directories,
+            vec![
+                std::path::PathBuf::from("/a/skills"),
+                std::path::PathBuf::from("/b/skills")
+            ]
+        );
+
+        // A stale row from another build is warned about, not fatal.
+        let mut broken = Config::default();
+        apply_rows(
+            &mut broken,
+            &[(keys::SKILLS_CUSTOM.to_string(), "{not json".to_string())],
+        );
+        assert!(broken.skills.custom.is_empty());
+    }
+
+    #[test]
+    fn a_skills_patch_is_clamped_and_cannot_touch_the_stored_skills() {
+        let mut cfg = Config::default();
+        cfg.skills.custom = vec![kc_core::skill::CustomSkill {
+            id: "note".into(),
+            name: "Note".into(),
+            description: "d".into(),
+            body: "b".into(),
+        }];
+        cfg.skills.disabled = vec!["release".into()];
+        let patch = ConfigPatch {
+            skills: Some(SkillsPatch {
+                enabled: Some(false),
+                prompt_max_chars: Some(0),
+                max_skills: Some(10_000),
+                ..SkillsPatch::default()
+            }),
+            ..ConfigPatch::default()
+        };
+        apply_patch(&mut cfg, &patch).unwrap();
+        assert!(!cfg.skills.enabled);
+        // Both bounds are clamped to what the prompt builder can live with.
+        assert_eq!(cfg.skills.prompt_max_chars, 200);
+        assert!(cfg.skills.max_skills <= 512);
+        // The per-skill rows are not part of the patch and must be untouched.
+        assert_eq!(cfg.skills.custom.len(), 1);
+        assert_eq!(cfg.skills.disabled, vec!["release".to_string()]);
+
+        // An empty folder is refused rather than silently scanning the root.
+        let empty = ConfigPatch {
+            skills: Some(SkillsPatch {
+                directories: Some(vec!["".into()]),
+                ..SkillsPatch::default()
+            }),
+            ..ConfigPatch::default()
+        };
+        assert!(apply_patch(&mut cfg, &empty).is_err());
+
+        // A skills patch is a prompt change, not a credential change: the
+        // ordinary bearer token is enough, exactly as the plan says.
+        assert!(patch.security_fields().is_empty());
     }
 
     #[test]

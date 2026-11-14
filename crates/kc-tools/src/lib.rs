@@ -8,7 +8,7 @@
 // @kc-title: The built-in tools the agent can call
 // @kc-summary: What each first-party tool does, how it is gated, and the limits and gotchas that shape its output.
 // @kc-tags: tools, agent, files, search, shell, git
-// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:glob, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:git_log, tool:karucode_docs, tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, route:POST /api/sessions/:id/rewind, config:[limits], config:limits.max_file_read_bytes, config:limits.max_command_output_bytes, config:limits.search_max_results, config:limits.max_tool_output_bytes, config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:limits.parallel_tool_calls, env:KARUCODE_PARALLEL_TOOL_CALLS, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:RIPGREP_CONFIG_PATH
+// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:glob, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:git_log, tool:karucode_docs, tool:skill, tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, route:POST /api/sessions/:id/rewind, config:[limits], config:limits.max_file_read_bytes, config:limits.max_command_output_bytes, config:limits.search_max_results, config:limits.max_tool_output_bytes, config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:limits.parallel_tool_calls, env:KARUCODE_PARALLEL_TOOL_CALLS, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:RIPGREP_CONFIG_PATH
 //
 // | Tool | Class | Approval | What it does |
 // | --- | --- | --- | --- |
@@ -23,6 +23,7 @@
 // | `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref, **confined to the workspace** (paths are workspace-relative) |
 // | `git_log` | read_only | none | bounded commit history: one line per commit (`sha date subject`), `max_count` default 20 and hard-capped at 200, optional `path` narrowing, **confined to the workspace** |
 // | `karucode_docs` | read_only | none | search and read karucode's own documentation (this system); `read` is paged with `offset`/`limit` and ends with the exact offset that continues a long topic |
+// | `skill` | read_only | none | list, search and read the workspace's skills - the `[skills]` instruction packs auto-detected in `.karucode/skills`, `.claude/skills` and their user-scope twins, plus the ones added in the UI. `list` shows what exists, `read` returns one body paged with `offset`/`limit` under the same continuation rule as `karucode_docs`, `search` matches a word against id, name and description. Only the enabled ones are readable, and a disabled master switch fails the call with the setting to change |
 //
 // The delegate family - `spawn_agent`, `spawn_agents`, `send_message`,
 // `wait_for_agents`, `list_subagents`, `agent_history`, `pause_agents`,
@@ -336,6 +337,7 @@ pub mod favicon;
 pub mod file_ops;
 pub mod git;
 pub mod search;
+pub mod skill_tool;
 
 #[cfg(test)]
 mod tests;
@@ -1877,5 +1879,6 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(GitDiff),
         Arc::new(GitLog),
         Arc::new(docs_tool::KarucodeDocs),
+        Arc::new(skill_tool::SkillTool),
     ]
 }

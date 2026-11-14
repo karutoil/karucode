@@ -430,6 +430,12 @@ export interface Config {
   plugins_watch?: boolean;
   plugins_watch_secs?: number;
   /**
+   * Whether the server re-reads `[[mcp_servers]]` on a timer (`mcp_watch`), and
+   * how often. Absent on an older server, which only reloads on demand.
+   */
+  mcp_watch?: boolean;
+  mcp_watch_secs?: number;
+  /**
    * `[updates]`: whether the server looks for a newer build. Absent on an older
    * server, which never checks (and has no update routes at all).
    */
@@ -442,6 +448,12 @@ export interface Config {
    * all beyond the bearer token.
    */
   access?: AccessConfig;
+  /**
+   * The `[skills]` section. Absent on an older server, which has no skills
+   * feature at all - Settings → Skills reads `GET /api/skills` instead, so an
+   * absent field here costs nothing.
+   */
+  skills?: SkillsConfigSummary;
   version: string;
 }
 
@@ -659,6 +671,127 @@ export interface ConfigPatch {
   notifications?: NotificationsPatch;
   access?: AccessPatch;
   updates?: UpdatesPatch;
+  /**
+   * The `[skills]` section: any subset of its six fields.
+   *
+   * `skills.custom` and `skills.disabled` are deliberately **not** here - they
+   * are managed by the `/api/skills` routes, not by a config patch.
+   */
+  skills?: SkillsConfigPatch;
+}
+
+// ---------------------------------------------------------------------------
+// Skills (`[skills]`, `GET /api/skills` and friends)
+// ---------------------------------------------------------------------------
+
+/**
+ * The `[skills]` section, as `GET /api/config` and `GET /api/skills` report it.
+ *
+ * These six are the whole install-level surface: everything else about skills is
+ * per-skill. `directories` holds only the extra folders a person added; the
+ * conventional workspace and user folders are always scanned when `auto_detect`
+ * is on.
+ */
+export interface SkillsConfigSummary {
+  enabled: boolean;
+  auto_detect: boolean;
+  directories: string[];
+  prompt: boolean;
+  /**
+   * How many characters of the skill list may reach the system prompt. The
+   * server clamps it, so a caller must re-read the stored value from the
+   * response rather than echo what was typed.
+   */
+  prompt_max_chars: number;
+  /** How many skills the prompt block lists. Clamped by the server too. */
+  max_skills: number;
+}
+
+/**
+ * Where a skill came from, exactly as the API spells it.
+ *
+ * `kc_core::skill::SkillSource` is `#[serde(rename_all = "kebab-case")]`, so the
+ * `source` field on the wire is one of these four strings. They are *not* the
+ * human labels: the prompt and the `skill` tool use `SkillSource::label()`, which
+ * says `configured` for `config` and `added` for `custom`. Anything that shows
+ * the source to a person maps the value (`SkillsSettings.tsx`); anything that keys off
+ * the wire (`data-source`) mirrors it verbatim.
+ */
+export type SkillSource = 'workspace' | 'user' | 'config' | 'custom';
+
+/** One row of `GET /api/skills`. */
+export interface SkillSummary {
+  id: string;
+  name: string;
+  /** One line: when to use it. The prompt shows exactly this. */
+  description: string;
+  source: SkillSource;
+  /** The file it was read from; absent for a skill that only lives in config. */
+  path?: string | null;
+  enabled: boolean;
+  /** True for a skill added through the API (the only kind that can be deleted). */
+  custom?: boolean;
+}
+
+/** `GET /api/skills/:id`: the row plus its markdown, frontmatter stripped. */
+export interface SkillDetail extends SkillSummary {
+  body?: string | null;
+  /** True when the server cut the body at its own cap. */
+  body_truncated?: boolean;
+}
+
+/**
+ * One folder discovery looked in.
+ *
+ * `exists: false` is what makes "auto-detect found nothing" explainable: the
+ * folder is where it was expected to be, and it is not there.
+ */
+export interface SkillRoot {
+  path: string;
+  source: SkillSource;
+  exists: boolean;
+  /** True for an entry that came from `skills.directories`. */
+  configured?: boolean;
+  /** How many skills this folder contributed after shadowing. */
+  count: number;
+}
+
+export interface SkillListResponse extends SkillsConfigSummary {
+  /** True when `max_skills` cut the list short. */
+  truncated?: boolean;
+  roots: SkillRoot[];
+  skills: SkillSummary[];
+}
+
+/** `PATCH /api/config`'s optional `skills` object: any subset of the six. */
+export interface SkillsConfigPatch {
+  enabled?: boolean;
+  auto_detect?: boolean;
+  directories?: string[];
+  prompt?: boolean;
+  prompt_max_chars?: number;
+  max_skills?: number;
+}
+
+/** `POST /api/skills`. `id`/`name` default to each other; `body` is required. */
+export interface SkillCreateRequest {
+  id?: string;
+  name?: string;
+  description: string;
+  body: string;
+}
+
+/**
+ * `PATCH /api/skills/:id`.
+ *
+ * `enabled` works for every skill. `name`/`description`/`body` work only for a
+ * custom one: the server answers 400 for a file-backed skill, naming the file.
+ */
+export interface SkillUpdateRequest {
+  enabled?: boolean;
+  name?: string;
+  description?: string;
+  body?: string;
 }
 
 export interface ProviderTestResult {
@@ -1405,6 +1538,13 @@ export interface GitFile {
   conflict?: boolean;
 }
 
+export type GitRepoOperation = 'merge' | 'rebase' | 'cherry-pick' | 'revert';
+
+export interface GitIdentity {
+  name: string | null;
+  email: string | null;
+}
+
 export interface GitStatus {
   is_repo: boolean;
   branch: string | null;
@@ -1414,6 +1554,10 @@ export interface GitStatus {
   upstream?: string | null;
   ahead?: number;
   behind?: number;
+  operation?: GitRepoOperation | null;
+  has_head?: boolean;
+  identity?: GitIdentity;
+  remotes_count?: number;
   error: string | null;
   files: GitFile[];
   /** The server cut the listing at its output limit. */
@@ -1438,12 +1582,164 @@ export interface GitBranch {
   subject: string;
 }
 
+export interface GitRemoteBranch {
+  name: string;
+  remote: string;
+  branch: string;
+  commit: string;
+  timestamp: number;
+  subject: string;
+}
+
 export interface GitBranchList {
   is_repo: boolean;
   branch: string | null;
   detached: boolean;
   branches: GitBranch[];
+  remote_branches?: GitRemoteBranch[];
   truncated: boolean;
+}
+
+export interface GitTag {
+  name: string;
+  commit: string;
+  annotated: boolean;
+  timestamp: number;
+  subject: string;
+}
+
+export interface GitTagList {
+  is_repo: boolean;
+  tags: GitTag[];
+  truncated: boolean;
+}
+
+export interface GitRemote {
+  name: string;
+  fetch_url: string | null;
+  push_url: string | null;
+  github: { owner: string; repo: string } | null;
+}
+
+export interface GitRemoteList {
+  is_repo: boolean;
+  remotes: GitRemote[];
+}
+
+export interface GitStashDetail {
+  ref: string;
+  index: number;
+  files: GitCommitFile[];
+  diff: string;
+  truncated: boolean;
+}
+
+export interface GitHubStatus {
+  gh_installed: boolean;
+  authenticated: boolean;
+  username: string | null;
+  remote_slug: string | null;
+  repo: {
+    nameWithOwner?: string;
+    name?: string;
+    url?: string;
+    sshUrl?: string;
+    defaultBranchRef?: { name: string } | null;
+    isPrivate?: boolean;
+    description?: string | null;
+    stargazerCount?: number;
+    forkCount?: number;
+  } | null;
+  error: string | null;
+}
+
+export interface GitHubLabel {
+  id?: string;
+  name: string;
+  color?: string;
+  description?: string;
+}
+
+export interface GitHubAuthor {
+  login: string;
+  is_bot?: boolean;
+}
+
+export interface GitHubStatusCheck {
+  __typename?: string;
+  name?: string;
+  context?: string;
+  status?: string;
+  state?: string;
+  conclusion?: string | null;
+  detailsUrl?: string;
+  targetUrl?: string;
+}
+
+export interface GitHubPullSummary {
+  number: number;
+  title: string;
+  state: 'OPEN' | 'CLOSED' | 'MERGED' | string;
+  isDraft: boolean;
+  author: GitHubAuthor | null;
+  headRefName: string;
+  baseRefName: string;
+  url: string;
+  createdAt: string;
+  updatedAt: string;
+  labels: GitHubLabel[];
+  reviewDecision?: string | null;
+  mergeable?: string | null;
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
+  statusCheckRollup?: GitHubStatusCheck[] | null;
+  body?: string;
+}
+
+export interface GitHubComment {
+  id?: string;
+  author: GitHubAuthor | null;
+  body: string;
+  createdAt: string;
+}
+
+export interface GitHubPullDetail extends GitHubPullSummary {
+  comments?: GitHubComment[];
+  reviews?: Array<{
+    author: GitHubAuthor | null;
+    state: string;
+    body: string;
+    submittedAt?: string;
+  }>;
+  files?: Array<{
+    path: string;
+    additions: number;
+    deletions: number;
+  }>;
+  commits?: Array<{
+    oid: string;
+    messageHeadline: string;
+    authors?: Array<{ login?: string; name?: string }>;
+  }>;
+}
+
+export interface GitHubIssueSummary {
+  number: number;
+  title: string;
+  state: 'OPEN' | 'CLOSED' | string;
+  author: GitHubAuthor | null;
+  url: string;
+  createdAt: string;
+  updatedAt: string;
+  labels: GitHubLabel[];
+  assignees?: GitHubAuthor[];
+  comments?: GitHubComment[] | number;
+  body?: string;
+}
+
+export interface GitHubIssueDetail extends Omit<GitHubIssueSummary, 'comments'> {
+  comments?: GitHubComment[];
 }
 
 /** One commit from `GET /api/git/log`. */
@@ -1514,6 +1810,8 @@ export interface GitMutationResult {
   message: string | null;
   status: GitStatus;
   commit: { id: string; short_id: string; subject: string } | null;
+  remotes?: GitRemote[];
+  url?: string | null;
 }
 
 export interface PluginToolSpec {
@@ -1562,6 +1860,20 @@ export interface McpServer {
   status: string;
   tools: string[];
   error: string | null;
+}
+
+/** What one `POST /api/mcp/reload` changed, in configuration order. */
+export interface McpRescanReport {
+  added: string[];
+  removed: string[];
+  restarted: string[];
+  retried: string[];
+  unchanged: string[];
+}
+
+export interface McpRescanResponse {
+  report: McpRescanReport;
+  servers: McpServer[];
 }
 
 export interface EventEnvelope {

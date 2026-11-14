@@ -495,6 +495,8 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
   const rootRef = useRef<HTMLDivElement>(null);
   const disclosureRef = useRef<HTMLButtonElement>(null);
   const disclosureId = useId();
+  /** Whether resting on the trigger opens the list, or only a press does. */
+  const hoverOpens = store.projectMenuOpen.value === 'hover';
   /** Hover timers for the desktop dropdown, plus whether the pointer is what
    *  opened it — a hover must never move focus. */
   const hoverOpenTimer = useRef<number | null>(null);
@@ -534,9 +536,14 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
     setProjectsOpen(true);
   };
 
-  /** Resting on the trigger opens the dropdown (the way a menu bar does). */
+  /** Resting on the trigger opens the dropdown (the way a menu bar does).
+   *
+   *  Only in `hover` mode: the setting exists because this is the one control in
+   *  the rail that opens under a pointer which was only crossing it on the way to
+   *  the composer. In `click` mode the trigger is an ordinary disclosure and the
+   *  pointer may pass over it freely. */
   const hoverOpenProjects = (): void => {
-    if (!desktop) return;
+    if (!desktop || !hoverOpens) return;
     clearHoverTimers();
     if (projectsOpen) return;
     hoverOpenTimer.current = window.setTimeout(() => {
@@ -554,9 +561,12 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
     }
   };
 
-  /** Leaving the trigger or the panel closes it, after the grace period. */
+  /** Leaving the trigger or the panel closes it, after the grace period.
+   *
+   *  A `click` menu stays open until it is dismissed: closing it because the
+   *  pointer moved would be the hover behaviour the setting just turned off. */
   const hoverCloseProjects = (): void => {
-    if (!desktop) return;
+    if (!desktop || !hoverOpens) return;
     if (hoverOpenTimer.current !== null) {
       // Left before it opened: never open at all.
       window.clearTimeout(hoverOpenTimer.current);
