@@ -1551,17 +1551,21 @@ frames as control JSON: `{"type":"resize","cols":…,"rows":…}`, `{"type":"inp
 type this server does not know). The `terminals` doc topic covers the environment
 and the limits.
 
-## Git
+## Git & GitHub
 
-The git routes are the source-control manager's backend. They are **local only**:
-staging, commits, branches, history and stashes. There is deliberately no
-fetch/pull/push route - those need credentials and can block on a prompt, so they
-stay in the terminal.
+The git and GitHub routes are the source-control manager's backend: repository
+initialization, local working-tree mutations, commits, branches, tags, history,
+stashes, merge/rebase/cherry-pick/reset/revert/conflict-resolution, remote
+management and non-interactive fetch/pull/push, plus `gh` CLI integration for
+GitHub repositories, Pull Requests and Issues.
 
 `GET /api/git/status[?project=<id>]` →
 ```json
 { "is_repo": true, "branch": "main", "detached": false,
-  "upstream": "origin/main", "ahead": 1, "behind": 0, "error": null,
+  "upstream": "origin/main", "ahead": 1, "behind": 0,
+  "operation": null, "has_head": true,
+  "identity": { "name": "Alice", "email": "alice@example.com" },
+  "remotes_count": 1, "error": null,
   "truncated": false,
   "files": [ { "path": "src/x.rs", "orig_path": null,
                "index": "M", "worktree": " ", "status": "M",
@@ -1571,6 +1575,7 @@ stay in the terminal.
 `index`/`worktree` are the two porcelain columns, so a path staged *and* modified
 (`MM`) belongs to both the staged and the working-tree list; `status` is the
 trimmed form older clients read. `detached: true` means `branch` is `null`.
+`operation` is `"merge"`, `"rebase"`, `"cherry-pick"`, `"revert"` or `null`.
 `truncated: true` means the listing hit the server's output cap.
 
 `GET /api/git/diff?path=&staged=false&base=[&project=<id>]` →
@@ -1583,8 +1588,13 @@ file reads as added lines instead of an empty patch.
 Reads for the manager:
 
 * `GET /api/git/branches` → `{ is_repo, branch, detached, truncated, branches: [{
-  name, current, commit, upstream, ahead, behind, timestamp, subject }] }`
-* `GET /api/git/log[?limit=30&path=src/x.rs]` → `{ is_repo, truncated, commits: [{
+  name, current, commit, upstream, ahead, behind, timestamp, subject }],
+  remote_branches: [{ name, remote, branch, commit, timestamp, subject }] }`
+* `GET /api/git/tags` → `{ is_repo, truncated, tags: [{ name, commit, annotated,
+  timestamp, subject }] }`
+* `GET /api/git/remotes` → `{ is_repo, remotes: [{ name, fetch_url, push_url,
+  github: { owner, repo } | null }] }` (embedded `user:pass@` credentials stripped)
+* `GET /api/git/log[?limit=30&path=src/x.rs&branch=main&all=false&search=]` → `{ is_repo, truncated, commits: [{
   id, short_id, author, email, timestamp, parents, refs, subject }] }` (`limit` is
   clamped to 1-100; `path` narrows the log to one file's history)
 * `GET /api/git/commits/:sha` → the commit with `body`, a `files` stat
@@ -1592,26 +1602,41 @@ Reads for the manager:
   well-formed id that is not in the repository, `400` for a non-hex one
 * `GET /api/git/stash` → `{ is_repo, truncated, stashes: [{ ref, index, commit,
   timestamp, subject }] }`
+* `GET /api/git/stash/:index` → `{ ref, index, files: [...], diff, truncated }`
+* `GET /api/git/github/status` → `{ gh_installed, authenticated, username,
+  remote_slug, repo, error }`
+* `GET /api/git/github/pulls[?state=open|closed|merged|all&limit=30]`, `GET /api/git/github/pulls/:number`, `GET /api/git/github/pulls/:number/diff`
+* `GET /api/git/github/issues[?state=open|closed|all&limit=30]`, `GET /api/git/github/issues/:number`
 
-Every mutation answers the same envelope, with a **fresh** status so a client
+Every git mutation answers the same envelope, with a **fresh** status so a client
 never races a second `GET` against a command it just ran:
 
 ```json
 { "ok": true, "message": "switched to main", "status": { … }, "commit": null }
 ```
 
-`commit` carries `{id, short_id, subject}` after `POST /api/git/commit` and is
-`null` everywhere else.
+`commit` carries `{id, short_id, subject}` after `POST /api/git/commit` (and optionally `POST /api/git/init` with `initial_commit: true`) and is `null` everywhere else.
 
 | Route | Body |
 | --- | --- |
+| `POST /api/git/init` | `{ "default_branch": "main", "initial_commit": false, "commit_message": "…", "gitignore_template": "rust\|node\|python\|go\|general\|none" }` |
+| `POST /api/git/config` | `{ "user_name": "…", "user_email": "…" }` |
 | `POST /api/git/stage`, `/unstage` | `{ "paths": ["src/x.rs"] }` or `{ "all": true }` |
 | `POST /api/git/discard` | the same plus `"staged": bool` and **required** `"confirm": true` |
 | `POST /api/git/commit` | `{ "message": "fix: x", "amend": false, "stage_all": false }` |
 | `POST /api/git/branches` | `{ "name": "feat/y", "start": "main", "checkout": true }` |
+| `POST /api/git/branches/rename` | `{ "old_name": "a", "new_name": "b" }` |
 | `POST /api/git/branches/delete` | `{ "name": "feat/y", "force": false, "confirm": false }` |
-| `POST /api/git/checkout` | `{ "name": "main" }` |
+| `POST /api/git/checkout` | `{ "name": "main", "track": false, "detach": false }` |
+| `POST /api/git/tags` | `{ "action": "create\|delete\|push", "name": "v1.0.0", "target": "HEAD", "message": "…", "remote": "origin" }` |
+| `POST /api/git/remotes` | `{ "action": "add\|set_url\|remove\|rename", "name": "origin", "url": "…", "new_name": "…" }` |
+| `POST /api/git/fetch`, `/pull`, `/push` | `fetch`: `{remote?,prune?,all?,tags?}`, `pull`: `{remote?,branch?,rebase?}`, `push`: `{remote?,branch?,set_upstream?,force_with_lease?,tags?,confirm?}` |
+| `POST /api/git/merge`, `/rebase`, `/cherry-pick` | `{ "branch"\|"sha"?, "action"?: "merge\|rebase\|pick\|continue\|abort\|skip", "no_ff"?, "squash"? }` |
+| `POST /api/git/revert`, `/reset`, `/resolve` | `revert`: `{sha}`, `reset`: `{target,mode:"soft\|mixed\|hard",confirm?}`, `resolve`: `{path,strategy:"ours\|theirs"}` |
 | `POST /api/git/stash` | `{ "action": "push\|pop\|apply\|drop", "index": 0, "message": "…", "include_untracked": false, "confirm": false }` |
+| `POST /api/git/github/repo` | `{ "name": "…", "description"?, "visibility": "private\|public\|internal", "remote"?: "origin", "push"?: true }` |
+| `POST /api/git/github/pulls`, `/:n/checkout`, `/:n/merge`, `/:n/state`, `/:n/comment` | PR create (`title,body?,base?,head?,draft?`), checkout, merge (`method?,delete_branch?,confirm:true`), state (`close\|reopen`), comment (`body`) |
+| `POST /api/git/github/issues`, `/:n/state`, `/:n/comment` | Issue create (`title,body?,labels?`), state (`close\|reopen`), comment (`body`) |
 
 Rules:
 
@@ -1810,6 +1835,23 @@ is `409 bad_request` naming its status; an unknown id is `404 not_found`.
 `GET /api/mcp` → `{ "servers": [ { "name": "fs", "transport": "stdio",
   "status": "connected|failed|disconnected", "tools": ["mcp__fs__read"],
   "error": null } ] }`
+
+`POST /api/mcp/reload` re-reads `[[mcp_servers]]` and reconciles the running
+connections with it, without restarting karucode. The body is
+`{ "report": { "added": [...], "removed": [...], "restarted": [...],
+"retried": [...], "unchanged": [...] }, "servers": [ ...same shape as GET... ] }`.
+A new name is started, a name that disappeared is stopped and dropped, a changed
+entry is closed and started again, an unchanged entry whose connection is not
+alive is retried, and everything else is left running untouched. An empty
+`[[mcp_servers]]` table means no servers; an unreadable or unparseable config
+file keeps what is running and logs a warning. `mcp_watch = true` runs the same
+reconcile on a timer.
+
+`POST /api/mcp/:name/reload` replaces one server's process/connection from the
+current entry, whether or not the entry changed; a configured-but-not-running
+name is started, an unknown name is `404 not_found`. The body is the server
+status, same shape as one `GET /api/mcp` entry. Both routes need the admin
+credential (an `admin`-scope API key or `X-Karucode-Admin-Token`).
 
 ## Skills
 

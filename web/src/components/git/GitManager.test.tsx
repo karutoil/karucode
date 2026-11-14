@@ -978,3 +978,267 @@ function containerRow(name: string): HTMLElement {
   if (!found) throw new Error(`no row for ${name}`);
   return found;
 }
+
+describe('GitManager — full git client & GitHub session launcher', () => {
+  it('initializes a repository from the non-repo setup form', async () => {
+    const calls = installFetch({
+      status: { is_repo: false, branch: null, error: null, files: [] },
+      statusAfter: { ...STATUS, files: [] },
+    });
+    render(<GitManager variant="page" />);
+
+    const initBtn = await screen.findByRole('button', { name: 'Initialize repository' });
+    fireEvent.click(initBtn);
+
+    await waitFor(() => expect(posts(calls, '/api/git/init')).toHaveLength(1));
+    expect(posts(calls, '/api/git/init')[0]?.body).toMatchObject({
+      default_branch: 'main',
+      initial_commit: true,
+    });
+  });
+
+  it('adds a remote and creates a GitHub repo from the Remotes tab', async () => {
+    const calls: Call[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://localhost');
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+        calls.push({ method, path: url.pathname, query: url.searchParams, body });
+
+        if (method === 'GET') {
+          if (url.pathname === '/api/git/status') return jsonResponse({ ...STATUS, remotes_count: 0 });
+          if (url.pathname === '/api/git/branches') return jsonResponse(BRANCHES);
+          if (url.pathname === '/api/git/log') return jsonResponse(LOG);
+          if (url.pathname === '/api/git/remotes') return jsonResponse({ is_repo: true, remotes: [] });
+          if (url.pathname === '/api/git/github/status') {
+            return jsonResponse({
+              gh_installed: true,
+              authenticated: true,
+              username: 'karutoil',
+              remote_slug: null,
+              repo: null,
+              error: null,
+            });
+          }
+        }
+        if (method === 'POST') {
+          return jsonResponse({
+            ok: true,
+            message: 'ok',
+            status: { ...STATUS, remotes_count: 1 },
+            commit: null,
+            remotes: [{ name: 'origin', fetch_url: 'https://github.com/karutoil/demo.git', push_url: 'https://github.com/karutoil/demo.git', github: { owner: 'karutoil', repo: 'demo' } }],
+          });
+        }
+        return jsonResponse({ error: { code: 'not_found', message: url.pathname } }, 404);
+      }),
+    );
+
+    render(<GitManager variant="page" />);
+    const remotesTab = await screen.findByRole('tab', { name: /Remotes/ });
+    fireEvent.click(remotesTab);
+
+    const urlInput = await screen.findByPlaceholderText('https://github.com/owner/repo.git');
+    fireEvent.input(urlInput, { target: { value: 'https://github.com/karutoil/demo.git' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/ }));
+
+    await waitFor(() => expect(posts(calls, '/api/git/remotes')).toHaveLength(1));
+    expect(posts(calls, '/api/git/remotes')[0]?.body).toEqual({
+      action: 'add',
+      name: 'origin',
+      url: 'https://github.com/karutoil/demo.git',
+    });
+
+    const ghBtn = await screen.findByRole('button', { name: 'Create GitHub repository' });
+    await waitFor(() => expect((ghBtn as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.submit(ghBtn.closest('form')!);
+    await waitFor(() => expect(posts(calls, '/api/git/github/repo')).toHaveLength(1));
+  });
+
+  it('lists PRs and launches a karucode session for one or all PRs', async () => {
+    const calls: Call[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://localhost');
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+        calls.push({ method, path: url.pathname, query: url.searchParams, body });
+
+        if (method === 'GET') {
+          if (url.pathname === '/api/git/status') return jsonResponse({ ...STATUS, remotes_count: 1 });
+          if (url.pathname === '/api/git/branches') return jsonResponse(BRANCHES);
+          if (url.pathname === '/api/git/log') return jsonResponse(LOG);
+          if (url.pathname === '/api/git/github/status') {
+            return jsonResponse({
+              gh_installed: true,
+              authenticated: true,
+              username: 'karutoil',
+              remote_slug: 'karutoil/karucode',
+              repo: { nameWithOwner: 'karutoil/karucode', url: 'https://github.com/karutoil/karucode' },
+              error: null,
+            });
+          }
+          if (url.pathname === '/api/git/github/pulls') {
+            return jsonResponse({
+              pulls: [
+                {
+                  number: 15,
+                  title: 'Fix auth bug',
+                  state: 'OPEN',
+                  isDraft: false,
+                  author: { login: 'toil' },
+                  headRefName: 'fix/auth',
+                  baseRefName: 'main',
+                  url: 'https://github.com/karutoil/karucode/pull/15',
+                  createdAt: '2026-01-01T00:00:00Z',
+                  updatedAt: '2026-01-02T00:00:00Z',
+                  labels: [],
+                  body: 'Fixes login.',
+                },
+                {
+                  number: 16,
+                  title: 'Update deps',
+                  state: 'OPEN',
+                  isDraft: false,
+                  author: { login: 'dependabot' },
+                  headRefName: 'deps',
+                  baseRefName: 'main',
+                  url: 'https://github.com/karutoil/karucode/pull/16',
+                  createdAt: '2026-01-01T00:00:00Z',
+                  updatedAt: '2026-01-02T00:00:00Z',
+                  labels: [],
+                  body: 'Bumps deps.',
+                },
+              ],
+            });
+          }
+          if (url.pathname === '/api/sessions/s_pr_1') {
+            return jsonResponse({
+              session: { id: 's_pr_1', title: 'PR #15: Fix auth bug', project_id: null, created_at: 1, updated_at: 1 },
+              messages: [],
+              runs: [],
+              agents: [],
+              approvals: [],
+              claims: [],
+              running: false,
+            });
+          }
+        }
+        if (method === 'POST') {
+          if (url.pathname === '/api/sessions') {
+            return jsonResponse({
+              id: 's_pr_1',
+              title: body?.title ?? 'New session',
+              workspace_root: '/tmp',
+              project_id: null,
+              created_at: 1,
+              updated_at: 1,
+            });
+          }
+          if (url.pathname.endsWith('/messages')) {
+            return jsonResponse({ run_id: 'r_1' });
+          }
+        }
+        return jsonResponse({ error: { code: 'not_found', message: url.pathname } }, 404);
+      }),
+    );
+
+    render(<GitManager variant="page" />);
+    fireEvent.click(await screen.findByRole('tab', { name: 'Pull requests' }));
+    expect(await screen.findByText('#15 Fix auth bug')).not.toBeNull();
+
+    // Launch a session for all PRs
+    fireEvent.click(screen.getByRole('button', { name: /Session for all \(2\)/ }));
+    await waitFor(() => expect(posts(calls, '/api/sessions')).toHaveLength(1));
+    await waitFor(() => expect(posts(calls, '/api/sessions/s_pr_1/messages')).toHaveLength(1));
+    expect(String(posts(calls, '/api/sessions/s_pr_1/messages')[0]?.body?.content)).toContain('#15');
+    expect(String(posts(calls, '/api/sessions/s_pr_1/messages')[0]?.body?.content)).toContain('#16');
+  });
+
+  it('lists issues and launches a session for a single issue', async () => {
+    const calls: Call[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://localhost');
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+        calls.push({ method, path: url.pathname, query: url.searchParams, body });
+
+        if (method === 'GET') {
+          if (url.pathname === '/api/git/status') return jsonResponse({ ...STATUS, remotes_count: 1 });
+          if (url.pathname === '/api/git/branches') return jsonResponse(BRANCHES);
+          if (url.pathname === '/api/git/log') return jsonResponse(LOG);
+          if (url.pathname === '/api/git/github/status') {
+            return jsonResponse({
+              gh_installed: true,
+              authenticated: true,
+              username: 'karutoil',
+              remote_slug: 'karutoil/karucode',
+              repo: { nameWithOwner: 'karutoil/karucode' },
+              error: null,
+            });
+          }
+          if (url.pathname === '/api/git/github/issues') {
+            return jsonResponse({
+              issues: [
+                {
+                  number: 42,
+                  title: 'Add dark mode toggle',
+                  state: 'OPEN',
+                  author: { login: 'toil' },
+                  url: 'https://github.com/karutoil/karucode/issues/42',
+                  createdAt: '2026-01-01T00:00:00Z',
+                  updatedAt: '2026-01-02T00:00:00Z',
+                  labels: [{ name: 'enhancement' }],
+                  body: 'Users want dark mode.',
+                },
+              ],
+            });
+          }
+          if (url.pathname === '/api/sessions/s_iss_1') {
+            return jsonResponse({
+              session: { id: 's_iss_1', title: 'Issue #42: Add dark mode toggle', project_id: null, created_at: 1, updated_at: 1 },
+              messages: [],
+              runs: [],
+              agents: [],
+              approvals: [],
+              claims: [],
+              running: false,
+            });
+          }
+        }
+        if (method === 'POST') {
+          if (url.pathname === '/api/sessions') {
+            return jsonResponse({
+              id: 's_iss_1',
+              title: body?.title ?? 'New session',
+              workspace_root: '/tmp',
+              project_id: null,
+              created_at: 1,
+              updated_at: 1,
+            });
+          }
+          if (url.pathname.endsWith('/messages')) {
+            return jsonResponse({ run_id: 'r_2' });
+          }
+        }
+        return jsonResponse({ error: { code: 'not_found', message: url.pathname } }, 404);
+      }),
+    );
+
+    render(<GitManager variant="page" />);
+    fireEvent.click(await screen.findByRole('tab', { name: 'Issues' }));
+    expect(await screen.findByText('#42 Add dark mode toggle')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start session for issue #42' }));
+    await waitFor(() => expect(posts(calls, '/api/sessions')).toHaveLength(1));
+    await waitFor(() => expect(posts(calls, '/api/sessions/s_iss_1/messages')).toHaveLength(1));
+    expect(String(posts(calls, '/api/sessions/s_iss_1/messages')[0]?.body?.content)).toContain(
+      'GitHub Issue #42: Add dark mode toggle',
+    );
+  });
+});

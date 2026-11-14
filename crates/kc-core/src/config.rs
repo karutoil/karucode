@@ -725,6 +725,37 @@ pub struct Limits {
     /// capped at eight times this value. Default 30 s.
     #[serde(default = "d_turn_retry_delay")]
     pub turn_retry_delay_ms: u64,
+    /// Ask a model for the **semantic** half of a compaction digest.
+    ///
+    /// On by default. When a run finally evicts a whole slice of history (the
+    /// quantised drop happens once every ~50 turns, not on every turn), the runtime
+    /// already has a deterministic state ledger in the digest: the modified file
+    /// set, the explored map, the command verdicts and the evicted instructions.
+    /// With this on it also asks a model to write four prose sections - goal
+    /// progress, codebase invariants, dead ends, and what was happening at the
+    /// boundary - over a pre-filtered batch of the evicted turns.
+    ///
+    /// **A failure costs nothing.** If the call errors, times out or returns
+    /// nothing, the deterministic ledger is *already* in the window and the run
+    /// continues with it: this switch buys prose, never correctness. Turn it off
+    /// for a provider that bills per call, or when a compaction must never wait on
+    /// a second endpoint.
+    #[serde(default = "d_true")]
+    pub model_compaction: bool,
+    /// Model id for that compaction call. `None` uses the active model, which is
+    /// the safe default; a dedicated small/fast model id here keeps compaction off
+    /// an expensive main model.
+    #[serde(default)]
+    pub compaction_model: Option<String>,
+    /// Output budget for one compaction call, in tokens. The summary is four short
+    /// sections, so this is a ceiling on how much prose can be produced, not a
+    /// target.
+    #[serde(default = "d_compaction_max_tokens")]
+    pub compaction_max_tokens: u32,
+    /// Wall-clock limit for one compaction call, in seconds. A compaction that
+    /// takes longer than this is abandoned and the deterministic ledger is used.
+    #[serde(default = "d_compaction_timeout")]
+    pub compaction_timeout_secs: u64,
 }
 
 fn d_turn_retries() -> u32 {
@@ -732,6 +763,12 @@ fn d_turn_retries() -> u32 {
 }
 fn d_turn_retry_delay() -> u64 {
     30_000
+}
+fn d_compaction_max_tokens() -> u32 {
+    1_200
+}
+fn d_compaction_timeout() -> u64 {
+    20
 }
 
 fn d_iterations() -> u32 {
@@ -799,6 +836,10 @@ impl Default for Limits {
             command_env_passthrough: Vec::new(),
             max_turn_retries: d_turn_retries(),
             turn_retry_delay_ms: d_turn_retry_delay(),
+            model_compaction: d_true(),
+            compaction_model: None,
+            compaction_max_tokens: d_compaction_max_tokens(),
+            compaction_timeout_secs: d_compaction_timeout(),
         }
     }
 }
@@ -1925,6 +1966,14 @@ pub struct ConfigFile {
     pub plugins_watch_secs: Option<u64>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Re-read `[[mcp_servers]]` in the background and apply additions, removals
+    /// and changes without restarting the server.
+    #[serde(default)]
+    pub mcp_watch: Option<bool>,
+    /// How often the MCP watcher polls, in seconds (clamped to
+    /// [`MIN_MCP_WATCH_SECS`]`..=`[`MAX_MCP_WATCH_SECS`]).
+    #[serde(default)]
+    pub mcp_watch_secs: Option<u64>,
     /// Allowlist for directories a project may be created in. `None`/empty -
     /// the default - means **no allowlist**: any existing directory is a valid
     /// project, which is what a single-operator install wants, since the obvious
@@ -1999,6 +2048,12 @@ pub struct Config {
     /// Poll interval for the watcher, in seconds.
     pub plugins_watch_secs: u64,
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Poll `[[mcp_servers]]` and apply changes without a restart. Off by
+    /// default: a reload replaces connections, and an operator who edits the
+    /// file mid-session should opt into that happening on its own.
+    pub mcp_watch: bool,
+    /// Poll interval for the MCP watcher, in seconds.
+    pub mcp_watch_secs: u64,
     pub web_dir: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
     /// Allowlist for directories a project may be created in. **Empty means no
@@ -2043,6 +2098,8 @@ impl Default for Config {
             plugins_watch: false,
             plugins_watch_secs: DEFAULT_PLUGINS_WATCH_SECS,
             mcp_servers: Vec::new(),
+            mcp_watch: false,
+            mcp_watch_secs: DEFAULT_MCP_WATCH_SECS,
             web_dir: None,
             config_path: None,
             project_roots: Vec::new(),
@@ -2067,6 +2124,20 @@ pub const MIN_PLUGINS_WATCH_SECS: u64 = 1;
 pub const DEFAULT_PLUGINS_WATCH_SECS: u64 = 2;
 /// Slowest the plugin watcher may poll, in seconds.
 pub const MAX_PLUGINS_WATCH_SECS: u64 = 600;
+
+/// Fastest the MCP watcher may poll, in seconds.
+///
+/// One poll is a `stat` of the config file, so the floor is about not turning
+/// the log into a metronome rather than about cost.
+pub const MIN_MCP_WATCH_SECS: u64 = 1;
+/// Default poll interval for the MCP watcher, in seconds.
+///
+/// The same two seconds as the plugin watcher: saving the config file should
+/// feel like it took effect, and a slow enough interval that an editor writing
+/// the file in several steps is seen once rather than mid-write.
+pub const DEFAULT_MCP_WATCH_SECS: u64 = 2;
+/// Slowest the MCP watcher may poll, in seconds.
+pub const MAX_MCP_WATCH_SECS: u64 = 600;
 
 fn default_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("KARUCODE_DATA_DIR") {
@@ -2265,6 +2336,12 @@ impl Config {
         if !file.mcp_servers.is_empty() {
             cfg.mcp_servers = file.mcp_servers;
         }
+        if let Some(v) = file.mcp_watch {
+            cfg.mcp_watch = v;
+        }
+        if let Some(v) = file.mcp_watch_secs {
+            cfg.mcp_watch_secs = v;
+        }
         if let Some(v) = file.project_roots {
             cfg.project_roots = v;
         }
@@ -2315,6 +2392,12 @@ impl Config {
         }
         if let Some(v) = env_parse("KARUCODE_PLUGINS_WATCH_SECS") {
             cfg.plugins_watch_secs = v;
+        }
+        if let Some(v) = env_bool("KARUCODE_MCP_WATCH")? {
+            cfg.mcp_watch = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_MCP_WATCH_SECS") {
+            cfg.mcp_watch_secs = v;
         }
         // AI titles: one switch plus an optional second model. The env spelling
         // is `KARUCODE_TITLES_*` so an operator can turn the extra turn off in a
@@ -2640,6 +2723,12 @@ impl Config {
         cfg.plugins_watch_secs = cfg
             .plugins_watch_secs
             .clamp(MIN_PLUGINS_WATCH_SECS, MAX_PLUGINS_WATCH_SECS);
+        // The MCP watcher makes the same promise about latency, so it gets the
+        // same treatment: `0` would be a busy loop on the config file and
+        // `86400` a "hot" reload that takes a day.
+        cfg.mcp_watch_secs = cfg
+            .mcp_watch_secs
+            .clamp(MIN_MCP_WATCH_SECS, MAX_MCP_WATCH_SECS);
         // The same reasoning as the watcher interval: the range is a promise the
         // documentation makes, so accept the number and keep the promise.
         cfg.updates.check_secs = cfg.updates.interval();
@@ -2678,6 +2767,37 @@ impl Config {
                      already loaded: {e}"
                 );
                 self.plugins.clone()
+            }
+        }
+    }
+
+    /// Re-read just the `[[mcp_servers]]` entries from the config file.
+    ///
+    /// The config file is the only authority on MCP servers: `PATCH /api/config`
+    /// deliberately cannot change `[[mcp_servers]]` (starting a process is not a
+    /// settings tweak), so a hot reload looks at the file again and falls back to
+    /// the in-memory list only when there is nothing to read - no config file, an
+    /// unreadable one, or a parse error, each logged where it happens.
+    ///
+    /// A file that parses with no `[[mcp_servers]]` table means **no servers**:
+    /// deleting the last entry is how an operator removes it, so an empty list
+    /// must be honoured rather than treated as "keep what we had".
+    pub fn reload_mcp_entries(&self) -> Vec<McpServerConfig> {
+        let Some(path) = &self.config_path else {
+            return self.mcp_servers.clone();
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return self.mcp_servers.clone();
+        };
+        match toml::from_str::<ConfigFile>(&text) {
+            Ok(file) => file.mcp_servers,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "cannot re-read the MCP server entries from the config file; keeping the \
+                     ones already loaded: {e}"
+                );
+                self.mcp_servers.clone()
             }
         }
     }
@@ -4304,6 +4424,89 @@ retry_max_stream_restarts = 0
         // With no readable file the in-memory list is the only truth left.
         std::fs::remove_file(&path).unwrap();
         let entries = cfg.reload_plugin_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "stale");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_mcp_watcher_interval_is_clamped_to_the_documented_range() {
+        let _env = env_lock();
+        // 0 would busy-loop on the config file; a day would make a "hot" reload
+        // indistinguishable from not having one.
+        let file = ConfigFile {
+            mcp_watch: Some(true),
+            mcp_watch_secs: Some(0),
+            ..ConfigFile::default()
+        };
+        let cfg = Config::from_parts(file, None).unwrap();
+        assert!(cfg.mcp_watch);
+        assert_eq!(cfg.mcp_watch_secs, MIN_MCP_WATCH_SECS);
+
+        let file = ConfigFile {
+            mcp_watch_secs: Some(86_400),
+            ..ConfigFile::default()
+        };
+        let cfg = Config::from_parts(file, None).unwrap();
+        assert_eq!(cfg.mcp_watch_secs, MAX_MCP_WATCH_SECS);
+        assert!(!cfg.mcp_watch, "watching is opt-in");
+
+        let file = ConfigFile {
+            mcp_watch_secs: Some(5),
+            ..ConfigFile::default()
+        };
+        let cfg = Config::from_parts(file, None).unwrap();
+        assert_eq!(cfg.mcp_watch_secs, 5);
+    }
+
+    #[test]
+    fn reloading_mcp_entries_reads_the_config_file_again() {
+        let dir = std::env::temp_dir().join(format!(
+            "kc-config-mcp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[[mcp_servers]]\nname = \"one\"\ntransport = \"stdio\"\ncommand = [\"/bin/one\"]\n",
+        )
+        .unwrap();
+
+        let cfg = Config {
+            config_path: Some(path.clone()),
+            mcp_servers: vec![McpServerConfig {
+                name: "stale".into(),
+                transport: "stdio".into(),
+                command: vec!["/bin/stale".into()],
+                url: None,
+                env: Default::default(),
+                headers: Default::default(),
+                enabled: true,
+                require_approval: true,
+            }],
+            ..Config::default()
+        };
+        let entries = cfg.reload_mcp_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].name, "one",
+            "the file wins over the in-memory copy"
+        );
+
+        // Deleting the last entry is how an operator removes a server: the empty
+        // list must be honoured, not treated as "keep what we had".
+        std::fs::write(&path, "port = 8787\n").unwrap();
+        assert!(cfg.reload_mcp_entries().is_empty());
+
+        // With no readable file the in-memory list is the only truth left.
+        std::fs::remove_file(&path).unwrap();
+        let entries = cfg.reload_mcp_entries();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "stale");
 

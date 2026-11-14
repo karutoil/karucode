@@ -136,6 +136,7 @@ pub const REQUIRED_SLUGS: &[&str] = &[
     "ephemeral-sessions",
     "http-api",
     "mcp",
+    "mcp-hot-reload",
     "missions",
     "notifications",
     "plugins",

@@ -340,6 +340,15 @@ ephemeral_sessions = false
 # [mcp_servers.headers]
 # Authorization = "Bearer ..."
 
+# Hot MCP reloads. Off by default: a reload replaces server processes, so it is an
+# explicit choice. With it on, the server re-reads the [[mcp_servers]] entries above
+# and applies adds, removals and changed entries without a restart.
+# `POST /api/mcp/reload` does the same thing on demand, and
+# `POST /api/mcp/<name>/reload` replaces one server. The interval is clamped to
+# 1..=600 seconds.
+# mcp_watch = true
+# mcp_watch_secs = 2
+
 # --- terminals -------------------------------------------------------------
 # The terminal tab: a real PTY per sub-tab, running as the server user. This is
 # a shell for the *operator*, not a model tool, so it does not ask for approval;

@@ -22,7 +22,7 @@
 // @kc-title: Call the HTTP API
 // @kc-summary: Authenticate, send the CSRF header, and find the endpoint for sessions, config, approvals, files, git, plugins, MCP and the event stream.
 // @kc-tags: api, http, rest, sse, curl, endpoints
-// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:PATCH /api/projects/:id/preferences, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:DELETE /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:POST /api/sessions/:id/expire, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/control/sessions, route:POST /api/control/sessions, route:GET /api/control/overview, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:GET /api/workspace/preview-project/:project/*rest, route:POST /api/workspace/upload, route:POST /api/artifacts, route:GET /api/artifacts/:id, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:POST /api/plugins/install/preview, route:POST /api/plugins/install, route:GET /api/plugins/install/:id, route:POST /api/plugins/install/:id/cancel, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, header:X-Karucode-Admin-Token, config:[updates], config:plugin_panels, route:GET /api/events, header:X-Karucode-Event-Epoch, event:notification, event:queued_messages, event:session_rewound, event:karucode.transport, event:connection_cap, event:stream_overflow, event:text_replaced, field:expected_digest, config:[notifications], header:X-Karucode-Client, header:Cookie, env:KARUCODE_AUTH_TOKEN, route:GET /api/auth/status, route:POST /api/auth/login, route:POST /api/auth/logout, route:GET /api/auth/me, route:POST /api/auth/password, route:DELETE /api/auth/password, route:GET /api/auth/passkeys, route:POST /api/auth/passkeys, route:POST /api/auth/passkeys/options, route:PATCH /api/auth/passkeys/:id, route:DELETE /api/auth/passkeys/:id, route:POST /api/auth/passkey/options, route:POST /api/auth/passkey/login, route:GET /api/auth/sessions, route:DELETE /api/auth/sessions/:id, route:POST /api/auth/sessions/revoke-all, route:GET /api/auth/api-keys, route:POST /api/auth/api-keys, route:PATCH /api/auth/api-keys/:id, route:DELETE /api/auth/api-keys/:id, route:POST /api/auth/api-keys/:id/rotate, route:GET /api/onboarding, route:POST /api/onboarding/complete, config:[access], config:access.enabled, doc:docs/API.md
+// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:PATCH /api/projects/:id/preferences, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:DELETE /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:POST /api/sessions/:id/expire, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/control/sessions, route:POST /api/control/sessions, route:GET /api/control/overview, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:GET /api/workspace/preview-project/:project/*rest, route:POST /api/workspace/upload, route:POST /api/artifacts, route:GET /api/artifacts/:id, route:GET /api/git/status, route:GET /api/git/diff, route:POST /api/git/init, route:POST /api/git/config, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/rename, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/tags, route:POST /api/git/tags, route:GET /api/git/remotes, route:POST /api/git/remotes, route:POST /api/git/fetch, route:POST /api/git/pull, route:POST /api/git/push, route:POST /api/git/merge, route:POST /api/git/rebase, route:POST /api/git/cherry-pick, route:POST /api/git/revert, route:POST /api/git/reset, route:POST /api/git/resolve, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, route:GET /api/git/stash/:index, route:GET /api/git/github/status, route:POST /api/git/github/repo, route:GET /api/git/github/pulls, route:POST /api/git/github/pulls, route:GET /api/git/github/pulls/:number, route:GET /api/git/github/pulls/:number/diff, route:POST /api/git/github/pulls/:number/checkout, route:POST /api/git/github/pulls/:number/merge, route:POST /api/git/github/pulls/:number/state, route:POST /api/git/github/pulls/:number/comment, route:GET /api/git/github/issues, route:POST /api/git/github/issues, route:GET /api/git/github/issues/:number, route:POST /api/git/github/issues/:number/state, route:POST /api/git/github/issues/:number/comment, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:POST /api/plugins/install/preview, route:POST /api/plugins/install, route:GET /api/plugins/install/:id, route:POST /api/plugins/install/:id/cancel, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, route:POST /api/mcp/reload, route:POST /api/mcp/:name/reload, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, header:X-Karucode-Admin-Token, config:[updates], config:plugin_panels, route:GET /api/events, header:X-Karucode-Event-Epoch, event:notification, event:queued_messages, event:session_rewound, event:karucode.transport, event:connection_cap, event:stream_overflow, event:text_replaced, field:expected_digest, config:[notifications], header:X-Karucode-Client, header:Cookie, env:KARUCODE_AUTH_TOKEN, route:GET /api/auth/status, route:POST /api/auth/login, route:POST /api/auth/logout, route:GET /api/auth/me, route:POST /api/auth/password, route:DELETE /api/auth/password, route:GET /api/auth/passkeys, route:POST /api/auth/passkeys, route:POST /api/auth/passkeys/options, route:PATCH /api/auth/passkeys/:id, route:DELETE /api/auth/passkeys/:id, route:POST /api/auth/passkey/options, route:POST /api/auth/passkey/login, route:GET /api/auth/sessions, route:DELETE /api/auth/sessions/:id, route:POST /api/auth/sessions/revoke-all, route:GET /api/auth/api-keys, route:POST /api/auth/api-keys, route:PATCH /api/auth/api-keys/:id, route:DELETE /api/auth/api-keys/:id, route:POST /api/auth/api-keys/:id/rotate, route:GET /api/onboarding, route:POST /api/onboarding/complete, config:[access], config:access.enabled, doc:docs/API.md
 //
 // The API is same-origin only; there is no CORS surface. Three rules matter:
 //
@@ -85,13 +85,20 @@
 // | `PUT /api/workspace/file`, `GET /api/workspace/raw` | save a file from the editor, and serve its raw bytes for image/PDF previews |
 // | `POST /api/workspace/upload` | attach a file for the composer |
 // | `POST /api/artifacts`, `GET /api/artifacts/:id` | publish a chat artifact (an HTML mock from the transcript) and serve it as an isolated page |
-// | `GET /api/git/status`, `/api/git/diff` | working-tree state and one file's patch |
-// | `GET /api/git/branches`, `POST /api/git/checkout` | local branches, and switching to one |
-// | `POST /api/git/branches`, `POST /api/git/branches/delete` | create (and optionally switch to) a branch, delete one |
-// | `GET /api/git/log`, `GET /api/git/commits/:sha` | commit history (optionally for one path), and one commit's files plus patch |
+// | `GET /api/git/status`, `/api/git/diff` | working-tree state (incl. active operation, identity, remote count) and one file's patch |
+// | `POST /api/git/init`, `POST /api/git/config` | initialize a repository (with optional `.gitignore` and initial commit), and set repo-local `user.name`/`user.email` |
+// | `GET /api/git/branches`, `POST /api/git/checkout` | local + remote branches, and switching (or tracking/detaching) |
+// | `POST /api/git/branches`, `/rename`, `/delete` | create (and optionally switch to) a branch, rename one, delete one |
+// | `GET`/`POST /api/git/tags` | list tags, create (lightweight/annotated), delete, or push a tag |
+// | `GET`/`POST /api/git/remotes` | list remotes (credentials stripped, GitHub slug parsed) and add/set-url/remove/rename one |
+// | `POST /api/git/fetch`, `/pull`, `/push` | non-interactive remote sync (`--prune`, `--rebase`, `-u`, `--force-with-lease` with `confirm`) |
+// | `POST /api/git/merge`, `/rebase`, `/cherry-pick`, `/revert`, `/reset`, `/resolve` | branch/commit operations, conflict resolution (`ours`/`theirs`), and resets (`hard` needs `confirm`) |
+// | `GET /api/git/log`, `GET /api/git/commits/:sha` | commit history (by path/branch/all/search), and one commit's files plus patch |
 // | `POST /api/git/stage`, `/unstage`, `/discard` | the three per-file verbs, singly or by path list or whole workspace |
 // | `POST /api/git/commit` | commit (or amend), optionally staging everything first |
-// | `GET`/`POST /api/git/stash` | the stash stack, and push/pop/apply/drop |
+// | `GET`/`POST /api/git/stash`, `GET /api/git/stash/:index` | the stash stack, one stash's diff, and push/pop/apply/drop |
+// | `GET /api/git/github/status`, `POST /api/git/github/repo` | `gh` CLI auth/repo status and creating a new GitHub repository |
+// | `GET`/`POST /api/git/github/pulls…`, `/issues…` | list, inspect, diff, create, checkout, merge, comment, and close/reopen PRs & issues via `gh` |
 // | `GET /api/plugins`, `POST /api/plugins/:name/enable` | plugin status, enable/disable |
 // | `POST /api/plugins/reload` | rescan every plugin source: start new plugins, drop removed ones, replace changed ones (no server restart) |
 // | `POST /api/plugins/install/preview` | resolve a GitHub/local source and list its plugins (names, permissions, builds, already-installed) without installing; needs the admin token when one is configured |
@@ -102,6 +109,8 @@
 // | `GET /api/plugins/:name/panels/:panel` | one plugin panel's payload for the inspector |
 // | `POST /api/plugins/:name/ui/actions/:action` | run one UI action a plugin contributed (a button or palette command a person activated) |
 // | `GET /api/mcp` | MCP server status and discovered tools |
+// | `POST /api/mcp/reload` | re-read `[[mcp_servers]]`: start new servers, stop removed ones, replace changed ones (no server restart) |
+// | `POST /api/mcp/:name/reload` | replace one MCP server's process/connection (after a rebuild or an entry edit) |
 // | `GET /api/update` | the running build, how this install can be updated, the last check and any staged artifact (cached; no network) |
 // | `POST /api/update/check` | ask the release manifest now |
 // | `POST /api/update/apply` | stage if needed, then install the newer build (`X-Karucode-Admin-Token` when configured; `{"restart": true}` restarts a supervised process) |
@@ -803,20 +812,23 @@
 // curl -s localhost:8787/api/control/overview | jq '.sessions, .agents, (.control | length)'
 // ```
 //
-// # Managing the working tree
+// # Managing the working tree, remotes and GitHub
 //
-// The git routes are the source-control manager's whole backend. They are
-// **local only**: staging, commits, branches, stashes and history. There is no
-// fetch/pull/push route on purpose - those need credentials and can block on a
-// prompt, so they stay in the terminal, where the operator already is.
+// The git and GitHub routes are the source-control manager's whole backend:
+// repository initialization, local working-tree mutations, commits, branches,
+// tags, stashes, merge/rebase/cherry-pick/reset/revert/conflict-resolution,
+// remote management and non-interactive fetch/pull/push, plus `gh` CLI
+// integration for GitHub repo creation, Pull Requests and Issues.
 //
 // Reads:
 //
 // ```json
 // GET /api/git/status
 // { "is_repo": true, "branch": "main", "detached": false,
-//   "upstream": "origin/main", "ahead": 1, "behind": 0, "error": null,
-//   "truncated": false,
+//   "upstream": "origin/main", "ahead": 1, "behind": 0,
+//   "operation": null, "has_head": true,
+//   "identity": { "name": "Alice", "email": "alice@example.com" },
+//   "remotes_count": 1, "error": null, "truncated": false,
 //   "files": [ { "path": "src/x.rs", "orig_path": null,
 //                "index": "M", "worktree": " ", "status": "M",
 //                "staged": true, "unstaged": false,
@@ -824,7 +836,8 @@
 // ```
 // `index`/`worktree` are the two porcelain columns, so a path that is both
 // staged and modified (`MM`) appears in both lists of the UI; `status` keeps the
-// older trimmed form. `detached` means `branch` is `null`.
+// older trimmed form. `detached` means `branch` is `null`. `operation` is
+// `"merge"`, `"rebase"`, `"cherry-pick"`, `"revert"` or `null`.
 //
 // Every mutation answers the same envelope, with a *fresh* status so a client
 // never races a second `GET` against a command it just ran:
@@ -834,6 +847,8 @@
 // ```
 //
 // ```bash
+// curl -s -X POST localhost:8787/api/git/init -H 'X-Karucode-Client: web' \
+//   -H 'Content-Type: application/json' -d '{"default_branch":"main","initial_commit":true}'
 // curl -s -X POST localhost:8787/api/git/stage -H 'X-Karucode-Client: web' \
 //   -H 'Content-Type: application/json' -d '{"paths":["src/x.rs"]}'
 // curl -s -X POST localhost:8787/api/git/commit -H 'X-Karucode-Client: web' \
@@ -844,6 +859,8 @@
 //
 // What each body takes:
 //
+// * `init`: `{"default_branch":"main","initial_commit":bool,"commit_message":"…","gitignore_template":"rust|node|python|go|general|none"}`.
+// * `config`: `{"user_name":"…","user_email":"…"}` (repo-local identity).
 // * `stage` / `unstage`: `{"paths":[…]}` or `{"all":true}`.
 // * `discard`: the same, plus `"staged": true` to restore the index *and* the
 //   working tree to `HEAD` instead of the working tree to the index, and
@@ -852,10 +869,30 @@
 // * `commit`: `{"message":"…","amend":bool,"stage_all":bool}`. An empty message
 //   that amends keeps the previous one (`--no-edit`).
 // * `branches`: `{"name":"…","start":"…","checkout":bool}`;
+//   `branches/rename`: `{"old_name":"…","new_name":"…"}`;
 //   `branches/delete`: `{"name":"…","force":bool,"confirm":bool}` (`force` needs
-//   `confirm`); `checkout`: `{"name":"…"}`.
+//   `confirm`); `checkout`: `{"name":"…","track":bool,"detach":bool}`.
+// * `tags` (`POST`): `{"action":"create|delete|push","name":"…","target":"…","message":"…","remote":"…"}`.
+// * `remotes` (`POST`): `{"action":"add|set_url|remove|rename","name":"…","url":"…","new_name":"…"}`.
+// * `fetch` / `pull` / `push`: `fetch` takes `{remote?,prune?,all?,tags?}`,
+//   `pull` takes `{remote?,branch?,rebase?}`, `push` takes
+//   `{remote?,branch?,set_upstream?,force_with_lease?,tags?,confirm?}`
+//   (`force_with_lease` requires `confirm: true`). Network operations run with
+//   `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, and `BatchMode=yes` when
+//   `GIT_SSH_COMMAND` is unset so missing credentials fail fast instead of hanging.
+// * `merge` / `rebase` / `cherry-pick` / `revert` / `reset` / `resolve`:
+//   `reset` with `mode: "hard"` requires `confirm: true`; `resolve` takes
+//   `{"path":"…","strategy":"ours|theirs"}` and stages the resolved file.
 // * `stash`: `{"action":"push|pop|apply|drop","index":0,"message":"…",
 //   "include_untracked":bool,"confirm":bool}`. `drop` needs `confirm`.
+//   `GET /api/git/stash/:index` returns the stash's numstat and patch.
+// * `github/*`: delegates to `gh` CLI (`GH_PROMPT_DISABLED=1`); `GET /api/git/github/status`
+//   reports `gh_installed`, `authenticated`, `username`, `remote_slug`, and
+//   `repo`. `POST /api/git/github/repo` creates a repo with `gh repo create`.
+//   PRs (`/pulls`, `/pulls/:number`, `/pulls/:number/diff`, `/checkout`, `/merge`
+//   requiring `confirm: true`, `/state`, `/comment`) and Issues (`/issues`,
+//   `/issues/:number`, `/state`, `/comment`) require `gh` to be installed and
+//   authenticated.
 //
 // A refused command is `400 bad_request` carrying git's own message (nothing to
 // commit, a dirty tree that would be overwritten, an unmerged branch, an unknown
@@ -969,6 +1006,7 @@ pub mod bootstrap;
 pub mod catalog;
 pub mod error;
 pub mod host;
+pub mod mcp_watch;
 pub mod metrics;
 mod mission_coordinator;
 pub mod plugin_install;
