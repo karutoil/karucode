@@ -217,7 +217,12 @@ export class TerminalSocket {
   /** Send raw keystrokes as a binary frame. */
   send(bytes: Uint8Array): void {
     if (!this.isOpen) return;
-    this.socket?.send(bytes);
+    // TS 7 narrows the WebSocket.send overloads to `string | Blob | BufferSource`
+    // and a plain `Uint8Array` is `Uint8Array<ArrayBufferLike>`, which does not
+    // satisfy `BufferSource` (SharedArrayBuffer is not transferable). The bytes
+    // here are always built over a caller-provided ArrayBuffer, so assert the
+    // backing store is a plain ArrayBuffer.
+    this.socket?.send(bytes as Uint8Array<ArrayBuffer>);
   }
 
   /** Tell the shell the window changed size. */
