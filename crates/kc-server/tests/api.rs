@@ -2809,6 +2809,181 @@ async fn broken_plugin_and_mcp_servers_are_isolated() {
 }
 
 #[tokio::test]
+async fn mcp_servers_reload_without_a_restart() {
+    use kc_core::config::McpServerConfig;
+
+    const FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/fake_mcp_server.sh"
+    );
+
+    fn server(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.into(),
+            transport: "stdio".into(),
+            command: vec!["sh".into(), FIXTURE.into()],
+            url: None,
+            env: Default::default(),
+            headers: Default::default(),
+            enabled: true,
+            require_approval: true,
+        }
+    }
+
+    let h = HarnessBuilder::new(vec![text("ok")])
+        .mcp(server("first"))
+        .mcp_config_file()
+        .build()
+        .await;
+
+    // The server configured at startup is connected and its tools are in the
+    // registry the next run resolves against.
+    let mcp = h.get("/api/mcp").await.json();
+    assert_eq!(mcp["servers"][0]["status"], "connected");
+    let names = h.state.runtime().tools().names();
+    assert!(names.contains(&"mcp__first__echo".to_string()), "{names:?}");
+
+    // An unchanged file is a no-op: nothing is disturbed.
+    let reload = h.post("/api/mcp/reload", json!({})).await;
+    assert_eq!(reload.status, StatusCode::OK);
+    let reload = reload.json();
+    assert_eq!(reload["report"]["unchanged"][0], "first");
+    assert!(reload["report"]["added"].as_array().unwrap().is_empty());
+
+    // Adding an entry to the file and reloading starts it without a restart.
+    h.write_mcp_config(&[server("first"), server("second")]);
+    let reload = h.post("/api/mcp/reload", json!({})).await.json();
+    assert_eq!(reload["report"]["added"][0], "second");
+    assert_eq!(reload["report"]["unchanged"][0], "first");
+    let names = h.state.runtime().tools().names();
+    assert!(
+        names.contains(&"mcp__second__echo".to_string()),
+        "{names:?}"
+    );
+    assert_eq!(reload["servers"].as_array().unwrap().len(), 2);
+
+    // Changing an entry replaces its connection.
+    let mut changed = server("second");
+    changed.env.insert("FAKE_MCP_EXTRA".into(), "1".into());
+    h.write_mcp_config(&[server("first"), changed.clone()]);
+    let reload = h.post("/api/mcp/reload", json!({})).await.json();
+    assert_eq!(reload["report"]["restarted"][0], "second");
+    assert_eq!(reload["servers"][1]["status"], "connected");
+
+    // One server can be replaced on its own, and an unknown name is a 404.
+    let one = h.post("/api/mcp/second/reload", json!({})).await;
+    assert_eq!(one.status, StatusCode::OK);
+    assert_eq!(one.json()["status"], "connected");
+    let unknown = h.post("/api/mcp/nope/reload", json!({})).await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown.error_code(), "not_found");
+
+    // Removing an entry stops it and drops its tools.
+    h.write_mcp_config(&[changed]);
+    let reload = h.post("/api/mcp/reload", json!({})).await.json();
+    assert_eq!(reload["report"]["removed"][0], "first");
+    let names = h.state.runtime().tools().names();
+    assert!(
+        !names.contains(&"mcp__first__echo".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"mcp__second__echo".to_string()),
+        "{names:?}"
+    );
+
+    // An empty file means no servers: the last process is stopped too.
+    h.write_mcp_config(&[]);
+    let reload = h.post("/api/mcp/reload", json!({})).await.json();
+    assert_eq!(reload["report"]["removed"][0], "second");
+    assert!(reload["servers"].as_array().unwrap().is_empty());
+    assert!(!h
+        .state
+        .runtime()
+        .tools()
+        .names()
+        .iter()
+        .any(|name| name.starts_with("mcp__")));
+}
+
+#[tokio::test]
+async fn the_mcp_watcher_applies_a_config_edit_without_a_restart() {
+    use kc_core::config::McpServerConfig;
+
+    const FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/fake_mcp_server.sh"
+    );
+
+    fn server(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.into(),
+            transport: "stdio".into(),
+            command: vec!["sh".into(), FIXTURE.into()],
+            url: None,
+            env: Default::default(),
+            headers: Default::default(),
+            enabled: true,
+            require_approval: true,
+        }
+    }
+
+    let h = HarnessBuilder::new(vec![text("ok")])
+        .mcp_config_file()
+        .build()
+        .await;
+    assert!(!h
+        .state
+        .runtime()
+        .tools()
+        .names()
+        .iter()
+        .any(|name| name.starts_with("mcp__")));
+
+    let watcher =
+        kc_server::mcp_watch::spawn(h.state.clone(), std::time::Duration::from_millis(50));
+    // Let the task take its initial stamp before the file moves: a watcher that
+    // starts after a write treats the new content as the baseline.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    h.write_mcp_config(&[server("watched")]);
+
+    // The watcher waits for two agreeing polls before it applies a file, so give
+    // it a deadline instead of a fixed sleep.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let names = h.state.runtime().tools().names();
+        if names.contains(&"mcp__watched__echo".to_string()) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "watcher did not add the server; got {names:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        h.get("/api/mcp").await.json()["servers"][0]["status"],
+        "connected"
+    );
+
+    h.write_mcp_config(&[]);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let names = h.state.runtime().tools().names();
+        if !names.iter().any(|name| name.starts_with("mcp__")) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "watcher did not remove the server; got {names:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    watcher.abort();
+}
+
+#[tokio::test]
 async fn git_endpoints_report_status_and_diff() {
     let git_available = std::process::Command::new("git")
         .arg("--version")
@@ -3307,6 +3482,334 @@ async fn git_manager_stages_commits_branches_and_history() {
     assert_eq!(h.get("/api/git/branches").await.json()["is_repo"], false);
     assert_eq!(h.get("/api/git/log").await.json()["is_repo"], false);
     assert_eq!(h.get("/api/git/stash").await.json()["is_repo"], false);
+    assert_eq!(h.get("/api/git/remotes").await.json()["is_repo"], false);
+    assert_eq!(h.get("/api/git/tags").await.json()["is_repo"], false);
+}
+
+/// Full git client lifecycle part 1: init, identity config, remotes, push/fetch/pull
+/// against a local bare repository, and GitHub status/validation probes.
+#[cfg(unix)]
+#[tokio::test]
+async fn git_client_init_remotes_and_sync() {
+    let git_available = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+    if !git_available {
+        return;
+    }
+
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let ws = h.workspace_path().to_path_buf();
+    std::fs::write(ws.join("README.md"), "# Hello\n").unwrap();
+
+    // ---- init + .gitignore template + config identity ----
+    let init = h
+        .post(
+            "/api/git/init",
+            json!({
+                "default_branch": "main",
+                "gitignore_template": "rust",
+                "initial_commit": false
+            }),
+        )
+        .await;
+    assert_eq!(init.status, StatusCode::OK, "{}", init.text());
+    assert_eq!(init.json()["status"]["is_repo"], true);
+    assert_eq!(init.json()["status"]["branch"], "main");
+    assert_eq!(init.json()["status"]["has_head"], false);
+    assert!(ws.join(".gitignore").exists());
+
+    // Re-initializing an existing repo is refused.
+    assert_eq!(
+        h.post("/api/git/init", json!({})).await.status,
+        StatusCode::BAD_REQUEST
+    );
+
+    let cfg = h
+        .post(
+            "/api/git/config",
+            json!({ "user_name": "Toil", "user_email": "toil@example.com" }),
+        )
+        .await;
+    assert_eq!(cfg.status, StatusCode::OK, "{}", cfg.text());
+    assert_eq!(cfg.json()["status"]["identity"]["name"], "Toil");
+    assert_eq!(
+        cfg.json()["status"]["identity"]["email"],
+        "toil@example.com"
+    );
+
+    let first_commit = h
+        .post(
+            "/api/git/commit",
+            json!({ "message": "chore: init", "stage_all": true }),
+        )
+        .await;
+    assert_eq!(
+        first_commit.status,
+        StatusCode::OK,
+        "{}",
+        first_commit.text()
+    );
+    assert_eq!(first_commit.json()["status"]["has_head"], true);
+
+    // ---- bare remote + add / rename / push / fetch / pull ----
+    let bare_path = ws.parent().unwrap().join("bare-remote.git");
+    std::fs::create_dir_all(&bare_path).unwrap();
+    let bare_init = std::process::Command::new("git")
+        .args(["init", "--bare", "-q", "-b", "main"])
+        .current_dir(&bare_path)
+        .output()
+        .unwrap();
+    assert!(bare_init.status.success());
+    let bare_url = bare_path.to_string_lossy().to_string();
+
+    assert_eq!(
+        h.post(
+            "/api/git/remotes",
+            json!({ "action": "add", "name": "-evil", "url": bare_url }),
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.post(
+            "/api/git/remotes",
+            json!({ "action": "add", "name": "origin", "url": "--upload-pack=evil" }),
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+
+    let added = h
+        .post(
+            "/api/git/remotes",
+            json!({ "action": "add", "name": "upstream", "url": bare_url }),
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::OK, "{}", added.text());
+    assert_eq!(added.json()["remotes"][0]["name"], "upstream");
+
+    let renamed_remote = h
+        .post(
+            "/api/git/remotes",
+            json!({ "action": "rename", "name": "upstream", "new_name": "origin" }),
+        )
+        .await;
+    assert_eq!(
+        renamed_remote.status,
+        StatusCode::OK,
+        "{}",
+        renamed_remote.text()
+    );
+    assert_eq!(renamed_remote.json()["remotes"][0]["name"], "origin");
+
+    let pushed = h
+        .post(
+            "/api/git/push",
+            json!({ "remote": "origin", "branch": "main", "set_upstream": true }),
+        )
+        .await;
+    assert_eq!(pushed.status, StatusCode::OK, "{}", pushed.text());
+    assert_eq!(pushed.json()["status"]["upstream"], "origin/main");
+
+    assert_eq!(
+        h.post(
+            "/api/git/push",
+            json!({ "remote": "origin", "force_with_lease": true }),
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+
+    let fetched = h
+        .post(
+            "/api/git/fetch",
+            json!({ "remote": "origin", "prune": true }),
+        )
+        .await;
+    assert_eq!(fetched.status, StatusCode::OK, "{}", fetched.text());
+
+    let pulled = h
+        .post(
+            "/api/git/pull",
+            json!({ "remote": "origin", "branch": "main" }),
+        )
+        .await;
+    assert_eq!(pulled.status, StatusCode::OK, "{}", pulled.text());
+
+    // ---- github status & validation ----
+    let gh_status = h.get("/api/git/github/status").await;
+    assert_eq!(gh_status.status, StatusCode::OK, "{}", gh_status.text());
+    assert!(gh_status.json().get("gh_installed").is_some());
+    assert_eq!(
+        h.post("/api/git/github/repo", json!({ "name": "-bad" }))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.get("/api/git/github/pulls?state=bogus").await.status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.post(
+            "/api/git/github/pulls/1/merge",
+            json!({ "method": "squash", "confirm": false }),
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+/// Full git client lifecycle part 2: branch rename, tags, stash diff, merge
+/// conflict resolution, reset confirmation, and log search.
+#[cfg(unix)]
+#[tokio::test]
+async fn git_client_branches_tags_stash_and_conflicts() {
+    let git_available = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+    if !git_available {
+        return;
+    }
+
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let ws = h.workspace_path().to_path_buf();
+    std::fs::write(ws.join("README.md"), "# Hello\n").unwrap();
+    h.post("/api/git/init", json!({ "default_branch": "main" }))
+        .await;
+    h.post(
+        "/api/git/config",
+        json!({ "user_name": "Toil", "user_email": "toil@example.com" }),
+    )
+    .await;
+    h.post(
+        "/api/git/commit",
+        json!({ "message": "chore: init", "stage_all": true }),
+    )
+    .await;
+
+    // ---- branch rename + tags ----
+    h.post(
+        "/api/git/branches",
+        json!({ "name": "feat/old", "checkout": true }),
+    )
+    .await;
+    let renamed_branch = h
+        .post(
+            "/api/git/branches/rename",
+            json!({ "old_name": "feat/old", "new_name": "feat/new" }),
+        )
+        .await;
+    assert_eq!(renamed_branch.status, StatusCode::OK);
+    assert_eq!(renamed_branch.json()["status"]["branch"], "feat/new");
+    h.post("/api/git/checkout", json!({ "name": "main" })).await;
+
+    let tagged = h
+        .post(
+            "/api/git/tags",
+            json!({ "action": "create", "name": "v0.1.0", "message": "first release" }),
+        )
+        .await;
+    assert_eq!(tagged.status, StatusCode::OK, "{}", tagged.text());
+    let tags = h.get("/api/git/tags").await.json();
+    assert_eq!(tags["tags"][0]["name"], "v0.1.0");
+    assert_eq!(tags["tags"][0]["annotated"], true);
+
+    let untagged = h
+        .post(
+            "/api/git/tags",
+            json!({ "action": "delete", "name": "v0.1.0" }),
+        )
+        .await;
+    assert_eq!(untagged.status, StatusCode::OK);
+    assert!(h.get("/api/git/tags").await.json()["tags"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // ---- stash detail diff ----
+    std::fs::write(ws.join("README.md"), "# Stashed change\n").unwrap();
+    h.post(
+        "/api/git/stash",
+        json!({ "action": "push", "message": "wip" }),
+    )
+    .await;
+    let stash_diff = h.get("/api/git/stash/0").await;
+    assert_eq!(stash_diff.status, StatusCode::OK, "{}", stash_diff.text());
+    assert!(stash_diff.json()["diff"]
+        .as_str()
+        .unwrap()
+        .contains("Stashed change"));
+    h.post(
+        "/api/git/stash",
+        json!({ "action": "drop", "confirm": true }),
+    )
+    .await;
+
+    // ---- merge conflict + resolve (`ours`) ----
+    h.post(
+        "/api/git/branches",
+        json!({ "name": "side", "checkout": true }),
+    )
+    .await;
+    std::fs::write(ws.join("README.md"), "# Side branch\n").unwrap();
+    h.post(
+        "/api/git/commit",
+        json!({ "message": "side change", "stage_all": true }),
+    )
+    .await;
+    h.post("/api/git/checkout", json!({ "name": "main" })).await;
+    std::fs::write(ws.join("README.md"), "# Main branch\n").unwrap();
+    h.post(
+        "/api/git/commit",
+        json!({ "message": "main change", "stage_all": true }),
+    )
+    .await;
+
+    let conflict_merge = h.post("/api/git/merge", json!({ "branch": "side" })).await;
+    assert_eq!(conflict_merge.status, StatusCode::BAD_REQUEST);
+    let mid_status = h.get("/api/git/status").await.json();
+    assert_eq!(mid_status["operation"], "merge");
+    assert_eq!(mid_status["files"][0]["conflict"], true);
+
+    let resolved = h
+        .post(
+            "/api/git/resolve",
+            json!({ "path": "README.md", "strategy": "ours" }),
+        )
+        .await;
+    assert_eq!(resolved.status, StatusCode::OK, "{}", resolved.text());
+    assert_eq!(
+        std::fs::read_to_string(ws.join("README.md")).unwrap(),
+        "# Main branch\n"
+    );
+    let merge_done = h
+        .post("/api/git/merge", json!({ "action": "continue" }))
+        .await;
+    assert_eq!(merge_done.status, StatusCode::OK, "{}", merge_done.text());
+    assert_eq!(merge_done.json()["status"]["operation"], Value::Null);
+
+    assert_eq!(
+        h.post(
+            "/api/git/reset",
+            json!({ "target": "HEAD~1", "mode": "hard" }),
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+
+    let searched = h.get("/api/git/log?search=main%20change").await.json();
+    assert_eq!(searched["commits"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -7268,7 +7771,12 @@ async fn a_replay_reports_that_no_run_ever_started() {
         .auto_approvals()
         .build()
         .await;
-    let project = h.get("/api/projects").await.json()["projects"][0]["id"]
+    let projects_resp = h.get("/api/projects").await.json();
+    let project = projects_resp["projects"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let project_path = projects_resp["projects"][0]["path"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -7280,7 +7788,7 @@ async fn a_replay_reports_that_no_run_ever_started() {
             "s_reserved",
             &project,
             "",
-            &h.workspace_dir.to_string_lossy(),
+            &project_path,
             "Port the CLI to Rust",
         )
         .await

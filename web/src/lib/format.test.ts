@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { clockTime, formatDuration, fromUnixSeconds, relativeTime, truncate } from './format';
+import {
+  clockTime,
+  formatContextWindow,
+  formatDuration,
+  fromUnixSeconds,
+  relativeTime,
+  truncate,
+} from './format';
 
 describe('formatDuration', () => {
   it('never renders a suspicious zero', () => {
@@ -18,6 +25,34 @@ describe('formatDuration', () => {
   it('is empty for unknown durations', () => {
     expect(formatDuration(null)).toBe('');
     expect(formatDuration(Number.NaN)).toBe('');
+  });
+});
+
+describe('formatContextWindow', () => {
+  it('renders a window in tokens, not in messages', () => {
+    // The picker used to call `formatCount` here, so a 1,000,000-token window
+    // read "1000000 messages ctx" on every row of the list.
+    expect(formatContextWindow(1_000_000)).toBe('1M');
+    expect(formatContextWindow(1_000_000)).not.toContain('message');
+  });
+
+  it('scales to millions and thousands with at most two decimals', () => {
+    expect(formatContextWindow(1_048_576)).toBe('1.05M');
+    expect(formatContextWindow(2_000_000)).toBe('2M');
+    expect(formatContextWindow(1_500_000)).toBe('1.5M');
+    expect(formatContextWindow(128_000)).toBe('128K');
+    expect(formatContextWindow(200_000)).toBe('200K');
+    expect(formatContextWindow(8_192)).toBe('8K');
+    expect(formatContextWindow(512)).toBe('512');
+  });
+
+  it('is empty for a window the model never declared', () => {
+    // An unknown window is not a zero one: the row draws no chip at all.
+    expect(formatContextWindow(null)).toBe('');
+    expect(formatContextWindow(undefined)).toBe('');
+    expect(formatContextWindow(0)).toBe('');
+    expect(formatContextWindow(-1)).toBe('');
+    expect(formatContextWindow(Number.NaN)).toBe('');
   });
 });
 

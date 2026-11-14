@@ -68,6 +68,7 @@ export type AgentFilter = 'all' | AgentStatus;
 const RAIL_KEY = 'karucode.railCollapsed';
 const INSPECTOR_KEY = 'karucode.inspectorCollapsed';
 const INSPECTOR_MODE_KEY = 'karucode.inspectorMode';
+const PROJECT_MENU_OPEN_KEY = 'karucode.projectMenuOpen';
 const LAST_SESSION_KEY = 'karucode.lastSession';
 const LAST_PROJECT_KEY = 'karucode.lastProject';
 /** Browser-side notification preferences. Server-side routing lives in config. */
@@ -145,6 +146,42 @@ export function readInspectorMode(): InspectorMode {
 
 export function persistInspectorMode(mode: InspectorMode): void {
   writeString(INSPECTOR_MODE_KEY, mode);
+}
+
+/**
+ * How the desktop project dropdown opens.
+ *
+ * `hover` is the menu-bar behaviour the rail has always had: resting on the
+ * project name opens the list. It is fast, and it is also the one control in the
+ * rail that moves under a pointer that was only passing through on its way to
+ * the composer — so `click` is offered as a real alternative rather than as a
+ * bug report. In `click` mode the trigger behaves like every other disclosure:
+ * a press opens it, a press closes it, and the pointer is free to cross it.
+ *
+ * A per-browser presentation choice (like the theme and the results panel), not
+ * a server setting: it describes how this person's pointer works, not what the
+ * install is.
+ */
+export type ProjectMenuOpen = 'hover' | 'click';
+
+const PROJECT_MENU_OPEN_MODES: readonly ProjectMenuOpen[] = ['hover', 'click'];
+
+export function readProjectMenuOpen(): ProjectMenuOpen {
+  try {
+    if (typeof localStorage === 'undefined') return 'hover';
+    const stored = localStorage.getItem(PROJECT_MENU_OPEN_KEY);
+    // An older or hand-edited value is not a reason to guess: hover is the
+    // behaviour this build has always had.
+    return PROJECT_MENU_OPEN_MODES.includes(stored as ProjectMenuOpen)
+      ? (stored as ProjectMenuOpen)
+      : 'hover';
+  } catch {
+    return 'hover';
+  }
+}
+
+export function persistProjectMenuOpen(mode: ProjectMenuOpen): void {
+  writeString(PROJECT_MENU_OPEN_KEY, mode);
 }
 
 export function readLastSessionId(): string | null {
@@ -327,6 +364,7 @@ export const phoneViewport = signal<boolean>(
 export const railCollapsed = signal(readBool(RAIL_KEY, false));
 export const inspectorCollapsed = signal(readBool(INSPECTOR_KEY, false));
 export const inspectorMode = signal<InspectorMode>(readInspectorMode());
+export const projectMenuOpen = signal<ProjectMenuOpen>(readProjectMenuOpen());
 export const mobileSheet = signal<MobileSheet>(null);
 export const inspectorTab = signal<InspectorTab>('workspace');
 /**

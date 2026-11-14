@@ -294,25 +294,45 @@ async fn json_ping_gets_a_private_text_pong_not_broadcast_pty_bytes() {
         ))
         .await
         .unwrap();
-    let pong = tokio::time::timeout(Duration::from_secs(2), first.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(
-        pong.is_text(),
-        "pong must not be a binary PTY frame: {pong:?}"
-    );
-    assert_eq!(
-        serde_json::from_str::<Value>(pong.to_text().unwrap()).unwrap(),
-        json!({"type":"pong"})
-    );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(150), second.next())
-            .await
-            .is_err(),
-        "one browser's ping must not be broadcast to another browser"
-    );
+    // The shell is still printing its prompt, so binary PTY frames can arrive on
+    // either socket at any time. Read past them: the first socket must get the
+    // private text pong, and the second must never get that pong at all.
+    let pong = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let message = first
+                .next()
+                .await
+                .expect("first socket closed")
+                .expect("first socket failed");
+            if message.is_text() {
+                let value: Value =
+                    serde_json::from_str(message.to_text().unwrap()).unwrap_or(Value::Null);
+                if value["type"] == "pong" {
+                    return value;
+                }
+            }
+        }
+    })
+    .await
+    .expect("a ping must be answered with a pong within two seconds");
+    assert_eq!(pong, json!({"type":"pong"}));
+    // Any frame the second socket receives in the next moment must be the shell's
+    // own output (binary), never the other browser's pong.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, second.next()).await {
+            Err(_) | Ok(None) => break,
+            Ok(Some(Err(error))) => panic!("second socket failed: {error}"),
+            Ok(Some(Ok(message))) => assert!(
+                !message.is_text(),
+                "one browser's ping must not be broadcast to another browser: {message:?}"
+            ),
+        }
+    }
 
     drop(first);
     drop(second);
