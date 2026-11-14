@@ -517,6 +517,10 @@ export function ThemeStudio(): JSX.Element | null {
                       class={`theme-preset${selected ? ' selected' : ''}`}
                       style={presetStyle(entry)}
                       aria-pressed={selected}
+                      // The preset name and its mode are adjacent spans, so the
+                      // content-derived accessible name would run them together
+                      // ("EmberDark"). Name it as it is announced.
+                      aria-label={`${entry.name} ${modeLabel}${custom ? ' · Custom' : ''}`}
                       title={entry.description ?? entry.name}
                       data-testid={`theme-preset-${entry.id}`}
                       onClick={() => {

@@ -31,7 +31,12 @@ function installObjectUrls(): void {
 }
 
 function okBlob(): Response {
-  return new Response(new Blob([new Uint8Array([0, 0, 1, 0])], { type: 'image/x-icon' }), {
+  // jsdom 31's Blob lacks `.stream()`, which the Response implementation
+  // requires when `blob()` consumes the body: a jsdom Blob handed to the
+  // Response constructor fails with "object.stream is not a function". The
+  // bytes are the payload, so pass them as an ArrayBuffer the response can
+  // wrap itself.
+  return new Response(new Uint8Array([0, 0, 1, 0]).buffer, {
     status: 200,
     headers: { 'content-type': 'image/x-icon' },
   });

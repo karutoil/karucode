@@ -146,6 +146,11 @@ export function Tabs<T extends string>({
             aria-controls={selected ? `${prefix}-panel-${item.id}` : undefined}
             tabIndex={selected ? 0 : -1}
             title={item.title}
+            // The label and the count pill are separate spans with no whitespace
+            // between them, so the content-derived accessible name would run the
+            // two together ("Terminal1"). The label names the tab properly and
+            // the count stays visible as the pill.
+            aria-label={item.count !== undefined && item.count > 0 ? `${item.label} ${item.count}` : item.label}
             onClick={() => onChange(item.id)}
           >
             {item.icon ? <span class="tab-icon" aria-hidden="true">{item.icon}</span> : null}

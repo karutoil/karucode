@@ -277,7 +277,7 @@ aarch64, build from source (`cargo build --release -p kc-server`) and either pas
 ### From source
 
 ```bash
-cargo build --release -p kc-server        # embeds web/dist; needs Node 22.12+ once
+cargo build --release -p kc-server        # embeds web/dist; needs Node 22.22+ once
 sudo install -m 0755 target/release/karucode /usr/local/bin/karucode
 # then the same unit + drop-in steps as above
 ```
