@@ -1,14 +1,34 @@
 import type { JSX } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { GitBranch, GitFile } from '../../api/types';
+import * as actions from '../../state/actions';
 import * as store from '../../state/store';
-import { AlertIcon, BranchIcon, ChevronDownIcon, RefreshIcon } from '../icons';
+import {
+  AlertIcon,
+  BranchIcon,
+  ChevronDownIcon,
+  CommitIcon,
+  DownloadIcon,
+  ExternalIcon,
+  GitIcon,
+  GlobeIcon,
+  IssueIcon,
+  PullRequestIcon,
+  RefreshIcon,
+  UploadIcon,
+} from '../icons';
 import { GitBranchDialog } from './GitBranchDialog';
+import { GitBranchesView } from './GitBranchesView';
 import { GitChanges } from './GitChanges';
 import { GitCommitBox } from './GitCommitBox';
 import { GitConfirmDialog, type ConfirmRequest } from './GitConfirmDialog';
 import { GitDiffPane } from './GitDiffPane';
 import { GitHistory } from './GitHistory';
+import { GitHistoryView } from './GitHistoryView';
+import { GitInitView } from './GitInitView';
+import { GitIssuesView } from './GitIssuesView';
+import { GitPullRequestsView } from './GitPullRequestsView';
+import { GitRemotesView } from './GitRemotesView';
 import {
   type GitGroup,
   type GitGroupId,
@@ -18,10 +38,12 @@ import {
   describeStatus,
   groupFiles,
   isUntracked,
+  operationLabel,
 } from './gitModel';
 import { useGitRepo } from './useGitRepo';
 
 export type GitManagerVariant = 'page' | 'panel';
+export type GitSection = 'changes' | 'history' | 'branches' | 'remotes' | 'pulls' | 'issues';
 
 export interface GitManagerProps {
   /**
@@ -53,27 +75,28 @@ function findFile(
 }
 
 /**
- * The source-control manager: the working tree, the commit box, branches and the
- * history in one panel.
- *
- * Everything it can *do* is local to this checkout (stage, unstage, discard,
- * commit, switch/create/delete a branch, stash). Fetch/pull/push are deliberately
- * absent: they need credentials and a prompt, which is the terminal's job, and a
- * web button that silently hangs on an SSH passphrase would be a worse experience
- * than not offering it.
+ * The source-control manager: working tree, commit box, history, branches,
+ * tags, stashes, remotes, sync, and GitHub pull requests & issues.
  */
 export function GitManager({ variant = 'panel', active = true }: GitManagerProps): JSX.Element {
   const projectId = store.currentProjectId.value;
+  const project = store.currentProject.value;
   const repo = useGitRepo(projectId);
+  const [section, setSection] = useState<GitSection>('changes');
   const [selection, setSelection] = useState<GitSelection | null>(null);
   const [branchesOpen, setBranchesOpen] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
+  const [idName, setIdName] = useState('');
+  const [idEmail, setIdEmail] = useState('');
+  const [showIdentityForm, setShowIdentityForm] = useState(false);
 
   useEffect(() => {
     // Paths, SHAs and open confirmations from repository A are meaningless in B.
     setSelection(null);
     setBranchesOpen(false);
     setConfirm(null);
+    setSection('changes');
+    setShowIdentityForm(false);
   }, [projectId]);
 
   // A manager that was hidden while the agent worked re-reads the tree when it
@@ -91,14 +114,14 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
   const groups = groupFiles(files);
   const branch = branchLabel(status);
   const busy = repo.busy !== null;
+  const activeOp = operationLabel(status?.operation);
+  const remotesCount = status?.remotes_count ?? repo.remotes?.length ?? 0;
 
   // The full-width view has room for the history, so it is already there when the
   // view opens; the inspector waits for the section to be expanded.
   useEffect(() => {
     if (variant !== 'page') return;
     repo.loadHistory();
-    // `loadHistory` is rebuilt when the project changes, which is exactly when the
-    // history has to be reloaded - so it is a real dependency.
   }, [variant, repo.loadHistory]);
 
   const requestDiscardFile = (file: GitFile, group: GitGroupId): void => {
@@ -149,7 +172,7 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
       title: `Delete branch ${target.name}?`,
       description: `The branch ref is removed. Commits that no other branch contains become unreachable.`,
       confirmLabel: 'Delete branch',
-      note: 'Git refuses to delete an unmerged branch from this panel; delete it from the terminal with `git branch -D` if you are sure.',
+      note: 'Git refuses to delete an unmerged branch from this dialog; use the Branches tab to force delete if you are sure.',
       onConfirm: async () => {
         await repo.deleteBranch(target.name);
       },
@@ -227,17 +250,11 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
 
   const notRepo =
     repo.state === 'ready' && status && !status.is_repo ? (
-      <div class="empty-inspector" key="not-repo">
-        <p class="empty-inspector-title">
-          {status.error ? 'Git unavailable' : 'Not a git repository'}
-        </p>
-        <p>
-          {status.error
-            ? 'The git status probe failed, so there is no working tree to manage here.'
-            : 'This workspace is not tracked by git, so there is nothing to stage, commit or review. `git init` in the project directory turns this panel on.'}
-        </p>
-        {status.error ? <p class="muted small">{status.error}</p> : null}
-      </div>
+      <GitInitView
+        error={status.error}
+        busy={busy}
+        onInit={(opts) => repo.initRepo(opts)}
+      />
     ) : null;
 
   const probeError =
@@ -349,6 +366,196 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
     />
   );
 
+  const operationBanner =
+    status?.is_repo && activeOp ? (
+      <div class="gitm-op-banner" role="status">
+        <span class="gitm-op-label">
+          <AlertIcon size={13} /> {activeOp}
+        </span>
+        <div class="gitm-op-actions">
+          {status.operation === 'merge' ? (
+            <>
+              <button
+                type="button"
+                class="button button-small button-primary"
+                disabled={busy || counts.conflicts > 0}
+                onClick={() => void repo.merge({ action: 'continue' })}
+              >
+                Continue merge
+              </button>
+              <button
+                type="button"
+                class="button button-small button-danger"
+                disabled={busy}
+                onClick={() => void repo.merge({ action: 'abort' })}
+              >
+                Abort merge
+              </button>
+            </>
+          ) : status.operation === 'rebase' ? (
+            <>
+              <button
+                type="button"
+                class="button button-small button-primary"
+                disabled={busy || counts.conflicts > 0}
+                onClick={() => void repo.rebase({ action: 'continue' })}
+              >
+                Continue
+              </button>
+              <button
+                type="button"
+                class="button button-small"
+                disabled={busy}
+                onClick={() => void repo.rebase({ action: 'skip' })}
+              >
+                Skip
+              </button>
+              <button
+                type="button"
+                class="button button-small button-danger"
+                disabled={busy}
+                onClick={() => void repo.rebase({ action: 'abort' })}
+              >
+                Abort rebase
+              </button>
+            </>
+          ) : status.operation === 'cherry-pick' ? (
+            <>
+              <button
+                type="button"
+                class="button button-small button-primary"
+                disabled={busy || counts.conflicts > 0}
+                onClick={() => void repo.cherryPick({ action: 'continue' })}
+              >
+                Continue
+              </button>
+              <button
+                type="button"
+                class="button button-small"
+                disabled={busy}
+                onClick={() => void repo.cherryPick({ action: 'skip' })}
+              >
+                Skip
+              </button>
+              <button
+                type="button"
+                class="button button-small button-danger"
+                disabled={busy}
+                onClick={() => void repo.cherryPick({ action: 'abort' })}
+              >
+                Abort
+              </button>
+            </>
+          ) : null}
+        </div>
+      </div>
+    ) : null;
+
+  const missingIdentity =
+    status?.is_repo &&
+    status.identity !== undefined &&
+    (!status.identity.name || !status.identity.email);
+
+  const identityBanner = missingIdentity ? (
+    <div class="gitm-id-banner">
+      <div class="gitm-id-row">
+        <span>
+          <AlertIcon size={13} /> Git author identity (<code>user.name</code> /{' '}
+          <code>user.email</code>) is not configured.
+        </span>
+        <button
+          type="button"
+          class="tiny-link"
+          onClick={() => setShowIdentityForm((v) => !v)}
+        >
+          {showIdentityForm ? 'Hide' : 'Configure'}
+        </button>
+      </div>
+      {showIdentityForm ? (
+        <form
+          class="gitm-id-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (busy) return;
+            void repo.setIdentity(idName, idEmail).then((ok) => {
+              if (ok) setShowIdentityForm(false);
+            });
+          }}
+        >
+          <input
+            type="text"
+            class="gitm-input"
+            placeholder="Your Name"
+            aria-label="Git user.name"
+            value={idName}
+            onInput={(e) => setIdName((e.target as HTMLInputElement).value)}
+          />
+          <input
+            type="email"
+            class="gitm-input"
+            placeholder="you@example.com"
+            aria-label="Git user.email"
+            value={idEmail}
+            onInput={(e) => setIdEmail((e.target as HTMLInputElement).value)}
+          />
+          <button
+            type="submit"
+            class="button button-small button-primary"
+            disabled={busy || (idName.trim() === '' && idEmail.trim() === '')}
+          >
+            Save identity
+          </button>
+        </form>
+      ) : null}
+    </div>
+  ) : null;
+
+  const pageSections: Array<{
+    id: GitSection;
+    label: string;
+    icon: JSX.Element;
+    count?: number;
+  }> = [
+    {
+      id: 'changes',
+      label: 'Changes',
+      icon: <GitIcon size={13} />,
+      count: counts.total > 0 ? counts.total : undefined,
+    },
+    {
+      id: 'history',
+      label: 'History',
+      icon: <CommitIcon size={13} />,
+    },
+    {
+      id: 'branches',
+      label: 'Branches',
+      icon: <BranchIcon size={13} />,
+      count: repo.branches.length > 0 ? repo.branches.length : undefined,
+    },
+    {
+      id: 'remotes',
+      label: 'Remotes',
+      icon: <GlobeIcon size={13} />,
+      count: remotesCount > 0 ? remotesCount : undefined,
+    },
+    {
+      id: 'pulls',
+      label: 'Pull requests',
+      icon: <PullRequestIcon size={13} />,
+    },
+    {
+      id: 'issues',
+      label: 'Issues',
+      icon: <IssueIcon size={13} />,
+    },
+  ];
+
+  const defaultRepoName = (project?.name ?? 'repository')
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'repository';
+
   if (variant === 'page') {
     return (
       <div class="gitm gitm-page">
@@ -356,76 +563,287 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
           <div class="gitm-head-titles">
             <p class="gitm-kicker">Source control</p>
             <div class="gitm-head-line">
-              {branchChip}
-              <h2 class="gitm-title">Working tree</h2>
+              {status?.is_repo ? branchChip : null}
+              <h2 class="gitm-title">
+                {status === null || status.is_repo ? 'Working tree' : 'Repository setup'}
+              </h2>
+              {repo.githubStatus?.repo?.url ? (
+                <a
+                  class="gitm-gh-pill"
+                  href={repo.githubStatus.repo.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="Open repository on GitHub"
+                >
+                  <GlobeIcon size={12} />
+                  <span>{repo.githubStatus.repo.nameWithOwner}</span>
+                  <ExternalIcon size={11} />
+                </a>
+              ) : null}
             </div>
-            <p class="gitm-desc">{describeStatus(status) ?? 'No repository to show'}</p>
+            <p class="gitm-desc">
+              {status?.is_repo
+                ? (describeStatus(status) ?? 'No repository to show')
+                : 'Initialize a git repository or connect a remote'}
+            </p>
           </div>
+
           <div class="gitm-head-actions">
             {status?.is_repo ? (
-              // Only what exists: three chips reading "0" are noise next to a
-              // sentence that already says the tree is clean.
-              <span class="gitm-chips" aria-label="Change counts">
-                {counts.staged > 0 ? (
-                  <span class="gitm-chip is-staged" title="Staged files">
-                    staged {counts.staged}
-                  </span>
-                ) : null}
-                {counts.changes > 0 ? (
-                  <span class="gitm-chip is-changes" title="Unstaged modified files">
-                    modified {counts.changes}
-                  </span>
-                ) : null}
-                {counts.untracked > 0 ? (
-                  <span class="gitm-chip is-untracked" title="Untracked files">
-                    untracked {counts.untracked}
-                  </span>
-                ) : null}
-                {counts.conflicts > 0 ? (
-                  <span class="gitm-chip is-conflict" title="Unresolved merge conflicts">
-                    conflicts {counts.conflicts}
-                  </span>
-                ) : null}
-                {counts.total === 0 ? <span class="gitm-chip is-clean">clean</span> : null}
-              </span>
+              <>
+                <div class="gitm-sync-bar" role="group" aria-label="Remote sync">
+                  {remotesCount === 0 ? (
+                    <button
+                      type="button"
+                      class="button button-small"
+                      disabled={busy}
+                      onClick={() => setSection('remotes')}
+                    >
+                      <GlobeIcon size={12} /> Set remote
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        class="button button-small"
+                        disabled={busy}
+                        title="Fetch updates from all remotes"
+                        onClick={() => void repo.fetch({ all: true, prune: true })}
+                      >
+                        Fetch
+                      </button>
+                      <button
+                        type="button"
+                        class="button button-small"
+                        disabled={busy || !status.branch}
+                        title="Pull from remote"
+                        onClick={() => void repo.pull()}
+                      >
+                        <DownloadIcon size={12} /> Pull
+                        {status.behind ? ` ↓${status.behind}` : ''}
+                      </button>
+                      <button
+                        type="button"
+                        class="button button-small button-primary"
+                        disabled={busy || !status.branch}
+                        title={
+                          status.upstream
+                            ? `Push to ${status.upstream}`
+                            : 'Publish branch to origin'
+                        }
+                        onClick={() =>
+                          void repo.push({
+                            set_upstream: !status.upstream,
+                          })
+                        }
+                      >
+                        <UploadIcon size={12} />{' '}
+                        {status.upstream
+                          ? `Push${status.ahead ? ` ↑${status.ahead}` : ''}`
+                          : 'Publish'}
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                <span class="gitm-chips" aria-label="Change counts">
+                  {counts.staged > 0 ? (
+                    <span class="gitm-chip is-staged" title="Staged files">
+                      staged {counts.staged}
+                    </span>
+                  ) : null}
+                  {counts.changes > 0 ? (
+                    <span class="gitm-chip is-changes" title="Unstaged modified files">
+                      modified {counts.changes}
+                    </span>
+                  ) : null}
+                  {counts.untracked > 0 ? (
+                    <span class="gitm-chip is-untracked" title="Untracked files">
+                      untracked {counts.untracked}
+                    </span>
+                  ) : null}
+                  {counts.conflicts > 0 ? (
+                    <span class="gitm-chip is-conflict" title="Unresolved merge conflicts">
+                      conflicts {counts.conflicts}
+                    </span>
+                  ) : null}
+                  {counts.total === 0 ? <span class="gitm-chip is-clean">clean</span> : null}
+                </span>
+              </>
             ) : null}
             {refreshButton}
           </div>
         </header>
 
         {status?.is_repo ? (
-          <div class="gitm-body" key="body">
-            <aside class="gitm-side" aria-label="Source control actions">
-              {commitBox}
-              <div class="gitm-side-scroll">
-                {statusWarning}
-                {actionError}
-                {changesBlock}
-                {historyBlock}
-              </div>
-            </aside>
-            <section class="gitm-main" aria-label="Diff">
-              <GitDiffPane
-                key="diff-pane"
-                variant="page"
-                selection={selection}
-                projectId={projectId}
-                reloadKey={repo.revision}
+          <nav class="gitm-nav" role="tablist" aria-label="Source control sections">
+            {pageSections.map((item) => {
+              const selected = section === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  class={`gitm-nav-tab${selected ? ' is-active' : ''}`}
+                  onClick={() => setSection(item.id)}
+                >
+                  {item.icon}
+                  <span>{item.label}</span>
+                  {item.count !== undefined ? (
+                    <span class="gitm-nav-count">{item.count}</span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </nav>
+        ) : null}
+
+        {operationBanner}
+        {identityBanner}
+
+        {status?.is_repo ? (
+          section === 'changes' ? (
+            <div class="gitm-body" key="body">
+              <aside class="gitm-side" aria-label="Source control actions">
+                {commitBox}
+                <div class="gitm-side-scroll">
+                  {statusWarning}
+                  {actionError}
+                  {changesBlock}
+                  {historyBlock}
+                </div>
+              </aside>
+              <section class="gitm-main" aria-label="Diff">
+                <GitDiffPane
+                  key="diff-pane"
+                  variant="page"
+                  selection={selection}
+                  projectId={projectId}
+                  reloadKey={repo.revision}
+                  busy={busy}
+                  file={selectedFile}
+                  onStage={(paths) => void repo.stage(paths)}
+                  onUnstage={(paths) => void repo.unstage(paths)}
+                  onDiscard={(file, staged) => {
+                    const group: GitGroupId = staged
+                      ? 'staged'
+                      : isUntracked(file)
+                        ? 'untracked'
+                        : 'changes';
+                    requestDiscardFile(file, group);
+                  }}
+                  onResolveConflict={(path, strategy) =>
+                    void repo.resolveConflict(path, strategy)
+                  }
+                  onOpenFile={(path) => actions.openFileInTab(path)}
+                  onClear={() => setSelection(null)}
+                />
+              </section>
+            </div>
+          ) : section === 'history' ? (
+            <GitHistoryView
+              commits={repo.commits}
+              branches={repo.branches}
+              projectId={projectId}
+              revision={repo.revision}
+              busy={busy}
+              onLoadHistory={repo.loadHistory}
+              onCheckoutDetached={(sha) => repo.checkout(sha, { detach: true })}
+              onCreateBranchAt={(name, start) => repo.createBranch(name, { start, checkout: true })}
+              onCreateTagAt={(name, target) => repo.manageTag({ action: 'create', name, target })}
+              onCherryPick={(sha) => repo.cherryPick({ sha, action: 'pick' })}
+              onRevert={(sha) => repo.revertCommit(sha)}
+              onReset={(target, mode, confirmReset) =>
+                repo.resetHead({ target, mode, confirm: confirmReset })
+              }
+              onRequestConfirm={setConfirm}
+            />
+          ) : section === 'branches' ? (
+            <div class="gitm-branches-layout">
+              <GitBranchesView
+                status={status}
+                branches={repo.branches}
+                remoteBranches={repo.remoteBranches}
+                tags={repo.tags}
+                stashes={repo.stashes}
                 busy={busy}
-                file={selectedFile}
-                onStage={(paths) => void repo.stage(paths)}
-                onUnstage={(paths) => void repo.unstage(paths)}
-                onDiscard={(file, staged) => {
-                  const group: GitGroupId = staged ? 'staged' : isUntracked(file) ? 'untracked' : 'changes';
-                  requestDiscardFile(file, group);
-                }}
-                onClear={() => setSelection(null)}
+                onLoadTags={repo.loadTags}
+                onLoadStashes={repo.loadStashes}
+                onCheckout={repo.checkout}
+                onCreateBranch={repo.createBranch}
+                onRenameBranch={repo.renameBranch}
+                onDeleteBranch={repo.deleteBranch}
+                onMerge={(b) => repo.merge({ branch: b })}
+                onRebase={(b) => repo.rebase({ branch: b })}
+                onManageTag={repo.manageTag}
+                onStash={repo.stash}
+                onInspectStash={(entry) =>
+                  setSelection({
+                    kind: 'stash',
+                    index: entry.index,
+                    ref: entry.ref,
+                    subject: entry.subject,
+                  })
+                }
+                onRequestConfirm={setConfirm}
               />
-            </section>
-          </div>
+              {selection?.kind === 'stash' ? (
+                <section class="gitm-stash-preview" aria-label="Stash diff">
+                  <GitDiffPane
+                    variant="panel"
+                    selection={selection}
+                    projectId={projectId}
+                    reloadKey={repo.revision}
+                    busy={busy}
+                    file={null}
+                    onStage={() => {}}
+                    onUnstage={() => {}}
+                    onDiscard={() => {}}
+                    onClear={() => setSelection(null)}
+                  />
+                </section>
+              ) : null}
+            </div>
+          ) : section === 'remotes' ? (
+            <GitRemotesView
+              status={status}
+              remotes={repo.remotes}
+              githubStatus={repo.githubStatus}
+              defaultRepoName={defaultRepoName}
+              busy={busy}
+              onLoadRemotes={repo.loadRemotes}
+              onLoadGitHubStatus={repo.loadGitHubStatus}
+              onManageRemote={repo.manageRemote}
+              onFetch={repo.fetch}
+              onPull={repo.pull}
+              onPush={repo.push}
+              onCreateGitHubRepo={repo.createGitHubRepo}
+              onRequestConfirm={setConfirm}
+            />
+          ) : section === 'pulls' ? (
+            <GitPullRequestsView
+              projectId={projectId}
+              currentBranch={status.branch}
+              branches={repo.branches}
+              githubStatus={repo.githubStatus}
+              busy={busy}
+              onLoadGitHubStatus={repo.loadGitHubStatus}
+              onCheckoutPull={repo.checkoutPull}
+              onOpenRemotes={() => setSection('remotes')}
+              onRequestConfirm={setConfirm}
+            />
+          ) : (
+            <GitIssuesView
+              projectId={projectId}
+              githubStatus={repo.githubStatus}
+              busy={busy}
+              onLoadGitHubStatus={repo.loadGitHubStatus}
+              onOpenRemotes={() => setSection('remotes')}
+              onRequestConfirm={setConfirm}
+            />
+          )
         ) : (
-          // One explanation, not a sidebar and a pane: there is no working tree to
-          // put in them.
           <div class="gitm-empty-body" key="empty">
             {probeError}
             {notRepo}
@@ -456,6 +874,7 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
       {loading}
       {statusWarning}
       {actionError}
+      {operationBanner}
 
       {status?.is_repo ? (
         <>
@@ -473,18 +892,22 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
                 onStage={(paths) => void repo.stage(paths)}
                 onUnstage={(paths) => void repo.unstage(paths)}
                 onDiscard={(file, staged) => {
-                  const group: GitGroupId = staged ? 'staged' : isUntracked(file) ? 'untracked' : 'changes';
+                  const group: GitGroupId = staged
+                    ? 'staged'
+                    : isUntracked(file)
+                      ? 'untracked'
+                      : 'changes';
                   requestDiscardFile(file, group);
                 }}
+                onResolveConflict={(path, strategy) =>
+                  void repo.resolveConflict(path, strategy)
+                }
+                onOpenFile={(path) => actions.openFileInTab(path)}
                 onClear={() => setSelection(null)}
               />
             </section>
           ) : null}
           {historyBlock}
-          <p class="inspector-note">
-            <AlertIcon size={12} /> Local only: staging, commits, branches and stashes. Pull, push and
-            fetch stay in the terminal.
-          </p>
         </>
       ) : null}
 

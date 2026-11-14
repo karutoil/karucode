@@ -28,6 +28,7 @@ A change triggers this rule when it touches any of:
 | MCP transport, config field or unsupported feature | `mcp` |
 | an approval mode, allowlist or decision | `approvals` |
 | project/session/workspace semantics | `projects` |
+| a skill, the folders it is found in, or the `skill` tool | `skills` |
 | a security control or trust boundary | `security` |
 | subagent limits or behaviour | `subagents` |
 | a UI panel, shortcut or build step | `web-ui` |

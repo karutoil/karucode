@@ -1127,6 +1127,35 @@ pub trait Store: Send + Sync {
         limit: usize,
     ) -> Result<Vec<StoredMessage>>;
 
+    /// Remember the compacted window a run ended with (see
+    /// [`SqliteStore::save_compaction_snapshot`]).
+    ///
+    /// A store with no snapshot support reports success and remembers nothing:
+    /// the snapshot is an optimisation for the provider's prefix cache, never a
+    /// correctness requirement, so an implementation that does not have it must
+    /// behave exactly like one whose snapshot was dropped.
+    async fn save_compaction_snapshot(
+        &self,
+        _session_id: &str,
+        _watermark_count: usize,
+        _snapshot_messages: &[Message],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// The `(watermark_count, window)` the last compaction saved, if any.
+    async fn load_compaction_snapshot(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<(usize, Vec<Message>)>> {
+        Ok(None)
+    }
+
+    /// Forget the snapshot: the transcript it describes was rewound or truncated.
+    async fn clear_compaction_snapshot(&self, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn create_run(&self, id: &str, session_id: &str, model: &str, prompt: &str)
         -> Result<()>;
     async fn finish_run(&self, run_id: &str, status: RunStatus, error: Option<&str>) -> Result<()>;

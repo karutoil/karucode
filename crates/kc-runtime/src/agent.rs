@@ -663,10 +663,63 @@ async fn begin_run(
         limits.context_chars_for(model),
     )
     .await?;
+    // A previous run on this session already compacted its window. Rebuilding from
+    // the raw transcript would compact it again at a slightly different boundary -
+    // rewriting the digest near the front and throwing away the provider's whole
+    // cached prefix, every time the user types. So the compacted window is reused
+    // and only the messages stored *after* it are appended.
+    if let Some(hydrated) = load_compaction_snapshot(store, &state.session_id.0, &history).await {
+        history = hydrated;
+    }
     if history.is_empty() {
         history.push(user);
     }
     Ok(history)
+}
+
+/// Rebuild the run window as `[snapshot, stored after the snapshot]`.
+///
+/// Returns `None` - and the caller keeps the repaired transcript - whenever the
+/// snapshot cannot be trusted: it is empty, it is older than the window it claims
+/// to replace, or it describes rows this session no longer has (a rewind, a prune,
+/// a different session file). The snapshot is a cache in front of the prefix
+/// cache, never a source of truth.
+async fn load_compaction_snapshot(
+    store: &Arc<dyn kc_core::store::Store>,
+    session_id: &str,
+    repaired: &[Message],
+) -> Option<Vec<Message>> {
+    let (watermark, snapshot) = match store.load_compaction_snapshot(session_id).await {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not load the compaction snapshot; using the transcript");
+            return None;
+        }
+    };
+    if snapshot.is_empty() || watermark == 0 {
+        return None;
+    }
+    // How many stored messages are newer than the snapshot. `repaired` is the
+    // newest bounded suffix of the transcript, so the tail is the end of it.
+    let total = match store.session_stats(session_id).await {
+        Ok(stats) => stats.messages_main as usize,
+        Err(_) => return None,
+    };
+    if watermark > total {
+        // The snapshot covers more rows than the session has: a rewind or a prune
+        // happened under it.
+        return None;
+    }
+    let newer = total.saturating_sub(watermark);
+    if newer > repaired.len() {
+        // The tail is longer than what the repair loaded, so appending it would
+        // silently drop messages in the middle.
+        return None;
+    }
+    let mut hydrated = snapshot;
+    hydrated.extend(repaired[repaired.len() - newer..].iter().cloned());
+    Some(hydrated)
 }
 
 /// Run the loop for a session run and persist/emit its terminal state.
@@ -904,6 +957,22 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
     // reason a top-level run does.
     let instructions = kc_core::prompt::load_project_instructions(spec.workspace.root())
         .map(|instructions| kc_core::prompt::instructions_block(&instructions));
+    // Skills are resolved **once per run**, for exactly the reason the
+    // instructions above are: the listing is part of message 0, and a skill file
+    // that changed between two turns of the same run would move the cached
+    // prefix and cost a full prompt-cache miss on a request that is otherwise
+    // append-only. Bodies are not part of this - only the one line per skill; the
+    // agent opens the body through the `skill` tool when a task matches.
+    //
+    // A subagent runs this same loop against the same workspace (see
+    // `subagent.rs`), so a delegated task inherits the same skill list without
+    // any extra plumbing. `skills_block` is empty when the feature is off or
+    // nothing was found, which keeps such a prompt byte-identical to the one this
+    // harness produced before skills existed.
+    let skills_config = inner.deps.settings.skills().await;
+    let skills_registry = kc_core::skill::discover(&skills_config, spec.workspace.root());
+    let skills = kc_core::skill::skills_block(&skills_registry, &skills_config);
+    let skills = (!skills.is_empty()).then_some(skills);
     // The user turn this run is answering, captured before the loop mutates the
     // conversation: `run_loop_inner` pushes steers, mail and continuation nudges
     // onto the same history, so deriving it later would drift. It is the last
@@ -921,6 +990,7 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
         spec,
         Arc::clone(&notebook),
         instructions,
+        skills,
         turn,
     ))
     .catch_unwind()
@@ -958,6 +1028,10 @@ async fn run_loop_inner(
     notebook: Arc<std::sync::Mutex<crate::context::Notebook>>,
     // The workspace's instructions block, rendered once at run start.
     instructions: Option<String>,
+    // The skills block, rendered once at run start. `None` when the feature is
+    // off or the workspace has no skills, so the prompt stays byte-identical to
+    // the one an install without skills sends.
+    skills: Option<String>,
     // The user turn this run is answering, read once at run start.
     turn: Option<String>,
 ) -> LoopOutcome {
@@ -992,6 +1066,11 @@ async fn run_loop_inner(
     // forced-compaction block below), so a later turn starts already compacted
     // instead of walking into the same refusal again.
     let mut forced_compaction = false;
+    // The last *measured* prompt cost of this loop: `(characters sent,
+    // prompt_tokens the provider reported)` for the newest turn that reported any.
+    // See `ContextLimits::with_observed_usage` - it turns the four-characters-per-
+    // token guess into this install's real ratio.
+    let mut observed: Option<(usize, u64)> = None;
 
     loop {
         if spec.cancel.is_cancelled() {
@@ -1275,7 +1354,7 @@ is {})",
             }
         }
         let tool_specs = spec.tools.specs();
-        let system = kc_core::prompt::system_prompt_with_instructions(
+        let system = kc_core::prompt::system_prompt_with_context(
             &spec.workspace.root().to_string_lossy(),
             spec.workspace.extra_roots(),
             &tool_specs,
@@ -1283,6 +1362,7 @@ is {})",
             &spec.budget,
             &extra,
             instructions.as_deref(),
+            skills.as_deref(),
         );
         let mut base = Vec::with_capacity(history.len() + 2);
         base.push(Message::system(system));
@@ -1328,14 +1408,46 @@ is {})",
         let mut limits = spec
             .context_limits()
             .reserving(context::tool_payload_chars(&tool_specs));
+        // Characters the request built by this block actually carried. Declared
+        // outside the retry loop so the usage block, which lands after it, can
+        // still be paired with the window it describes.
+        #[allow(unused_assignments)]
+        let mut sent_chars = 0usize;
         let turn = 'request: loop {
-            let messages = context::fit_with_notes_and_limits(
+            // Calibration applies to this turn's request only: `limits` itself is
+            // the ceiling the loop was pinned with, and a measurement must never
+            // become a new permanent ceiling (a single dense turn would otherwise
+            // shrink every later request for the rest of the run).
+            let model_window = spec.model.context_window.unwrap_or(0);
+            let answer_reserve = spec
+                .model
+                .max_output_tokens
+                .or(spec.model.max_tokens.map(u64::from))
+                .unwrap_or(0);
+            let turn_limits = match observed {
+                Some((window_chars, prompt_tokens)) => limits.with_observed_usage(
+                    window_chars,
+                    prompt_tokens,
+                    model_window,
+                    answer_reserve,
+                ),
+                // No measurement yet: the estimate is the only signal that this
+                // window's *tokens* exceed the model's window even though its
+                // characters fit the budget. Acting on it here is what keeps the
+                // first request of a run from being refused outright.
+                None => limits.with_estimated_tokens(&base, model_window, answer_reserve),
+            };
+            let fitted = context::fit_with_notes_and_limits(
                 base.clone(),
-                limits,
+                turn_limits,
                 spec.limits.max_tool_output_bytes,
                 &notes,
-            )
-            .messages;
+            );
+            // What this request holds, in the units the provider will bill: the
+            // next turn's calibration divides this by the prompt token count that
+            // comes back for it.
+            sent_chars = fitted.chars();
+            let messages = fitted.messages;
 
             let request = ChatRequest {
                 admission: Some(kc_core::provider::AttemptAdmission {
@@ -1443,9 +1555,23 @@ is {})",
                                 ),
                             },
                             None,
+                            // No usage block: the request never produced a stream.
+                            None,
                         )
                     }
                 };
+                // Calibrate from what the provider just measured: `sent_chars` is
+                // what this request held and the usage block is the prompt token
+                // count the endpoint billed for it. Their ratio is the true
+                // characters-per-token of *this* content - the one number a static
+                // heuristic cannot know. A provider that reports no usage leaves the
+                // last reading alone: a stale measurement is still a measurement,
+                // and a missing one must not reset the calibration.
+                if let Some((input_tokens, _output_tokens)) = outcome.5 {
+                    if input_tokens > 0 && sent_chars > 0 {
+                        observed = Some((sent_chars, u64::from(input_tokens)));
+                    }
+                }
                 let restart = match &outcome.3 {
                     StreamEnd::Failed {
                         message, transient, ..
@@ -1645,7 +1771,7 @@ is {})",
             }
             break 'request turn;
         };
-        let (text, reasoning, calls, end, finish_reason) = turn;
+        let (text, reasoning, calls, end, finish_reason, _usage) = turn;
 
         if !text.is_empty() {
             last_text = text.clone();
@@ -2067,7 +2193,112 @@ is {})",
             .lock()
             .map(|notebook| notebook.entries().to_vec())
             .unwrap_or_default();
-        context::compact_run_window_with_limits(&mut history, spec.context_limits(), &notes);
+        let evicted = context::compact_run_window_with_limits_detailed(
+            &mut history,
+            spec.context_limits(),
+            &notes,
+        );
+        // The quantized eviction is the only moment worth a second model call: a
+        // whole slice of history has just been replaced by a digest, and prose
+        // about *why* that work mattered is the one thing the deterministic ledger
+        // cannot produce. It is additive by construction - the ledger is already in
+        // `history` - so every failure mode below is silent and cheap.
+        if let Some(batch) = evicted {
+            if let Some(summary) = run_semantic_compaction(&inner, &spec, &batch).await {
+                context::replace_digest_semantic_block(&mut history, &summary);
+            }
+            // Remember the window the turn is about to be answered from, so the
+            // *next* run on this session appends its user turn to these exact
+            // bytes instead of reloading the transcript and compacting again.
+            persist_compaction_snapshot(&inner, &spec, &history).await;
+        }
+    }
+}
+
+/// Ask the compaction model for the semantic block of a digest.
+///
+/// Returns `None` when the feature is off, when there is nothing to summarise, or
+/// when the call fails in any way - error, timeout, empty text, cancellation. The
+/// caller has already put the deterministic ledger in the window, so `None` is not
+/// a degradation the user has to hear about: the run continues on the ledger.
+async fn run_semantic_compaction(
+    inner: &Arc<RuntimeInner>,
+    spec: &LoopSpec,
+    batch: &context::EvictionBatch,
+) -> Option<String> {
+    let limits = &spec.limits;
+    if !limits.model_compaction {
+        return None;
+    }
+    if batch.scrubbed_transcript.trim().is_empty() {
+        return None;
+    }
+    let mut model = spec.model.clone();
+    if let Some(configured) = limits
+        .compaction_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        model.model = configured.to_string();
+    }
+    // A compaction must never wait on a provider the run already lost: ask the
+    // factory for a fresh handle, and treat a build failure as "no summary".
+    let provider = match inner.deps.providers.build(&model).await {
+        Ok(provider) => provider,
+        Err(e) => {
+            tracing::debug!(error = %e, "compaction model unavailable; keeping the state ledger");
+            return None;
+        }
+    };
+    let summary = context::synthesize_semantic_compaction_with_timeout(
+        provider.as_ref(),
+        &model.model,
+        batch,
+        limits.compaction_max_tokens.max(1),
+        limits.compaction_timeout_secs.max(1),
+        spec.cancel.child_token(),
+    )
+    .await;
+    match &summary {
+        Some(text) => tracing::info!(
+            session = %spec.session_id.0,
+            chars = text.chars().count(),
+            "model-assisted compaction merged into the digest"
+        ),
+        None => tracing::info!(
+            session = %spec.session_id.0,
+            "model-assisted compaction produced nothing; the deterministic state ledger is used"
+        ),
+    }
+    summary
+}
+
+/// Save the compacted window as this session's compaction checkpoint.
+///
+/// Failure is logged and ignored: the snapshot only saves a cache miss, so a store
+/// that cannot write it must not fail a run that is otherwise healthy.
+async fn persist_compaction_snapshot(
+    inner: &Arc<RuntimeInner>,
+    spec: &LoopSpec,
+    history: &[Message],
+) {
+    let store = &inner.deps.store;
+    let watermark = match store.session_stats(&spec.session_id.0).await {
+        Ok(stats) => stats.messages_main as usize,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not count stored messages for the compaction snapshot");
+            return;
+        }
+    };
+    if watermark == 0 || history.is_empty() {
+        return;
+    }
+    if let Err(e) = store
+        .save_compaction_snapshot(&spec.session_id.0, watermark, history)
+        .await
+    {
+        tracing::warn!(error = %e, "could not persist the compaction snapshot");
     }
 }
 
@@ -3172,6 +3403,10 @@ async fn consume(
     Vec<ToolCall>,
     StreamEnd,
     Option<String>,
+    // `(input_tokens, output_tokens)` the provider reported for this call, when it
+    // reported any. The loop uses the input count to calibrate the context budget
+    // from a measurement instead of a character heuristic.
+    Option<(u32, u32)>,
 ) {
     let mut text = String::new();
     // Reasoning is kept, not just forwarded: the turn is persisted with it
@@ -3466,6 +3701,7 @@ async fn consume(
         accumulator.finish(),
         end,
         finish_reason,
+        latest_usage.map(|(input_tokens, output_tokens, _cached)| (input_tokens, output_tokens)),
     )
 }
 

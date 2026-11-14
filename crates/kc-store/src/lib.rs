@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use kc_core::checkpoint::FileCheckpoint;
 use kc_core::config::SessionModelSelection;
 use kc_core::error::{Error, Result};
-use kc_core::message::{ImageAttachment, ToolCall};
+use kc_core::message::{ImageAttachment, Message, ToolCall};
 use kc_core::store::*;
 use parking_lot::Mutex;
 use rusqlite::{params, OptionalExtension, Row};
@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 24;
+const SCHEMA_VERSION: i64 = 25;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -377,6 +377,28 @@ CREATE INDEX IF NOT EXISTS idx_sessions_control_updated ON sessions(control, upd
 /// their existing `idx_sessions_control_updated` / `idx_sessions_project_id`
 /// plans.
 const MIGRATION_24: &str = "";
+
+/// Schema v25: the compaction checkpoint.
+///
+/// `messages` is append-only, so a follow-up user turn reloads the raw
+/// transcript and the runtime compacts it again - at a slightly shifted boundary,
+/// which rewrites the `[context digest: ...]` message near the front and throws
+/// away the provider's whole prefix cache. This row remembers the *compacted*
+/// window and how many stored messages it covered, so the next run can rebuild
+/// `[snapshot, stored[watermark..]]` and reuse the cached prefix instead.
+///
+/// One row per session (the newest compaction wins), deleted whenever the
+/// transcript is rewound: a snapshot that describes messages the rewind hid is
+/// worse than no snapshot at all.
+const MIGRATION_25: &str = r#"
+CREATE TABLE IF NOT EXISTS session_compaction_state (
+ session_id TEXT PRIMARY KEY,
+ evicted_up_to_seq INTEGER NOT NULL,
+ compacted_prefix_json TEXT NOT NULL,
+ superseded_map_json TEXT NOT NULL,
+ updated_at INTEGER NOT NULL
+);
+"#;
 
 const MIGRATION_12: &str = r#"
 CREATE TABLE IF NOT EXISTS missions (
@@ -1481,6 +1503,117 @@ impl SqliteStore {
         &self.instance_id
     }
 
+    /// Remember the window a compaction actually produced for this session.
+    ///
+    /// `watermark_count` is how many rows of `messages` that window already
+    /// covered (`list_messages(session, watermark_count)` was its tail). The next
+    /// run on this session rebuilds `[snapshot, stored[watermark_count..]]`, which
+    /// is byte-identical to what the previous run ended with plus the new user
+    /// turn - so the provider's prefix cache keeps hitting across the turn
+    /// boundary instead of being invalidated by a re-compaction.
+    ///
+    /// One row per session: the newest compaction replaces the previous one,
+    /// because an older snapshot describes a boundary the window has left behind.
+    pub async fn save_compaction_snapshot(
+        &self,
+        session_id: &str,
+        watermark_count: usize,
+        snapshot_messages: &[Message],
+    ) -> Result<()> {
+        let session_id = session_id.to_string();
+        let watermark = watermark_count as i64;
+        let messages = serde_json::to_string(snapshot_messages)
+            .map_err(|e| Error::Store(format!("serialize compaction snapshot: {e}")))?;
+        // What the window's stubs replaced, kept beside the window so a future
+        // reader can tell a stubbed body from a short result without re-deriving
+        // it. Nothing reads it yet; the column exists because re-deriving it means
+        // re-running supersession over a window that no longer holds the originals.
+        let superseded = serde_json::json!({
+            "stubbed": snapshot_messages
+                .iter()
+                .filter(|message| {
+                    message.content.starts_with("[superseded: ")
+                        || message.content.starts_with("[stale: ")
+                })
+                .count(),
+        })
+        .to_string();
+        let now = now_ms();
+        self.with(move |conn| {
+            conn.execute(
+                "INSERT INTO session_compaction_state
+                     (session_id, evicted_up_to_seq, compacted_prefix_json,
+                      superseded_map_json, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                     evicted_up_to_seq = excluded.evicted_up_to_seq,
+                     compacted_prefix_json = excluded.compacted_prefix_json,
+                     superseded_map_json = excluded.superseded_map_json,
+                     updated_at = excluded.updated_at",
+                params![session_id, watermark, messages, superseded, now],
+            )
+            .map_err(|e| db_err("save compaction snapshot", e))?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// The `(watermark_count, window)` a previous compaction saved, if any.
+    ///
+    /// A row that no longer parses is treated as absent rather than as an error:
+    /// it is a cache, and a corrupt cache must never keep a session from loading.
+    pub async fn load_compaction_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(usize, Vec<Message>)>> {
+        let session_id = session_id.to_string();
+        let row = self
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT evicted_up_to_seq, compacted_prefix_json
+                       FROM session_compaction_state WHERE session_id = ?1",
+                    params![session_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(|e| db_err("load compaction snapshot", e))
+            })
+            .await?;
+        let Some((watermark, json)) = row else {
+            return Ok(None);
+        };
+        let messages: Vec<Message> = match serde_json::from_str(&json) {
+            Ok(messages) => messages,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "ignoring an unreadable compaction snapshot; the session loads from its \
+                     stored messages instead"
+                );
+                return Ok(None);
+            }
+        };
+        Ok(Some((watermark.max(0) as usize, messages)))
+    }
+
+    /// Forget this session's compaction snapshot.
+    ///
+    /// Called whenever the transcript is rewound or truncated: the snapshot
+    /// describes a prefix that no longer exists, and hydrating it would resurrect
+    /// messages the user rewound away.
+    pub async fn clear_compaction_snapshot(&self, session_id: &str) -> Result<()> {
+        let session_id = session_id.to_string();
+        self.with(move |conn| {
+            conn.execute(
+                "DELETE FROM session_compaction_state WHERE session_id = ?1",
+                params![session_id],
+            )
+            .map_err(|e| db_err("clear compaction snapshot", e))?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Run a blocking closure with exclusive access to the writer connection.
     ///
     /// The mutex deliberately does not poison ([`parking_lot::Mutex`]): `f` is
@@ -1639,6 +1772,7 @@ impl SqliteStore {
                     22 => MIGRATION_22,
                     23 => MIGRATION_23,
                     24 => MIGRATION_24,
+                    25 => MIGRATION_25,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -3052,6 +3186,27 @@ impl Store for SqliteStore {
                 .map_err(|e| db_err("list_messages_after rows", e))
         })
         .await
+    }
+
+    async fn save_compaction_snapshot(
+        &self,
+        session_id: &str,
+        watermark_count: usize,
+        snapshot_messages: &[Message],
+    ) -> Result<()> {
+        SqliteStore::save_compaction_snapshot(self, session_id, watermark_count, snapshot_messages)
+            .await
+    }
+
+    async fn load_compaction_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(usize, Vec<Message>)>> {
+        SqliteStore::load_compaction_snapshot(self, session_id).await
+    }
+
+    async fn clear_compaction_snapshot(&self, session_id: &str) -> Result<()> {
+        SqliteStore::clear_compaction_snapshot(self, session_id).await
     }
 
     async fn create_run(
@@ -5032,6 +5187,134 @@ mod tests {
         }
     }
 
+    /// The compaction checkpoint survives a reopen, a rewind invalidates it, and a
+    /// corrupt row is treated as absent rather than as a failure.
+    ///
+    /// The snapshot is a cache in front of the provider's prefix cache: hydrating
+    /// it lets a follow-up user turn append to the window the last run actually
+    /// sent instead of reloading the raw transcript and compacting it again (which
+    /// rewrites the digest near the front and costs a full cache miss).
+    #[tokio::test]
+    async fn test_store_compaction_snapshot_roundtrip_and_rewind_clear() {
+        let db = TempDb::new("compaction-snapshot");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None, false)
+            .await
+            .expect("session");
+
+        assert_eq!(
+            SqliteStore::load_compaction_snapshot(&store, "s_1")
+                .await
+                .expect("load"),
+            None,
+            "a session with no compaction has no snapshot"
+        );
+
+        let digest = {
+            let mut message = Message::user(
+                "[context digest: 40 earlier messages omitted]\n### Modified & Created Files\n- file: `src/a.rs` — write",
+            );
+            message.name = Some("kc-runtime:context-digest".into());
+            message
+        };
+        let mut stubbed =
+            Message::tool_result("c1", "read_file", "[superseded: read_file `src/b.rs`]");
+        stubbed.content = "[superseded: read_file `src/b.rs` was replaced]".into();
+        let window = vec![
+            Message::system("sys"),
+            Message::user("TASK: fix the parser"),
+            digest.clone(),
+            stubbed,
+            Message::user("go on"),
+        ];
+        store
+            .save_compaction_snapshot("s_1", 12, &window)
+            .await
+            .expect("save");
+        store
+            .save_compaction_snapshot("s_other", 3, &window)
+            .await
+            .expect("second session");
+
+        let (watermark, loaded) = SqliteStore::load_compaction_snapshot(&store, "s_1")
+            .await
+            .expect("load")
+            .expect("a snapshot exists");
+        assert_eq!(watermark, 12, "the watermark is the stored message count");
+        assert_eq!(loaded, window, "the window round-trips byte for byte");
+        assert_eq!(
+            loaded[1].content, "TASK: fix the parser",
+            "and it keeps the pinned task"
+        );
+
+        // One row per session: a newer compaction replaces the older snapshot.
+        store
+            .save_compaction_snapshot("s_1", 20, &window[1..])
+            .await
+            .expect("overwrite");
+        let (watermark, loaded) = SqliteStore::load_compaction_snapshot(&store, "s_1")
+            .await
+            .expect("load")
+            .expect("snapshot");
+        assert_eq!(watermark, 20);
+        assert_eq!(loaded.len(), window.len() - 1);
+
+        // Reopening the database finds it again: this is a checkpoint, not cache
+        // in memory. The store holds an exclusive lock on its data directory, so
+        // the first handle is dropped first.
+        drop(store);
+        let store = db.open().await;
+        assert!(
+            SqliteStore::load_compaction_snapshot(&store, "s_1")
+                .await
+                .expect("load")
+                .is_some(),
+            "the snapshot survives a restart"
+        );
+
+        // A rewind hides the transcript the snapshot describes, so the runtime
+        // clears it. That is `clear_compaction_snapshot`; this asserts it really
+        // removes the row and leaves a sibling session's snapshot alone.
+        store.mark_messages_rewound("s_1", 0).await.expect("rewind");
+        store.clear_compaction_snapshot("s_1").await.expect("clear");
+        assert_eq!(
+            SqliteStore::load_compaction_snapshot(&store, "s_1")
+                .await
+                .expect("load"),
+            None,
+            "a rewound session must not resurrect its old window"
+        );
+        assert!(
+            SqliteStore::load_compaction_snapshot(&store, "s_other")
+                .await
+                .expect("load")
+                .is_some(),
+            "clearing one session does not touch another"
+        );
+
+        // An unreadable row is absence, not an error: a session must always load.
+        store
+            .with(|conn| {
+                conn.execute(
+                    "UPDATE session_compaction_state SET compacted_prefix_json = 'not json'
+                      WHERE session_id = 's_other'",
+                    [],
+                )
+                .map_err(|e| db_err("corrupt snapshot", e))?;
+                Ok(())
+            })
+            .await
+            .expect("corrupt");
+        assert_eq!(
+            SqliteStore::load_compaction_snapshot(&store, "s_other")
+                .await
+                .expect("load"),
+            None,
+            "an unreadable snapshot is ignored"
+        );
+    }
+
     fn new_message(session_id: &str, role: &str, content: &str) -> NewMessage {
         NewMessage {
             session_id: session_id.to_string(),
@@ -5147,6 +5430,7 @@ mod tests {
                 22 => MIGRATION_22,
                 23 => MIGRATION_23,
                 24 => MIGRATION_24,
+                25 => MIGRATION_25,
                 other => panic!("no batch for v{other}"),
             };
             for (_, table, column, decl) in ADDED_COLUMNS

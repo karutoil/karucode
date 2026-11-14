@@ -248,10 +248,15 @@ def main():
         print(f"binary not found: {binary} (use --build)", file=sys.stderr)
         return 2
 
+    # The plugin binary is looked up beside the server binary first, then in this
+    # checkout's target dir. The first entry is what a CI step that downloads a
+    # build artifact wants: the artifact's files land next to each other, and
+    # `ROOT/target/...` may be empty or stale in that shape.
     plugin_bin = next(
         (
             candidate
             for candidate in (
+                binary.parent / "example-hello",
                 ROOT / "target/debug/example-hello",
                 ROOT / "target/release/example-hello",
             )
@@ -457,11 +462,21 @@ def main():
             _assert(payload["id"] == f"run:{rid}", payload["id"])
             _assert(payload["session_title"], "the notification must carry the session title")
             # Ordering: the terminal state must be on the wire first, so a client
-            # that reacts by refetching finds the truth.
-            types = [e.get("type") for e in events.of_type("run_finished", "notification")]
+            # that reacts by refetching finds the truth. Compared within *this run's*
+            # frames: another session's notification (or a plugin's) may legitimately
+            # appear earlier in the stream and says nothing about this run's order.
+            stream = events.of_type("run_finished", "notification")
+            finished_at = next(
+                index
+                for index, event in enumerate(stream)
+                if event.get("type") == "run_finished" and event.get("run_id") == rid
+            )
+            notified_at = next(
+                index for index, event in enumerate(stream) if event is frames[0]
+            )
             _assert(
-                types.index("run_finished") < types.index("notification"),
-                f"run_finished must precede its notification: {types}",
+                finished_at < notified_at,
+                f"run_finished must precede its notification: {[e.get('type') for e in stream]}",
             )
             return f"kind={payload['kind']} title={payload['session_title']!r}"
 

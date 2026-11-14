@@ -24,12 +24,6 @@ license = "MIT"
 # crates (hashbrown, chacha20), so 1.89 is the highest of the requirements. CI's
 # `msrv` job runs this same number.
 rust-version = "1.89"
-authors = ["karucode contributors"]
-repository = "https://github.com/karutoil/karucode"
-homepage = "https://github.com/karutoil/karucode"
-readme = "README.md"
-keywords = ["agent", "llm", "coding-agent", "self-hosted"]
-categories = ["development-tools", "web-programming::http-server"]
 
 [workspace.dependencies]
 kc-core = { path = "crates/kc-core" }
