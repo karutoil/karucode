@@ -562,6 +562,14 @@ pub(crate) async fn rewind_quiescent(
         .store
         .mark_messages_rewound(session_id, cut)
         .await?;
+    // The compaction snapshot describes the transcript as it was *before* this
+    // rewind. Hydrating it on the next run would resurrect the messages the user
+    // just rewound away, so it goes with them.
+    inner
+        .deps
+        .store
+        .clear_compaction_snapshot(session_id)
+        .await?;
     inner.deps.store.touch_session(session_id).await?;
 
     Ok((point, preview, outcomes))

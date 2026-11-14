@@ -3386,7 +3386,7 @@ async fn git_tools_in_a_plain_repo_are_unchanged() {
 #[tokio::test]
 async fn builtin_tools_are_complete_and_read_only_by_default() {
     let tools = builtin_tools();
-    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), 12);
     let names: Vec<String> = tools.iter().map(|t| t.spec().name).collect();
     assert_eq!(
         names,
@@ -3401,7 +3401,8 @@ async fn builtin_tools_are_complete_and_read_only_by_default() {
             "git_status",
             "git_diff",
             "git_log",
-            "karucode_docs"
+            "karucode_docs",
+            "skill"
         ]
     );
     for tool in &tools {

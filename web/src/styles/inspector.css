@@ -1967,6 +1967,11 @@
   .result-git .gitm-chips {
     display: none;
   }
+
+  .result-git .gitm-two-col,
+  .result-git .gitm-field-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .context-drawer {

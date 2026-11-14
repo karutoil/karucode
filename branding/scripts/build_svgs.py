@@ -104,7 +104,7 @@ def banner() -> str:
         '<stop offset="1" stop-color="#24201a"/></linearGradient>'
     )
     words, _ = wordmark(78, 224, 184, PAPER, GOLD)
-    tag, _ = text(REGULAR, "A self-hosted coding agent for long sessions.", 24, 228, 230, PAPER2)
+    tag, _ = text(REGULAR, "A coding agent that is one binary, not a stack.", 24, 228, 230, PAPER2)
     body = "\n  ".join([
         '<rect width="1280" height="320" fill="url(#bg)"/>',
         mark(960, -40, 8.4, PAPER, GOLD, 0.06),
@@ -122,7 +122,7 @@ def social_card() -> str:
         '<stop offset="1" stop-color="#2a2319"/></linearGradient>'
     )
     words, _ = wordmark(104, 96, 370, PAPER, GOLD)
-    tag, _ = text(REGULAR, "A self-hosted coding agent for long sessions.", 34, 100, 432, PAPER2)
+    tag, _ = text(REGULAR, "A coding agent that is one binary, not a stack.", 34, 100, 432, PAPER2)
     facts, _ = text(MONO, "one Rust binary · SQLite · any OpenAI-compatible endpoint", 24, 100, 536, MUTED)
     body = "\n  ".join([
         '<rect width="1280" height="640" fill="url(#bg)"/>',
