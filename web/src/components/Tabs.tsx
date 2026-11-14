@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef } from 'preact/hooks';
-import type { JSX } from 'preact';
+import type { JSX, TargetedKeyboardEvent } from 'preact';
 import { CloseIcon } from './icons';
 
 export interface TabItem<T extends string> {
@@ -98,7 +98,7 @@ export function Tabs<T extends string>({
     return () => window.removeEventListener('resize', reveal);
   }, [active, prefix, items.length]);
 
-  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
+  const onKeyDown = (event: TargetedKeyboardEvent<HTMLDivElement>): void => {
     const index = items.findIndex((item) => item.id === active);
     if (index === -1) return;
     // Delete/Backspace closes the selected tab, the way a browser's own tab strip
@@ -146,6 +146,11 @@ export function Tabs<T extends string>({
             aria-controls={selected ? `${prefix}-panel-${item.id}` : undefined}
             tabIndex={selected ? 0 : -1}
             title={item.title}
+            // The label and the count pill are separate spans with no whitespace
+            // between them, so the content-derived accessible name would run the
+            // two together ("Terminal1"). The label names the tab properly and
+            // the count stays visible as the pill.
+            aria-label={item.count !== undefined && item.count > 0 ? `${item.label} ${item.count}` : item.label}
             onClick={() => onChange(item.id)}
           >
             {item.icon ? <span class="tab-icon" aria-hidden="true">{item.icon}</span> : null}

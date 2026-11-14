@@ -116,7 +116,7 @@ export function Inspector(): JSX.Element {
   const active = store.inspectorTab.value;
   const isSheetOpen = store.mobileSheet.value === 'inspector';
   const isNarrow = store.narrowViewport.value;
-  const inspectorRef = useRef<HTMLElement>(null);
+  const inspectorRef = useRef<HTMLDivElement>(null);
   const contextOpen = workbench.contextOpen.value;
   // A popped-out panel is an overlay that is closed as often as it is open, so
   // its only close control is an explicit one. On a phone the sheet always closes.
@@ -163,14 +163,18 @@ export function Inspector(): JSX.Element {
   }, [active, items.map((item) => item.id).join('|')]);
 
   return (
-    <aside
+    <div
       ref={inspectorRef}
       id="workbench-results"
       class={`inspector${isSheetOpen ? ' is-open' : ''}`}
       aria-label="Workspace inspector"
       aria-hidden={contextSuppressesSheet ? 'true' : undefined}
       inert={contextSuppressesSheet ? true : undefined}
-      role={isSheetOpen || popout ? 'dialog' : undefined}
+      // A plain div has no implicit role, so the dock's landmark and the
+      // overlay's dialog are both explicit. (The element was an <aside>, whose
+      // implicit role is complementary, but preact 11's per-element ARIA unions
+      // do not allow dialog on an aside.)
+      role={isSheetOpen || popout ? 'dialog' : 'complementary'}
       aria-modal={isSheetOpen && !contextOpen ? 'true' : undefined}
       data-context-open={contextOpen ? 'true' : 'false'}
       data-results-popout={popout ? 'true' : undefined}
@@ -246,6 +250,6 @@ export function Inspector(): JSX.Element {
 
         <BranchFooter />
       </div>
-    </aside>
+    </div>
   );
 }

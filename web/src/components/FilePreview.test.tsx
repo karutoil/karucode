@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, waitFor } from '@testing-library/preact';
+import { act, render, waitFor } from '@testing-library/preact';
 import { setAuthToken } from '../api/client';
 import { FilePreview, htmlDocument, renderMarkdownForFile } from './FilePreview';
 
@@ -180,6 +180,9 @@ describe('authenticated workspace media', () => {
     expect(document.body.innerHTML).not.toContain('browser-test-secret');
 
     view.unmount();
+    // preact 11 runs passive-effect cleanup on unmount asynchronously, so the
+    // revoke is awaited rather than assumed synchronous.
+    await act(async () => { await Promise.resolve(); });
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:workspace-1');
   });
 

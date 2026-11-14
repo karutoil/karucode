@@ -11,7 +11,7 @@ is [AGENTS.md](AGENTS.md) and [docs/CONTRIBUTING-AGENTS.md](docs/CONTRIBUTING-AG
   Linux-specific; macOS runs the unit-test matrix but is otherwise untested,
   Windows is unsupported).
 * Rust 1.89+ (the workspace `rust-version`; MSRV, checked by CI).
-* Node.js 22.12+ — **only to build the frontend**; `cargo build -p kc-server`
+* Node.js 22.22+ — **only to build the frontend**; `cargo build -p kc-server`
   runs `npm ci` + `npm run build` itself and embeds the result. Nothing Node
   remains at runtime. `KARUCODE_SKIP_WEB_BUILD=1` skips the frontend entirely for
   Rust-only iteration.

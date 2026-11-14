@@ -802,16 +802,18 @@ fn sanitize_passkey_name(name: &str) -> String {
 }
 
 fn hash_password(password: &str) -> Result<String> {
-    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
-    let salt = SaltString::generate(&mut OsRng);
+    // argon2 0.6: password-hash 0.6 dropped `SaltString::generate`; the salt is
+    // generated inside `hash_password` (getrandom is on through argon2's
+    // default features), and `PasswordHash` now lives in the `phc` module.
+    use argon2::password_hash::PasswordHasher;
     argon2::Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|e| Error::Config(format!("could not hash the password: {e}")))
 }
 
 fn verify_password_hash(hash: &str, password: &str) -> bool {
-    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    use argon2::password_hash::{phc::PasswordHash, PasswordVerifier};
     let Ok(parsed) = PasswordHash::new(hash) else {
         return false;
     };

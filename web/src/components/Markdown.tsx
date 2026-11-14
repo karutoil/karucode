@@ -1,6 +1,7 @@
 import type { JSX } from 'preact';
 import { render } from 'preact';
 import { useLayoutEffect, useMemo, useRef } from 'preact/hooks';
+import type { TargetedMouseEvent } from 'preact';
 import { copyText } from '../lib/clipboard';
 import { ARTIFACT_SLOT_ATTRIBUTE, renderMarkdownDocument } from '../lib/markdown';
 import { useResolvedMarkdownImages } from '../lib/markdownImages';
@@ -86,7 +87,7 @@ function useCopyStatus(): {
 
 /** One `data-copy` button, delegated from whichever element contains the prose. */
 function onClickCopy(
-  event: JSX.TargetedMouseEvent<HTMLDivElement>,
+  event: TargetedMouseEvent<HTMLDivElement>,
   announce: (message: string) => void,
 ): void {
   const target = event.target;

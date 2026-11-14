@@ -14,6 +14,7 @@
 import type { JSX } from 'preact';
 import { createPortal } from 'preact/compat';
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
+import type { TargetedEvent } from 'preact';
 import { useFocusTrap } from '../lib/dom';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
@@ -249,7 +250,7 @@ export function ThemeStudio(): JSX.Element | null {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [hexEdits, setHexEdits] = useState<Record<string, string>>({});
 
-  const panelRef = useRef<HTMLElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
@@ -344,7 +345,7 @@ export function ThemeStudio(): JSX.Element | null {
     refocusSaveButton(panelRef.current);
   };
 
-  const onImportFile = async (event: JSX.TargetedEvent<HTMLInputElement, Event>): Promise<void> => {
+  const onImportFile = async (event: TargetedEvent<HTMLInputElement, Event>): Promise<void> => {
     const input = event.currentTarget;
     const file = input.files?.[0];
     // Allow picking the same file again after a failed import.
@@ -427,7 +428,7 @@ export function ThemeStudio(): JSX.Element | null {
   const layer = (
     <div class="theme-studio-layer">
       <div class="theme-shade" aria-hidden="true" onClick={actions.closeThemeStudio} />
-      <aside
+      <div
         class="theme-studio"
         role="dialog"
         aria-modal="true"
@@ -516,6 +517,10 @@ export function ThemeStudio(): JSX.Element | null {
                       class={`theme-preset${selected ? ' selected' : ''}`}
                       style={presetStyle(entry)}
                       aria-pressed={selected}
+                      // The preset name and its mode are adjacent spans, so the
+                      // content-derived accessible name would run them together
+                      // ("EmberDark"). Name it as it is announced.
+                      aria-label={`${entry.name} ${modeLabel}${custom ? ' · Custom' : ''}`}
                       title={entry.description ?? entry.name}
                       data-testid={`theme-preset-${entry.id}`}
                       onClick={() => {
@@ -939,7 +944,7 @@ export function ThemeStudio(): JSX.Element | null {
             onChange={(event) => void onImportFile(event)}
           />
         </footer>
-      </aside>
+      </div>
     </div>
   );
 

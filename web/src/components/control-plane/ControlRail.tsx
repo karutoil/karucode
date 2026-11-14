@@ -37,7 +37,7 @@ const FILTERS: { id: Filter; label: string }[] = [
 
 export interface ControlRailProps {
   /** The rail region itself, focused when the plane opens (see the shell's mount effect). */
-  railRef: RefObject<HTMLElement>;
+  railRef: RefObject<HTMLElement | null>;
   /** The control chats, newest first - the same list the hero counts. */
   chats: ControlChatSummary[];
   /** Every row the last `/api/sessions` read returned, control chats included. */

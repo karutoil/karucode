@@ -1,6 +1,7 @@
 import type { ComponentChildren, JSX } from 'preact';
 import { useCallback, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
+import type { TargetedKeyboardEvent } from 'preact';
 
 /**
  * One accessible menu, for every surface that needs one.
@@ -221,7 +222,7 @@ export function useMenu(): MenuController {
 }
 
 /** The keyboard contract, shared by both placements. */
-function onMenuKeyDown(menu: MenuController, event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void {
+function onMenuKeyDown(menu: MenuController, event: TargetedKeyboardEvent<HTMLDivElement>): void {
   if (event.key === 'Escape') {
     event.preventDefault();
     event.stopPropagation();

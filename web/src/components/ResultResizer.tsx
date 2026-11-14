@@ -1,5 +1,6 @@
 import type { JSX, RefObject } from 'preact';
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import type { TargetedKeyboardEvent, TargetedPointerEvent } from 'preact';
 import * as actions from '../state/actions';
 
 export const MIN_RESULT_PANEL_WIDTH = 280;
@@ -20,7 +21,7 @@ function preferredValue(value: number | undefined): number | null {
 }
 
 interface ResultResizerProps {
-  containerRef: RefObject<HTMLDivElement>;
+  containerRef: RefObject<HTMLDivElement | null>;
   projectId: string | null;
   preferredWidth?: number;
   /**
@@ -158,14 +159,14 @@ export function ResultResizer({
     return next;
   };
 
-  const widthFromPointer = (event: JSX.TargetedPointerEvent<HTMLDivElement>): number | null => {
+  const widthFromPointer = (event: TargetedPointerEvent<HTMLDivElement>): number | null => {
     const active = drag.current;
     if (!active || active.pointerId !== event.pointerId) return null;
     // The results pane is on the right: dragging left makes it wider.
     return selectWidth(active.startWidth + active.startX - event.clientX, active.maximum);
   };
 
-  const finishPointer = (event: JSX.TargetedPointerEvent<HTMLDivElement>, save: boolean): void => {
+  const finishPointer = (event: TargetedPointerEvent<HTMLDivElement>, save: boolean): void => {
     const active = drag.current;
     if (!active || active.pointerId !== event.pointerId) return;
     // A cancellation can carry a meaningless (often zero) coordinate. Keep the
@@ -178,7 +179,7 @@ export function ResultResizer({
     }
   };
 
-  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
+  const onKeyDown = (event: TargetedKeyboardEvent<HTMLDivElement>): void => {
     const geometry = measure();
     const startingWidth = latestWidth(geometry.maximum, geometry.automatic);
     const step = event.shiftKey ? 50 : 10;

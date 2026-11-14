@@ -1,11 +1,11 @@
-import type { JSX } from 'preact';
+import type { JSX, SVGAttributes } from 'preact';
 
 export interface IconProps {
   size?: number;
   class?: string;
 }
 
-function svgProps({ size = 16, class: className }: IconProps): JSX.SVGAttributes<SVGSVGElement> {
+function svgProps({ size = 16, class: className }: IconProps): SVGAttributes<SVGSVGElement> {
   return {
     width: size,
     height: size,

@@ -1,6 +1,7 @@
 import type { JSX } from 'preact';
 import { lazy, Suspense } from 'preact/compat';
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
+import type { TargetedKeyboardEvent } from 'preact';
 import type { Terminal } from '../api/types';
 import { contextMenuProps, Menu, MenuItem, useMenu } from '../lib/menu';
 import type { TerminalSocketStatus } from '../state/terminalSocket';
@@ -218,7 +219,7 @@ function TerminalStrip({
     revealTab(activeId);
   }, [activeId, list.length, renamingId]);
 
-  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
+  const onKeyDown = (event: TargetedKeyboardEvent<HTMLDivElement>): void => {
     // Only the tabs own the arrow keys: the rename field and the chip actions
     // live inside this tablist too, and Home/End in a text field must move the
     // caret, not the selection.

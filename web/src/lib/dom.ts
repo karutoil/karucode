@@ -142,7 +142,7 @@ export function focusableWithin(container: HTMLElement): HTMLElement[] {
  * and the key is lost.
  */
 export function useFocusTrap(
-  ref: RefObject<HTMLElement>,
+  ref: RefObject<HTMLElement | null>,
   active: boolean,
   onEscape?: () => void,
 ): void {
