@@ -30,7 +30,7 @@ concrete implementations together.
 
 | Crate | Responsibility |
 | --- | --- |
-| `kc-core` | ids, messages, config, approval policy, workspace path confinement, event schema, tool/provider/store/hooks traits, plugin protocol types, system prompt |
+| `kc-core` | ids, messages, config, approval policy, workspace path confinement, event schema, tool/provider/store/hooks traits, plugin protocol types, system prompt, the skill model (discovery, frontmatter, prompt block) |
 | `kc-store` | SQLite schema + queries (projects, sessions, messages, runs, agents, approvals, settings, claims) |
 | `kc-provider` | `POST /chat/completions` streaming, SSE parsing, tool-call deltas, errors |
 | `kc-tools` | read/list/search/write/edit/command/git, output bounds, process-group kill |
@@ -44,7 +44,10 @@ concrete implementations together.
 ## Agent loop
 
 1. Persist the user message and a `runs` row (`running`).
-2. Build the prompt: system prompt + hook contributions + trimmed history.
+2. Build the prompt: system prompt (project instructions and the skill list are
+   read once per run, so message[0] cannot change mid-run and break the prefix
+   cache) + hook contributions + trimmed history. Skill *bodies* are never in it -
+   only one line per skill; the agent opens a body with the `skill` tool.
 3. Stream the provider; emit `text_delta`/`reasoning_delta`; accumulate tool calls.
 4. For each tool call (bounded count): emit `tool_call_started`, resolve approvals,
    execute with cancellation, truncate output, persist a `tool` message.

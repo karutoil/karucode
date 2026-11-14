@@ -35,12 +35,14 @@ import {
   PaletteIcon,
   SearchIcon,
   SettingsIcon,
+  SparkIcon,
 } from './icons';
 
 export type SettingsTab =
   | 'general'
   | 'models'
   | 'agent'
+  | 'skills'
   | 'access'
   | 'notifications'
   | 'plugins'
@@ -114,6 +116,17 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
     scope: 'install',
     icon: <AgentsIcon size={15} />,
     keywords: 'approval allowlist auto read-only permission subagent concurrency iterations limits timeouts',
+  },
+  {
+    id: 'skills',
+    label: 'Skills',
+    note: 'Procedures it loads on demand',
+    caption:
+      'Instruction packs the agent opens only when a task matches their description - where they are found, what of them reaches the prompt, and the ones you add yourself.',
+    scope: 'install',
+    icon: <SparkIcon size={15} />,
+    keywords:
+      'skill skill.md procedures playbook prompt context folders auto-detect discover add remove enable disable body',
   },
   {
     id: 'access',

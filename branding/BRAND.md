@@ -107,7 +107,7 @@ no exclamation marks, no "revolutionary", no emoji in product copy.
 * Second person, present tense: "you stop it", "the server embeds the UI".
 * Sentence case for headings and buttons.
 
-Tagline (banner): **A self-hosted coding agent for long sessions.**
+Tagline (banner): **A coding agent that is one binary, not a stack.**
 Facts line (social card): **one Rust binary · SQLite · any OpenAI-compatible endpoint.**
 
 ## Assets not to use
