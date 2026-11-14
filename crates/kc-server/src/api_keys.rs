@@ -322,6 +322,10 @@ fn admin_only(path: &str, method: &Method) -> bool {
     if path.starts_with("/api/plugins") && *method != Method::GET {
         return true;
     }
+    // Starting or stopping an MCP server is a process decision, like a plugin.
+    if path.starts_with("/api/mcp") && *method != Method::GET {
+        return true;
+    }
     if path == "/api/update/apply" {
         return true;
     }
@@ -1339,6 +1343,15 @@ mod tests {
             Scope::Admin
         );
         assert_eq!(required_scope("/api/plugins", &Method::GET), Scope::Read);
+        assert_eq!(
+            required_scope("/api/mcp/reload", &Method::POST),
+            Scope::Admin
+        );
+        assert_eq!(
+            required_scope("/api/mcp/fs/reload", &Method::POST),
+            Scope::Admin
+        );
+        assert_eq!(required_scope("/api/mcp", &Method::GET), Scope::Read);
         assert_eq!(
             required_scope("/api/update/apply", &Method::POST),
             Scope::Admin

@@ -111,6 +111,31 @@ export function formatCount(count: number): string {
   return count === 1 ? '1 message' : `${count} messages`;
 }
 
+/** Drop the trailing zeros of a fixed-point string, keeping a real fraction. */
+function trimFraction(value: string): string {
+  return value.includes('.') ? value.replace(/\.?0+$/, '') : value;
+}
+
+/**
+ * A model's context window as a compact token count: `1M`, `1.05M`, `128K`.
+ *
+ * The model picker used to render this with {@link formatCount}, which is the
+ * *message* counter: a 1,000,000-token window read "1000000 messages ctx" on
+ * every row of the list. A window is tokens, so it gets its own formatter and
+ * its own unit, and the exact figure belongs in the row's `title` where a
+ * reader who needs it can find it.
+ *
+ * Two decimals at most, trailing zeros dropped: `1048576` is `1.05M`, not
+ * `1.048576M`. Empty — never `0K` — when the model declares no window, because
+ * an unknown window is not a zero one.
+ */
+export function formatContextWindow(tokens: number | null | undefined): string {
+  if (tokens === null || tokens === undefined || !Number.isFinite(tokens) || tokens <= 0) return '';
+  if (tokens >= 1_000_000) return `${trimFraction((tokens / 1_000_000).toFixed(2))}M`;
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
+  return String(Math.round(tokens));
+}
+
 export function jsonSummary(value: unknown, max = 90): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'string') return truncate(value.replace(/\s+/g, ' '), max);

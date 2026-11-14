@@ -500,6 +500,9 @@ describe('SessionsRail desktop project navigation', () => {
     store.railCollapsed.value = false;
     store.notifications.value = [];
     store.projectIcons.value = {};
+    // The dropdown's open mode is a stored preference: a test that switched it
+    // must not hand a click-only rail to the next one.
+    store.projectMenuOpen.value = 'hover';
     controlPlaneOpen.value = false;
   });
 
@@ -757,6 +760,57 @@ describe('SessionsRail desktop project navigation', () => {
     // The pointer has not moved, so nothing should re-open it.
     await new Promise((resolve) => setTimeout(resolve, PROJECTS_HOVER_OPEN_MS + 120));
     expect(screen.queryByLabelText('Available projects')).toBeNull();
+  });
+
+  it('ignores the pointer entirely when the preference is click', async () => {
+    // The setting exists because this is the one control in the rail that opens
+    // under a pointer which was only crossing it on the way to the composer.
+    store.projectMenuOpen.value = 'click';
+    render(<SessionsRail />);
+    const disclosure = screen.getByRole('button', { name: 'Projects: KaruCode' });
+
+    fireEvent.mouseEnter(disclosure);
+    await new Promise((resolve) => setTimeout(resolve, PROJECTS_HOVER_OPEN_MS + 120));
+    expect(screen.queryByLabelText('Available projects')).toBeNull();
+    expect(disclosure.getAttribute('aria-expanded')).toBe('false');
+
+    // A press is the only thing that opens it, and it still moves focus in.
+    fireEvent.click(disclosure);
+    expect(screen.queryByLabelText('Available projects')).not.toBeNull();
+    expect(disclosure.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('keeps a click-opened dropdown open when the pointer leaves', async () => {
+    store.projectMenuOpen.value = 'click';
+    render(<SessionsRail />);
+    const disclosure = screen.getByRole('button', { name: 'Projects: KaruCode' });
+    fireEvent.click(disclosure);
+    const panel = screen.getByLabelText('Available projects');
+
+    fireEvent.mouseLeave(disclosure);
+    fireEvent.mouseLeave(panel);
+    await new Promise((resolve) => setTimeout(resolve, PROJECTS_HOVER_CLOSE_MS + 120));
+    // Closing on a pointer move would be the hover behaviour just turned off.
+    expect(screen.queryByLabelText('Available projects')).not.toBeNull();
+
+    // It is still a disclosure: a press on the trigger closes it.
+    fireEvent.click(disclosure);
+    expect(screen.queryByLabelText('Available projects')).toBeNull();
+  });
+
+  it('remembers the project-menu preference per browser', () => {
+    expect(store.readProjectMenuOpen()).toBe('hover');
+    actions.setProjectMenuOpen('click');
+    expect(store.projectMenuOpen.value).toBe('click');
+    expect(localStorage.getItem('karucode.projectMenuOpen')).toBe('click');
+    expect(store.readProjectMenuOpen()).toBe('click');
+
+    // A value this build does not know is not a reason to guess.
+    localStorage.setItem('karucode.projectMenuOpen', 'sideways');
+    expect(store.readProjectMenuOpen()).toBe('hover');
+
+    actions.setProjectMenuOpen('hover');
+    expect(localStorage.getItem('karucode.projectMenuOpen')).toBe('hover');
   });
 
   it('closes the dropdown when Tab moves focus out of it', () => {
