@@ -124,9 +124,12 @@
 //
 // # Gotchas
 //
-// * A tool-list change does not refresh the registry: restart the server (or the
-//   karucode process) to pick up new tools.
-// * A failed server stays failed; there is no health-check loop yet.
+// * A tool-list change on a connected server does not refresh the registry by
+//   itself: `POST /api/mcp/:name/reload` (or `mcp_watch`) replaces the connection
+//   and re-reads the tools.
+// * A failed server stays failed until it is reloaded; there is no health-check
+//   loop, but `POST /api/mcp/reload` retries an unchanged entry whose connection
+//   is not alive.
 // * A missing `command` or `url` fails that slot at startup with an explanatory
 //   error - it does not crash the server.
 // * `npx` servers are downloaded on first use; on an air-gapped host pre-install
@@ -134,6 +137,85 @@
 //
 // Full reference: `docs/MCP.md` (wire details, failure mapping, the full
 // not-implemented list).
+
+// @kc-doc: mcp-hot-reload
+// @kc-title: Reload MCP servers without a restart
+// @kc-summary: Apply an added, removed or edited [[mcp_servers]] entry with a reload route or the mcp_watch timer instead of restarting karucode.
+// @kc-tags: mcp, reload, restart, hot reload, watch, config
+// @kc-applies-to: config:[[mcp_servers]], config:mcp_watch, config:mcp_watch_secs, env:KARUCODE_MCP_WATCH, env:KARUCODE_MCP_WATCH_SECS, route:POST /api/mcp/reload, route:POST /api/mcp/:name/reload, route:GET /api/mcp, ui:Settings > Plugins & MCP, doc:docs/MCP.md
+//
+// Editing `[[mcp_servers]]` does not require restarting karucode. The config file
+// is re-read on demand, and the running connections are reconciled with it.
+//
+// # Apply an edit now
+//
+// ```bash
+// # after adding, removing or editing an entry in ~/.config/karucode/config.toml
+// curl -s -X POST localhost:8787/api/mcp/reload \
+//   -H "X-Karucode-Admin-Token: $KARUCODE_ADMIN_TOKEN" | jq
+// ```
+//
+// The answer names what happened, in configuration order:
+//
+// ```json
+// {
+//   "report": {
+//     "added": ["filesystem"],
+//     "removed": ["old-server"],
+//     "restarted": ["github"],
+//     "retried": [],
+//     "unchanged": ["remote-tools"]
+//   },
+//   "servers": [ { "name": "filesystem", "status": "connected", "tools": ["mcp__filesystem__read_file"] } ]
+// }
+// ```
+//
+// * `added` - a new name was started.
+// * `removed` - the entry disappeared; its process was stopped and its tools are gone.
+// * `restarted` - the entry changed; the old connection was closed and a new one opened.
+// * `retried` - the entry did not change but its connection was not alive; it was rebuilt.
+// * `unchanged` - left running exactly as it was.
+//
+// An empty `[[mcp_servers]]` table means **no servers**: deleting the last entry
+// stops it, so there is no "keep what we had" fallback. A config file that cannot
+// be read or parsed keeps the servers already running and logs a warning.
+//
+// # One server
+//
+// ```bash
+// # after rebuilding a server binary or editing one entry
+// curl -s -X POST localhost:8787/api/mcp/filesystem/reload \
+//   -H "X-Karucode-Admin-Token: $KARUCODE_ADMIN_TOKEN" | jq
+// ```
+//
+// This closes that server's connection and starts it again from the current
+// entry, whether or not the entry changed. A name that is configured but not
+// running is started; an unknown name is `404 not_found`.
+//
+// # Apply edits automatically
+//
+// ```toml
+// mcp_watch = true          # KARUCODE_MCP_WATCH=1
+// mcp_watch_secs = 2        # KARUCODE_MCP_WATCH_SECS, clamped to 1..=600
+// ```
+//
+// With `mcp_watch` on, the server stats the config file on that interval and
+// applies a change once two polls agree, so a truncate-then-write is not read as
+// an empty server list. It is off by default because a reload replaces
+// processes. The same switch exists for plugins (`plugins_watch`).
+//
+// # What still needs care
+//
+// * A run already in flight keeps the tool list it started with; the new set
+//   applies to the next run. No new session is needed.
+// * A tool-list change on a connected server needs a reload: karucode does not
+//   subscribe to `list_changed` notifications.
+// * `require_approval`, the `external` class and secret scrubbing are unchanged
+//   by a reload: a hot-added server is exactly as gated as one read at startup.
+// * `POST` routes need the admin credential (an API key with `admin` scope or the
+//   admin token); `GET /api/mcp` is readable with `read` scope.
+//
+// Full reference: `docs/MCP.md`.
 
 use async_trait::async_trait;
 use kc_core::config::McpServerConfig;
@@ -228,6 +310,39 @@ pub struct McpServerStatus {
     pub tools: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// What one [`McpManager::rescan`] changed, in configuration order.
+///
+/// Serialised by `POST /api/mcp/reload` so the caller can log or show what
+/// happened. `retried` is separate from `restarted` on purpose: an unchanged
+/// entry whose connection failed is retried, and calling that a restart would
+/// hide the fact that the operator changed nothing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpRescanReport {
+    /// Servers that did not exist before and whose process/connection was started.
+    pub added: Vec<String>,
+    /// Servers whose entry disappeared; their process was stopped and their tools
+    /// are gone.
+    pub removed: Vec<String>,
+    /// Servers whose entry changed; the old connection was closed and a new one
+    /// opened from the new entry.
+    pub restarted: Vec<String>,
+    /// Servers whose entry did not change but whose connection was not alive; the
+    /// connection was rebuilt and the handshake attempted again.
+    pub retried: Vec<String>,
+    /// Servers left exactly as they were.
+    pub unchanged: Vec<String>,
+}
+
+impl McpRescanReport {
+    /// Whether anything was added, removed, replaced or retried.
+    pub fn changed(&self) -> bool {
+        !(self.added.is_empty()
+            && self.removed.is_empty()
+            && self.restarted.is_empty()
+            && self.retried.is_empty())
+    }
 }
 
 /// Tool definition as returned by `tools/list`.
@@ -355,22 +470,38 @@ impl McpManager {
     /// command/url, bad transport) become `failed` statuses.
     pub fn new(configs: &[McpServerConfig]) -> Self {
         let timeouts = Arc::new(TimeoutRefs::from(&McpTimeouts::default()));
-        let mut servers = Vec::with_capacity(configs.len());
-        for config in configs {
-            let state = ServerState::new();
-            let (transport, setup_error) = build_transport(config);
-            if let Some(err) = &setup_error {
-                warn!(server = %config.name, "MCP server unavailable: {err}");
-                state.failed(err.clone());
-            }
-            servers.push(ServerSlot {
-                config: config.clone(),
-                transport,
-                state,
-                setup_error,
-            });
-        }
+        let servers = configs.iter().map(Self::slot_for).collect();
         Self { servers, timeouts }
+    }
+
+    /// One slot for one entry: transport built, setup error recorded, nothing
+    /// started. Shared by [`new`](Self::new), [`rescan`](Self::rescan) and
+    /// [`reload`](Self::reload) so a hot-added server is built exactly like one
+    /// read at startup.
+    fn slot_for(config: &McpServerConfig) -> ServerSlot {
+        let state = ServerState::new();
+        let (transport, setup_error) = build_transport(config);
+        if let Some(err) = &setup_error {
+            warn!(server = %config.name, "MCP server unavailable: {err}");
+            state.failed(err.clone());
+        }
+        ServerSlot {
+            config: config.clone(),
+            transport,
+            state,
+            setup_error,
+        }
+    }
+
+    /// Close one slot's transport and mark it disconnected. Used by
+    /// [`rescan`](Self::rescan), [`reload`](Self::reload) and
+    /// [`shutdown`](Self::shutdown) so a departing process is reaped the same way
+    /// everywhere.
+    async fn close_slot(slot: &ServerSlot) {
+        if let Some(transport) = &slot.transport {
+            transport.close().await;
+        }
+        slot.state.disconnected();
     }
 
     /// Override the connect/call budgets (applies to future connects and calls).
@@ -386,8 +517,20 @@ impl McpManager {
     /// Handshake with every enabled server concurrently. Each connection is
     /// capped, and one failure cannot delay or break the others.
     pub async fn connect_all(&mut self) {
+        self.connect_slots((0..self.servers.len()).collect()).await;
+    }
+
+    /// Handshake with the slots at `indices` concurrently.
+    ///
+    /// The indices are resolved against the current slot list, so a caller that
+    /// just replaced slots (a rescan or a single reload) can start exactly the
+    /// ones that need starting without a second pass over the config.
+    async fn connect_slots(&self, indices: Vec<usize>) {
         let mut set = JoinSet::new();
-        for slot in &self.servers {
+        for index in indices {
+            let Some(slot) = self.servers.get(index) else {
+                continue;
+            };
             if !slot.config.enabled || slot.setup_error.is_some() {
                 continue;
             }
@@ -407,6 +550,145 @@ impl McpManager {
                 warn!("MCP connect task failed: {e}");
             }
         }
+    }
+
+    /// Reconcile the running servers with `configs` without restarting karucode.
+    ///
+    /// This is what makes editing `[[mcp_servers]]` a normal edit instead of a
+    /// reboot:
+    ///
+    /// * a name that is new is added and started (hot **load**);
+    /// * a name that disappeared is stopped and dropped (hot **unload**);
+    /// * an entry whose fields changed is closed and started again from the new
+    ///   entry (hot **reload**);
+    /// * an unchanged entry whose connection is not alive is retried, because a
+    ///   reload is the operator asking for another attempt;
+    /// * everything else is left running untouched, so a rescan of an unchanged
+    ///   file does not disturb a single process.
+    ///
+    /// A deterministic setup error (no `command`, no `url`, unsupported
+    /// transport) is not retried while the entry is unchanged: the config would
+    /// have to change for the outcome to differ.
+    ///
+    /// Call the server's `reload_tools` afterwards so the registry exposes the new
+    /// set - the same contract as the plugin host's `rescan`.
+    pub async fn rescan(&mut self, configs: &[McpServerConfig]) -> McpRescanReport {
+        let mut report = McpRescanReport::default();
+        let mut previous: Vec<Option<ServerSlot>> = self.servers.drain(..).map(Some).collect();
+        let mut next: Vec<ServerSlot> = Vec::with_capacity(configs.len());
+        let mut starts: Vec<usize> = Vec::new();
+        let mut stops: Vec<ServerSlot> = Vec::new();
+
+        for config in configs {
+            let existing = previous
+                .iter_mut()
+                .find(|slot| {
+                    slot.as_ref()
+                        .is_some_and(|slot| slot.config.name == config.name)
+                })
+                .and_then(|slot| slot.take());
+            let Some(old) = existing else {
+                let slot = Self::slot_for(config);
+                if slot.config.enabled && slot.setup_error.is_none() {
+                    starts.push(next.len());
+                }
+                report.added.push(config.name.clone());
+                next.push(slot);
+                continue;
+            };
+            if old.config == *config {
+                let running = old.config.enabled
+                    && old.setup_error.is_none()
+                    && old.state.is_connected()
+                    && old
+                        .transport
+                        .as_ref()
+                        .is_some_and(|transport| transport.alive());
+                if running || old.setup_error.is_some() || !old.config.enabled {
+                    report.unchanged.push(config.name.clone());
+                    next.push(old);
+                    continue;
+                }
+                stops.push(old);
+                let slot = Self::slot_for(config);
+                starts.push(next.len());
+                report.retried.push(config.name.clone());
+                next.push(slot);
+                continue;
+            }
+            // The entry changed under a running process: the old process is
+            // executing what the operator has already replaced, so it is closed
+            // and a fresh slot is built from the new entry.
+            stops.push(old);
+            let slot = Self::slot_for(config);
+            if slot.config.enabled && slot.setup_error.is_none() {
+                starts.push(next.len());
+            }
+            report.restarted.push(config.name.clone());
+            next.push(slot);
+        }
+
+        for slot in previous.into_iter().flatten() {
+            report.removed.push(slot.config.name.clone());
+            stops.push(slot);
+        }
+
+        // Stop before start: a replacement must not race its predecessor for the
+        // same name, port, lock file or socket.
+        for slot in &stops {
+            Self::close_slot(slot).await;
+        }
+        self.servers = next;
+        self.connect_slots(starts).await;
+        report
+    }
+
+    /// Replace one server's slot from `configs`, whether or not its entry changed.
+    ///
+    /// This is the "I rebuilt the server binary" / "I edited its entry" path: the
+    /// old process is closed and a fresh one is started from the current entry.
+    /// `Err(NotFound)` means the name is not in `configs` at all - a name that is
+    /// configured but not yet in the manager is added, so a reload can also be the
+    /// first start.
+    pub async fn reload(
+        &mut self,
+        name: &str,
+        configs: &[McpServerConfig],
+    ) -> kc_core::Result<McpServerStatus> {
+        let config = configs
+            .iter()
+            .find(|config| config.name == name)
+            .ok_or_else(|| {
+                kc_core::Error::NotFound(format!("MCP server `{name}` is not configured"))
+            })?;
+        let index = self
+            .servers
+            .iter()
+            .position(|slot| slot.config.name == name);
+        if let Some(old) = index.map(|index| self.servers.remove(index)) {
+            Self::close_slot(&old).await;
+        }
+        let slot = Self::slot_for(config);
+        let connect = slot.config.enabled && slot.setup_error.is_none();
+        let index = match index {
+            Some(index) => {
+                self.servers.insert(index, slot);
+                index
+            }
+            None => {
+                self.servers.push(slot);
+                self.servers.len() - 1
+            }
+        };
+        if connect {
+            self.connect_slots(vec![index]).await;
+        }
+        self.statuses()
+            .into_iter()
+            .find(|status| status.name == name)
+            .ok_or_else(|| {
+                kc_core::Error::NotFound(format!("MCP server `{name}` is not configured"))
+            })
     }
 
     /// Tools of every connected server.
@@ -564,10 +846,7 @@ impl McpManager {
     /// Close every connection and reap every child process.
     pub async fn shutdown(&mut self) {
         for slot in &self.servers {
-            if let Some(transport) = &slot.transport {
-                transport.close().await;
-            }
-            slot.state.disconnected();
+            Self::close_slot(slot).await;
         }
     }
 }

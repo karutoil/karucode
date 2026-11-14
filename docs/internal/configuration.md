@@ -7,7 +7,7 @@
 
 - **Slug:** `configuration`
 - **Tags:** config, settings, configuration, toml, env
-- **Applies to:** `env:KARUCODE_MALLOC_ARENA_MAX`, `env:KARUCODE_MALLOC_TRIM_SECS`, `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_PARALLEL_TOOL_CALLS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `env:KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_concurrent`, `config:subagents.max_iterations`, `config:subagents.max_depth`, `config:subagents.timeout_secs`, `config:[notifications]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `config:limits.parallel_tool_calls`, `config:limits.max_turn_retries`, `config:limits.turn_retry_delay_ms`, `config:notifications.enabled`, `config:notifications.min_run_secs`, `config:notifications.ephemeral_sessions`, `config:[access]`, `config:access.enabled`, `config:access.public_url`, `config:access.session_days`, `config:access.tunnel`, `config:access.trusted_proxies`, `env:KARUCODE_ACCESS_ENABLED`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_SESSION_DAYS`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`, `config:[updates]`, `config:updates.check`, `config:updates.check_secs`, `config:updates.manifest_url`, `config:updates.auto_apply`, `env:KARUCODE_UPDATE_CHECK`, `env:KARUCODE_UPDATE_CHECK_SECS`, `env:KARUCODE_UPDATE_MANIFEST_URL`, `env:KARUCODE_UPDATE_AUTO_APPLY`, `route:GET /api/update`, `route:POST /api/update/check`, `route:POST /api/update/apply`, `ui:Settings > Updates`
+- **Applies to:** `env:KARUCODE_MALLOC_ARENA_MAX`, `env:KARUCODE_MALLOC_TRIM_SECS`, `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_PARALLEL_TOOL_CALLS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `env:KARUCODE_MCP_WATCH`, `env:KARUCODE_MCP_WATCH_SECS`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `env:KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_concurrent`, `config:subagents.max_iterations`, `config:subagents.max_depth`, `config:subagents.timeout_secs`, `config:[notifications]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:mcp_watch`, `config:mcp_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `config:limits.parallel_tool_calls`, `config:limits.max_turn_retries`, `config:limits.turn_retry_delay_ms`, `config:limits.model_compaction`, `config:limits.compaction_model`, `config:limits.compaction_max_tokens`, `config:limits.compaction_timeout_secs`, `config:notifications.enabled`, `config:notifications.min_run_secs`, `config:notifications.ephemeral_sessions`, `config:[access]`, `config:access.enabled`, `config:access.public_url`, `config:access.session_days`, `config:access.tunnel`, `config:access.trusted_proxies`, `env:KARUCODE_ACCESS_ENABLED`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_SESSION_DAYS`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`, `config:[updates]`, `config:updates.check`, `config:updates.check_secs`, `config:updates.manifest_url`, `config:updates.auto_apply`, `env:KARUCODE_UPDATE_CHECK`, `env:KARUCODE_UPDATE_CHECK_SECS`, `env:KARUCODE_UPDATE_MANIFEST_URL`, `env:KARUCODE_UPDATE_AUTO_APPLY`, `route:GET /api/update`, `route:POST /api/update/check`, `route:POST /api/update/apply`, `ui:Settings > Updates`
 - **Source:** `crates/kc-server/src/settings.rs:14`
 
 ---
@@ -41,19 +41,24 @@ silently retaining a potentially permissive default.
 ## Which settings apply without a restart
 
 Model, sampling, limits, approvals and subagents are hot-swapped by a saved
-change. The plugin list is not part of `PATCH /api/config` - installing a
-plugin is not a settings tweak - so it has its own refresh:
+change. The plugin list and the MCP server list are not part of
+`PATCH /api/config` - installing a plugin or starting a server is not a
+settings tweak - so each has its own refresh:
 
 ```toml
 plugins_watch = true      # KARUCODE_PLUGINS_WATCH=1
 plugins_watch_secs = 2    # KARUCODE_PLUGINS_WATCH_SECS, clamped to 1..=600
+mcp_watch = true          # KARUCODE_MCP_WATCH=1
+mcp_watch_secs = 2        # KARUCODE_MCP_WATCH_SECS, clamped to 1..=600
 ```
 
 With `plugins_watch` on, the server re-reads `[[plugins]]` from this file and
 every `<data_dir>/plugins/*/plugin.toml` on a timer and applies additions,
-removals and rebuilt binaries without a restart. It is off by default because a
-reload replaces processes; `POST /api/plugins/reload` does the same thing on
-demand, and `POST /api/plugins/:name/reload` refreshes one plugin. Bind
+removals and rebuilt binaries without a restart. `mcp_watch` does the same for
+`[[mcp_servers]]`: a new entry is started, a deleted one is stopped and a
+changed one is replaced. Both are off by default because a reload replaces
+processes; `POST /api/plugins/reload` and `POST /api/mcp/reload` do the same
+thing on demand, and the per-name routes refresh one plugin or server. Bind
 address, port, data directory and auth token still need a restart.
 
 ## Update checking
@@ -271,6 +276,28 @@ rendered) and a warning notice naming the attempt, the wait and this key's name.
 Nothing of a failed attempt is persisted, so a retry can never duplicate an
 answer, and the run's own wall clock still applies: if the next wait would run
 past `max_run_secs`, the run fails now instead.
+
+### Compaction is two-tier, and the second tier is optional
+
+When a run finally evicts a whole slice of history, the digest it leaves behind
+is a deterministic **state ledger**: the modified file set, the explored map, the
+command verdicts and the evicted instructions (see the `prompt-cache` topic). On
+top of that, a model can be asked for the four prose sections a ledger cannot
+produce - goal progress, codebase invariants, dead ends, and what was happening at
+the boundary.
+
+```toml
+[limits]
+model_compaction = true      # off means the deterministic ledger only
+compaction_model = "gpt-4.1-mini"  # omit to use the active model
+compaction_max_tokens = 1200 # output ceiling for one compaction call
+compaction_timeout_secs = 20 # wall clock; a slower call is abandoned
+```
+
+A failure costs nothing: if the call errors, times out or returns nothing, the
+ledger is already in the window and the run continues with it. The compaction
+model never sees the transcript - only a pre-filtered batch of user prompts,
+assistant prose, one-line call signatures and command diagnostics.
 
 Environment: `KARUCODE_MAX_ITERATIONS`, `KARUCODE_MAX_RUN_SECS`,
 `KARUCODE_CONTEXT_MAX_CHARS`, `KARUCODE_PARALLEL_TOOL_CALLS`.

@@ -115,9 +115,12 @@ HTTP+SSE, OAuth flows, and automatic reconnect.
 
 ## Gotchas
 
-* A tool-list change does not refresh the registry: restart the server (or the
-  karucode process) to pick up new tools.
-* A failed server stays failed; there is no health-check loop yet.
+* A tool-list change on a connected server does not refresh the registry by
+  itself: `POST /api/mcp/:name/reload` (or `mcp_watch`) replaces the connection
+  and re-reads the tools.
+* A failed server stays failed until it is reloaded; there is no health-check
+  loop, but `POST /api/mcp/reload` retries an unchanged entry whose connection
+  is not alive.
 * A missing `command` or `url` fails that slot at startup with an explanatory
   error - it does not crash the server.
 * `npx` servers are downloaded on first use; on an air-gapped host pre-install

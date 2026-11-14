@@ -526,6 +526,46 @@ export function ArtifactIcon(props: IconProps): JSX.Element {
   );
 }
 
+export function PullRequestIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <circle cx="6" cy="6" r="2.2" />
+      <circle cx="6" cy="18" r="2.2" />
+      <circle cx="18" cy="18" r="2.2" />
+      <path d="M6 8.2v7.6M13 6h3a2 2 0 0 1 2 2v7.8" />
+      <path d="m15 4-2 2 2 2" />
+    </svg>
+  );
+}
+
+export function IssueIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <circle cx="12" cy="12" r="9" />
+      <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function TagIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M12.6 3H5a2 2 0 0 0-2 2v7.6a2 2 0 0 0 .6 1.4l7.4 7.4a2 2 0 0 0 2.8 0l5.6-5.6a2 2 0 0 0 0-2.8L12.6 3Z" />
+      <circle cx="8" cy="8" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function GlobeIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3.6 9h16.8M3.6 15h16.8" />
+      <ellipse cx="12" cy="12" rx="4" ry="9" />
+    </svg>
+  );
+}
+
 /**
  * The icons a plugin may name in its manifest's panel `icon` field.
  *

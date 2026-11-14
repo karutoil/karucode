@@ -112,6 +112,17 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Added
 
+- **MCP servers reload without a restart.** `POST /api/mcp/reload` re-reads
+  `[[mcp_servers]]` and reconciles the running connections: new names start,
+  removed names stop and drop their tools, changed entries are replaced and an
+  unchanged entry whose connection died is retried. `POST /api/mcp/:name/reload`
+  replaces one server (the "I rebuilt the binary" path). `mcp_watch = true`
+  (`KARUCODE_MCP_WATCH`, interval `mcp_watch_secs` / `KARUCODE_MCP_WATCH_SECS`,
+  clamped to 1..=600) applies edits on a timer, and the Settings > Plugins & MCP
+  tab has Reload MCP and per-server Reload buttons. A run already in flight keeps
+  the tool list it started with; the new set applies to the next run in every
+  existing session.
+
 - **Skills: instruction packs the agent loads on demand.** `AGENTS.md` is always in
   the prompt; a skill is a page the agent opens only when the task matches its
   description, so a collection of ten procedures costs ten lines of prompt rather

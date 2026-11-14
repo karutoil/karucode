@@ -828,6 +828,18 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         );
     }
 
+    // Hot MCP reloads (`mcp_watch = true`): one `stat` of the config file on a
+    // timer. Off by default — a reload replaces connections, so an operator opts
+    // in. The task stops itself on shutdown.
+    if config.mcp_watch {
+        let interval = Duration::from_secs(config.mcp_watch_secs);
+        crate::mcp_watch::spawn(state.clone(), interval);
+        tracing::info!(
+            interval_secs = config.mcp_watch_secs,
+            "MCP watcher enabled: changes to [[mcp_servers]] are applied without a restart"
+        );
+    }
+
     // Retention: drop transcript rows outside `retention_days` and hand the
     // freed pages back. Off by default (`0` = keep everything), so the task is
     // only started when the operator opted in at startup; it re-reads the
