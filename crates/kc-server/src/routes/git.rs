@@ -1,12 +1,14 @@
-//! Git state and git *mutations* for the web source-control manager.
+//! Git state, local mutations, remote sync, and repository setup for the web
+//! source-control manager.
 //!
 //! `kc_tools::git` exposes a rendered text report, but the UI needs structured
-//! data (per-file index/worktree codes, commit metadata, branch tracking), so the
-//! server runs `git` itself and renders JSON. The hardening is *not* duplicated:
-//! [`kc_tools::git::SAFE_CONFIG`], [`safe_env`], [`diff_args`],
-//! [`literal_pathspec_env`] and the ref/branch validators are the single source of
-//! truth shared with the `git_status`/`git_diff` tools and with `kc-tools`'
-//! confinement policy, so the HTTP surface cannot drift from the tools.
+//! data (per-file index/worktree codes, commit metadata, branch tracking,
+//! remotes, tags, operation state), so the server runs `git` itself and renders
+//! JSON. The hardening is *not* duplicated: [`kc_tools::git::SAFE_CONFIG`],
+//! [`safe_env`], [`diff_args`], [`literal_pathspec_env`] and the ref/branch
+//! validators are the single source of truth shared with the
+//! `git_status`/`git_diff` tools and with `kc-tools`' confinement policy, so the
+//! HTTP surface cannot drift from the tools.
 //!
 //! ## Invariants for every endpoint in this module
 //!
@@ -24,21 +26,24 @@
 //!   are refused with `400` before git sees them; the resulting pathspec is passed
 //!   after `--` with `GIT_LITERAL_PATHSPECS=1`, so `a[1].txt` or `*.rs` matching
 //!   more than the caller selected is impossible;
-//! * every ref or branch name is validated by
-//!   [`kc_tools::git::validate_revision_arg`]/[`validate_branch_name`] before it
-//!   sits in a flag position;
+//! * every ref, tag, remote or branch name is validated before it sits in a flag
+//!   position;
+//! * network commands (`fetch`, `pull`, `push`) disable interactive prompts
+//!   (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, `BatchMode=yes` when
+//!   `GIT_SSH_COMMAND` is unset) so a missing credential fails quickly rather than
+//!   hanging on `/dev/tty`, and never echo URL userinfo credentials;
 //! * each invocation is bounded by a timeout with `kill_on_drop`, and stdio is
 //!   drained but kept in memory only up to fixed caps.
 //!
 //! ## What mutations deliberately do *not* neutralise
 //!
-//! `git add`, `git commit` and `git stash push` are explicit user actions, and they
-//! run the repository's own hooks (`pre-commit`, `commit-msg`, …) and clean/smudge
-//! filters exactly like a terminal `git` invocation - a manager that disabled LFS
-//! or skipped `pre-commit` would commit something other than what the user asked
-//! for. They are therefore *not* routed through [`filter_env`]; the read-only
-//! endpoints are. Nothing here reaches the network: fetch/pull/push stay in the
-//! terminal, where credentials and prompts already live.
+//! `git add`, `git commit`, `git merge`, `git rebase`, `git push` and
+//! `git stash push` are explicit user actions, and they run the repository's own
+//! hooks (`pre-commit`, `commit-msg`, `pre-push`, …) and clean/smudge filters
+//! exactly like a terminal `git` invocation - a manager that disabled LFS or
+//! skipped `pre-commit` would commit something other than what the user asked for.
+//! They are therefore *not* routed through [`filter_env`]; the read-only
+//! endpoints are.
 
 use crate::error::{ApiError, ApiResult};
 use crate::routes::{parse_body, query_bool, query_str, query_usize, QueryMap};
@@ -63,21 +68,28 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// slow part; both are the user's own configuration, so they get room - but not
 /// unbounded room.
 const MUTATION_TIMEOUT: Duration = Duration::from_secs(60);
-const MAX_DIFF_BYTES: usize = 512 * 1024;
-const MAX_STDERR_CHARS: usize = 2000;
+/// Bound for network operations (`fetch`, `pull`, `push`).
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const MAX_DIFF_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_STDERR_CHARS: usize = 2000;
 /// Caps for what is kept in memory; the pipes are still drained so a large
 /// repository cannot deadlock the child.
-const MAX_GIT_STDOUT: usize = 4 * 1024 * 1024;
-const MAX_GIT_STDERR: usize = 64 * 1024;
+pub(crate) const MAX_GIT_STDOUT: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_GIT_STDERR: usize = 64 * 1024;
 /// Bounds on what a single response can carry, so a pathological repository
 /// cannot turn one GET into tens of megabytes of JSON.
 const MAX_BRANCHES: usize = 300;
+const MAX_TAGS: usize = 300;
 const MAX_LOG_ENTRIES: usize = 100;
 const DEFAULT_LOG_ENTRIES: usize = 30;
 const MAX_STASHES: usize = 100;
 const MAX_PATHS_PER_REQUEST: usize = 500;
 const MAX_COMMIT_MESSAGE_CHARS: usize = 8000;
 const MAX_STASH_MESSAGE_CHARS: usize = 400;
+const MAX_TAG_MESSAGE_CHARS: usize = 4000;
+const MAX_REMOTE_NAME_CHARS: usize = 100;
+const MAX_REMOTE_URL_CHARS: usize = 500;
+const MAX_SEARCH_CHARS: usize = 200;
 /// `%x1f` (unit separator) between fields: it cannot appear in a ref name, an
 /// email or a path git prints, and a commit subject that does contain one would
 /// have to be deliberately hostile. The subject is always the *last* field, so a
@@ -125,7 +137,7 @@ pub async fn status(
 /// Failures are reported *in the payload* (`is_repo: false` plus `error`) rather
 /// than as an HTTP error: a non-git workspace is an ordinary state the panel
 /// explains, and a missing `git` binary must not look like a broken server.
-async fn read_status(state: &AppState, root: &FsPath) -> ApiResult<Value> {
+pub(crate) async fn read_status(state: &AppState, root: &FsPath) -> ApiResult<Value> {
     // `-uall` lists the files inside an untracked directory instead of collapsing
     // it to `dir/`: the manager can then offer a per-file diff, stage and discard
     // for them, which a collapsed entry cannot support.
@@ -143,6 +155,10 @@ async fn read_status(state: &AppState, root: &FsPath) -> ApiResult<Value> {
             "upstream": Value::Null,
             "ahead": 0,
             "behind": 0,
+            "operation": Value::Null,
+            "has_head": false,
+            "identity": { "name": Value::Null, "email": Value::Null },
+            "remotes_count": 0,
             "error": error,
             "files": [],
             "truncated": false,
@@ -151,6 +167,10 @@ async fn read_status(state: &AppState, root: &FsPath) -> ApiResult<Value> {
     match outcome {
         Ok(output) if output.success => {
             let status = parse_status_z(&output.stdout);
+            let operation = detect_repo_operation(root).await;
+            let has_head = head_exists(root).await.unwrap_or(false);
+            let identity = read_git_identity(root).await;
+            let remotes_count = count_remotes(root).await;
             Ok(json!({
                 "is_repo": true,
                 "branch": status.branch,
@@ -158,6 +178,13 @@ async fn read_status(state: &AppState, root: &FsPath) -> ApiResult<Value> {
                 "upstream": status.upstream,
                 "ahead": status.ahead,
                 "behind": status.behind,
+                "operation": operation,
+                "has_head": has_head,
+                "identity": {
+                    "name": identity.0,
+                    "email": identity.1,
+                },
+                "remotes_count": remotes_count,
                 "error": Value::Null,
                 "files": status.files,
                 // A working tree with hundreds of thousands of changes is
@@ -179,6 +206,81 @@ async fn read_status(state: &AppState, root: &FsPath) -> ApiResult<Value> {
         }
         Err(error) => Ok(empty(Some(state.redact(&error.message)))),
     }
+}
+
+async fn detect_repo_operation(root: &FsPath) -> Option<&'static str> {
+    let output = run_git(root, &["rev-parse", "--git-dir"], &[]).await.ok()?;
+    if !output.success {
+        return None;
+    }
+    let raw = output.stdout.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let git_dir = {
+        let candidate = std::path::PathBuf::from(raw);
+        if candidate.is_absolute() {
+            candidate
+        } else {
+            root.join(candidate)
+        }
+    };
+    if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        Some("rebase")
+    } else if git_dir.join("MERGE_HEAD").exists() {
+        Some("merge")
+    } else if git_dir.join("CHERRY_PICK_HEAD").exists() {
+        Some("cherry-pick")
+    } else if git_dir.join("REVERT_HEAD").exists() {
+        Some("revert")
+    } else {
+        None
+    }
+}
+
+async fn read_git_identity(root: &FsPath) -> (Option<String>, Option<String>) {
+    let Ok(output) = run_git(
+        root,
+        &["config", "--get-regexp", r"^user\.(name|email)$"],
+        &[],
+    )
+    .await
+    else {
+        return (None, None);
+    };
+    if !output.success {
+        return (None, None);
+    }
+    let mut name = None;
+    let mut email = None;
+    for line in output.stdout.lines() {
+        if let Some(rest) = line.strip_prefix("user.name ") {
+            let trimmed = rest.trim();
+            if !trimmed.is_empty() {
+                name = Some(trimmed.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("user.email ") {
+            let trimmed = rest.trim();
+            if !trimmed.is_empty() {
+                email = Some(trimmed.to_string());
+            }
+        }
+    }
+    (name, email)
+}
+
+async fn count_remotes(root: &FsPath) -> usize {
+    let Ok(output) = run_git(root, &["remote"], &[]).await else {
+        return 0;
+    };
+    if !output.success {
+        return 0;
+    }
+    output
+        .stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
 }
 
 pub async fn diff(
@@ -359,16 +461,69 @@ async fn read_branches(state: &AppState, root: &FsPath) -> ApiResult<Value> {
         RepoStatus::default()
     };
 
+    let remote_output = run_git(
+        root,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)%1f%(objectname:short)%1f%(committerdate:unix)%1f%(symref)%1f%(contents:subject)",
+            "refs/remotes",
+        ],
+        &[],
+    )
+    .await?;
+    let mut remote_branches = Vec::new();
+    if remote_output.success {
+        for line in remote_output.stdout.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut fields = line.splitn(5, '\u{1f}');
+            let name = fields.next().unwrap_or_default().trim().to_string();
+            if name.is_empty() || name.ends_with("/HEAD") {
+                continue;
+            }
+            let commit = fields.next().unwrap_or_default().trim().to_string();
+            let timestamp = fields
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .parse::<i64>()
+                .unwrap_or(0);
+            let symref = fields.next().unwrap_or_default().trim().to_string();
+            if !symref.is_empty() {
+                continue;
+            }
+            let subject = fields.next().unwrap_or_default().to_string();
+            let (remote, branch_name) = match name.split_once('/') {
+                Some((r, b)) => (r.to_string(), b.to_string()),
+                None => (String::new(), name.clone()),
+            };
+            remote_branches.push(json!({
+                "name": name,
+                "remote": remote,
+                "branch": branch_name,
+                "commit": commit,
+                "timestamp": timestamp,
+                "subject": subject,
+            }));
+            if remote_branches.len() >= MAX_BRANCHES {
+                break;
+            }
+        }
+    }
+
     Ok(json!({
         "is_repo": true,
         "branch": parsed.branch,
         "detached": parsed.detached,
         "branches": branches,
+        "remote_branches": remote_branches,
         "truncated": truncated,
     }))
 }
 
-/// `GET /api/git/log?limit=&path=` - the commit history, optionally for one file.
+/// `GET /api/git/log?limit=&path=&branch=&all=&search=` - the commit history.
 pub async fn log(
     State(state): State<AppState>,
     Query(query): Query<QueryMap>,
@@ -381,18 +536,49 @@ pub async fn log(
         Some(path) => Some(workspace_pathspec(&workspace, path)?),
         None => None,
     };
+    let all = query_bool(&query, "all")?;
+    let branch = match query_str(&query, "branch") {
+        Some(b) if !b.trim().is_empty() => {
+            let trimmed = b.trim();
+            validate_ref(trimmed)?;
+            Some(trimmed.to_string())
+        }
+        _ => None,
+    };
+    let search = match query_str(&query, "search") {
+        Some(s) if !s.trim().is_empty() => {
+            let trimmed = s.trim();
+            if trimmed.chars().count() > MAX_SEARCH_CHARS {
+                return Err(ApiError::bad_request(format!(
+                    "`search` may be at most {MAX_SEARCH_CHARS} characters"
+                )));
+            }
+            Some(trimmed.to_string())
+        }
+        _ => None,
+    };
     let root = workspace.root().to_path_buf();
 
     let count = format!("-n{limit}");
     let format =
         format!("--format=%H{FIELD}%h{FIELD}%an{FIELD}%ae{FIELD}%at{FIELD}%P{FIELD}%D{FIELD}%s");
-    let mut args: Vec<&str> = vec!["log", &count, &format, "--no-color"];
-    let pathspec_ref = pathspec.as_deref();
-    if let Some(spec) = pathspec_ref {
-        args.push("--");
+    let mut args: Vec<String> = vec!["log".to_string(), count, format, "--no-color".to_string()];
+    if all {
+        args.push("--all".to_string());
+    } else if let Some(ref b) = branch {
+        args.push(b.clone());
+    }
+    if let Some(ref q) = search {
+        args.push("--fixed-strings".to_string());
+        args.push("--regexp-ignore-case".to_string());
+        args.push(format!("--grep={q}"));
+    }
+    if let Some(spec) = pathspec {
+        args.push("--".to_string());
         args.push(spec);
     }
-    let output = run_git(&root, &args, &[]).await?;
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run_git(&root, &borrowed, &[]).await?;
     if !output.success {
         if is_not_a_repo(&output.stderr) {
             return Ok(Json(json!({ "is_repo": false, "commits": [] })));
@@ -640,6 +826,231 @@ async fn read_stashes(state: &AppState, root: &FsPath) -> ApiResult<Value> {
     }))
 }
 
+/// `GET /api/git/stash/:index` - one stash's file stat and unified diff.
+pub async fn stash_detail(
+    State(state): State<AppState>,
+    Path(index): Path<u32>,
+    Query(query): Query<QueryMap>,
+) -> ApiResult<Json<Value>> {
+    if index >= MAX_STASHES as u32 {
+        return Err(ApiError::bad_request(format!(
+            "`index` must be below {MAX_STASHES}"
+        )));
+    }
+    let root = state
+        .workspace_for_project(query_str(&query, "project"))?
+        .root()
+        .to_path_buf();
+    let reference = format!("stash@{{{index}}}");
+
+    let stat = run_git(
+        &root,
+        &[
+            "stash",
+            "show",
+            "--numstat",
+            "--include-untracked",
+            "--no-color",
+            &reference,
+        ],
+        &[],
+    )
+    .await?;
+    if !stat.success {
+        if is_not_a_repo(&stat.stderr) {
+            return Err(ApiError::bad_request(
+                "the workspace is not a git repository",
+            ));
+        }
+        return Err(ApiError::not_found(format!(
+            "no stash entry `{reference}` in this repository"
+        )));
+    }
+    let mut files = Vec::new();
+    for line in stat.stdout.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let Some(additions) = parts.next() else {
+            continue;
+        };
+        let Some(deletions) = parts.next() else {
+            continue;
+        };
+        let Some(path) = parts.next() else { continue };
+        files.push(json!({
+            "path": path,
+            "additions": additions.parse::<u64>().ok(),
+            "deletions": deletions.parse::<u64>().ok(),
+            "binary": additions == "-" || deletions == "-",
+        }));
+    }
+
+    let patch = run_git(
+        &root,
+        &[
+            "stash",
+            "show",
+            "-p",
+            "--include-untracked",
+            "--no-color",
+            &reference,
+        ],
+        &[],
+    )
+    .await?;
+    if !patch.success {
+        return Err(failure(&state, "stash show", &patch));
+    }
+    let (diff, truncated) = truncate_bytes(&patch.stdout, MAX_DIFF_BYTES);
+    Ok(Json(json!({
+        "ref": reference,
+        "index": index,
+        "files": files,
+        "diff": diff,
+        "truncated": truncated,
+    })))
+}
+
+/// `GET /api/git/tags` - repository tags, newest first.
+pub async fn tags(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+) -> ApiResult<Json<Value>> {
+    let root = state
+        .workspace_for_project(query_str(&query, "project"))?
+        .root()
+        .to_path_buf();
+    Ok(Json(read_tags(&state, &root).await?))
+}
+
+async fn read_tags(state: &AppState, root: &FsPath) -> ApiResult<Value> {
+    let format = "--format=%(refname:short)%1f%(objecttype)%1f%(*objectname:short)%1f%(objectname:short)%1f%(creatordate:unix)%1f%(contents:subject)";
+    let output = run_git(
+        root,
+        &["for-each-ref", "--sort=-creatordate", format, "refs/tags"],
+        &[],
+    )
+    .await?;
+    if !output.success {
+        if is_not_a_repo(&output.stderr) {
+            return Ok(json!({ "is_repo": false, "tags": [], "truncated": false }));
+        }
+        return Err(failure(state, "for-each-ref refs/tags", &output));
+    }
+    let mut tags = Vec::new();
+    for line in output.stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut fields = line.splitn(6, '\u{1f}');
+        let name = fields.next().unwrap_or_default().trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let obj_type = fields.next().unwrap_or_default().trim();
+        let target_short = fields.next().unwrap_or_default().trim();
+        let obj_short = fields.next().unwrap_or_default().trim();
+        let timestamp = fields
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .parse::<i64>()
+            .unwrap_or(0);
+        let subject = fields.next().unwrap_or_default().to_string();
+        let annotated = obj_type == "tag";
+        let commit = if target_short.is_empty() {
+            obj_short.to_string()
+        } else {
+            target_short.to_string()
+        };
+        tags.push(json!({
+            "name": name,
+            "commit": commit,
+            "annotated": annotated,
+            "timestamp": timestamp,
+            "subject": subject,
+        }));
+        if tags.len() >= MAX_TAGS {
+            break;
+        }
+    }
+    let truncated = output.stdout_truncated || tags.len() >= MAX_TAGS;
+    Ok(json!({
+        "is_repo": true,
+        "tags": tags,
+        "truncated": truncated,
+    }))
+}
+
+/// `GET /api/git/remotes` - configured git remotes with sanitized URLs and GitHub slug info.
+pub async fn remotes(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+) -> ApiResult<Json<Value>> {
+    let root = state
+        .workspace_for_project(query_str(&query, "project"))?
+        .root()
+        .to_path_buf();
+    Ok(Json(read_remotes(&state, &root).await?))
+}
+
+pub(crate) async fn read_remotes(state: &AppState, root: &FsPath) -> ApiResult<Value> {
+    let output = run_git(root, &["remote", "-v"], &[]).await?;
+    if !output.success {
+        if is_not_a_repo(&output.stderr) {
+            return Ok(json!({ "is_repo": false, "remotes": [] }));
+        }
+        return Err(failure(state, "remote -v", &output));
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut map: std::collections::HashMap<String, (Option<String>, Option<String>)> =
+        std::collections::HashMap::new();
+    for line in output.stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((name, rest)) = trimmed.split_once('\t') else {
+            continue;
+        };
+        let name = name.trim().to_string();
+        let (url, kind) = if let Some(u) = rest.strip_suffix(" (fetch)") {
+            (u.trim(), "fetch")
+        } else if let Some(u) = rest.strip_suffix(" (push)") {
+            (u.trim(), "push")
+        } else {
+            (rest.trim(), "fetch")
+        };
+        if !map.contains_key(&name) {
+            order.push(name.clone());
+        }
+        let entry = map.entry(name).or_insert((None, None));
+        let clean = state.redact(&sanitize_remote_url(url));
+        if kind == "push" {
+            entry.1 = Some(clean);
+        } else {
+            entry.0 = Some(clean);
+        }
+    }
+    let mut list = Vec::with_capacity(order.len());
+    for name in order {
+        let (fetch_url, push_url) = map.remove(&name).unwrap_or((None, None));
+        let slug = fetch_url
+            .as_deref()
+            .or(push_url.as_deref())
+            .and_then(parse_github_slug);
+        list.push(json!({
+            "name": name,
+            "fetch_url": fetch_url,
+            "push_url": push_url,
+            "github": slug.map(|(owner, repo)| json!({ "owner": owner, "repo": repo })),
+        }));
+    }
+    Ok(json!({
+        "is_repo": true,
+        "remotes": list,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Mutations
 // ---------------------------------------------------------------------------
@@ -713,6 +1124,181 @@ struct CreateBranchBody {
 #[serde(deny_unknown_fields)]
 struct CheckoutBody {
     name: String,
+    /// Check out a remote-tracking branch (`git switch --track <name>`).
+    #[serde(default)]
+    track: bool,
+    /// Detach HEAD at a commit/tag (`git switch --detach <name>`).
+    #[serde(default)]
+    detach: bool,
+}
+
+/// Body of `POST /api/git/branches/rename`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameBranchBody {
+    old_name: String,
+    new_name: String,
+}
+
+/// Body of `POST /api/git/init`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InitBody {
+    #[serde(default)]
+    default_branch: Option<String>,
+    #[serde(default)]
+    initial_commit: bool,
+    #[serde(default)]
+    commit_message: Option<String>,
+    #[serde(default)]
+    gitignore_template: Option<String>,
+}
+
+/// Body of `POST /api/git/config`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigIdentityBody {
+    #[serde(default)]
+    user_name: Option<String>,
+    #[serde(default)]
+    user_email: Option<String>,
+}
+
+/// Body of `POST /api/git/remotes`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteBody {
+    /// `add`, `set_url`, `remove`, or `rename`.
+    action: String,
+    name: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    new_name: Option<String>,
+}
+
+/// Body of `POST /api/git/fetch`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchBody {
+    #[serde(default)]
+    remote: Option<String>,
+    #[serde(default)]
+    prune: bool,
+    #[serde(default)]
+    all: bool,
+    #[serde(default)]
+    tags: bool,
+}
+
+/// Body of `POST /api/git/pull`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PullBody {
+    #[serde(default)]
+    remote: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    rebase: bool,
+}
+
+/// Body of `POST /api/git/push`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PushBody {
+    #[serde(default)]
+    remote: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    set_upstream: bool,
+    #[serde(default)]
+    force_with_lease: bool,
+    #[serde(default)]
+    tags: bool,
+    #[serde(default)]
+    confirm: bool,
+}
+
+/// Body of `POST /api/git/merge`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergeBody {
+    #[serde(default)]
+    branch: Option<String>,
+    /// `merge` (default), `continue`, or `abort`.
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    no_ff: bool,
+    #[serde(default)]
+    squash: bool,
+}
+
+/// Body of `POST /api/git/rebase`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RebaseBody {
+    #[serde(default)]
+    branch: Option<String>,
+    /// `rebase` (default), `continue`, `abort`, or `skip`.
+    #[serde(default)]
+    action: Option<String>,
+}
+
+/// Body of `POST /api/git/cherry-pick`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CherryPickBody {
+    #[serde(default)]
+    sha: Option<String>,
+    /// `pick` (default), `continue`, `abort`, or `skip`.
+    #[serde(default)]
+    action: Option<String>,
+}
+
+/// Body of `POST /api/git/revert`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevertBody {
+    sha: String,
+}
+
+/// Body of `POST /api/git/reset`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResetBody {
+    target: String,
+    /// `soft`, `mixed` (default), or `hard`.
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    confirm: bool,
+}
+
+/// Body of `POST /api/git/resolve`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveBody {
+    path: String,
+    /// `ours` or `theirs`.
+    strategy: String,
+}
+
+/// Body of `POST /api/git/tags`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TagBody {
+    /// `create`, `delete`, or `push`.
+    action: String,
+    name: String,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    remote: Option<String>,
 }
 
 /// Body of `POST /api/git/branches/delete`.
@@ -991,23 +1577,76 @@ pub async fn checkout(
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
     let body: CheckoutBody = parse_body(&body)?;
-    let name = checked_branch_name(&body.name)?;
     let workspace = state.workspace_for_project(query_str(&query, "project"))?;
     let root = workspace.root().to_path_buf();
-    // `git switch` (not `checkout`) so a name and a path can never be confused;
-    // a dirty tree that would be overwritten fails with git's own message, which
-    // the caller shows verbatim instead of a guess.
+    let (args, msg) = if body.detach {
+        let target = body.name.trim();
+        validate_ref(target)?;
+        (
+            vec![
+                "switch".to_string(),
+                "--detach".to_string(),
+                target.to_string(),
+            ],
+            format!("detached HEAD at {target}"),
+        )
+    } else if body.track {
+        let remote_ref = body.name.trim();
+        validate_ref(remote_ref)?;
+        if !remote_ref.contains('/') {
+            return Err(ApiError::bad_request(
+                "tracking checkout expects a remote branch like `origin/feat`",
+            ));
+        }
+        (
+            vec![
+                "switch".to_string(),
+                "--track".to_string(),
+                remote_ref.to_string(),
+            ],
+            format!("checked out tracking branch for {remote_ref}"),
+        )
+    } else {
+        let name = checked_branch_name(&body.name)?;
+        // `git switch` (not `checkout`) so a name and a path can never be confused;
+        // a dirty tree that would be overwritten fails with git's own message, which
+        // the caller shows verbatim instead of a guess.
+        (
+            vec!["switch".to_string(), name.clone()],
+            format!("switched to {name}"),
+        )
+    };
+    run_mutation(&state, &root, &args, "switch").await?;
+    mutation_reply(&state, &root, Some(msg), Value::Null).await
+}
+
+pub async fn rename_branch(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: RenameBranchBody = parse_body(&body)?;
+    let old_name = checked_branch_name(&body.old_name)?;
+    let new_name = checked_branch_name(&body.new_name)?;
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
     run_mutation(
         &state,
         &root,
-        &["switch".to_string(), name.clone()],
-        "switch",
+        &[
+            "branch".to_string(),
+            "-m".to_string(),
+            "--".to_string(),
+            old_name.clone(),
+            new_name.clone(),
+        ],
+        "branch -m",
     )
     .await?;
     mutation_reply(
         &state,
         &root,
-        Some(format!("switched to {name}")),
+        Some(format!("renamed {old_name} to {new_name}")),
         Value::Null,
     )
     .await
@@ -1122,6 +1761,832 @@ pub async fn stash(
     mutation_reply(&state, &root, message, Value::Null).await
 }
 
+pub async fn init(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: InitBody = if body.is_empty() {
+        InitBody::default()
+    } else {
+        parse_body(&body)?
+    };
+    let branch = match body.default_branch.as_deref().map(str::trim) {
+        Some(b) if !b.is_empty() => checked_branch_name(b)?,
+        _ => "main".to_string(),
+    };
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
+
+    if root.join(".git").exists() {
+        return Err(ApiError::bad_request(
+            "this workspace is already a git repository",
+        ));
+    }
+
+    run_mutation(
+        &state,
+        &root,
+        &["init".to_string(), "-b".to_string(), branch.clone()],
+        "init",
+    )
+    .await?;
+
+    if let Some(template) = body.gitignore_template.as_deref().map(str::trim) {
+        if !template.is_empty() && template != "none" {
+            let content = gitignore_for_template(template).ok_or_else(|| {
+                ApiError::bad_request(format!("unknown .gitignore template `{template}`"))
+            })?;
+            let target = root.join(".gitignore");
+            if !target.exists() {
+                std::fs::write(&target, content)
+                    .map_err(|e| ApiError::internal(format!("could not write .gitignore: {e}")))?;
+            }
+        }
+    }
+
+    let mut commit_info = Value::Null;
+    if body.initial_commit {
+        let msg = body
+            .commit_message
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("chore: initial commit")
+            .to_string();
+        if msg.chars().count() > MAX_COMMIT_MESSAGE_CHARS {
+            return Err(ApiError::bad_request(format!(
+                "the commit message is longer than {MAX_COMMIT_MESSAGE_CHARS} characters"
+            )));
+        }
+        run_mutation(
+            &state,
+            &root,
+            &[
+                "add".to_string(),
+                "-A".to_string(),
+                "--".to_string(),
+                ".".to_string(),
+            ],
+            "add",
+        )
+        .await?;
+        run_mutation(
+            &state,
+            &root,
+            &[
+                "commit".to_string(),
+                "--allow-empty".to_string(),
+                "-m".to_string(),
+                msg,
+            ],
+            "commit",
+        )
+        .await?;
+        if let Ok(head) = run_git(
+            &root,
+            &[
+                "log",
+                "-1",
+                &format!("--format=%H{FIELD}%h{FIELD}%s"),
+                "--no-color",
+            ],
+            &[],
+        )
+        .await
+        {
+            let mut fields = head
+                .stdout
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .splitn(3, '\u{1f}');
+            commit_info = json!({
+                "id": fields.next().unwrap_or_default().trim(),
+                "short_id": fields.next().unwrap_or_default(),
+                "subject": fields.next().unwrap_or_default(),
+            });
+        }
+    }
+
+    mutation_reply(
+        &state,
+        &root,
+        Some(format!("initialized git repository on `{branch}`")),
+        commit_info,
+    )
+    .await
+}
+
+pub async fn config_identity(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: ConfigIdentityBody = parse_body(&body)?;
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
+
+    let name = body
+        .user_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let email = body
+        .user_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if name.is_none() && email.is_none() {
+        return Err(ApiError::bad_request(
+            "provide `user_name` and/or `user_email`",
+        ));
+    }
+    for (label, val) in [("user_name", name), ("user_email", email)] {
+        if let Some(v) = val {
+            if v.chars().count() > 200 || v.contains('\0') || v.contains('\n') || v.contains('\r') {
+                return Err(ApiError::bad_request(format!(
+                    "`{label}` must be a single line of at most 200 characters"
+                )));
+            }
+        }
+    }
+    if let Some(name) = name {
+        run_mutation(
+            &state,
+            &root,
+            &[
+                "config".to_string(),
+                "user.name".to_string(),
+                name.to_string(),
+            ],
+            "config user.name",
+        )
+        .await?;
+    }
+    if let Some(email) = email {
+        run_mutation(
+            &state,
+            &root,
+            &[
+                "config".to_string(),
+                "user.email".to_string(),
+                email.to_string(),
+            ],
+            "config user.email",
+        )
+        .await?;
+    }
+    mutation_reply(
+        &state,
+        &root,
+        Some("updated repository git identity".to_string()),
+        Value::Null,
+    )
+    .await
+}
+
+pub async fn manage_remote(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: RemoteBody = parse_body(&body)?;
+    let action = body.action.trim().to_ascii_lowercase();
+    let name = checked_remote_name(&body.name)?;
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
+
+    let message = match action.as_str() {
+        "add" => {
+            let url = checked_remote_url(body.url.as_deref().unwrap_or(""))?;
+            run_mutation(
+                &state,
+                &root,
+                &[
+                    "remote".to_string(),
+                    "add".to_string(),
+                    "--".to_string(),
+                    name.clone(),
+                    url,
+                ],
+                "remote add",
+            )
+            .await?;
+            format!("added remote `{name}`")
+        }
+        "set_url" => {
+            let url = checked_remote_url(body.url.as_deref().unwrap_or(""))?;
+            run_mutation(
+                &state,
+                &root,
+                &[
+                    "remote".to_string(),
+                    "set-url".to_string(),
+                    "--".to_string(),
+                    name.clone(),
+                    url,
+                ],
+                "remote set-url",
+            )
+            .await?;
+            format!("updated URL for remote `{name}`")
+        }
+        "remove" => {
+            run_mutation(
+                &state,
+                &root,
+                &[
+                    "remote".to_string(),
+                    "remove".to_string(),
+                    "--".to_string(),
+                    name.clone(),
+                ],
+                "remote remove",
+            )
+            .await?;
+            format!("removed remote `{name}`")
+        }
+        "rename" => {
+            let new_name = checked_remote_name(body.new_name.as_deref().unwrap_or(""))?;
+            run_mutation(
+                &state,
+                &root,
+                &[
+                    "remote".to_string(),
+                    "rename".to_string(),
+                    "--".to_string(),
+                    name.clone(),
+                    new_name.clone(),
+                ],
+                "remote rename",
+            )
+            .await?;
+            format!("renamed remote `{name}` to `{new_name}`")
+        }
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "`action` must be one of add, set_url, remove, rename (got `{other}`)"
+            )))
+        }
+    };
+
+    let status = read_status(&state, &root).await?;
+    let remotes_payload = read_remotes(&state, &root).await?;
+    Ok(Json(json!({
+        "ok": true,
+        "message": message,
+        "status": status,
+        "commit": Value::Null,
+        "remotes": remotes_payload["remotes"],
+    })))
+}
+
+pub async fn fetch(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: FetchBody = if body.is_empty() {
+        FetchBody::default()
+    } else {
+        parse_body(&body)?
+    };
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
+
+    let mut args = vec!["fetch".to_string()];
+    if body.prune {
+        args.push("--prune".to_string());
+    }
+    if body.tags {
+        args.push("--tags".to_string());
+    }
+    if body.all {
+        args.push("--all".to_string());
+    } else if let Some(remote) = body
+        .remote
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let name = checked_remote_name(remote)?;
+        args.push("--".to_string());
+        args.push(name);
+    }
+
+    run_network_mutation(&state, &root, &args, "fetch").await?;
+    mutation_reply(
+        &state,
+        &root,
+        Some("fetched updates".to_string()),
+        Value::Null,
+    )
+    .await
+}
+
+pub async fn pull(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: PullBody = if body.is_empty() {
+        PullBody::default()
+    } else {
+        parse_body(&body)?
+    };
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
+
+    let mut args = vec!["pull".to_string()];
+    if body.rebase {
+        args.push("--rebase".to_string());
+    }
+    if let Some(remote) = body
+        .remote
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let remote = checked_remote_name(remote)?;
+        args.push("--".to_string());
+        args.push(remote);
+        if let Some(branch) = body
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            args.push(checked_branch_name(branch)?);
+        }
+    } else if body.branch.as_deref().is_some_and(|b| !b.trim().is_empty()) {
+        return Err(ApiError::bad_request(
+            "`branch` requires `remote` to be specified",
+        ));
+    }
+
+    run_network_mutation(&state, &root, &args, "pull").await?;
+    mutation_reply(
+        &state,
+        &root,
+        Some("pulled latest changes".to_string()),
+        Value::Null,
+    )
+    .await
+}
+
+pub async fn push(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: PushBody = if body.is_empty() {
+        PushBody::default()
+    } else {
+        parse_body(&body)?
+    };
+    if body.force_with_lease && !body.confirm {
+        return Err(ApiError::bad_request(
+            "force-pushing rewrites remote history; send `confirm: true` to proceed",
+        ));
+    }
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
+
+    let mut args = vec!["push".to_string()];
+    if body.set_upstream {
+        args.push("-u".to_string());
+    }
+    if body.force_with_lease {
+        args.push("--force-with-lease".to_string());
+    }
+    if body.tags {
+        args.push("--tags".to_string());
+    }
+    let remote = body
+        .remote
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(checked_remote_name)
+        .transpose()?;
+    let branch = body
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(checked_branch_name)
+        .transpose()?;
+
+    if let Some(r) = remote {
+        args.push("--".to_string());
+        args.push(r);
+        if let Some(b) = branch {
+            args.push(b);
+        }
+    } else if let Some(b) = branch {
+        args.push("--".to_string());
+        args.push("origin".to_string());
+        args.push(b);
+    } else if body.set_upstream {
+        // Determine current branch to push `-u origin <branch>` when no upstream exists.
+        let status = read_status(&state, &root).await?;
+        let current = status["branch"]
+            .as_str()
+            .ok_or_else(|| ApiError::bad_request("cannot set upstream on a detached HEAD"))?;
+        args.push("--".to_string());
+        args.push("origin".to_string());
+        args.push(current.to_string());
+    }
+
+    run_network_mutation(&state, &root, &args, "push").await?;
+    mutation_reply(
+        &state,
+        &root,
+        Some("pushed to remote".to_string()),
+        Value::Null,
+    )
+    .await
+}
+
+pub async fn merge(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: MergeBody = parse_body(&body)?;
+    let action = body
+        .action
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("merge")
+        .to_ascii_lowercase();
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
+
+    let (args, msg, extra_env) = match action.as_str() {
+        "merge" => {
+            let target = body
+                .branch
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| ApiError::bad_request("`branch` is required to merge"))?;
+            validate_ref(target)?;
+            let mut args = vec!["merge".to_string(), "--no-edit".to_string()];
+            if body.no_ff {
+                args.push("--no-ff".to_string());
+            }
+            if body.squash {
+                args.push("--squash".to_string());
+            }
+            args.push("--".to_string());
+            args.push(target.to_string());
+            (args, format!("merged `{target}`"), Vec::new())
+        }
+        "continue" => (
+            vec!["merge".to_string(), "--continue".to_string()],
+            "completed merge".to_string(),
+            vec![("GIT_EDITOR".to_string(), "true".to_string())],
+        ),
+        "abort" => (
+            vec!["merge".to_string(), "--abort".to_string()],
+            "aborted merge".to_string(),
+            Vec::new(),
+        ),
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "`action` must be one of merge, continue, abort (got `{other}`)"
+            )))
+        }
+    };
+
+    run_mutation_with_env(&state, &root, &args, "merge", &extra_env).await?;
+    mutation_reply(&state, &root, Some(msg), Value::Null).await
+}
+
+pub async fn rebase(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: RebaseBody = parse_body(&body)?;
+    let action = body
+        .action
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("rebase")
+        .to_ascii_lowercase();
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
+
+    let (args, msg) = match action.as_str() {
+        "rebase" => {
+            let target = body
+                .branch
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| ApiError::bad_request("`branch` is required to rebase"))?;
+            validate_ref(target)?;
+            (
+                vec!["rebase".to_string(), "--".to_string(), target.to_string()],
+                format!("rebased onto `{target}`"),
+            )
+        }
+        "continue" => (
+            vec!["rebase".to_string(), "--continue".to_string()],
+            "continued rebase".to_string(),
+        ),
+        "abort" => (
+            vec!["rebase".to_string(), "--abort".to_string()],
+            "aborted rebase".to_string(),
+        ),
+        "skip" => (
+            vec!["rebase".to_string(), "--skip".to_string()],
+            "skipped commit in rebase".to_string(),
+        ),
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "`action` must be one of rebase, continue, abort, skip (got `{other}`)"
+            )))
+        }
+    };
+
+    run_mutation_with_env(
+        &state,
+        &root,
+        &args,
+        "rebase",
+        &[("GIT_EDITOR".to_string(), "true".to_string())],
+    )
+    .await?;
+    mutation_reply(&state, &root, Some(msg), Value::Null).await
+}
+
+pub async fn cherry_pick(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: CherryPickBody = parse_body(&body)?;
+    let action = body
+        .action
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("pick")
+        .to_ascii_lowercase();
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
+
+    let (args, msg, extra_env) = match action.as_str() {
+        "pick" => {
+            let sha = validate_commit_sha(body.sha.as_deref().unwrap_or(""))?;
+            (
+                vec!["cherry-pick".to_string(), sha.clone()],
+                format!("cherry-picked `{sha}`"),
+                Vec::new(),
+            )
+        }
+        "continue" => (
+            vec!["cherry-pick".to_string(), "--continue".to_string()],
+            "continued cherry-pick".to_string(),
+            vec![("GIT_EDITOR".to_string(), "true".to_string())],
+        ),
+        "abort" => (
+            vec!["cherry-pick".to_string(), "--abort".to_string()],
+            "aborted cherry-pick".to_string(),
+            Vec::new(),
+        ),
+        "skip" => (
+            vec!["cherry-pick".to_string(), "--skip".to_string()],
+            "skipped commit in cherry-pick".to_string(),
+            Vec::new(),
+        ),
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "`action` must be one of pick, continue, abort, skip (got `{other}`)"
+            )))
+        }
+    };
+
+    run_mutation_with_env(&state, &root, &args, "cherry-pick", &extra_env).await?;
+    mutation_reply(&state, &root, Some(msg), Value::Null).await
+}
+
+pub async fn revert_commit(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: RevertBody = parse_body(&body)?;
+    let sha = validate_commit_sha(&body.sha)?;
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
+
+    run_mutation(
+        &state,
+        &root,
+        &["revert".to_string(), "--no-edit".to_string(), sha.clone()],
+        "revert",
+    )
+    .await?;
+    mutation_reply(
+        &state,
+        &root,
+        Some(format!("reverted `{sha}`")),
+        Value::Null,
+    )
+    .await
+}
+
+pub async fn reset(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: ResetBody = parse_body(&body)?;
+    let target = body.target.trim();
+    validate_ref(target)?;
+    let mode = body
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("mixed")
+        .to_ascii_lowercase();
+    let flag = match mode.as_str() {
+        "soft" => "--soft",
+        "mixed" => "--mixed",
+        "hard" => {
+            if !body.confirm {
+                return Err(ApiError::bad_request(
+                    "hard reset discards uncommitted changes; send `confirm: true` to proceed",
+                ));
+            }
+            "--hard"
+        }
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "`mode` must be soft, mixed, or hard (got `{other}`)"
+            )))
+        }
+    };
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
+
+    run_mutation(
+        &state,
+        &root,
+        &["reset".to_string(), flag.to_string(), target.to_string()],
+        "reset",
+    )
+    .await?;
+    mutation_reply(
+        &state,
+        &root,
+        Some(format!("reset ({mode}) to `{target}`")),
+        Value::Null,
+    )
+    .await
+}
+
+pub async fn resolve_conflict(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: ResolveBody = parse_body(&body)?;
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let spec = workspace_pathspec(&workspace, &body.path)?;
+    let flag = match body.strategy.trim().to_ascii_lowercase().as_str() {
+        "ours" => "--ours",
+        "theirs" => "--theirs",
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "`strategy` must be `ours` or `theirs` (got `{other}`)"
+            )))
+        }
+    };
+    let root = workspace.root().to_path_buf();
+    run_mutation(
+        &state,
+        &root,
+        &[
+            "checkout".to_string(),
+            flag.to_string(),
+            "--".to_string(),
+            spec.clone(),
+        ],
+        "checkout",
+    )
+    .await?;
+    run_mutation(
+        &state,
+        &root,
+        &["add".to_string(), "--".to_string(), spec.clone()],
+        "add",
+    )
+    .await?;
+    mutation_reply(
+        &state,
+        &root,
+        Some(format!("resolved `{spec}` using {}", body.strategy.trim())),
+        Value::Null,
+    )
+    .await
+}
+
+pub async fn manage_tag(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: TagBody = parse_body(&body)?;
+    let action = body.action.trim().to_ascii_lowercase();
+    let name = checked_tag_name(&body.name)?;
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let root = workspace.root().to_path_buf();
+
+    let msg = match action.as_str() {
+        "create" => {
+            let mut args = vec!["tag".to_string()];
+            if let Some(m) = body
+                .message
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if m.chars().count() > MAX_TAG_MESSAGE_CHARS {
+                    return Err(ApiError::bad_request(format!(
+                        "a tag message may be at most {MAX_TAG_MESSAGE_CHARS} characters"
+                    )));
+                }
+                args.push("-a".to_string());
+                args.push(name.clone());
+                args.push("-m".to_string());
+                args.push(m.to_string());
+            } else {
+                args.push(name.clone());
+            }
+            if let Some(target) = body
+                .target
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                validate_ref(target)?;
+                args.push(target.to_string());
+            }
+            run_mutation(&state, &root, &args, "tag").await?;
+            format!("created tag `{name}`")
+        }
+        "delete" => {
+            run_mutation(
+                &state,
+                &root,
+                &["tag".to_string(), "-d".to_string(), name.clone()],
+                "tag -d",
+            )
+            .await?;
+            format!("deleted tag `{name}`")
+        }
+        "push" => {
+            let remote = body
+                .remote
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(checked_remote_name)
+                .transpose()?
+                .unwrap_or_else(|| "origin".to_string());
+            run_network_mutation(
+                &state,
+                &root,
+                &[
+                    "push".to_string(),
+                    "--".to_string(),
+                    remote,
+                    format!("refs/tags/{name}"),
+                ],
+                "push tag",
+            )
+            .await?;
+            format!("pushed tag `{name}`")
+        }
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "`action` must be one of create, delete, push (got `{other}`)"
+            )))
+        }
+    };
+
+    mutation_reply(&state, &root, Some(msg), Value::Null).await
+}
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
@@ -1131,7 +2596,7 @@ pub async fn stash(
 /// `status` is a fresh read, so the caller's model of the working tree is never
 /// stale after an action it just took. `commit` carries the new revision for
 /// `POST /api/git/commit` and `null` everywhere else.
-async fn mutation_reply(
+pub(crate) async fn mutation_reply(
     state: &AppState,
     root: &FsPath,
     message: Option<String>,
@@ -1198,12 +2663,111 @@ fn workspace_pathspec(workspace: &Workspace, raw: &str) -> ApiResult<String> {
 
 /// Refuse a branch name that git would read as an option or reject anyway, so the
 /// caller gets the rule instead of git's syntax error.
-fn checked_branch_name(raw: &str) -> ApiResult<String> {
+pub(crate) fn checked_branch_name(raw: &str) -> ApiResult<String> {
     let name = raw.trim();
     validate_branch_name(name).map_err(|reason| {
         ApiError::bad_request(format!("invalid branch name `{name}`: {reason}"))
     })?;
     Ok(name.to_string())
+}
+
+pub(crate) fn checked_remote_name(raw: &str) -> ApiResult<String> {
+    let name = raw.trim();
+    if name.is_empty() || name.chars().count() > MAX_REMOTE_NAME_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "remote name must be 1-{MAX_REMOTE_NAME_CHARS} characters"
+        )));
+    }
+    if name.starts_with('-') {
+        return Err(ApiError::bad_request("remote name may not start with `-`"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(ApiError::bad_request(
+            "remote name may only contain letters, digits, `.`, `_`, or `-`",
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn checked_remote_url(raw: &str) -> ApiResult<String> {
+    let url = raw.trim();
+    if url.is_empty() || url.chars().count() > MAX_REMOTE_URL_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "remote URL must be 1-{MAX_REMOTE_URL_CHARS} characters"
+        )));
+    }
+    if url.starts_with('-') {
+        return Err(ApiError::bad_request("remote URL may not start with `-`"));
+    }
+    if url
+        .chars()
+        .any(|c| c.is_ascii_control() || c.is_ascii_whitespace())
+    {
+        return Err(ApiError::bad_request(
+            "remote URL may not contain whitespace or control characters",
+        ));
+    }
+    Ok(url.to_string())
+}
+
+fn checked_tag_name(raw: &str) -> ApiResult<String> {
+    let name = raw.trim();
+    validate_branch_name(name)
+        .map_err(|reason| ApiError::bad_request(format!("invalid tag name `{name}`: {reason}")))?;
+    Ok(name.to_string())
+}
+
+/// Strip embedded `user:pass@` credentials from `http(s)://` URLs while leaving
+/// SSH SCP syntax like `git@github.com:owner/repo.git` intact.
+pub(crate) fn sanitize_remote_url(url: &str) -> String {
+    for scheme in ["https://", "http://"] {
+        if let Some(rest) = url.strip_prefix(scheme) {
+            if let Some((authority, path)) = rest.split_once('/') {
+                if let Some((_userinfo, host)) = authority.rsplit_once('@') {
+                    return format!("{scheme}{host}/{path}");
+                }
+            } else if let Some((_userinfo, host)) = rest.rsplit_once('@') {
+                return format!("{scheme}{host}");
+            }
+        }
+    }
+    url.to_string()
+}
+
+/// Parse `owner/repo` when the URL targets `github.com`.
+pub(crate) fn parse_github_slug(url: &str) -> Option<(String, String)> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let rest = if let Some(after) = trimmed.strip_prefix("git@github.com:") {
+        after
+    } else {
+        trimmed
+            .strip_prefix("https://github.com/")
+            .or_else(|| trimmed.strip_prefix("http://github.com/"))
+            .or_else(|| trimmed.strip_prefix("ssh://git@github.com/"))
+            .or_else(|| trimmed.strip_prefix("git://github.com/"))?
+    };
+    let clean = rest.strip_suffix(".git").unwrap_or(rest);
+    let mut parts = clean.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+fn gitignore_for_template(template: &str) -> Option<&'static str> {
+    match template.to_ascii_lowercase().as_str() {
+        "rust" => Some("/target/\nCargo.lock\n.DS_Store\n"),
+        "node" => Some("node_modules/\ndist/\n.env\n.env.local\n.DS_Store\n"),
+        "python" => Some("__pycache__/\n*.py[cod]\n.venv/\nvenv/\n.env\n.DS_Store\n"),
+        "go" => Some("bin/\n*.exe\n*.test\n*.out\n.env\n.DS_Store\n"),
+        "general" => Some(".env\n.env.local\n.DS_Store\n*.log\n"),
+        _ => None,
+    }
 }
 
 /// `404`-worthy when the path parameter is not a commit id at all; the hex
@@ -1220,7 +2784,7 @@ fn validate_commit_sha(sha: &str) -> ApiResult<String> {
 
 /// The `base=` grammar, delegated to the shared tools crate so the tool and the
 /// endpoint cannot accept different refs.
-fn validate_ref(base: &str) -> ApiResult<()> {
+pub(crate) fn validate_ref(base: &str) -> ApiResult<()> {
     validate_revision_arg(base)
         .map_err(|reason| ApiError::bad_request(format!("query parameter `base`: {reason}")))
 }
@@ -1247,8 +2811,39 @@ async fn run_mutation(
     args: &[String],
     action: &str,
 ) -> ApiResult<()> {
+    run_mutation_with_env(state, root, args, action, &[]).await
+}
+
+async fn run_mutation_with_env(
+    state: &AppState,
+    root: &FsPath,
+    args: &[String],
+    action: &str,
+    extra_env: &[(String, String)],
+) -> ApiResult<()> {
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    let output = run_git_with_timeout(root, &borrowed, &[], MUTATION_TIMEOUT).await?;
+    let output = run_git_with_timeout(root, &borrowed, extra_env, MUTATION_TIMEOUT).await?;
+    if output.success {
+        return Ok(());
+    }
+    Err(failure(state, action, &output))
+}
+
+async fn run_network_mutation(
+    state: &AppState,
+    root: &FsPath,
+    args: &[String],
+    action: &str,
+) -> ApiResult<()> {
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut env = vec![("GCM_INTERACTIVE".to_string(), "never".to_string())];
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        env.push((
+            "GIT_SSH_COMMAND".to_string(),
+            "ssh -o BatchMode=yes".to_string(),
+        ));
+    }
+    let output = run_git_with_timeout(root, &borrowed, &env, NETWORK_TIMEOUT).await?;
     if output.success {
         return Ok(());
     }
@@ -1391,7 +2986,7 @@ async fn run_git_with_timeout(
 
 /// Read a pipe to EOF while retaining at most `limit` bytes. The rest is
 /// discarded so the child never blocks on a full pipe.
-async fn read_bounded<R>(mut reader: R, limit: usize) -> std::io::Result<(Vec<u8>, bool)>
+pub(crate) async fn read_bounded<R>(mut reader: R, limit: usize) -> std::io::Result<(Vec<u8>, bool)>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -1557,7 +3152,7 @@ fn parse_branch_header(rest: &str) -> (Option<String>, bool, Option<String>, u32
     )
 }
 
-fn truncate(value: &str, max_chars: usize) -> String {
+pub(crate) fn truncate(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
     }
@@ -1567,7 +3162,7 @@ fn truncate(value: &str, max_chars: usize) -> String {
 }
 
 /// Byte-bounded truncation that never splits a UTF-8 character.
-fn truncate_bytes(value: &str, max_bytes: usize) -> (String, bool) {
+pub(crate) fn truncate_bytes(value: &str, max_bytes: usize) -> (String, bool) {
     if value.len() <= max_bytes {
         return (value.to_string(), false);
     }
@@ -1710,5 +3305,34 @@ mod tests {
         let (out, cut) = truncate_bytes("hi", 10);
         assert!(!cut);
         assert_eq!(out, "hi");
+    }
+
+    #[test]
+    fn remote_validation_and_github_slug_parsing() {
+        assert!(checked_remote_name("origin").is_ok());
+        assert!(checked_remote_name("upstream-2.0").is_ok());
+        assert!(checked_remote_name("-flag").is_err());
+        assert!(checked_remote_name("bad name").is_err());
+        assert!(checked_remote_url("https://github.com/karutoil/karucode.git").is_ok());
+        assert!(checked_remote_url("--upload-pack=evil").is_err());
+        assert!(checked_remote_url("https://evil.com/a b").is_err());
+
+        assert_eq!(
+            sanitize_remote_url("https://x-access-token:ghp_secret@github.com/a/b.git"),
+            "https://github.com/a/b.git"
+        );
+        assert_eq!(
+            sanitize_remote_url("git@github.com:a/b.git"),
+            "git@github.com:a/b.git"
+        );
+        assert_eq!(
+            parse_github_slug("https://github.com/karutoil/karucode.git"),
+            Some(("karutoil".into(), "karucode".into()))
+        );
+        assert_eq!(
+            parse_github_slug("git@github.com:karutoil/karucode.git"),
+            Some(("karutoil".into(), "karucode".into()))
+        );
+        assert_eq!(parse_github_slug("https://gitlab.com/a/b.git"), None);
     }
 }

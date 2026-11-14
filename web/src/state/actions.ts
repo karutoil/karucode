@@ -2521,6 +2521,20 @@ export function setInspectorMode(mode: store.InspectorMode): void {
   store.persistBool('inspector', collapsed);
 }
 
+/**
+ * Choose whether the desktop project dropdown opens on hover or on a press.
+ *
+ * Nothing else changes with it: the list, its rows, its keyboard contract and
+ * its close rules are the same in both modes. Only the trigger's pointer
+ * behaviour differs, which is why this is one stored word and not a second
+ * component. The choice is remembered per browser, like the theme.
+ */
+export function setProjectMenuOpen(mode: store.ProjectMenuOpen): void {
+  if (store.projectMenuOpen.value === mode) return;
+  store.projectMenuOpen.value = mode;
+  store.persistProjectMenuOpen(mode);
+}
+
 export function closeSheets(): void {
   workbench.closeContext();
   store.mobileSheet.value = null;
@@ -3069,6 +3083,39 @@ export function registerAuthHandler(): () => void {
     store.authError.value = null;
   });
   return () => onUnauthorized(null);
+}
+
+/**
+ * Create a new karucode session in `projectId`, immediately send `prompt`, and
+ * optionally focus it in the Conversation view. Used by the Source Control tab
+ * to launch sessions for one or all GitHub issues / pull requests.
+ */
+export async function launchSessionWithPrompt(options: {
+  title: string;
+  prompt: string;
+  projectId?: string | null;
+  focus?: boolean;
+}): Promise<{ sessionId: string; title: string } | null> {
+  const targetProject =
+    options.projectId === undefined ? store.currentProjectId.value : options.projectId;
+  const trimmedPrompt = options.prompt.trim();
+  if (trimmedPrompt === '') return null;
+  try {
+    const session = await api.createSession(options.title, targetProject ?? undefined);
+    mergeSummary(summaryFromSession(session));
+    await api.sendMessage(session.id, trimmedPrompt);
+    scheduleSessionsRefresh();
+    if (options.focus !== false) {
+      store.mobileSheet.value = null;
+      workspaceTabs.selectWorkspaceView('chat');
+      await openSessionInProject(targetProject ?? null, session.id);
+    }
+    return { sessionId: session.id, title: session.title };
+  } catch (error) {
+    if (isUnauthorized(error)) enterAuthState();
+    else store.pushToast(toErrorMessage(error), 'error');
+    return null;
+  }
 }
 
 /** Test seam: forget module-level stream/refresh state without touching storage. */

@@ -112,6 +112,33 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Added
 
+- **MCP servers reload without a restart.** `POST /api/mcp/reload` re-reads
+  `[[mcp_servers]]` and reconciles the running connections: new names start,
+  removed names stop and drop their tools, changed entries are replaced and an
+  unchanged entry whose connection died is retried. `POST /api/mcp/:name/reload`
+  replaces one server (the "I rebuilt the binary" path). `mcp_watch = true`
+  (`KARUCODE_MCP_WATCH`, interval `mcp_watch_secs` / `KARUCODE_MCP_WATCH_SECS`,
+  clamped to 1..=600) applies edits on a timer, and the Settings > Plugins & MCP
+  tab has Reload MCP and per-server Reload buttons. A run already in flight keeps
+  the tool list it started with; the new set applies to the next run in every
+  existing session.
+
+- **Skills: instruction packs the agent loads on demand.** `AGENTS.md` is always in
+  the prompt; a skill is a page the agent opens only when the task matches its
+  description, so a collection of ten procedures costs ten lines of prompt rather
+  than ten pages on every turn. `[skills]` (on by default) discovers
+  `.karucode/skills`, `.claude/skills`, `.agents/skills` and `.agent/skills` in the
+  project plus `~/.karucode/skills`, `~/.claude/skills`, `~/.agents/skills` and
+  `~/.config/karucode/skills`, and `skills.directories` adds more; one line per
+  enabled skill reaches the system prompt, bounded by `prompt_max_chars` (4,000) and
+  `max_skills` (64), and the body is read with the new read-only `skill` tool
+  (`list`, `read`, `search`, paged like `karucode_docs`). Skills are listed, added,
+  hidden and deleted through `/api/skills` and Settings → Skills, or by dropping a
+  `SKILL.md` in a scanned folder; adding one makes it a settings row, while a
+  file-backed skill is refused for delete and rename because the file is the truth.
+  `skills.enabled = false`, `KARUCODE_SKILLS_ENABLED=0` or `skills.prompt = false`
+  turns the block - or the whole feature - off.
+
 - **Application API keys: a scoped, expiring bearer credential for one
   integration.** `KARUCODE_AUTH_TOKEN` is the master key and the web password is
   for a person; a script, CI job or bot had no credential of its own, so the only

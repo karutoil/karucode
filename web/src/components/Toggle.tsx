@@ -8,9 +8,22 @@ export interface ToggleProps {
   disabled?: boolean;
   id?: string;
   description?: string;
+  /**
+   * Stable hook for an end-to-end driver (the real-browser verifiers identify
+   * controls by `data-testid`, because a label is copy and copy changes).
+   */
+  testId?: string;
 }
 
-export function Toggle({ checked, onChange, label, disabled = false, id, description }: ToggleProps): JSX.Element {
+export function Toggle({
+  checked,
+  onChange,
+  label,
+  disabled = false,
+  id,
+  description,
+  testId,
+}: ToggleProps): JSX.Element {
   const generated = useId();
   const descriptionId = description ? `toggle-description-${id ?? generated}` : undefined;
   return (
@@ -19,6 +32,7 @@ export function Toggle({ checked, onChange, label, disabled = false, id, descrip
         id={id}
         type="button"
         role="switch"
+        data-testid={testId}
         aria-checked={checked}
         aria-label={label}
         aria-describedby={descriptionId}

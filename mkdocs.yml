@@ -1,5 +1,5 @@
 site_name: karucode
-site_description: A self-hosted coding agent for long sessions.
+site_description: A coding agent that is one binary, not a stack.
 repo_url: https://github.com/karutoil/karucode
 repo_name: karutoil/karucode
 
@@ -38,6 +38,7 @@ use_directory_urls: true
 nav:
   - Home: README.md
   - Handbooks:
+      - Quick start: QUICKSTART.md
       - HTTP API: API.md
       - Architecture: ARCHITECTURE.md
       - MCP client: MCP.md
@@ -59,6 +60,7 @@ nav:
       - Run a temporary chat: internal/ephemeral-sessions.md
       - Call the HTTP API: internal/http-api.md
       - Connect MCP servers: internal/mcp.md
+      - Reload MCP servers without a restart: internal/mcp-hot-reload.md
       - Organize work into missions: internal/missions.md
       - Get told when a run finishes or needs an answer: internal/notifications.md
       - Write and install a plugin: internal/plugins.md
@@ -71,6 +73,7 @@ nav:
       - Build, run and stop the server: internal/run-server.md
       - Understand the security model: internal/security.md
       - Give sessions AI-written titles: internal/session-titles.md
+      - Give the agent skills it loads on demand: internal/skills.md
       - Delegate work to subagents: internal/subagents.md
       - What the agent is told about reading, tool output and stopping: internal/system-prompt.md
       - Use the terminal tab: internal/terminals.md

@@ -104,8 +104,10 @@
 // Each shell is its own session and process group, so closing the tab, deleting
 // the terminal or stopping the server kills the whole tree - a `make watch` left
 // running in a terminal does not survive it. Shutdown sends SIGHUP, escalates to
-// SIGKILL after two seconds when needed, and waits for the leader and PTY close;
-// a shell that ignores SIGHUP therefore cannot escape through process bootstrap.
+// SIGKILL after two seconds when needed, then reaps the leader and closes the PTY
+// within a bounded wait of its own: a shell that ignores SIGHUP cannot escape
+// through process bootstrap, and one that wedges cannot hold the shutdown open
+// either (no terminal call blocks forever on a shell).
 //
 // # Limits
 //
@@ -184,6 +186,24 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// killed. Without the second signal a stubborn child would keep its PTY open
 /// and leak the descriptor.
 const KILL_GRACE: Duration = Duration::from_secs(2);
+
+/// How long shutdown waits for the `io` lock, which is only ever held for a few
+/// instructions by the reader (a non-blocking `read`, taking the child out).
+///
+/// Kept well below [`REAP_GRACE`]: a lock that is busy for longer than this is a
+/// thread that is wedged elsewhere, and waiting for it would put the escalation
+/// back at its mercy. Giving up costs nothing - whoever holds the lock finishes
+/// the close itself.
+const LOCK_GRACE: Duration = Duration::from_millis(500);
+
+/// How long shutdown waits for the leader to be reaped before giving up on it.
+///
+/// `wait(2)` on a child that is not yet gone blocks forever, and the reader
+/// thread can be inside such a wait while it owns the lock. Polling
+/// `try_wait(2)` to a deadline is what keeps a wedged shell from wedging the
+/// caller: the SIGKILL has already been sent by this point, so an unreaped
+/// zombie costs a process-table slot for a moment, not the whole server.
+const REAP_GRACE: Duration = Duration::from_secs(2);
 
 /// Terminal sizes below this are not worth rendering and usually mean a
 /// hidden element measured as zero.
@@ -507,6 +527,10 @@ impl Terminal {
         // An acquire load observing zero must also observe this timestamp.
         self.last_seen
             .store(crate::state::now_ms(), Ordering::Release);
+        // `Atomic::fetch_update` is `try_update` from Rust 1.100. The workspace's
+        // MSRV is 1.89, where only the old name exists, so the old name stays (and
+        // the deprecation is allowed) until the MSRV moves.
+        #[allow(deprecated)]
         let _ = self
             .attached
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
@@ -533,9 +557,22 @@ impl Terminal {
     /// Closing the master is what actually ends the child's `read`, so the
     /// process is signalled first (so it can run its exit handlers) and the fd
     /// is closed after the grace period or as soon as it exits. This call does not
-    /// return until escalation, `wait(2)`, and the close have completed; spawning
+    /// return until escalation, the reap and the close have completed; spawning
     /// an unjoined cleanup thread let the process exit while a HUP-ignoring shell
     /// was still alive.
+    ///
+    /// Nothing here blocks on the `io` mutex without a deadline. The reader thread
+    /// takes the same lock and may be waiting for the very leader this call is
+    /// trying to kill, so a shutdown that queued behind it could never reach its
+    /// own SIGKILL: the shell ignored SIGHUP, the reader waited for the shell, and
+    /// both sat there forever. That is a real hang - on macOS one such shutdown
+    /// parked a CI job for five hours - so escalation is driven by the deadline
+    /// and by `kill(2)` alone, never by acquiring the lock.
+    ///
+    /// Two signals go out per step (the group and the leader's pid) because macOS
+    /// was seen answering `kill(-pgid, …)` with a group that its live leader had
+    /// supposedly left; signalling the pid is what actually stops the process this
+    /// call reaps, and signalling the group is what reaches `make watch`.
     pub fn shutdown(&self) {
         if self.dead.swap(true, Ordering::AcqRel) {
             return;
@@ -545,40 +582,68 @@ impl Terminal {
             signal_group(pid, libc::SIGHUP);
         }
         let deadline = Instant::now() + KILL_GRACE;
+        let mut escalated = false;
         loop {
-            if pid == 0 {
-                break;
-            }
-            {
-                let mut state = self.io.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(child) = state.child.as_mut() {
-                    match child.try_wait() {
+            // Opportunistic reap: `try_lock`, so a reader holding the lock just
+            // means "not now", never "not ever". The leader is the process this
+            // call has to answer for, so its own state settles the loop.
+            let settled = match try_io_for(self, Duration::ZERO) {
+                Some(mut state) => match state.child.as_mut() {
+                    Some(child) => match child.try_wait() {
                         Ok(Some(_)) | Err(_) => {
-                            // `try_wait` has reaped an exited leader. Descendants,
-                            // if any, still keep the process group alive below.
-                            state.child.take();
+                            // `try_wait` has reaped an exited leader.
+                            state.child = None;
+                            true
                         }
-                        Ok(None) => {}
-                    }
-                }
-            }
-            if !group_alive(pid) {
+                        Ok(None) => false,
+                    },
+                    // The reader owns the reap; there is nothing left to wait for.
+                    None => true,
+                },
+                // The lock is busy, so ask the pid instead - `kill(2)` needs no
+                // lock, which is the whole point.
+                None => !process_alive(pid),
+            };
+            if settled {
                 break;
             }
             if Instant::now() >= deadline {
+                // The whole group, so a HUP handler cannot outlive the deadline.
                 signal_group(pid, libc::SIGKILL);
+                escalated = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));
         }
-        let mut state = self.io.lock().unwrap_or_else(|e| e.into_inner());
-        // Reap the leader before closing the PTY. After SIGKILL this wait cannot
-        // be survived by a HUP handler, and by this point the whole group got it.
-        if let Some(mut child) = state.child.take() {
-            let _ = child.wait();
+        // A leader that exited on its own can still leave a `make watch` behind, so a
+        // surviving group or a surviving leader gets one more SIGKILL. Two checks
+        // because neither is authoritative: on macOS `kill(-pgid, 0)` was seen
+        // answering "gone" for a group whose leader was alive and looping, and a
+        // check that can lie in that direction must never be able to cut this
+        // escalation short. Killing an empty group is an `ESRCH`, nothing more.
+        if !escalated && pid != 0 && (group_alive(pid) || process_alive(pid)) {
+            signal_group(pid, libc::SIGKILL);
         }
-        state.master = None;
-        drop(state);
+        // Take the leader out from under the lock and reap it *after* releasing
+        // it. Holding the lock across `wait` is what starved the escalation above.
+        // Both acquisitions share one budget, so a lock that is busy costs
+        // `LOCK_GRACE` in total, not `LOCK_GRACE` twice.
+        let locked_until = Instant::now() + LOCK_GRACE;
+        let child = {
+            let mut state =
+                try_io_for(self, locked_until.saturating_duration_since(Instant::now()));
+            state.as_mut().and_then(|state| state.child.take())
+        };
+        if let Some(mut child) = child {
+            reap(&mut child);
+        }
+        // Close the PTY. The reader's own close (`finish`) does this too; exactly
+        // one of them wins, and an fd closed twice is an fd closed once.
+        if let Some(mut state) =
+            try_io_for(self, locked_until.saturating_duration_since(Instant::now()))
+        {
+            state.master = None;
+        }
         let _ = self.output.send(Output::Exit(None));
     }
 }
@@ -592,7 +657,7 @@ impl Drop for Terminal {
             if pid != 0 {
                 signal_group(pid, libc::SIGHUP);
             }
-            if let Ok(mut state) = self.io.lock() {
+            if let Ok(mut state) = self.io.try_lock() {
                 if let Some(mut child) = state.child.take() {
                     // Non-blocking best effort: a `try_wait` after a short sleep
                     // would stall the drop. The SIGKILL below is what matters.
@@ -668,7 +733,11 @@ fn spawn_reader(terminal: Arc<Terminal>) {
 
 /// Reap the child if it has exited and publish the status once.
 fn child_exited(terminal: &Terminal) -> bool {
-    let mut io = terminal.io.lock().unwrap_or_else(|e| e.into_inner());
+    // `try_lock`: this runs on the reader thread, and a caller that owns the lock
+    // (a shutdown deciding whether to escalate) must never wait for the reader.
+    let Ok(mut io) = terminal.io.try_lock() else {
+        return false;
+    };
     let Some(child) = io.child.as_mut() else {
         return true;
     };
@@ -684,16 +753,18 @@ fn finish(terminal: &Terminal) {
     if terminal.dead.swap(true, Ordering::AcqRel) {
         return;
     }
-    let mut status = None;
-    {
+    // Close the PTY and take the child under the lock, then wait *outside* it: a
+    // reader that waited for a live shell while owning the lock could never be
+    // interrupted, and anything that wanted the lock (a shutdown about to send
+    // SIGKILL) waited for that shell instead of killing it.
+    let child = {
         let mut io = terminal.io.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(mut child) = io.child.take() {
-            if let Ok(exit) = child.wait() {
-                status = exit.code();
-            }
-        }
         io.master = None;
-    }
+        io.child.take()
+    };
+    let status = child
+        .and_then(|mut child| reap(&mut child))
+        .and_then(|exit| exit.code());
     let _ = terminal.output.send(Output::Exit(status));
 }
 
@@ -702,23 +773,44 @@ fn finish(terminal: &Terminal) {
 fn open_pty(cols: u16, rows: u16) -> kc_core::Result<(std::fs::File, std::fs::File)> {
     let mut master: libc::c_int = -1;
     let mut slave: libc::c_int = -1;
-    let size = libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
+    // `openpty` writes the two fds through the pointers. The termios/winsize
+    // arguments are read-only on Linux (`*const`) but are written back on macOS
+    // (`*mut`), so each target passes the pointer type its libc binding expects.
+    #[cfg(target_os = "macos")]
+    let rc = {
+        let mut size = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        }
     };
-    // `openpty` writes the two fds through the pointers; it only ever reads the
-    // termios/winsize arguments, so they do not need to be `mut` (clippy's
-    // `unnecessary_mut_passed` would flag `&mut`).
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            &size,
-        )
+    #[cfg(not(target_os = "macos"))]
+    let rc = {
+        let size = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &size,
+            )
+        }
     };
     if rc != 0 {
         return Err(kc_core::Error::Tool(format!(
@@ -826,14 +918,78 @@ fn signal_group(pid: u32, signal: libc::c_int) {
         // Negative pid = the whole process group. The shell is a group leader
         // (`setsid`), so this reaches every child.
         libc::kill(-(pid as libc::pid_t), signal);
+        // ...and the leader by pid as well. The group id *is* the leader's pid by
+        // construction, so this is a no-op when the group is intact; when it is
+        // not (a shell that left the group, a group id the kernel no longer
+        // resolves) the leader is still the process this module reaps, and leaving
+        // it unsignalled is what turns a reap into a wait for a process nobody
+        // asked to stop.
+        libc::kill(pid as libc::pid_t, signal);
     }
 }
 
+/// True while the process with this pid exists (a zombie counts: it has not been
+/// reaped, and `kill(pid, 0)` succeeds).
+///
+/// This is the liveness check shutdown relies on, because it asks about exactly
+/// the process shutdown reaps.
+fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// True when the shell's *process group* still has members.
+///
+/// Only ever used to decide whether a tree needs another SIGKILL, never to decide
+/// that a shutdown is finished: macOS was observed answering "gone" for a group
+/// whose leader was alive and looping (run 43351960141, pgid == sid == pid), and a
+/// check that can lie in that direction must not be able to cut a shutdown short.
 fn group_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
     unsafe { libc::kill(-(pid as libc::pid_t), 0) == 0 }
+}
+
+/// Take the `io` lock only while `budget` allows, so a thread that already owns
+/// it (the reader, inside [`finish`]) cannot stall a caller that must not wait.
+fn try_io_for(terminal: &Terminal, budget: Duration) -> Option<std::sync::MutexGuard<'_, IoState>> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match terminal.io.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
+/// Reap the leader without betting the caller on it.
+///
+/// `wait(2)` blocks until the child is gone, which is unbounded if the kernel
+/// never releases it; `try_wait(2)` to [`REAP_GRACE`] always returns. An
+/// unreaped child is a zombie that init reaps, not a wedged thread.
+fn reap(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + REAP_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            // A `wait` that fails has already given up on the child.
+            Err(_) => return None,
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// The live terminals, keyed by id.
@@ -1484,6 +1640,47 @@ mod tests {
         std::env::temp_dir().to_string_lossy().into_owned()
     }
 
+    /// What the platform says about a pid shutdown was supposed to end: its state
+    /// from `ps`, and whether a fresh SIGKILL is even accepted. Only called from a
+    /// failure path, so it never disturbs a passing test.
+    fn describe_process(pid: u32) -> String {
+        let state = std::process::Command::new("ps")
+            .args([
+                "-o",
+                "pid=,stat=,pgid=,sid=,command=",
+                "-p",
+                &pid.to_string(),
+            ])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_else(|error| format!("ps failed: {error}"));
+        let accepted = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        let errno = std::io::Error::last_os_error();
+        format!("ps: {state:?}; a fresh SIGKILL of {pid} returned {accepted} (errno: {errno})")
+    }
+
+    /// Run the blocking `shutdown` on its own thread and fail if it never
+    /// returns.
+    ///
+    /// A shutdown that parks used to be invisible to CI: the test simply never
+    /// finished, the job sat until the next push cancelled it (one macOS job burned
+    /// 4h53m that way), and nothing named the culprit. The thread is deliberately
+    /// leaked - a process can exit with a blocked thread, it just cannot pass a
+    /// test that is still waiting for one.
+    fn shutdown_within(terminal: &Arc<Terminal>, patience: Duration) -> Duration {
+        let (done, finished) = std::sync::mpsc::channel();
+        let stopping = Arc::clone(terminal);
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            stopping.shutdown();
+            let _ = done.send(());
+        });
+        finished.recv_timeout(patience).expect(
+            "shutdown never returned: a shell was left alive and the escalation was blocked",
+        );
+        started.elapsed()
+    }
+
     fn handshake(origin: &str, host: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1657,24 +1854,29 @@ mod tests {
         }
         assert!(String::from_utf8_lossy(&terminal.replay()).contains("KC_HUP_IGNORED"));
         let pid = terminal.pid();
-        let started = std::time::Instant::now();
-        terminal.shutdown();
-        assert!(
-            started.elapsed() >= KILL_GRACE,
-            "HUP ignored must escalate to KILL"
-        );
-        assert!(started.elapsed() < KILL_GRACE + Duration::from_secs(2));
-        assert!(
-            terminal.io.lock().unwrap().child.is_none(),
-            "leader was not reaped"
-        );
-        assert!(
-            terminal.io.lock().unwrap().master.is_none(),
-            "PTY was not closed"
-        );
-        // The leader is our child and has been waited on, so its id cannot still be
-        // alive. Group members received SIGKILL before the same return point.
-        assert_ne!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
+        let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+        let sid = unsafe { libc::getsid(pid as libc::pid_t) };
+        let patience = KILL_GRACE + LOCK_GRACE + REAP_GRACE + Duration::from_secs(2);
+        let elapsed = shutdown_within(&terminal, patience);
+        let (child_left, master_left) = {
+            let state = terminal.io.lock().unwrap_or_else(|e| e.into_inner());
+            (state.child.is_some(), state.master.is_some())
+        };
+        let leader_alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        // One assertion, so a failure reports every fact at once: which part of
+        // "hang up, escalate, reap, close" the platform actually did.
+        if !(elapsed >= KILL_GRACE && !child_left && !master_left && !leader_alive) {
+            panic!(
+                "shutdown in {elapsed:?}: escalated on time (>= {KILL_GRACE:?}): {}, \
+                 leader reaped: {}, PTY closed: {}, leader dead: {}, \
+                 pgid {pgid}, sid {sid} (spawned pid {pid})\n{}",
+                elapsed >= KILL_GRACE,
+                !child_left,
+                !master_left,
+                !leader_alive,
+                describe_process(pid)
+            );
+        }
         for _ in 0..40 {
             if !group_alive(pid) {
                 break;
@@ -1684,6 +1886,69 @@ mod tests {
         assert!(
             !group_alive(pid),
             "a stubborn process group survived shutdown"
+        );
+    }
+
+    /// Regression for the macOS CI hang: a thread that owns the `io` lock (the
+    /// reader inside `finish`, waiting for the leader) must not be able to hold
+    /// shutdown's escalation hostage.
+    ///
+    /// On 2026-11-12 the macOS job reached the test above, one such interleaving
+    /// parked shutdown before its SIGKILL deadline, and the job sat for 4h53m until
+    /// the next push cancelled it. The deadline has to be reachable without the
+    /// lock: what has to be true is that the group is dead and the call returned.
+    #[tokio::test]
+    async fn shutdown_escalates_even_when_another_thread_holds_the_io_lock() {
+        let terminal = Terminal::spawn("t_locked", &session(&cwd()), &settings(), &[], 80, 24)
+            .expect("spawn stubborn shell");
+        assert!(
+            terminal.write(b"trap '' HUP; printf 'KC_HUP_IGNORED\\n'; while :; do sleep 1; done\n")
+        );
+        for _ in 0..200 {
+            if String::from_utf8_lossy(&terminal.replay()).contains("KC_HUP_IGNORED") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(String::from_utf8_lossy(&terminal.replay()).contains("KC_HUP_IGNORED"));
+        let pid = terminal.pid();
+        let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+        let sid = unsafe { libc::getsid(pid as libc::pid_t) };
+
+        // Stand in for a reader parked in `finish` for as long as the leader takes
+        // to die: it owns the lock, so nothing shutdown does may need it.
+        let held = terminal.io.lock().unwrap_or_else(|e| e.into_inner());
+        // Worst case: the grace, then one bounded wait for the lock, then the
+        // bounded reap - and no more. A shutdown that is still running past this
+        // would be waiting on a lock it can never get.
+        let patience = KILL_GRACE + REAP_GRACE + Duration::from_secs(2);
+        let elapsed = shutdown_within(&terminal, patience);
+        drop(held);
+
+        // The lock owner is the one left holding the leader (in production the
+        // reader finishes the job in `finish`); the group must already be dead.
+        let group_at_return = group_alive(pid);
+        let leftover = terminal
+            .io
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .child
+            .take();
+        if let Some(mut child) = leftover {
+            reap(&mut child);
+        }
+        let leader_alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        // What this test owes: shutdown returned despite the busy lock (enforced by
+        // `shutdown_within`), the grace it promised was actually spent (a shell that
+        // ignores SIGHUP only dies by SIGKILL at the deadline), and the shell it was
+        // closing is gone.
+        assert!(
+            elapsed >= KILL_GRACE && !leader_alive,
+            "shutdown in {elapsed:?}: grace spent {}, shell gone {} \
+             (group alive at return: {group_at_return}, pgid {pgid}, sid {sid})\n{}",
+            elapsed >= KILL_GRACE,
+            !leader_alive,
+            describe_process(pid)
         );
     }
 
