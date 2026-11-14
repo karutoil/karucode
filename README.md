@@ -154,7 +154,7 @@ Useful flags: `--help`, `--host`, `--port`, `--workspace`, `--data-dir`, `--conf
 
 If you are developing karucode itself or want to compile a custom build from source:
 
-Prerequisites: Linux (the primary target) or macOS (unit-tested). Rust 1.89+ (the workspace `rust-version`) and Node.js 22.12+ (only to build the embedded frontend; nothing Node remains at runtime).
+Prerequisites: Linux (the primary target) or macOS (unit-tested). Rust 1.89+ (the workspace `rust-version`) and Node.js 22.22+ (only to build the embedded frontend; nothing Node remains at runtime).
 
 ```bash
 git clone https://github.com/karutoil/karucode && cd karucode

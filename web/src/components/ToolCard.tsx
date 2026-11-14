@@ -216,6 +216,11 @@ export function ToolCard({ item, defaultOpen = false, variant = 'card' }: ToolCa
           class="tool-row-head"
           aria-expanded={open}
           aria-controls={bodyId}
+          aria-label={
+            summary !== ''
+              ? `${item.name} ${summary} ${toolStatusLabel(item.status)}`
+              : `${item.name} ${toolStatusLabel(item.status)}`
+          }
           title={detail.length > 500 ? `${detail.slice(0, 500)}…` : detail}
           onClick={() => setOpen((previous) => !previous)}
         >
