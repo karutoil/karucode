@@ -1,0 +1,344 @@
+/* Skills settings (`SkillsSettings.tsx`).
+ *
+ * The pane is a management surface, so it reads top-down as answers to
+ * questions: what is on (the switches), where it looked (the folders and the
+ * roots), what it found (the rows), how to add one. Each of those is a
+ * `.settings-section` card from the sheet's own stylesheet - this file only adds
+ * the rows, chips and dialogs inside them, and every control reuses the app's
+ * recipes (`.field`, `.button`, `.toggle-field`), so nothing here invents a
+ * second vocabulary.
+ */
+
+/* The wrapper only exists so the panel is one node for the verifier: the
+ * sections inside it are spaced by the same gap the other panes use. */
+.skills-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.skills-panel {
+  gap: var(--space-4);
+}
+
+.skills-error {
+  margin: 0;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--danger-bg);
+  border-radius: var(--radius);
+  background: var(--danger-bg);
+  overflow-wrap: anywhere;
+}
+
+/* The master switch being off is not an error and not an empty state: the list
+ * below is still true, it just is not in the prompt. It gets a card, not a
+ * warning strip, so it is read as a state rather than as a failure. */
+.skills-master-off {
+  padding: var(--space-5);
+  border: 1px dashed var(--line-card-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+}
+
+.skills-master-off strong {
+  color: var(--text);
+  font-weight: 640;
+}
+
+/* Blocks inside a section keep the column rhythm without a second card border:
+ * a card inside a card reads as a different kind of thing, and these are all the
+ * same kind of thing. */
+.skills-directories,
+.skills-roots,
+.skills-add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* One skill is a card of its own: rows are separate objects, not a list inside
+ * the section's card. */
+.skill-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.skills-options-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+/* ---------- the folder list -------------------------------------------- */
+
+.skills-dir-list,
+.skills-root-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.skills-dir-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius-xs);
+  /* A chip is a recess, not a card. */
+  background: var(--bg);
+  font-size: var(--fs-tiny);
+}
+
+.skills-dir-row code {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- roots: "not found" has to be visible ------------------------ */
+
+.skills-root {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius-xs);
+  background: var(--bg);
+}
+
+/* A folder that is not there is the explanation for an empty list, so it is
+ * drawn as a recess with quiet ink - clearly present, clearly empty. */
+.skills-root[data-exists='false'] {
+  border-style: dashed;
+  background: var(--surface-sunken);
+}
+
+.skills-root-path {
+  flex: 1 1 12ch;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skills-root-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.skills-root-count {
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+}
+
+.skills-root-count[data-exists='false'] {
+  color: var(--warn);
+}
+
+/* ---------- one row per skill ------------------------------------------ */
+
+.skills-empty {
+  padding: var(--space-5);
+  border: 1px dashed var(--line-card-strong);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+}
+
+.skills-empty p {
+  margin: 0;
+}
+
+.skills-empty-title {
+  margin-bottom: var(--space-2);
+  color: var(--text);
+  font-weight: 640;
+}
+
+
+.skills-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.skills-list-head {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.skill-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.skill-id {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The source badge. `custom` is the one kind with no file behind it, so it is
+ * the one that reads as something this app owns. */
+.skill-source {
+  flex: 0 0 auto;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--chip-line);
+  border-radius: var(--radius-pill);
+  background: var(--chip-surface);
+  color: var(--chip-ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+
+/* The attribute is the API's spelling (`data-source`), the text beside it is the
+ * label a person reads - see `SOURCE_LABEL` in `SkillsSettings.tsx`. */
+.skill-source[data-source='workspace'] {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--chip-line));
+  color: var(--accent-text);
+}
+
+.skill-source[data-source='config'] {
+  border-color: color-mix(in srgb, var(--info) 38%, var(--chip-line));
+  color: var(--info);
+}
+
+.skill-source[data-source='custom'] {
+  border-color: color-mix(in srgb, var(--success) 38%, var(--chip-line));
+  color: var(--success);
+}
+
+.skill-description {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+}
+
+.skill-path {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-subtle);
+  font-size: var(--fs-tiny);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.skill-row-actions .button {
+  gap: var(--space-2);
+}
+
+/* Why delete is not offered. Quiet, not an error: nothing failed. */
+.skill-refusal {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+}
+
+.skill-refusal code {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- the body viewer and the editor ----------------------------- */
+
+.dialog-skill {
+  width: min(760px, 92vw);
+}
+
+.skill-body-wrap,
+.skill-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+/* The body is markdown the agent reads; the panel never renders it as markup
+ * (a skill is data), so it scrolls in a mono block of its own. */
+.skill-body {
+  max-height: 52vh;
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius-sm);
+  /* A recess, not a card. */
+  background: var(--code-bg);
+  color: var(--text-command-output);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  line-height: 1.6;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.skill-body:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.skill-editor-body {
+  height: auto;
+  padding: var(--space-3) var(--space-4);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  line-height: 1.6;
+  resize: vertical;
+}
+
+@media (max-width: 640px) {
+  .skill-row {
+    padding: var(--space-4);
+  }
+
+  /* The count and the refresh button sit on their own line under a narrow
+   * heading rather than squeezing it. */
+  .skills-list-head {
+    flex-wrap: wrap;
+  }
+}

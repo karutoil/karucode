@@ -166,6 +166,45 @@ pub async fn list_mcp(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     Ok(Json(json!({ "servers": servers })))
 }
 
+/// `POST /api/mcp/reload` — re-read `[[mcp_servers]]` and reconcile the running
+/// servers with it.
+///
+/// This is the no-restart path for adding, removing or changing an MCP server:
+/// new names are started, names that disappeared are stopped and dropped, and an
+/// entry whose fields changed is closed and started again. Servers that did not
+/// change are left running untouched, so this is safe to call on a hunch (and the
+/// watcher calls it on a timer).
+///
+/// The body is the report (`added`, `removed`, `restarted`, `retried`,
+/// `unchanged`) plus the live statuses, so a caller does not need a second
+/// request.
+pub async fn reload_mcp(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let report = state.reload_mcp().await;
+    let servers = {
+        let mcp = state.mcp().lock().await;
+        mcp.statuses().iter().map(mcp_summary).collect::<Vec<_>>()
+    };
+    Ok(Json(json!({ "report": report, "servers": servers })))
+}
+
+/// `POST /api/mcp/:name/reload` — replace one server's process/connection.
+///
+/// The "I rebuilt the server binary" / "I edited its entry" path. A name that is
+/// configured but not yet running is started, so this can also be the first
+/// start; an unknown name is `404`.
+pub async fn reload_mcp_server(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let status = state
+        .reload_mcp_server(&name)
+        .await
+        .map_err(map_mcp_error)?;
+    serde_json::to_value(status)
+        .map(Json)
+        .map_err(|e| ApiError::internal(format!("could not serialize MCP server: {e}")))
+}
+
 /// `GET /api/plugins/:name/panels/:panel[?project=&session=]`
 ///
 /// The plugin answers `panels/read` with opaque JSON; this handler wraps it in
@@ -228,6 +267,17 @@ pub async fn read_panel(
 /// [`enable_plugin`] does: a wrong name is a 404, a plugin that is not usable is
 /// a 400, anything else is a plugin-side failure.
 fn map_plugin_error(error: kc_core::Error) -> ApiError {
+    match error {
+        kc_core::Error::NotFound(message) => ApiError::not_found(message),
+        kc_core::Error::Config(message) => ApiError::bad_request(message),
+        other => ApiError::from(other),
+    }
+}
+
+/// Map an MCP failure onto the documented HTTP error: a name that is not
+/// configured is a 404, a bad entry is a 400, anything else is a server-side
+/// failure.
+fn map_mcp_error(error: kc_core::Error) -> ApiError {
     match error {
         kc_core::Error::NotFound(message) => ApiError::not_found(message),
         kc_core::Error::Config(message) => ApiError::bad_request(message),
