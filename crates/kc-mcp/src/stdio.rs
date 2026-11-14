@@ -780,7 +780,7 @@ mod tests {
         .unwrap();
         assert_eq!(report.over_long_lines, 1);
         assert_eq!(lines.len(), 2);
-        assert!(!lines[0].contains('\u{FFFD}'), "{:?}", &lines[0].len());
+        assert!(!lines[0].contains('\u{FFFD}'), "{:?}", lines[0].len());
         assert_eq!(lines[0].len(), 1024);
         assert_eq!(lines[1], "tail");
     }

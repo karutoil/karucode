@@ -344,12 +344,13 @@ def main() -> int:
             """,
         )
         check(
-            "the sheet opens with a vertical rail of seven sections",
+            "the sheet opens with a vertical rail of eight sections",
             rail["labels"]
             == [
                 "Appearance",
                 "Models & providers",
                 "Agent",
+                "Skills",
                 "Access & sign-in",
                 "Notifications",
                 "Plugins & MCP",
@@ -388,12 +389,12 @@ def main() -> int:
         )
         check(
             "exactly one panel is visible at a time",
-            visible["count"] == 7 and len(visible["visible"]) == 1,
+            visible["count"] == 8 and len(visible["visible"]) == 1,
             f'{len(visible["visible"])} of {visible["count"]} visible',
         )
         check(
             "the hidden panels are really out of layout",
-            visible["display"].count("none") == 6,
+            visible["display"].count("none") == 7,
             str(visible["display"]),
         )
 
@@ -404,6 +405,7 @@ def main() -> int:
               Appearance: 'settings-theme',
               'Models & providers': 'settings-providers',
               Agent: 'settings-approvals',
+              Skills: 'settings-skills-switch',
               'Access & sign-in': 'settings-access-signin',
               Notifications: 'settings-notifications',
               'Plugins & MCP': 'settings-plugins',
@@ -454,13 +456,19 @@ def main() -> int:
               for (const section of panel.querySelectorAll('.settings-section')) {
                 if (section.closest('details.settings-advanced')) continue;
                 const style = getComputedStyle(section);
+                // `.skill-row` is an option box too: one skill is a card of its
+                // own inside the section (see `styles/skills.css`), so its
+                // switch belongs to that box the way a switch inside a `.field`
+                // belongs to the field's.
                 const isOption = (el) =>
-                  el.matches('.field, .list-editor, .setting-row, .toggle-field');
+                  el.matches('.field, .list-editor, .setting-row, .toggle-field, .skill-row');
                 // Every option, at any depth inside the card (fields live inside
                 // `.field-grid`, switches inside a `.field`), but not a nested one:
                 // a switch inside a field is part of that field's box.
                 const options = Array.from(
-                  section.querySelectorAll('.field, .list-editor, .setting-row, .toggle-field'),
+                  section.querySelectorAll(
+                    '.field, .list-editor, .setting-row, .toggle-field, .skill-row',
+                  ),
                 )
                   .filter((el) => !el.closest('details.settings-advanced'))
                   .filter((el) => {
@@ -720,7 +728,7 @@ def main() -> int:
             "Escape clears the search without closing the sheet",
             escaped["cleared"] is True
             and escaped["stillOpen"] is True
-            and escaped["labels"] == 7,
+            and escaped["labels"] == 8,
             f'cleared={escaped["cleared"]} open={escaped["stillOpen"]} rows={escaped["labels"]}',
         )
         check(
@@ -962,7 +970,7 @@ def main() -> int:
             const sheetRight = sheet.getBoundingClientRect().right;
             // A child of a horizontal scroller is allowed to hang past the edge:
             // that is what scrolling it means, and the strip is the phone rail's
-            // whole answer to seven labels in 390px.
+            // whole answer to eight labels in 390px.
             const insideScroller = (el) => {
               for (let node = el.parentElement; node && node !== sheet; node = node.parentElement) {
                 if (getComputedStyle(node).overflowX !== 'visible') return true;

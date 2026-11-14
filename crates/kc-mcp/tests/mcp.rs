@@ -257,6 +257,186 @@ async fn explicit_stdio_shutdown_still_waits_for_the_real_reap() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// ---------------------------------------------------------------------------
+// hot reload: rescan and single-server reload
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rescan_adds_removes_and_leaves_unchanged_servers_alone() {
+    let dir = temp_dir("rescan-add-remove");
+    let mut manager = McpManager::new(&[stdio_server("first")]);
+    manager.connect_all().await;
+    assert_eq!(manager.statuses()[0].status, "connected");
+
+    // Adding an entry starts it and exposes its tools; the untouched entry keeps
+    // running.
+    let report = manager
+        .rescan(&[stdio_server("first"), stdio_server("second")])
+        .await;
+    assert_eq!(report.added, vec!["second".to_string()]);
+    assert_eq!(report.unchanged, vec!["first".to_string()]);
+    assert!(report.removed.is_empty() && report.restarted.is_empty() && report.retried.is_empty());
+    assert!(report.changed());
+    let names: Vec<String> = manager
+        .tools()
+        .iter()
+        .map(|tool| tool.spec().name)
+        .collect();
+    assert!(names.contains(&"mcp__first__echo".to_string()));
+    assert!(names.contains(&"mcp__second__echo".to_string()));
+
+    // Removing an entry stops it and drops its tools; the remaining one is
+    // untouched.
+    let report = manager.rescan(&[stdio_server("second")]).await;
+    assert_eq!(report.removed, vec!["first".to_string()]);
+    assert_eq!(report.unchanged, vec!["second".to_string()]);
+    let names: Vec<String> = manager
+        .tools()
+        .iter()
+        .map(|tool| tool.spec().name)
+        .collect();
+    assert!(!names.contains(&"mcp__first__echo".to_string()));
+    assert!(names.contains(&"mcp__second__echo".to_string()));
+
+    // An empty list is "no servers", not "keep what we had".
+    let report = manager.rescan(&[]).await;
+    assert_eq!(report.removed, vec!["second".to_string()]);
+    assert!(manager.tools().is_empty());
+    assert!(manager.statuses().is_empty());
+
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rescan_replaces_a_changed_entry_and_reaps_the_old_process() {
+    let dir = temp_dir("rescan-restart");
+    let pid_file = dir.join("pid");
+    let mut manager = McpManager::new(&[recorded_stdio_server("restart", &pid_file)]);
+    manager.connect_all().await;
+    assert_eq!(manager.statuses()[0].status, "connected");
+    let first = recorded_pid(&pid_file);
+
+    // A changed entry is a new process: the old one is closed and reaped before
+    // the replacement starts.
+    let mut changed = recorded_stdio_server("restart", &pid_file);
+    changed.env.insert("FAKE_MCP_EXTRA".into(), "1".into());
+    let report = manager.rescan(&[changed.clone()]).await;
+    assert_eq!(report.restarted, vec!["restart".to_string()]);
+    assert!(report.added.is_empty() && report.removed.is_empty() && report.retried.is_empty());
+    assert_pid_reaped(first).await;
+    let second = recorded_pid(&pid_file);
+    assert_ne!(first, second, "a new process was started");
+    assert_eq!(manager.statuses()[0].status, "connected");
+
+    // The same entry again is left alone: the pid does not move.
+    let report = manager.rescan(&[changed]).await;
+    assert_eq!(report.unchanged, vec!["restart".to_string()]);
+    assert_eq!(recorded_pid(&pid_file), second);
+
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn rescan_retries_an_unchanged_entry_whose_connection_failed() {
+    let dir = temp_dir("rescan-retry");
+    let marker = dir.join("ready");
+    let mut config = stdio_server("retry");
+    config.command = vec![
+        "sh".into(),
+        "-c".into(),
+        "if [ -f \"$1\" ]; then exec sh \"$2\"; else exit 1; fi".into(),
+        "kc-mcp-retry".into(),
+        marker.to_string_lossy().into_owned(),
+        FIXTURE.into(),
+    ];
+    let mut manager = McpManager::new(&[config.clone()]);
+    manager.connect_all().await;
+    assert_eq!(manager.statuses()[0].status, "failed");
+
+    // The entry did not change, but the reload is the operator asking for
+    // another attempt: the connection is rebuilt and now succeeds.
+    std::fs::write(&marker, b"ready").unwrap();
+    let report = manager.rescan(&[config]).await;
+    assert_eq!(report.retried, vec!["retry".to_string()]);
+    assert!(report.restarted.is_empty());
+    assert_eq!(manager.statuses()[0].status, "connected");
+    assert!(manager
+        .tools()
+        .iter()
+        .any(|tool| tool.spec().name == "mcp__retry__echo"));
+
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn rescan_does_not_retry_a_deterministic_setup_error() {
+    let mut config = stdio_server("no-command");
+    config.command.clear();
+    let mut manager = McpManager::new(&[config.clone()]);
+    manager.connect_all().await;
+    assert_eq!(manager.statuses()[0].status, "failed");
+
+    let report = manager.rescan(&[config]).await;
+    assert_eq!(report.unchanged, vec!["no-command".to_string()]);
+    assert!(report.retried.is_empty());
+    assert_eq!(manager.statuses()[0].status, "failed");
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn rescan_applies_enabled_false_and_true() {
+    let mut manager = McpManager::new(&[stdio_server("toggle")]);
+    manager.connect_all().await;
+    assert_eq!(manager.statuses()[0].status, "connected");
+
+    let mut off = stdio_server("toggle");
+    off.enabled = false;
+    let report = manager.rescan(&[off]).await;
+    assert_eq!(report.restarted, vec!["toggle".to_string()]);
+    assert_eq!(manager.statuses()[0].status, "disconnected");
+    assert!(manager.tools().is_empty());
+
+    let report = manager.rescan(&[stdio_server("toggle")]).await;
+    assert_eq!(report.restarted, vec!["toggle".to_string()]);
+    assert_eq!(manager.statuses()[0].status, "connected");
+    assert!(!manager.tools().is_empty());
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn reload_replaces_one_server_and_refuses_an_unknown_name() {
+    let mut manager = McpManager::new(&[stdio_server("one")]);
+    manager.connect_all().await;
+    let status = manager.reload("one", &[stdio_server("one")]).await.unwrap();
+    assert_eq!(status.status, "connected");
+    assert!(manager
+        .tools()
+        .iter()
+        .any(|tool| tool.spec().name == "mcp__one__echo"));
+
+    // A name that is configured but not yet in the manager is started, so a
+    // reload can also be the first start.
+    let status = manager
+        .reload("two", &[stdio_server("one"), stdio_server("two")])
+        .await
+        .unwrap();
+    assert_eq!(status.name, "two");
+    assert_eq!(status.status, "connected");
+
+    let err = manager
+        .reload("nope", &[stdio_server("one")])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, kc_core::Error::NotFound(_)), "{err:?}");
+
+    manager.shutdown().await;
+}
+
 #[tokio::test]
 async fn stdio_tools_call_joins_text_content() {
     let dir = temp_dir("stdio-call");

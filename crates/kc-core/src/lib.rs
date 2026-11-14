@@ -21,6 +21,7 @@ pub mod prompt;
 pub mod provider;
 pub mod queue;
 pub mod settings;
+pub mod skill;
 pub mod store;
 pub mod tool;
 
@@ -45,6 +46,7 @@ pub use queue::{
     AttachmentMode, QueuedAttachment, QueuedKind, QueuedMessage, MAX_QUEUED_ATTACHMENTS,
 };
 pub use settings::Settings;
+pub use skill::{CustomSkill, Skill, SkillRegistry, SkillRoot, SkillSource, SkillsConfig};
 pub use store::{RewindPoint, StoredMessage};
 pub use tool::{
     capture_file, closest_tool_name, repair_arguments, CapturedFile, JournalHandle, Tool,

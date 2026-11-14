@@ -54,6 +54,10 @@ pub struct Workspace {
     /// Additional allowed roots, canonicalised and de-duplicated. Always
     /// disjoint from `root` and never an ancestor of it (enforced on build).
     extra: Vec<PathBuf>,
+    /// Declared roots prior to canonicalisation (e.g. `/var/folders/...` or
+    /// `/tmp` on macOS where canonical is `/private/var/...`). Retained so
+    /// lexical containment checks match paths written with system-alias prefixes.
+    raw_roots: Vec<PathBuf>,
 }
 
 impl Workspace {
@@ -87,6 +91,11 @@ impl Workspace {
         }
 
         let mut extra: Vec<PathBuf> = Vec::new();
+        let mut raw_roots: Vec<PathBuf> = Vec::new();
+        let raw_root = root.to_path_buf();
+        if raw_root != canon {
+            raw_roots.push(raw_root);
+        }
         for candidate in extra_roots {
             let Ok(canon_extra) = std::fs::canonicalize(&candidate) else {
                 continue;
@@ -107,12 +116,18 @@ impl Workspace {
             if canon_extra == canon {
                 continue;
             }
-            if extra.contains(&canon_extra) {
-                continue;
+            if !extra.contains(&canon_extra) {
+                if candidate != canon_extra && !raw_roots.contains(&candidate) {
+                    raw_roots.push(candidate);
+                }
+                extra.push(canon_extra);
             }
-            extra.push(canon_extra);
         }
-        Ok(Self { root: canon, extra })
+        Ok(Self {
+            root: canon,
+            extra,
+            raw_roots,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -129,13 +144,23 @@ impl Workspace {
     /// extra allowlist. Used by the checks below and by callers that need to
     /// re-verify a canonical path themselves (the upload route does).
     pub fn roots(&self) -> impl Iterator<Item = &Path> {
-        std::iter::once(self.root.as_path()).chain(self.extra.iter().map(PathBuf::as_path))
+        std::iter::once(self.root.as_path())
+            .chain(self.extra.iter().map(PathBuf::as_path))
+            .chain(self.raw_roots.iter().map(PathBuf::as_path))
     }
 
     /// Whether `abs` (already canonical when it matters) is inside any allowed
     /// root. Component-wise, so `/tmp-evil` is not inside `/tmp`.
     pub fn contains(&self, abs: &Path) -> bool {
-        self.roots().any(|root| abs.starts_with(root))
+        if self.roots().any(|root| abs.starts_with(root)) {
+            return true;
+        }
+        if let Ok(canon) = std::fs::canonicalize(abs) {
+            if self.roots().any(|root| canon.starts_with(root)) {
+                return true;
+            }
+        }
+        false
     }
 
     /// The allowed root that would have contained `abs`, for error messages:
