@@ -257,8 +257,8 @@ jobs:
     timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # Pinned: a new major of the generator is a deliberate change, not a CI
@@ -281,8 +281,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22.12"
           cache: npm
@@ -300,8 +300,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22.12"
           cache: npm
@@ -357,7 +357,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22.12"
           cache: npm
@@ -492,7 +492,7 @@ jobs:
             fi
           fi
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22.12"
           cache: npm
@@ -549,7 +549,7 @@ jobs:
             --out dist/updates.json \
             --sha256sums dist/SHA256SUMS
           ls -l dist
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.version.outputs.build }}
           name: karucode ${{ steps.version.outputs.build }}
