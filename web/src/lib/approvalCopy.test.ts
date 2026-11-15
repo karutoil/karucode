@@ -13,7 +13,7 @@ const descriptions: Record<ApprovalMode, { label: string; title: string }> = {
     title: 'File writes inside the workspace are allowed; shell commands still ask. 1 allowlisted command, 1 auto-approved path. Change this in Settings → Approvals.',
   },
   auto: {
-    label: 'auto',
+    label: 'approve all',
     title: 'No approval prompts: every tool call is allowed and recorded. 1 allowlisted command, 1 auto-approved path. Change this in Settings → Approvals.',
   },
   read_only: {

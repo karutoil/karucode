@@ -4,7 +4,9 @@ import type { ApprovalMode, Config } from '../api/types';
 const APPROVAL_FOOT_LABEL: Record<ApprovalMode, string> = {
   ask: 'ask',
   ask_commands: 'commands only',
-  auto: 'auto',
+  // `auto` is the stored value; "approve all" is what the mode is called in the
+  // UI, so the chip and the Settings select agree.
+  auto: 'approve all',
   read_only: 'read only',
 };
 

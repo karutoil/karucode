@@ -21,6 +21,8 @@ import {
   type TurnRow,
 } from '../state/transcriptLayout';
 import { clockTime, formatDuration } from '../lib/format';
+import { noteOwnScroll } from '../lib/ownScroll';
+import { elementAtBottom } from '../lib/stickyBottom';
 import { clampEstimate, prefixHeights, visibleRange } from '../lib/virtualWindow';
 import * as store from '../state/store';
 import { activeTheme, type ThemeGrouping, type ThemeThinking, type ThemeToolStyle, type ThemeWorking } from '../theme';
@@ -1046,7 +1048,15 @@ export function ChatTranscript({
         // down the screen by 90px), so any change in it is a layout shift, and
         // moving the scroll by exactly that much keeps the row still.
         const shift = box.top - before.top + (element.scrollTop - before.scrollTop);
-        if (Number.isFinite(shift) && Math.abs(shift) >= 0.5) element.scrollTop += shift;
+        if (Number.isFinite(shift) && Math.abs(shift) >= 0.5) {
+          // Whether the newest content was on screen *before* this write decides
+          // what the sticky-bottom owes the reader: at the bottom, close the gap
+          // the correction opens; reading history, leave them alone. Read here,
+          // because after the write it is too late to tell.
+          const atBottom = elementAtBottom(element);
+          element.scrollTop += shift;
+          noteOwnScroll(element, atBottom);
+        }
         break;
       }
     }

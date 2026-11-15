@@ -1465,6 +1465,20 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  /* The transcript anchors itself, and the scroller must not do it again.
+   *
+   * `overflow-anchor: none` on `.transcript` (chat.css) excludes the rows from
+   * being chosen as an anchor, which is not the same as switching anchoring off:
+   * Chromium then anchors on the nearest eligible box *above* the rows — the
+   * banners and the history marker — and compensates for the windowed
+   * transcript replacing rows with padding by moving `scrollTop` itself, with no
+   * scroll event any handler wrote. Measured on a real 60-message session: the
+   * open ended 97px short of the newest row with "Jump to latest" showing at the
+   * bottom of a transcript nobody had scrolled, and no follow path could explain
+   * where the position came from. Turning it off at the container is what makes
+   * the measurement corrections in `lib/stickyBottom.ts` and
+   * `components/ChatTranscript.tsx` the only things that move this view. */
+  overflow-anchor: none;
   /* Keep "Jump to latest" (and anything else the browser scrolls into view)
    * clear of the floating dock. */
   scroll-padding-bottom: var(--composer-h, 24px);

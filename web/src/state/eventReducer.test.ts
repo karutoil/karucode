@@ -759,21 +759,43 @@ describe('queued messages', () => {
     expect(drained.retiredQueuedIds).toContain('steer_1');
   });
 
-  it('drops a steer the moment the run applies it', () => {
+  it('drops a steer the moment the run applies it, and shows it where it landed', () => {
     const seeded: ChatState = {
       ...state(),
+      items: [
+        {
+          kind: 'message',
+          id: 'stream:r_x',
+          at: NOW,
+          role: 'assistant',
+          content: 'working on it',
+          reasoning: '',
+          streaming: true,
+          runId: 'r_x',
+          agentId: null,
+        },
+      ],
       queued: [queuedFixture({ id: 'steer_1' })],
     };
     const applied = applyEventToChat(seeded, {
       ...event(5, 'steer_applied'),
       session_id: 's_ab12',
+      run_id: 'r_x',
       steer_id: 'steer_1',
       content: 'also check the fixtures',
     } as unknown as KarucodeEvent);
-    // The transcript row is not added here (the message arrives on the next
-    // request), but the optimistic pending row must not outlive its acceptance.
+    // The pending row must not outlive its acceptance…
     expect(applied.queued).toEqual([]);
     expect(applied.retiredQueuedIds).toContain('steer_1');
+    // …and the steer is now a user turn, where the model read it: the runtime
+    // persists it as an ordinary user message, so a reload shows the same row.
+    const rows = applied.items.filter((item) => item.kind === 'message');
+    expect(rows.map((row) => (row.kind === 'message' ? row.role : ''))).toEqual(['assistant', 'user']);
+    const steer = rows[rows.length - 1];
+    expect(steer?.kind === 'message' ? steer.content : '').toBe('also check the fixtures');
+    expect(steer?.kind === 'message' ? steer.id : '').toBe('user:steer:steer_1');
+    // The prose that was streaming when the steer landed is finished prose now.
+    expect(rows[0]?.kind === 'message' ? rows[0].streaming : true).toBe(false);
   });
 
   it('leaves other queued messages alone when one steer lands', () => {

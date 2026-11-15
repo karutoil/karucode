@@ -102,7 +102,8 @@ and inspects git, and it keeps going until the work is done or you stop it.
 
 The default approval mode is `ask`: shell commands and file writes wait for you,
 and you answer allow-once, allow-for-session or deny. Every decision is recorded.
-`auto`, `ask_commands` and `read_only` are the other modes — see
+`auto` (labelled **Approve All** in the web UI), `ask_commands` and
+`read_only` are the other modes — see
 [Control what the agent may do without asking](internal/approvals.md).
 
 To try it on a real bug, run it against the example project in the repository,

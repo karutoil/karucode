@@ -109,28 +109,34 @@ describe('isGrowthAfterFollow', () => {
 });
 
 describe('shouldFollow', () => {
-  it('follows while pinned, whatever the geometry says', () => {
-    expect(shouldFollow(view(100), null, true, false)).toBe(true);
+  // The reported bug, as a decision: a recorded pin is not permission. A wheel
+  // gesture clears the follow anchor, and the frame that would clear the pin has
+  // not run yet — while a stream produces growth in every one of those frames.
+  // Trusting the pin there snapped the view to the tail under the reader's hand.
+  it('is decided by live geometry, not by a pin recorded a frame ago', () => {
+    // Widget: the view sits 600px above the newest content, the anchor was
+    // dropped by a gesture, and the recorded pin still says "following".
+    expect(shouldFollow(view(200, 4000), null, false)).toBe(false);
   });
 
   it('follows while a smooth scroll it started is still settling', () => {
-    expect(shouldFollow(view(100), null, false, true)).toBe(true);
+    expect(shouldFollow(view(100), null, true)).toBe(true);
   });
 
   it('follows when the view is simply at the bottom', () => {
-    expect(shouldFollow(view(800), null, false, false)).toBe(true);
+    expect(shouldFollow(view(800), null, false)).toBe(true);
   });
 
   it('follows when the only gap is content that arrived after the follow', () => {
-    expect(shouldFollow(view(800, 2100), anchoredAtBottom(), false, false)).toBe(true);
+    expect(shouldFollow(view(800, 2100), anchoredAtBottom(), false)).toBe(true);
   });
 
   it('stays put once the reader has scrolled into history', () => {
     // The reviewed failure this must never reintroduce: following a reader who
     // deliberately moved up, however much content lands meanwhile.
     const anchored = anchoredAtBottom();
-    expect(shouldFollow(view(200, 4000), anchored, false, false)).toBe(false);
-    expect(shouldFollow(view(200, 4000), null, false, false)).toBe(false);
+    expect(shouldFollow(view(200, 4000), anchored, false)).toBe(false);
+    expect(shouldFollow(view(200, 4000), null, false)).toBe(false);
   });
 });
 

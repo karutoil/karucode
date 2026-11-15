@@ -75,8 +75,9 @@ workspace built for a long session, not for a dashboard demo.
   spawn subagents. Every tool result is bounded with an explicit truncation
   marker, never silently dropped.
 * **Approvals before mutations.** `ask` by default for shell and writes, with
-  command-prefix allowlists, per-path auto-approval, `ask_commands`, `auto` and
-  `read_only` modes; allow-once / allow-for-session / deny in the UI, audited.
+  command-prefix allowlists, per-path auto-approval, `ask_commands`, `auto`
+  (Approve All in the web UI) and `read_only` modes; allow-once /
+  allow-for-session / deny in the UI, audited.
 * **Containment for file tools.** Every path resolves through a confined
   workspace: no `..` escapes, no absolute paths outside, symlink escapes
   canonicalised away, writes atomic. The system temp dir is an extra root by

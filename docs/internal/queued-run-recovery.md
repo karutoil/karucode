@@ -24,10 +24,15 @@ curl -X POST 'http://127.0.0.1:3000/api/sessions/s_example/messages?mode=follow_
 ```
 
 A steer is marked `steer_applied` only when it joins a request-building
-iteration. If an iteration limit or `limits.max_run_secs` ends the run first,
-unsent steers become ordered follow-ups with their original ids and rendered
-content intact. The same queue-aware deregistration runs if `begin_run` fails
-before the background loop starts; accepted work is not left without a scheduler.
+iteration, and that is also the moment it becomes a transcript row: the runtime
+persists it as an ordinary user message (so a reload shows it in the place the
+model read it) and the event carries its text, which the web UI appends as a
+user turn. A steer that never joins a request is never persisted and never
+marked applied. If an iteration limit or `limits.max_run_secs` ends the run
+first, unsent steers become ordered follow-ups with their original ids and
+rendered content intact. The same queue-aware deregistration runs if
+`begin_run` fails before the background loop starts; accepted work is not left
+without a scheduler.
 
 If an ordinary submit wins the race with a queued follow-up's start, the popped
 entry goes back at the front and remains recallable; it is not treated as a

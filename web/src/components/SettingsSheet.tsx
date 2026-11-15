@@ -178,7 +178,9 @@ const APPROVAL_MODES: { value: ApprovalMode; label: string; description: string 
   },
   {
     value: 'auto',
-    label: 'Auto (no approval prompts)',
+    // The stored value stays `auto` (config key and wire value); only the label a
+    // person reads names what the mode does.
+    label: 'Approve All (no approval prompts)',
     description: 'Everything is allowed and recorded in the event log. Only use this in disposable environments.',
   },
   {
@@ -2893,8 +2895,8 @@ export function SettingsSheet(): JSX.Element | null {
                         </Field>
                         {form.approvalMode === 'auto' ? (
                           <div class="inline-warning" role="status">
-                            <AlertIcon size={14} /> Auto mode removes the approval gate. Every command will run without
-                            asking.
+                            <AlertIcon size={14} /> Approve All mode removes the approval gate. Every command will
+                            run without asking.
                           </div>
                         ) : null}
                         <div class="field-grid">

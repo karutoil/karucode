@@ -744,7 +744,32 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
       // arrives: acceptance is not permission to resurrect a consumed entry.
       const retired = retireQueuedIds(seen, [event.steer_id]);
       const queued = retired.queued.filter((entry) => entry.id !== event.steer_id);
-      return queued.length === retired.queued.length ? retired : { ...retired, queued };
+      const settled = queued.length === retired.queued.length ? retired : { ...retired, queued };
+      if (event.content.trim() === '') return settled;
+      // …and it is a *row*, here, at the moment the model read it. The runtime
+      // persists a steer as an ordinary user message (so a reload shows it in
+      // place), and this is the live half of the same fact: without it the
+      // reader watches the instruction they just sent leave the queue and never
+      // appear anywhere, which reads as "my steering was dropped".
+      return {
+        ...settled,
+        items: [
+          // The turn in flight wrote prose before this landed; the steer starts a
+          // new stretch of it, exactly as the persisted transcript will read.
+          ...closeStreaming(settled.items),
+          {
+            kind: 'message',
+            id: `user:steer:${event.steer_id}`,
+            at,
+            role: 'user',
+            content: event.content,
+            reasoning: '',
+            streaming: false,
+            runId: state.runId,
+            agentId: null,
+          },
+        ],
+      };
     }
 
     case 'queued_messages': {

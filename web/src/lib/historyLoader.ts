@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'preact/hooks';
 import type { RefObject } from 'preact';
+import { elementAtBottom } from './stickyBottom';
+import { noteOwnScroll } from './ownScroll';
 
 /** How close to the top of the viewport the sentinel starts loading (px). */
 export const HISTORY_PREFETCH_PX = 400;
@@ -184,13 +186,21 @@ export function useHistoryLoader(options: HistoryLoaderOptions): void {
                 // left alone.
                 const viewport = metrics(latest.current.scroller.current);
                 const shift = pending.content.getBoundingClientRect().top - viewport.top;
-                if (shift > 0) pending.element.scrollTop = pending.element.scrollTop + shift;
+                if (shift > 0) {
+                  const atBottom = elementAtBottom(pending.element);
+                  pending.element.scrollTop = pending.element.scrollTop + shift;
+                  noteOwnScroll(pending.element, atBottom);
+                }
                 revealed = true;
               } else {
                 const delta = pending.element.scrollHeight - pending.scrollHeight;
                 // Prepending grows the content above; moving down by the same
                 // height keeps the row that was at the top of the viewport there.
-                if (delta > 0) pending.element.scrollTop = pending.scrollTop + delta;
+                if (delta > 0) {
+                  const atBottom = elementAtBottom(pending.element);
+                  pending.element.scrollTop = pending.scrollTop + delta;
+                  noteOwnScroll(pending.element, atBottom);
+                }
               }
             }
             // A page shorter than the viewport leaves the sentinel visible, so

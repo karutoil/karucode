@@ -12,6 +12,11 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Changed
 
+- **The `auto` approval mode is called "Approve All" in the UI.** The stored
+  value, the config key, the env var and the API field stay `auto` — only the
+  wording a person reads changed (the Settings select and its warning, the
+  composer's approval chip, the Context drawer, and the `approvals` doc block).
+
 - **The documentation is release-ready.** The front door and the docs tree were
   audited against the code (ten parallel audits plus a dedicated API writer)
   and brought in line: the README's hero image pointed at an untracked PNG
@@ -77,6 +82,34 @@ matters to an operator says which behaviour changed, not which number.
   (45 checks) and in the new `ModelSwitcher` phone tests.
 
 ### Fixed
+
+- **The transcript stops fighting the reader.** Opening a long session could
+  land it a screen short of its own newest row with "Jump to latest" showing on a
+  conversation nobody had touched, scrolling down could jump the view back up,
+  and a streaming answer could yank the page under the wheel (a measured 757px
+  snap, then a sawtooth per delta). Reported, and first fixed in a pull request,
+  by Dana Hanna (`@thesoftwarejedi`) — whose patch also moved the
+  scroll-anchoring opt-out onto the scroll container, which this change keeps.
+  Three causes are addressed here: browser scroll anchoring is switched off on
+  the scroller (`overflow-anchor: none`, `styles/layout.css`), because the app's
+  own measurement corrections are the only writes that should move this view; a
+  scroll the app writes for layout reasons now announces itself
+  (`lib/ownScroll.ts`) together with the position that was on screen *before* the
+  write, so re-measuring rows is never mistaken for a gesture and never drags a
+  reader who *had* scrolled away back to the tail; and the follow rule credits a
+  *shrink* under the viewport as its own to close (`isShrinkAfterFollow`,
+  `lib/stickyBottom.ts`) instead of reading the resulting scroll clamp as a
+  decision to stop. Verified in a real headless Chromium by
+  `scripts/verify_transcript_scroll.py` (19 checks: the open lands on the newest
+  row, no backstep under either gesture direction, the bottom is reachable, Jump
+  to latest lands and stays, a stream never moves against the wheel).
+
+- **A steered message is now visible where it landed.** The runtime already
+  persisted a steer as an ordinary user message, so it reappeared after a reload
+  but never in the live transcript: the instruction left the pending panel and
+  showed up nowhere, which reads as "my steering was dropped". The
+  `steer_applied` frame now appends it as a user turn at the point the model read
+  it (`state/eventReducer.ts`), and the docs say so.
 
 - **The model and reasoning pickers appear where you tapped, above the dock.**
   Below 800px the menu became `position: fixed` to escape the pill row's

@@ -320,8 +320,16 @@ deliberately outside the parent form's dirty state.
   single frame can add more than the threshold and the view would read its own
   backlog as you scrolling away. Instead it records where following left the
   viewport and treats a gap no wider than the content that has arrived since
-  then as its own to close. Any movement of the scroll position is yours, and
-  is never overridden. **Jump to latest** animates a short distance and snaps
+  then as its own to close — and the mirror case, a *shrink* under the viewport
+  (the windowed transcript re-measuring the rows it swapped for padding), is
+  also its own, because a shrink clamps the scroll and would otherwise leave
+  a freshly opened session parked just short of its newest row. A gesture —
+  wheel, touch, key or scrollbar press — ends following on the spot, and the
+  transcript's own scroll corrections announce themselves (`lib/ownScroll.ts`,
+  with the position that was on screen *before* the write) so that keeping a
+  reader still while rows are re-measured is never mistaken for a reader
+  scrolling away, and a correction never drags a reader who *had* scrolled away
+  back to the tail. **Jump to latest** animates a short distance and snaps
   beyond three viewports (`jumpBehavior`): asked for 150 000px, Chromium covers
   a "smooth" scroll in one or two enormous steps, and each step mounts a
   screenful of rows it has never drawn - a strobe, not an animation.
@@ -713,8 +721,10 @@ beside the button once there is text: **Steer** folds the message into the turn
 in flight ("also rename the test"), **Follow-up** starts the next turn once this
 one finishes ("then run the tests"). The button says which one it will do and
 the footnote hint follows the toggle. Nothing is added to the transcript
-optimistically: a steer becomes a user turn only when the loop folds it in
-(`steer_applied`), which is where the model actually saw it.
+optimistically: a steer becomes a user turn the moment the loop folds it in
+(the `steer_applied` frame carries its text), which is where the model actually
+saw it, and a follow-up gets its row from the `run_started` of the run it
+starts. While it waits, it is only in the panel above the box.
 
 Queued messages appear in a panel **above** the box, with their kind, draft and
 attachment chips, each with **Recall**. Recalling takes the message out of the

@@ -26,6 +26,11 @@ whether that class is allowed, asked or denied.
 | `auto` | allow (audited) | allow (audited) | allow (audited) | allow |
 | `read_only` | deny | deny | deny | allow |
 
+The web UI names the `auto` mode **Approve All**, because it removes the
+approval gate entirely. That is a display label and nothing else: the value to
+write in `approvals.mode`, in `KARUCODE_APPROVAL_MODE` and in a
+`PATCH /api/config` body is still `auto`.
+
 `read_only` is the mode to use for a session you do not trust or a workspace you
 only want inspected: asking would imply the answer could be yes. The mission
 coordinator's `mission_draft_task` is a mutating tool: it is denied in
@@ -76,11 +81,11 @@ so `read_only` still denies it.
   for untrusted work.
 * Subagents inherit the parent policy; their prompts carry the parent's
   approval mode and the agent id in the audit trail.
-* `auto` is audited but does not ask; do not run it against a workspace whose
-  contents you have not looked at. "Audited" here means the ordinary
-  `tool_call_started`/`tool_call_finished` events are emitted: an allowed-
-  without-asking call does not store an approval row or an `approval_resolved`
-  event, because there was no question.
+* `auto` (Approve All in the UI) is audited but does not ask; do not run it
+  against a workspace whose contents you have not looked at. "Audited" here
+  means the ordinary `tool_call_started`/`tool_call_finished` events are
+  emitted: an allowed-without-asking call does not store an approval row or an
+  `approval_resolved` event, because there was no question.
 * `approvals.mode` governs **the agent**, not you. It classifies the model's
   tool calls. Actions you take from the API are yours and are not consulted
   against it - `POST /api/terminals` opens a shell, `/api/workspace/upload`

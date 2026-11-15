@@ -852,6 +852,38 @@ describe('SettingsSheet controls', () => {
     expect(patches[0]?.limits?.max_iterations).toBe(0);
   });
 
+  /**
+   * The mode stored as `auto` is called "Approve All" in the UI. The identifier is
+   * the config key and the wire value, so it must not move: only the label a
+   * person reads, and the warning under it, say what the mode does.
+   */
+  it('calls the `auto` approval mode "Approve All" while the value stays `auto`', async () => {
+    const config = twoProfileConfig();
+    config.approvals = { ...config.approvals, mode: 'auto' };
+    const { patches } = installFetch(config);
+    renderSheet(config);
+
+    await settleOnTab('Agent', 'Approval mode', config);
+    const panel = visiblePanel();
+    const select = within(panel).getByLabelText('Approval mode') as HTMLSelectElement;
+
+    expect(select.value).toBe('auto');
+    const selected = [...select.selectedOptions][0];
+    expect(selected?.value).toBe('auto');
+    expect(selected?.textContent).toBe('Approve All (no approval prompts)');
+    // No option still calls the mode "Auto" on its own.
+    expect([...select.options].map((option) => option.textContent)).not.toContain('Auto (no approval prompts)');
+
+    const warning = within(panel).getByRole('status');
+    expect(warning.textContent).toContain('Approve All mode removes the approval gate');
+    expect(warning.textContent).not.toContain('Auto mode');
+
+    // Saving the untouched form still sends the unchanged identifier.
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.approvals?.mode).toBe('auto');
+  });
+
   it('rejects a run turn ceiling above the server bound, naming the field', async () => {
     const config = twoProfileConfig();
     const { patches } = installFetch(config);

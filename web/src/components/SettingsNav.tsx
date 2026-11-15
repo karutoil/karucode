@@ -116,7 +116,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
       'What the agent may do without asking, and the bounds a run and its subagents work inside.',
     scope: 'install',
     icon: <AgentsIcon size={15} />,
-    keywords: 'approval allowlist auto read-only permission subagent concurrency iterations limits timeouts',
+    keywords:
+      'approval approve all allowlist auto read-only permission subagent concurrency iterations limits timeouts',
   },
   {
     id: 'skills',
