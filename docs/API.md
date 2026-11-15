@@ -241,7 +241,7 @@ directory. `provider_configured` is computed from the effective model (below).
                  "allow_recursive": false,
                  "max_depth": 1, "timeout_secs": 14400,
                  "allow_background": true, "max_background": 8,
-                 "wait_timeout_secs": 600 },
+                 "wait_timeout_secs": 600, "worktrees": false },
   "notifications": { "enabled": true, "run_finished": true, "needs_input": true,
                      "error": true, "info": true, "plugin": true,
                      "min_run_secs": 0, "say_body": true,
@@ -313,6 +313,13 @@ granting every spawn a slot immediately), while `max_depth` means *no delegation
 (`0..=255`, the field being a `u8`). `wait_timeout_secs` is `1..=3600`. A
 `max_depth` above `255` fails JSON deserialisation rather than being truncated to
 a smaller number.
+
+**`subagents.worktrees`** is a boolean, `false` by default. Setting it to `true`
+gives each new subagent its own git worktree instead of the parent's live tree;
+it takes effect on the next spawn and needs no restart. The spawn is refused - a
+tool error naming the setting, not a silent fallback - when the workspace is not
+a git repository or has no commits. See the `subagents` topic for what the child
+sees and where its changes go.
 
 **Admin gate.** When `KARUCODE_ADMIN_TOKEN` is set, a patch that changes
 `approvals`, `model.base_url`, `model.api_key`, `providers`, `active_provider` or

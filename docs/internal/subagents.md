@@ -7,7 +7,7 @@
 
 - **Slug:** `subagents`
 - **Tags:** subagents, delegation, agents, parallel, background, spawn_agent, spawn_agents, send_message, long-running
-- **Applies to:** `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `config:[subagents]`, `config:subagents.max_concurrent`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_iterations`, `config:subagents.timeout_secs`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `route:GET /api/sessions/:id`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_progress`, `event:agent_paused`, `event:agent_message`, `event:agent_note`, `event:agent_finished`, `ui:AgentsTab`
+- **Applies to:** `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `config:[subagents]`, `config:subagents.max_concurrent`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_iterations`, `config:subagents.timeout_secs`, `config:subagents.worktrees`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_WORKTREES`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `route:GET /api/sessions/:id`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `route:PATCH /api/config`, `route:GET /api/config`, `event:agent_spawned`, `event:agent_progress`, `event:agent_paused`, `event:agent_message`, `event:agent_note`, `event:agent_finished`, `ui:AgentsTab`
 - **Source:** `crates/kc-runtime/src/subagent.rs:20`
 
 ---
@@ -99,6 +99,7 @@ max_iterations = 0       # turns per subagent;  KARUCODE_SUBAGENT_MAX_ITERATIONS
 allow_recursive = false  # KARUCODE_ALLOW_RECURSIVE_SUBAGENTS
 max_depth = 1            # 0 = no delegation; at most 255
 timeout_secs = 14400     # 4h wall clock;      KARUCODE_SUBAGENT_TIMEOUT_SECS
+worktrees = false        # own git checkout per child; KARUCODE_SUBAGENT_WORKTREES
 ```
 
 Concurrency is enforced by a semaphore, iterations and wall clock per subagent,
@@ -106,6 +107,63 @@ and a hard backstop on top of the in-loop deadline. Cancelling the parent cancel
 children through a child token. A spawn past a finite `max_concurrent` or
 `max_background` is **refused**, never queued: a model that says "go" and then
 sees nothing happen is worse than one that was told "no".
+
+## Give each subagent its own worktree
+
+Off by default. Turn it on when several subagents edit the same repository and
+you want each child's changes separated instead of interleaved in one tree:
+
+```toml
+[subagents]
+worktrees = true   # KARUCODE_SUBAGENT_WORKTREES=1 also works
+```
+
+You do not have to edit the file yourself. Ask the agent - "turn on worktrees
+for subagents" - and it changes the same setting through
+`PATCH /api/config` (`{"subagents": {"worktrees": true}}`); the settings screen
+under **Subagents** has the switch as well. It applies to the next spawn, no
+restart needed, and it is persisted.
+
+**What a child gets.** A detached checkout at
+`<workspace>/.karucode/worktrees/<agent-id>`, and every path tool it calls -
+`read_file`, `write_file`, `edit_file`, `run_command`, the terminal, all of
+them - is confined to that directory. Two children can edit the same file
+without seeing each other, and the parent's working tree is not touched while
+they work.
+
+The checkout does **not** start at your last commit: it starts from your
+working tree as it is right now. Staged and unstaged changes to tracked files
+are in it, and untracked files (everything `git status` lists as new) are
+copied in. So a child sent to "finish the parser change I started" opens the
+file you were editing, not the committed version. Ignored files are not
+copied, and nested repositories/submodules are not mirrored - a child that
+needs a build can run one in its own tree.
+
+**Getting the work back.** Nothing is merged for you. When a child finishes:
+
+* changed nothing: its checkout is removed and no branch is created;
+* changed files: they are committed onto a local branch
+  `karucode/subagent/<agent-id>`, the checkout is removed, and the child's
+  summary says which branch and how many files.
+
+That summary line is in the parent's tool result, so the parent knows the work
+exists and where. Review and integrate it yourself:
+
+```bash
+git diff <base>..karucode/subagent/<agent-id>   # <base> is quoted in the summary
+git merge karucode/subagent/<agent-id>          # or cherry-pick, or restore --staged
+git branch -D karucode/subagent/<agent-id>      # when you are done with it
+```
+
+**When it refuses.** Only a git repository with at least one commit can support
+a worktree. In a plain directory, or a repo with no commits, the spawn is
+refused with a message naming `subagents.worktrees` - it never falls back to
+the shared tree, because a child quietly running somewhere other than where you
+asked is the surprise this feature exists to avoid.
+
+**What it costs.** One `git worktree add` and a full checkout per child, so a
+large repository makes spawns slower; the untracked-file copy adds to that.
+Combined with a wide `spawn_agents` fan-out this is real disk and time.
 
 ## Unlimited subagents
 
@@ -218,12 +276,11 @@ row or concurrency slot is left behind.
 
 ## Gotchas
 
-* **Subagents share the parent's live workspace**, including dirty and
-  untracked files. Automatic git worktrees are not created: a clean checkout
-  would hide parent work, and there is no durable patch handoff to make
-  deleting it safe. Child edits are immediately visible and survive completion.
-  `owned_paths` provides advisory conflict reporting, not locking or isolation;
-  assign disjoint paths and coordinate edits that overlap.
+* **Subagents share the parent's live workspace by default**, including dirty
+  and untracked files. Child edits are immediately visible and survive
+  completion; `owned_paths` provides advisory conflict reporting, not locking
+  or isolation. Turn on `subagents.worktrees` (next section) when two children
+  would otherwise race on the same files.
 * Recursion is off by default; enabling it without a depth budget turns one
   question into an expensive fan-out.
 * Subagent runs cost tokens and time. Delegating a one-file read is slower than

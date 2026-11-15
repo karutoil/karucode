@@ -107,6 +107,7 @@ interface FormState {
   allowBackground: boolean;
   subagentMaxBackground: string;
   subagentWaitTimeout: string;
+  subagentWorktrees: boolean;
 }
 
 /**
@@ -215,6 +216,7 @@ function formFromConfig(config: Config): FormState {
     allowBackground: config.subagents.allow_background,
     subagentMaxBackground: String(config.subagents.max_background),
     subagentWaitTimeout: String(config.subagents.wait_timeout_secs),
+    subagentWorktrees: config.subagents.worktrees,
   };
 }
 
@@ -366,6 +368,7 @@ function buildPatch(form: FormState): ConfigPatch {
       allow_background: form.allowBackground,
       max_background: Number(form.subagentMaxBackground),
       wait_timeout_secs: Number(form.subagentWaitTimeout),
+      worktrees: form.subagentWorktrees,
     },
   };
 }
@@ -3110,6 +3113,15 @@ export function SettingsSheet(): JSX.Element | null {
                                 checked={form.allowRecursive}
                                 disabled={disabled}
                                 onChange={(checked) => update({ allowRecursive: checked })}
+                              />
+                            </div>
+                            <div class="field field-toggle field-wide">
+                              <Toggle
+                                label="Give each subagent its own worktree"
+                                description="Off by default: subagents share this workspace. On, each child gets a detached git checkout of the current working state and its changes come back on a karucode/subagent/<id> branch. Needs a git repository with at least one commit."
+                                checked={form.subagentWorktrees}
+                                disabled={disabled}
+                                onChange={(checked) => update({ subagentWorktrees: checked })}
                               />
                             </div>
                           </div>

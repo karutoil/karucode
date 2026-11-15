@@ -951,6 +951,25 @@ def main():
             _assert(stats["rss_kb"] > 0, stats), f"{round(stats['rss_kb']/1024,1)} MiB"
         )[-1])
 
+        # The subagent worktree switch is the one an operator (or the agent, via
+        # this same route) flips to isolate children. It must default off, flip
+        # through PATCH, and come back from GET so a restart cannot silently
+        # switch isolation back off.
+        subagents_default = client.ok("GET", "/api/config")["subagents"]
+        check("subagent worktrees default to off", lambda: (
+            _assert(subagents_default.get("worktrees") is False, subagents_default),
+            "worktrees=false",
+        )[-1])
+        flipped = client.ok("PATCH", "/api/config", {"subagents": {"worktrees": True}})
+        check("subagent worktrees can be enabled over the API", lambda: (
+            _assert(flipped["subagents"]["worktrees"] is True, flipped["subagents"]),
+            _assert(
+                client.ok("GET", "/api/config")["subagents"]["worktrees"] is True,
+                "GET disagrees with PATCH",
+            ),
+            "worktrees=true",
+        )[-1])
+
         print("\n== session management / UI ==", flush=True)
         renamed = client.patch(f"/api/sessions/{sid}", {"title": "renamed by e2e"})
         check("session rename", lambda: (
@@ -991,6 +1010,11 @@ def main():
                 _assert(any(r["status"] == "interrupted" for r in detail["runs"]),
                         [r["status"] for r in detail["runs"]]),
                 "interrupted visible",
+            )[-1])
+            after_restart = client2.ok("GET", "/api/config")["subagents"]
+            check("the subagent worktree switch survives a restart", lambda: (
+                _assert(after_restart.get("worktrees") is True, after_restart),
+                "still on",
             )[-1])
         finally:
             server2.send_signal(signal.SIGINT)

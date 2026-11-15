@@ -21,7 +21,7 @@
 // @kc-title: Delegate work to subagents
 // @kc-summary: How spawn_agent, spawn_agents and the control tools work - blocking and background, sequential and parallel - and the limits they run under.
 // @kc-tags: subagents, delegation, agents, parallel, background, spawn_agent, spawn_agents, send_message, long-running
-// @kc-applies-to: tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, config:[subagents], config:subagents.max_concurrent, config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_iterations, config:subagents.timeout_secs, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, route:GET /api/sessions/:id, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, event:agent_spawned, event:agent_progress, event:agent_paused, event:agent_message, event:agent_note, event:agent_finished, ui:AgentsTab
+// @kc-applies-to: tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, config:[subagents], config:subagents.max_concurrent, config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_iterations, config:subagents.timeout_secs, config:subagents.worktrees, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_WORKTREES, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, route:GET /api/sessions/:id, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:PATCH /api/config, route:GET /api/config, event:agent_spawned, event:agent_progress, event:agent_paused, event:agent_message, event:agent_note, event:agent_finished, ui:AgentsTab
 //
 // The model can call `spawn_agent` with a self-contained task and a list of
 // `owned_paths`. A subagent is a **nested, bounded agent loop**: it gets a fresh
@@ -110,6 +110,7 @@
 // allow_recursive = false  # KARUCODE_ALLOW_RECURSIVE_SUBAGENTS
 // max_depth = 1            # 0 = no delegation; at most 255
 // timeout_secs = 14400     # 4h wall clock;      KARUCODE_SUBAGENT_TIMEOUT_SECS
+// worktrees = false        # own git checkout per child; KARUCODE_SUBAGENT_WORKTREES
 // ```
 //
 // Concurrency is enforced by a semaphore, iterations and wall clock per subagent,
@@ -117,6 +118,63 @@
 // children through a child token. A spawn past a finite `max_concurrent` or
 // `max_background` is **refused**, never queued: a model that says "go" and then
 // sees nothing happen is worse than one that was told "no".
+//
+// # Give each subagent its own worktree
+//
+// Off by default. Turn it on when several subagents edit the same repository and
+// you want each child's changes separated instead of interleaved in one tree:
+//
+// ```toml
+// [subagents]
+// worktrees = true   # KARUCODE_SUBAGENT_WORKTREES=1 also works
+// ```
+//
+// You do not have to edit the file yourself. Ask the agent - "turn on worktrees
+// for subagents" - and it changes the same setting through
+// `PATCH /api/config` (`{"subagents": {"worktrees": true}}`); the settings screen
+// under **Subagents** has the switch as well. It applies to the next spawn, no
+// restart needed, and it is persisted.
+//
+// **What a child gets.** A detached checkout at
+// `<workspace>/.karucode/worktrees/<agent-id>`, and every path tool it calls -
+// `read_file`, `write_file`, `edit_file`, `run_command`, the terminal, all of
+// them - is confined to that directory. Two children can edit the same file
+// without seeing each other, and the parent's working tree is not touched while
+// they work.
+//
+// The checkout does **not** start at your last commit: it starts from your
+// working tree as it is right now. Staged and unstaged changes to tracked files
+// are in it, and untracked files (everything `git status` lists as new) are
+// copied in. So a child sent to "finish the parser change I started" opens the
+// file you were editing, not the committed version. Ignored files are not
+// copied, and nested repositories/submodules are not mirrored - a child that
+// needs a build can run one in its own tree.
+//
+// **Getting the work back.** Nothing is merged for you. When a child finishes:
+//
+// * changed nothing: its checkout is removed and no branch is created;
+// * changed files: they are committed onto a local branch
+//   `karucode/subagent/<agent-id>`, the checkout is removed, and the child's
+//   summary says which branch and how many files.
+//
+// That summary line is in the parent's tool result, so the parent knows the work
+// exists and where. Review and integrate it yourself:
+//
+// ```bash
+// git diff <base>..karucode/subagent/<agent-id>   # <base> is quoted in the summary
+// git merge karucode/subagent/<agent-id>          # or cherry-pick, or restore --staged
+// git branch -D karucode/subagent/<agent-id>      # when you are done with it
+// ```
+//
+// **When it refuses.** Only a git repository with at least one commit can support
+// a worktree. In a plain directory, or a repo with no commits, the spawn is
+// refused with a message naming `subagents.worktrees` - it never falls back to
+// the shared tree, because a child quietly running somewhere other than where you
+// asked is the surprise this feature exists to avoid.
+//
+// **What it costs.** One `git worktree add` and a full checkout per child, so a
+// large repository makes spawns slower; the untracked-file copy adds to that.
+// Combined with a wide `spawn_agents` fan-out this is real disk and time.
 //
 // # Unlimited subagents
 //
@@ -229,12 +287,11 @@
 //
 // # Gotchas
 //
-// * **Subagents share the parent's live workspace**, including dirty and
-//   untracked files. Automatic git worktrees are not created: a clean checkout
-//   would hide parent work, and there is no durable patch handoff to make
-//   deleting it safe. Child edits are immediately visible and survive completion.
-//   `owned_paths` provides advisory conflict reporting, not locking or isolation;
-//   assign disjoint paths and coordinate edits that overlap.
+// * **Subagents share the parent's live workspace by default**, including dirty
+//   and untracked files. Child edits are immediately visible and survive
+//   completion; `owned_paths` provides advisory conflict reporting, not locking
+//   or isolation. Turn on `subagents.worktrees` (next section) when two children
+//   would otherwise race on the same files.
 // * Recursion is off by default; enabling it without a depth budget turns one
 //   question into an expensive fan-out.
 // * Subagent runs cost tokens and time. Delegating a one-file read is slower than
@@ -1574,7 +1631,7 @@ async fn start_child(
     let warnings_for_task = warnings;
     tokio::spawn(async move {
         run_child_loop(
-            spawned_inner,
+            &spawned_inner,
             spawned_live,
             spawned_record,
             spec,
@@ -1600,31 +1657,68 @@ fn _permit_holder(permit: SubagentPermit) -> SubagentPermit {
 
 /// Drive one child's loop, then persist and report how it ended.
 async fn run_child_loop(
-    inner: Arc<RuntimeInner>,
+    inner: &Arc<RuntimeInner>,
     live: Arc<LiveAgent>,
     record: AgentRecord,
-    spec: LoopSpec,
+    mut spec: LoopSpec,
     _permit: SubagentPermit,
     mut warnings: Vec<String>,
     _task: String,
 ) {
     let agent_id = live.id.clone();
     let session_id = live.session_id.clone();
-    let timeout_secs = {
-        let cfg = inner.deps.settings.subagent_config().await;
-        cfg.timeout_secs.max(1)
+    let cfg = inner.deps.settings.subagent_config().await;
+    let timeout_secs = cfg.timeout_secs.max(1);
+
+    // Where the child works. The default is the parent's live workspace: a child
+    // sees dirty and untracked parent state, its edits land immediately, and the
+    // journal and its tools resolve the same tree, so a rewind never targets a
+    // temporary checkout. `settings.subagents.worktrees = true` replaces that with
+    // a per-child git worktree, created here so a failure can still be reported
+    // through this function's normal paths.
+    let (spec, worktree) = if cfg.worktrees {
+        let root = spec.workspace.root();
+        let guard = match crate::worktree::WorktreeGuard::isolated(root, &agent_id.0) {
+            Ok(guard) => guard,
+            Err(e) => {
+                return finish_failed_spawn(inner, &live, record, warnings, e.to_string()).await
+            }
+        };
+        warnings.extend(guard.warnings().iter().cloned());
+        // A checkout inside the parent workspace, keeping the parent's extra
+        // roots: the child is confined to its own tree without losing access to
+        // anything the project deliberately allowed.
+        let roots = spec.workspace.extra_roots().to_vec();
+        match kc_core::paths::Workspace::with_extra_roots(guard.path(), roots) {
+            Ok(ws) => {
+                let ws = Arc::new(ws);
+                spec.workspace = Arc::clone(&ws);
+                // The journal resolves a recorded path against its workspace, both
+                // when it captures the before-image and when a rewind restores it.
+                // Reusing the parent's journal would capture from the child's
+                // checkout and then restore into the parent tree, so the child gets
+                // its own: its undo is confined to its own checkout.
+                spec.journal = Some(crate::rewind::StoreJournal::new(
+                    inner.deps.store.clone(),
+                    crate::SessionId(session_id.clone()),
+                    crate::RunId(live.run_id.clone()),
+                    Some(agent_id.clone()),
+                    ws,
+                ));
+                (spec, guard)
+            }
+            Err(e) => {
+                let (_, cleanup) = guard.finish();
+                warnings.extend(cleanup);
+                return finish_failed_spawn(inner, &live, record, warnings, e.to_string()).await;
+            }
+        }
+    } else {
+        let guard = crate::worktree::WorktreeGuard::shared(spec.workspace.root());
+        (spec, guard)
     };
 
-    // Children deliberately share the parent's live workspace. A detached git
-    // worktree starts at HEAD, hiding uncommitted parent state, and without a
-    // durable patch-handoff protocol its cleanup would destroy completed edits.
-    // Keeping this guard also makes the invariant explicit: the journal and the
-    // tools in `spec` resolve the same workspace, so rewind never targets a
-    // temporary checkout.
-    let worktree = crate::worktree::WorktreeGuard::fallback(spec.workspace.root());
-    debug_assert_eq!(worktree.path(), spec.workspace.root());
-
-    let guarded = std::panic::AssertUnwindSafe(crate::agent::run_loop(Arc::clone(&inner), spec))
+    let guarded = std::panic::AssertUnwindSafe(crate::agent::run_loop(Arc::clone(inner), spec))
         .catch_unwind();
     tokio::pin!(guarded);
     let hard_deadline = tokio::time::sleep(Duration::from_secs(timeout_secs));
@@ -1694,17 +1788,45 @@ async fn run_child_loop(
     inner.runs.lock().expect("runs lock").remove(&agent_id.0);
 
     // --- finish ---------------------------------------------------------------
-    // The shared guard owns no checkout and removes nothing. Every edit the
-    // child completed remains in the parent workspace.
-    drop(worktree);
+    // A shared guard owns no checkout and removes nothing: every edit the child
+    // completed remains in the parent workspace. An isolated guard commits what
+    // the child changed to its own branch and removes the checkout, and the
+    // handoff is appended to the summary so the parent can find the work.
+    let (handoff, worktree_warnings) = worktree.finish();
+    // These are not ordinary warnings: they are the only signal that a child's
+    // changes exist but could not be handed back. They go into the summary, which
+    // is what the parent reads, and not just into the log.
+    let worktree_trouble = worktree_warnings.join("; ");
+    warnings.extend(worktree_warnings);
 
     let (summary_raw, _) =
         truncate_output_with_advice(&outcome.text, MAX_SUMMARY_BYTES, SUMMARY_CUT_ADVICE);
-    let summary = if summary_raw.trim().is_empty() {
+    let mut summary = if summary_raw.trim().is_empty() {
         outcome.error.clone().unwrap_or_default()
     } else {
         summary_raw
     };
+    if let Some(handoff) = &handoff {
+        match &handoff.branch {
+            Some(branch) => summary.push_str(&format!(
+                "\n\n[worktree] {files} file(s) changed on branch `{branch}`, cut from {base}. \
+                 Nothing was merged into the parent's working tree: review with \
+                 `git diff {base}..{branch}`, then merge or delete the branch.",
+                files = handoff.files,
+                base = handoff.base,
+            )),
+            None => summary.push_str(&format!(
+                "\n\n[worktree] {files} file(s) were changed but could NOT be committed to a \
+                 branch; the checkout is still on disk at {path} and holds the only copy. \
+                 Do not delete it before copying the work out.",
+                files = handoff.files,
+                path = handoff.checkout.display(),
+            )),
+        }
+    }
+    if !worktree_trouble.is_empty() {
+        summary.push_str(&format!("\n\n[worktree] {worktree_trouble}"));
+    }
     let agent_status = match outcome.status {
         RunStatus::Completed => AgentStatus::Completed,
         // A kill is a cancellation the parent asked for, so say so plainly rather
@@ -1746,7 +1868,7 @@ async fn run_child_loop(
     }
 
     let ctx = crate::events::EmitCtx::new(
-        Arc::clone(&inner),
+        Arc::clone(inner),
         session_id.clone(),
         live.run_id.clone(),
         Some(agent_id.0.clone()),
@@ -1769,7 +1891,7 @@ async fn run_child_loop(
     // failure, so the failure itself has to be the signal.
     if agent_status == AgentStatus::Failed || agent_status == AgentStatus::Interrupted {
         crate::notify::agent_failed(
-            &inner,
+            inner,
             &session_id,
             &ctx.sink(),
             &agent_id.0,
@@ -1779,6 +1901,67 @@ async fn run_child_loop(
         .await;
     }
     let _ = killed;
+}
+
+/// End a spawn that could not start, through the same paths a failed child uses:
+/// the stored row, the `agent_finished` event, the hub and the failure notice.
+///
+/// Used when the child's workspace cannot be prepared (an isolated checkout in a
+/// directory that is not a git repository, for instance). Without this the running
+/// row inserted before the loop starts would be left behind with no owner.
+async fn finish_failed_spawn(
+    inner: &Arc<RuntimeInner>,
+    live: &Arc<LiveAgent>,
+    record: AgentRecord,
+    warnings: Vec<String>,
+    reason: String,
+) {
+    let agent_id = live.id.clone();
+    let session_id = live.session_id.clone();
+    inner.runs.lock().expect("runs lock").remove(&agent_id.0);
+
+    let mut final_record = record;
+    final_record.status = AgentStatus::Failed.as_str().to_string();
+    final_record.summary = reason.clone();
+    final_record.error = Some(reason.clone());
+    final_record.note = live.note.lock().expect("note lock").clone();
+    final_record.progress = *live.progress.lock().expect("progress lock");
+    final_record.updated_at = now_ms();
+    final_record.finished_at = Some(now_ms());
+    let store = inner.deps.store.clone();
+    if let Err(e) = store.upsert_agent(&final_record).await {
+        tracing::warn!(agent = %agent_id.0, "could not update the failed agent record: {e}");
+    }
+    if let Err(e) = store.release_claims(&agent_id.0).await {
+        tracing::warn!(agent = %agent_id.0, "could not release path claims: {e}");
+    }
+    for warning in &warnings {
+        tracing::warn!(agent = %agent_id.0, warning, "subagent could not start");
+    }
+
+    let ctx = crate::events::EmitCtx::new(
+        Arc::clone(inner),
+        session_id.clone(),
+        live.run_id.clone(),
+        Some(agent_id.0.clone()),
+    );
+    ctx.emit(Event::AgentFinished {
+        agent_id: agent_id.0.clone(),
+        status: AgentStatus::Failed.as_str().to_string(),
+        summary: reason.clone(),
+        error: Some(reason.clone()),
+    });
+    crate::hub::AgentHub::mark_settled(live, AgentStatus::Failed);
+    inner.hub.finish(&agent_id.0, AgentStatus::Failed);
+    crate::notify::agent_failed(
+        inner,
+        &session_id,
+        &ctx.sink(),
+        &agent_id.0,
+        &final_record.name,
+        Some(&reason),
+    )
+    .await;
 }
 
 /// Parent tool set minus the delegate tools, unless recursion is allowed at this
@@ -3226,6 +3409,341 @@ mod tests {
         assert!(status.success(), "git {args:?} failed");
     }
 
+    /// A tool that reports the tree the child is confined to and leaves an edit
+    /// in it, so a test can see both where it ran and what it produced.
+    struct WorktreeProbe;
+
+    #[async_trait]
+    impl Tool for WorktreeProbe {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "worktree_probe".into(),
+                description: "report the child's workspace and write into it".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                origin: Default::default(),
+            }
+        }
+
+        fn class(&self) -> ToolClass {
+            ToolClass::Mutating
+        }
+
+        async fn invoke(&self, _request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+            let root = ctx.workspace.root();
+            let seen = std::fs::read_to_string(root.join("tracked.txt")).unwrap_or_default();
+            if let Err(e) = std::fs::write(root.join("child-file.txt"), "from the child\n") {
+                return ToolOutcome::err(format!("could not write child file: {e}"));
+            }
+            ToolOutcome::ok(format!("root={}; tracked={}", root.display(), seen.trim()))
+        }
+    }
+
+    fn worktree_test_settings(worktrees: bool) -> kc_core::config::SubagentConfig {
+        kc_core::config::SubagentConfig {
+            worktrees,
+            ..subagent_config_for_test(2)
+        }
+    }
+
+    fn init_repo_with_commit(dir: &Path) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "test@example.invalid"]);
+        git(dir, &["config", "user.name", "Test"]);
+        std::fs::write(dir.join("tracked.txt"), "committed\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "init"]);
+    }
+
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    /// Every stored child row's summary, which is what the parent is shown.
+    async fn child_summary(h: &crate::tests_support::Harness) -> String {
+        use kc_core::store::Store as _;
+        let rows = h.store.list_agents(h.session()).await.unwrap_or_default();
+        rows.iter()
+            .map(|a| a.summary.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn tool_output(events: &[kc_core::events::EventEnvelope], call_id: &str) -> String {
+        events
+            .iter()
+            .find_map(|event| match &event.event {
+                Event::ToolCallFinished {
+                    call_id: id,
+                    output,
+                    ..
+                } if id == call_id => Some(output.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no tool result for {call_id}"))
+    }
+
+    /// A tool that journals its write the way a real file tool does, so a test can
+    /// see which tree the child's checkpoint resolves against.
+    struct JournalingProbe;
+
+    #[async_trait]
+    impl Tool for JournalingProbe {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "journaling_probe".into(),
+                description: "journal an overwrite of a tracked file".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                origin: Default::default(),
+            }
+        }
+
+        fn class(&self) -> ToolClass {
+            ToolClass::Mutating
+        }
+
+        async fn invoke(&self, _request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+            // `record_checkpoint` captures the before-image and writes the row, so
+            // one call is one journaled write.
+            if !ctx.capture_checkpoint("tracked.txt", "write_file").await {
+                return ToolOutcome::err("checkpoint could not be captured");
+            }
+            if let Err(e) = std::fs::write(ctx.workspace.root().join("tracked.txt"), "child edit\n")
+            {
+                return ToolOutcome::err(format!("could not write: {e}"));
+            }
+            ToolOutcome::ok("journalled")
+        }
+    }
+
+    /// An isolated child's journal must belong to its own checkout. Sharing the
+    /// parent's would capture the before-image from the child's tree and then
+    /// restore it into the parent's on rewind - silently rewriting the parent's
+    /// file with a worktree's content.
+    #[tokio::test]
+    async fn an_isolated_child_journals_against_its_own_checkout() {
+        if !git_available() {
+            return;
+        }
+        use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+        use kc_core::store::Store as _;
+        let child_task = "journal an edit";
+        let mut h = HarnessBuilder::new(vec![
+            Script::call(&[(
+                "root_spawn",
+                SPAWN_AGENT_TOOL,
+                &serde_json::json!({ "task": child_task }).to_string(),
+            )]),
+            Script::text("parent done"),
+        ])
+        .tool(Arc::new(JournalingProbe))
+        .settings(FakeSettings::default().with_subagents(worktree_test_settings(true)))
+        .build()
+        .await;
+        h.factory.key(
+            child_task,
+            vec![
+                Script::call(&[("child_journal", "journaling_probe", "{}")]),
+                Script::text("child done"),
+            ],
+        );
+        init_repo_with_commit(&h.workspace_dir);
+
+        let events = h.run_to_finish("journalling in a worktree").await;
+        h.wait_idle().await;
+        assert_eq!(tool_output(&events, "child_journal").trim(), "journalled");
+
+        // The child's write is in its checkout, which is gone; the parent's file
+        // never changed, so a rewind into it would be the bug this guards.
+        assert_eq!(
+            std::fs::read_to_string(h.workspace_dir.join("tracked.txt")).unwrap(),
+            "committed\n",
+            "the parent's file must be exactly as it was"
+        );
+        let rows = h.store.list_checkpoints(h.session(), 0).await.unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the child's write is journaled once: {rows:?}"
+        );
+        assert_eq!(rows[0].path, "tracked.txt");
+        assert!(rows[0].agent_id.is_some(), "the row names the child");
+
+        // Rewinding the parent must not resurrect the checkout's content into the
+        // parent tree: the child's journal is scoped to a directory that no longer
+        // exists, so the parent's "committed" state is untouched either way.
+        let prompt = h
+            .session_messages()
+            .await
+            .into_iter()
+            .find(|m| m.role == "user" && m.agent_id.is_none())
+            .expect("parent prompt");
+        let _ = h.runtime.rewind(h.session(), prompt.id, true, true).await;
+        assert_eq!(
+            std::fs::read_to_string(h.workspace_dir.join("tracked.txt")).unwrap(),
+            "committed\n",
+            "a rewind must never write a worktree's content into the parent tree"
+        );
+    }
+
+    /// With the setting off - the default - a child works in the parent's own
+    /// tree and its edits are simply there afterwards.
+    #[tokio::test]
+    async fn without_the_setting_a_child_still_works_in_the_parent_tree() {
+        if !git_available() {
+            return;
+        }
+        use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+        let child_task = "probe the tree";
+        let mut h = HarnessBuilder::new(vec![
+            Script::call(&[(
+                "root_spawn",
+                SPAWN_AGENT_TOOL,
+                &serde_json::json!({ "task": child_task }).to_string(),
+            )]),
+            Script::text("parent done"),
+        ])
+        .tool(Arc::new(WorktreeProbe))
+        .settings(FakeSettings::default().with_subagents(worktree_test_settings(false)))
+        .build()
+        .await;
+        h.factory.key(
+            child_task,
+            vec![
+                Script::call(&[("child_probe", "worktree_probe", "{}")]),
+                Script::text("child done"),
+            ],
+        );
+        init_repo_with_commit(&h.workspace_dir);
+        std::fs::write(h.workspace_dir.join("tracked.txt"), "parent dirty\n").unwrap();
+
+        let events = h.run_to_finish("exercise the default tree").await;
+        h.wait_idle().await;
+        let probe = tool_output(&events, "child_probe");
+        assert!(probe.contains("tracked=parent dirty"), "{probe}");
+        assert!(
+            !probe.contains(crate::worktree::WORKTREE_DIR),
+            "the default must not create a worktree: {probe}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(h.workspace_dir.join("child-file.txt")).unwrap(),
+            "from the child\n",
+            "a shared child's edit lands in the parent tree"
+        );
+    }
+
+    /// With the setting on, the child runs in its own checkout, its edit never
+    /// touches the parent's working tree, and its work is handed back on a branch.
+    #[tokio::test]
+    async fn with_the_setting_a_child_works_in_its_own_worktree() {
+        if !git_available() {
+            return;
+        }
+        use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+        let child_task = "probe the isolated tree";
+        let mut h = HarnessBuilder::new(vec![
+            Script::call(&[(
+                "root_spawn",
+                SPAWN_AGENT_TOOL,
+                &serde_json::json!({ "task": child_task }).to_string(),
+            )]),
+            Script::text("parent done"),
+        ])
+        .tool(Arc::new(WorktreeProbe))
+        .settings(FakeSettings::default().with_subagents(worktree_test_settings(true)))
+        .build()
+        .await;
+        h.factory.key(
+            child_task,
+            vec![
+                Script::call(&[("child_probe", "worktree_probe", "{}")]),
+                Script::text("child done"),
+            ],
+        );
+        init_repo_with_commit(&h.workspace_dir);
+        std::fs::write(h.workspace_dir.join("tracked.txt"), "parent dirty\n").unwrap();
+
+        let events = h.run_to_finish("exercise the isolated tree").await;
+        h.wait_idle().await;
+
+        let probe = tool_output(&events, "child_probe");
+        assert!(
+            probe.contains(crate::worktree::WORKTREE_DIR),
+            "the child must work in its own checkout: {probe}"
+        );
+        assert!(
+            probe.contains("tracked=parent dirty"),
+            "the child must still see the parent's uncommitted work: {probe}"
+        );
+        assert!(
+            !h.workspace_dir.join("child-file.txt").exists(),
+            "an isolated child's edit must not land in the parent's working tree"
+        );
+        assert_eq!(
+            std::fs::read_to_string(h.workspace_dir.join("tracked.txt")).unwrap(),
+            "parent dirty\n",
+            "the parent's own file is untouched"
+        );
+
+        // The child's work is not lost: its summary names the branch it went to.
+        let summary = child_summary(&h).await;
+        assert!(
+            summary.contains("[worktree]") && summary.contains(crate::worktree::BRANCH_PREFIX),
+            "the child's summary must hand its branch back: {summary:?}"
+        );
+        let branches = std::process::Command::new("git")
+            .args([
+                "branch",
+                "--list",
+                &format!("{}/*", crate::worktree::BRANCH_PREFIX),
+            ])
+            .current_dir(&h.workspace_dir)
+            .output()
+            .expect("list branches");
+        let listed = String::from_utf8_lossy(&branches.stdout);
+        assert!(
+            listed.contains(crate::worktree::BRANCH_PREFIX),
+            "the child's work must be on its own branch: {listed:?}"
+        );
+    }
+
+    /// A non-git workspace with the setting on is refused rather than silently
+    /// running the child in the shared tree.
+    #[tokio::test]
+    async fn a_worktree_spawn_outside_a_repository_is_refused_by_name() {
+        use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+        let mut h = HarnessBuilder::new(vec![
+            Script::call(&[(
+                "root_spawn",
+                SPAWN_AGENT_TOOL,
+                &serde_json::json!({ "task": "should not start" }).to_string(),
+            )]),
+            Script::text("parent done"),
+        ])
+        .settings(FakeSettings::default().with_subagents(worktree_test_settings(true)))
+        .build()
+        .await;
+
+        let events = h
+            .run_to_finish("try an isolated child in a plain directory")
+            .await;
+        h.wait_idle().await;
+        let result = tool_output(&events, "root_spawn");
+        assert!(
+            result.contains("subagents.worktrees"),
+            "the refusal must name the setting: {result}"
+        );
+        assert!(
+            result.contains("not inside a git repository"),
+            "the refusal must say why: {result}"
+        );
+    }
+
     #[tokio::test]
     async fn a_completed_child_shares_dirty_parent_state_and_rewinds_the_same_tree() {
         use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
@@ -4149,6 +4667,7 @@ mod tests {
             allow_background: true,
             max_background: 4,
             wait_timeout_secs: 5,
+            worktrees: false,
         }
     }
 

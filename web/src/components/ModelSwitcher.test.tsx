@@ -72,6 +72,7 @@ function twoProfileConfig(): Config {
       allow_background: true,
       max_background: 8,
       wait_timeout_secs: 600,
+    worktrees: false,
     },
     plugins: [],
     mcp_servers: [],

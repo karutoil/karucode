@@ -277,6 +277,12 @@ export interface SubagentConfig {
   max_background: number;
   /** Default bound on `wait_for_agents`, in seconds. */
   wait_timeout_secs: number;
+  /**
+   * Give each subagent its own git worktree instead of the parent's live tree.
+   * Off by default; a child's changes come back on a `karucode/subagent/<id>`
+   * branch rather than landing in this workspace.
+   */
+  worktrees: boolean;
 }
 
 export interface ConfigPluginSummary {

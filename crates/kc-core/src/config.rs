@@ -1030,6 +1030,38 @@ pub struct SubagentConfig {
     /// timeout and reports which agents are still running.
     #[serde(default = "d_sub_wait_timeout")]
     pub wait_timeout_secs: u64,
+    /// Give each subagent its own git worktree instead of the parent's live tree.
+    ///
+    /// Off by default, because the shared workspace is the safer contract: a
+    /// child sees the parent's uncommitted and untracked files, its edits are
+    /// visible immediately, and nothing has to be merged afterwards. Turn it on
+    /// when several subagents edit the same repository at once and you would
+    /// rather review each child's changes as its own branch than have them race
+    /// on the same files.
+    ///
+    /// **What a child gets when this is on.** A detached checkout at
+    /// `<workspace>/.karucode/worktrees/<agent-id>` whose starting commit
+    /// contains the parent's staged *and* unstaged changes to tracked files;
+    /// untracked files (not ignored ones) are copied in too. The child's
+    /// `read_file`, `write_file`, `run_command` and every other path tool are
+    /// confined to that directory, so its git state and its file edits are its
+    /// own. The parent's tree is untouched while it works.
+    ///
+    /// **What happens at the end.** A clean child leaves nothing: its worktree
+    /// is removed and its branch is dropped. A child that changed files is
+    /// committed onto a local branch `karucode/subagent/<agent-id>` before the
+    /// checkout is removed, and its summary names that branch and the number of
+    /// files. Review with `git diff <base>..karucode/subagent/<agent-id>`, then
+    /// merge or delete it. Nothing lands in the parent's working tree on its own.
+    ///
+    /// **When it cannot be used.** Only inside a git repository with at least one
+    /// commit: a plain directory, or a repo with no `HEAD`, has no tree to branch
+    /// from. The spawn is then refused by name - a subagent silently running in
+    /// the shared tree when the operator asked for isolation would be the worse
+    /// outcome. Nested git repositories and submodules inside the workspace are
+    /// not mirrored; a child in a worktree sees the parent repository's files.
+    #[serde(default)]
+    pub worktrees: bool,
 }
 
 fn d_sub_concurrency() -> usize {
@@ -1062,6 +1094,7 @@ impl Default for SubagentConfig {
             allow_background: true,
             max_background: d_sub_max_background(),
             wait_timeout_secs: d_sub_wait_timeout(),
+            worktrees: false,
         }
     }
 }
@@ -2728,6 +2761,9 @@ impl Config {
         }
         if let Some(v) = env_parse("KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS") {
             cfg.subagents.wait_timeout_secs = v;
+        }
+        if let Some(v) = env_bool("KARUCODE_SUBAGENT_WORKTREES")? {
+            cfg.subagents.worktrees = v;
         }
 
         // Validate.
@@ -4833,6 +4869,7 @@ retry_max_stream_restarts = 0
             "KARUCODE_MODEL_SUPPORTS_IMAGES",
             "KARUCODE_ALLOW_RECURSIVE_SUBAGENTS",
             "KARUCODE_SUBAGENT_ALLOW_BACKGROUND",
+            "KARUCODE_SUBAGENT_WORKTREES",
             "KARUCODE_PARALLEL_TOOL_CALLS",
             "KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS",
         ]);
@@ -4843,6 +4880,10 @@ retry_max_stream_restarts = 0
         assert!(!cfg.model.supports_images);
         assert!(!cfg.subagents.allow_recursive);
         assert!(cfg.subagents.allow_background);
+        assert!(
+            !cfg.subagents.worktrees,
+            "subagents share the parent workspace unless the operator asks for worktrees"
+        );
         assert!(
             cfg.limits.parallel_tool_calls,
             "independent tool calls run in parallel unless switched off"
@@ -4883,6 +4924,10 @@ retry_max_stream_restarts = 0
                 "KARUCODE_SUBAGENT_ALLOW_BACKGROUND={spelling}"
             );
             assert_eq!(
+                cfg.subagents.worktrees, expected,
+                "KARUCODE_SUBAGENT_WORKTREES={spelling}"
+            );
+            assert_eq!(
                 cfg.limits.parallel_tool_calls, expected,
                 "KARUCODE_PARALLEL_TOOL_CALLS={spelling}"
             );
@@ -4921,6 +4966,7 @@ retry_max_stream_restarts = 0
             "KARUCODE_MODEL_SUPPORTS_IMAGES",
             "KARUCODE_ALLOW_RECURSIVE_SUBAGENTS",
             "KARUCODE_SUBAGENT_ALLOW_BACKGROUND",
+            "KARUCODE_SUBAGENT_WORKTREES",
             "KARUCODE_PARALLEL_TOOL_CALLS",
         ] {
             let _guard = EnvVars::set([name]);

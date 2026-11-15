@@ -48,14 +48,17 @@
     "settings patch persists and hides the key",
     "provider test reaches the endpoint",
     "stats endpoint reports RSS",
+    "subagent worktrees default to off",
+    "subagent worktrees can be enabled over the API",
     "session rename",
     "session delete",
     "UI is served by the same process",
-    "history survives restart and interrupted runs are marked"
+    "history survives restart and interrupted runs are marked",
+    "the subagent worktree switch survives a restart"
   ],
   "failed": [],
   "skipped": [],
   "events": 469,
-  "server_log": "/tmp/kc-e2e-d8qsp7n1/server.log",
+  "server_log": "/tmp/kc-e2e-lsznf3jk/server.log",
   "mock_requests": 43
 }

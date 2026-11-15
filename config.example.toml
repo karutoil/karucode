@@ -257,6 +257,14 @@ allow_recursive = false
 max_depth = 1
 # Wall clock for one delegated task (4h).
 timeout_secs = 14400
+# Give each subagent its own git worktree instead of the parent's live tree.
+# Off by default: children share the workspace, see its dirty and untracked
+# files, and their edits land immediately. On, a child works in a detached
+# checkout under .karucode/worktrees/<agent-id> that starts from the parent's
+# current working state; its changes come back on a karucode/subagent/<agent-id>
+# branch instead of landing in your tree. Needs a git repo with one commit.
+# KARUCODE_SUBAGENT_WORKTREES=1 also sets it.
+worktrees = false
 
 # Reusable instruction packs the agent loads on demand. A skill is a Markdown page
 # - normally `<dir>/<name>/SKILL.md`, with optional YAML frontmatter - holding one

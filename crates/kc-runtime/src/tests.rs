@@ -5508,6 +5508,7 @@ async fn a_subagent_runs_until_it_is_done_instead_of_dying_at_a_budget() {
         allow_background: true,
         max_background: 8,
         wait_timeout_secs: 60,
+        worktrees: false,
     };
     let mut h = HarnessBuilder::new(vec![
         spawn_call("a long job", None, false),
@@ -5587,6 +5588,7 @@ async fn a_subagent_without_continuation_still_stops_at_its_budget() {
         allow_background: true,
         max_background: 8,
         wait_timeout_secs: 60,
+        worktrees: false,
     };
     let mut h = HarnessBuilder::new(vec![
         spawn_call("a job with a hard budget", None, false),
@@ -5669,6 +5671,7 @@ async fn recursion_is_allowed_when_enabled_and_depth_allows() {
         allow_background: true,
         max_background: 8,
         wait_timeout_secs: 60,
+        worktrees: false,
     };
     let mut h = HarnessBuilder::new(vec![
         spawn_call("outer task", None, true),
@@ -5704,6 +5707,7 @@ async fn subagent_depth_limit_stops_further_nesting() {
         allow_background: true,
         max_background: 8,
         wait_timeout_secs: 60,
+        worktrees: false,
     };
     let mut h = HarnessBuilder::new(vec![
         spawn_call("outer task", None, true),
@@ -5981,6 +5985,7 @@ async fn subagent_timeout_marks_the_agent_failed_but_not_the_parent() {
         allow_background: true,
         max_background: 8,
         wait_timeout_secs: 60,
+        worktrees: false,
     };
     let mut h = HarnessBuilder::new(vec![
         spawn_call("never finish", None, false),
@@ -6184,6 +6189,7 @@ async fn subagent_timeout_cancels_inflight_tool_before_dropping_the_loop() {
         allow_background: true,
         max_background: 8,
         wait_timeout_secs: 60,
+        worktrees: false,
     };
     let slow = Arc::new(SlowCancelTool::new("slow"));
     let started = slow.started();
@@ -9027,6 +9033,7 @@ fn fan_out_settings() -> SubagentConfig {
         allow_background: true,
         max_background: 4,
         wait_timeout_secs: 5,
+        worktrees: false,
     }
 }
 

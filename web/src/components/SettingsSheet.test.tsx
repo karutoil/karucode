@@ -1034,6 +1034,37 @@ describe('SettingsSheet controls', () => {
     expect(patches[0]?.model?.parallel_tool_calls).toBe(true);
   });
 
+  /**
+   * Worktree isolation is opt-in, so the switch has to read off by default and
+   * send the flag both ways: a UI that showed "on" or dropped the key would leave
+   * the operator believing children are isolated when they share the tree.
+   */
+  it('saves the per-subagent worktree switch and defaults it off', async () => {
+    const config = twoProfileConfig();
+    config.subagents.worktrees = false;
+    const { patches } = installFetch(config);
+    renderSheet(config);
+
+    await settleOnTab('Agent', 'Max concurrent', config);
+    await openAdvanced();
+    const toggle = await screen.findByRole('switch', {
+      name: 'Give each subagent its own worktree',
+    });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    // The hint has to say where the work goes, or "on" looks like it merges.
+    const describedBy = toggle.getAttribute('aria-describedby');
+    expect(document.getElementById(describedBy!)?.textContent).toContain(
+      'karucode/subagent/<id>',
+    );
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.subagents?.worktrees).toBe(true);
+  });
+
   it('saves the install-wide image default from its own switch', async () => {
     const config = twoProfileConfig();
     config.model.supports_images = false;

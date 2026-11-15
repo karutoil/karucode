@@ -15,7 +15,7 @@
 // @kc-title: Change karucode's configuration
 // @kc-summary: The four config layers, which settings apply live, and how secrets and invalid values are handled.
 // @kc-tags: config, settings, configuration, toml, env
-// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_PARALLEL_TOOL_CALLS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_MCP_WATCH, env:KARUCODE_MCP_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:limits.max_plugin_tool_output_bytes, config:plugins.tool_output_bytes, config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:mcp_watch, config:mcp_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:limits.parallel_tool_calls, config:limits.max_turn_retries, config:limits.turn_retry_delay_ms, config:limits.model_compaction, config:limits.compaction_model, config:limits.compaction_max_tokens, config:limits.compaction_timeout_secs, config:notifications.enabled, config:notifications.min_run_secs, config:notifications.ephemeral_sessions, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings, config:[updates], config:updates.check, config:updates.check_secs, config:updates.manifest_url, config:updates.auto_apply, env:KARUCODE_UPDATE_CHECK, env:KARUCODE_UPDATE_CHECK_SECS, env:KARUCODE_UPDATE_MANIFEST_URL, env:KARUCODE_UPDATE_AUTO_APPLY, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, ui:Settings > Updates
+// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_PARALLEL_TOOL_CALLS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_MCP_WATCH, env:KARUCODE_MCP_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, env:KARUCODE_SUBAGENT_WORKTREES, config:[model], config:[limits], config:limits.max_plugin_tool_output_bytes, config:plugins.tool_output_bytes, config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:subagents.worktrees, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:mcp_watch, config:mcp_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:limits.parallel_tool_calls, config:limits.max_turn_retries, config:limits.turn_retry_delay_ms, config:limits.model_compaction, config:limits.compaction_model, config:limits.compaction_max_tokens, config:limits.compaction_timeout_secs, config:notifications.enabled, config:notifications.min_run_secs, config:notifications.ephemeral_sessions, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings, config:[updates], config:updates.check, config:updates.check_secs, config:updates.manifest_url, config:updates.auto_apply, env:KARUCODE_UPDATE_CHECK, env:KARUCODE_UPDATE_CHECK_SECS, env:KARUCODE_UPDATE_MANIFEST_URL, env:KARUCODE_UPDATE_AUTO_APPLY, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, ui:Settings > Updates
 //
 // # Where the settings come from
 //
@@ -346,6 +346,7 @@
 // wait_timeout_secs = 600 # default bound on `wait_for_agents`
 // max_iterations = 0      # model turns per subagent; 0 = no ceiling
 // timeout_secs = 14400    # 4h wall clock for one delegated task
+// worktrees = false       # own git checkout per subagent; see `subagents`
 // ```
 //
 // `max_concurrent` bounds real parallelism, not call sites: a `spawn_agents`
@@ -370,7 +371,13 @@
 // `KARUCODE_SUBAGENT_CONCURRENCY`, `KARUCODE_SUBAGENT_MAX_BACKGROUND`,
 // `KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`,
 // `KARUCODE_SUBAGENT_MAX_ITERATIONS`, `KARUCODE_SUBAGENT_TIMEOUT_SECS`,
-// `KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`.
+// `KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `KARUCODE_SUBAGENT_WORKTREES`.
+//
+// `worktrees` gives each subagent its own git checkout instead of the parent's
+// live tree. It is **off by default**, and it needs a git repository with at
+// least one commit; a spawn that cannot get a worktree is refused rather than
+// quietly sharing the tree. The `subagents` topic explains what the child sees,
+// where its changes go, and how to merge them back.
 //
 // `limits.context_max_chars` decides how much conversation is sent to the model.
 // Leave it at `0` (the default) and the budget is **derived from the resolved
@@ -585,6 +592,9 @@ mod keys {
     pub const SUBAGENTS_ALLOW_BACKGROUND: &str = "subagents.allow_background";
     pub const SUBAGENTS_MAX_BACKGROUND: &str = "subagents.max_background";
     pub const SUBAGENTS_WAIT_TIMEOUT_SECS: &str = "subagents.wait_timeout_secs";
+    /// Give each subagent its own git worktree (default off: children share the
+    /// parent's live tree).
+    pub const SUBAGENTS_WORKTREES: &str = "subagents.worktrees";
 
     pub const TITLES_ENABLED: &str = "titles.enabled";
     pub const TITLES_PROVIDER: &str = "titles.provider";
@@ -719,6 +729,8 @@ pub struct SubagentsPatch {
     pub allow_background: Option<bool>,
     pub max_background: Option<usize>,
     pub wait_timeout_secs: Option<u64>,
+    /// Give each subagent its own git worktree instead of the parent's tree.
+    pub worktrees: Option<bool>,
 }
 
 /// `[titles]` section of `PATCH /api/config`.
@@ -1894,6 +1906,9 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         if let Some(v) = subagents.wait_timeout_secs {
             config.subagents.wait_timeout_secs = v;
         }
+        if let Some(v) = subagents.worktrees {
+            config.subagents.worktrees = v;
+        }
     }
 
     if let Some(titles) = &patch.titles {
@@ -2920,6 +2935,7 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
         keys::SUBAGENTS_WAIT_TIMEOUT_SECS,
         subagents.wait_timeout_secs.to_string(),
     );
+    rows.insert(keys::SUBAGENTS_WORKTREES, subagents.worktrees.to_string());
 
     let titles = &config.titles;
     rows.insert(keys::TITLES_ENABLED, titles.enabled.to_string());
@@ -3227,6 +3243,11 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
         keys::SUBAGENTS_WAIT_TIMEOUT_SECS => {
             if let Some(v) = parse_value(key, value) {
                 config.subagents.wait_timeout_secs = v;
+            }
+        }
+        keys::SUBAGENTS_WORKTREES => {
+            if let Some(v) = parse_bool(key, value) {
+                config.subagents.worktrees = v;
             }
         }
         keys::SUBAGENTS_MAX_DEPTH => {
@@ -4030,6 +4051,49 @@ mod tests {
         .unwrap();
         let error = validate_settings(&cfg).unwrap_err().to_string();
         assert!(error.contains("subagents.max_concurrent"), "{error}");
+    }
+
+    /// Worktree support is a switch an operator (or the agent, through the
+    /// settings API) can flip, so the whole path has to carry it: the patch, the
+    /// persisted rows and the restore on boot. Off stays the default, because a
+    /// child that silently gets isolated is a bigger surprise than one that
+    /// shares the parent's tree.
+    #[test]
+    fn the_subagent_worktree_switch_roundtrips_through_patch_and_rows() {
+        let mut cfg = test_config();
+        assert!(
+            !cfg.subagents.worktrees,
+            "worktrees are off unless asked for"
+        );
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                subagents: Some(SubagentsPatch {
+                    worktrees: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(cfg.subagents.worktrees);
+        assert!(validate_settings(&cfg).is_ok());
+
+        let rows: Vec<(String, String)> = rows_for(&cfg)
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        assert!(
+            rows.iter()
+                .any(|(k, v)| k == keys::SUBAGENTS_WORKTREES && v == "true"),
+            "the switch must be persisted under its own key"
+        );
+        let mut restored = Config::default();
+        apply_rows(&mut restored, &rows);
+        assert!(
+            restored.subagents.worktrees,
+            "a restart must not silently switch isolation back off"
+        );
     }
 
     #[test]
