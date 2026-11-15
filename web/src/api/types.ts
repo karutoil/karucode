@@ -1839,6 +1839,65 @@ export interface PluginDiagnostics {
   error?: string | null;
   pid: number | null;
   restart_count: number;
+  /**
+   * The tool-output budget that applies to this plugin's results.
+   *
+   * `effective_bytes` is what the runtime really truncates to: the operator's
+   * grant when there is one, otherwise the global `limits.max_tool_output_bytes`.
+   * `granted` says which, and `pending` carries an ask waiting for the operator.
+   */
+  tool_output?: PluginToolOutputSummary;
+}
+
+/**
+ * The per-plugin tool-output budget, as `GET /api/plugins` reports it.
+ *
+ * A budget is a *record of an operator decision*: an agent asks for one with a
+ * byte value and a reason, and only an answer creates it. Nothing here can be
+ * set by a plugin or by editing a config key.
+ */
+export interface PluginToolOutputSummary {
+  effective_bytes: number;
+  granted: boolean;
+  global_bytes: number;
+  ceiling_bytes: number;
+  /** The operator's `[[plugins]] tool_output_bytes`, when the config sets one. */
+  declared_bytes?: number | null;
+  granted_bytes?: number | null;
+  decided_by?: string | null;
+  /** Unix milliseconds. */
+  decided_at?: number | null;
+  reason?: string | null;
+  pending?: { bytes: number; reason: string; requested_at: number } | null;
+}
+
+/** One recorded decision, with its audit trail, from `GET …/tool-output`. */
+export interface PluginToolOutputRecord {
+  plugin: string;
+  effective_bytes: number;
+  granted: boolean;
+  global_bytes: number;
+  ceiling_bytes: number;
+  declared_bytes?: number | null;
+  decision?: {
+    decision: 'granted' | 'refused';
+    bytes?: number | null;
+    requested_bytes: number;
+    reason: string;
+    decided_by: string;
+    channel: string;
+    decided_at: number;
+  } | null;
+  pending?: { bytes: number; reason: string; requested_at: number } | null;
+  history: {
+    plugin: string;
+    kind: string;
+    bytes?: number | null;
+    requested_bytes: number;
+    reason: string;
+    actor: string;
+    at: number;
+  }[];
 }
 
 /** What one plugin rescan changed. Empty arrays mean "nothing to do". */

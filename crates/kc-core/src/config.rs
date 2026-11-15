@@ -582,6 +582,23 @@ pub struct Limits {
     /// request.
     #[serde(default = "d_tool_output")]
     pub max_tool_output_bytes: usize,
+    /// Ceiling for a **per-plugin** tool-output budget, in bytes.
+    ///
+    /// `limits.max_tool_output_bytes` is the default for every plugin. An
+    /// individual plugin can also be given its own budget - higher or lower -
+    /// but only by the operator granting it: a grant is a recorded decision
+    /// (see the `plugins` topic), never something a plugin's manifest, its
+    /// installed files or an agent's config edit can create.
+    ///
+    /// This key is the upper bound any grant may reach. A request above it is
+    /// **rejected**, not silently clamped, and an existing grant is clamped to
+    /// it when it is read, so lowering this value retires a larger earlier
+    /// grant. It grants nothing by itself: raising it does not raise any
+    /// plugin's budget, because that needs the operator's answer on record.
+    ///
+    /// Clamped to 2,000..=1,000,000 bytes (the same range a grant may carry).
+    #[serde(default = "d_plugin_tool_output_max")]
+    pub max_plugin_tool_output_bytes: usize,
     /// Bytes of streamed command output kept for the UI.
     #[serde(default = "d_cmd_output")]
     pub max_command_output_bytes: usize,
@@ -783,6 +800,9 @@ fn d_true() -> bool {
 fn d_tool_output() -> usize {
     24_000
 }
+fn d_plugin_tool_output_max() -> usize {
+    crate::plugin::tool_output::MAX_BYTES
+}
 fn d_cmd_output() -> usize {
     32_000
 }
@@ -823,6 +843,7 @@ impl Default for Limits {
             max_iterations: d_iterations(),
             max_run_secs: d_run_secs(),
             max_tool_output_bytes: d_tool_output(),
+            max_plugin_tool_output_bytes: d_plugin_tool_output_max(),
             max_command_output_bytes: d_cmd_output(),
             command_timeout_secs: d_cmd_timeout(),
             max_command_timeout_secs: d_cmd_timeout_max(),
@@ -876,6 +897,18 @@ const CONTEXT_FALLBACK_CHARS: usize = 32_000;
 const CONTEXT_MIN_CHARS: usize = 32_000;
 
 impl Limits {
+    /// The ceiling a per-plugin tool-output grant may reach, in bytes.
+    ///
+    /// `max_plugin_tool_output_bytes` is clamped to the range a grant may carry
+    /// ([`crate::plugin::tool_output::MIN_BYTES`]`..=`[`MAX_BYTES`]), so a
+    /// nonsensical config value can neither starve a tool result to nothing nor
+    /// promise a budget the turn and the window cannot pay for.
+    pub fn plugin_tool_output_ceiling(&self) -> usize {
+        self.max_plugin_tool_output_bytes.clamp(
+            crate::plugin::tool_output::MIN_BYTES,
+            crate::plugin::tool_output::MAX_BYTES,
+        )
+    }
     /// How much conversation this model may be sent, in characters.
     ///
     /// The model's own window decides, because it is the only number that is
@@ -1872,6 +1905,21 @@ pub struct PluginConfig {
     pub permissions: Vec<String>,
     #[serde(default)]
     pub settings: BTreeMap<String, serde_json::Value>,
+    /// Narrow this plugin's tool-output budget, in bytes (operator-only).
+    ///
+    /// A plugin's tool results are capped by `limits.max_tool_output_bytes`
+    /// unless the operator granted this plugin its own budget. This key can only
+    /// **narrow** such a grant, never create one: without a recorded operator
+    /// decision the global default applies and this value is reported as
+    /// ignored, so writing it into a config file is not a way to raise a budget.
+    ///
+    /// It is honoured from this `[[plugins]]` entry only. A `plugin.toml` in the
+    /// plugin's own directory may not set it (the host drops it with a warning)
+    /// and `karucode plugin install` strips it from an installed manifest, the
+    /// same way `settings.trust` and `settings.read_only_tools` are treated.
+    /// See the `plugins` topic for the request-and-answer flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_output_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -4406,6 +4454,8 @@ retry_max_stream_restarts = 0
                 env: Default::default(),
                 permissions: Vec::new(),
                 settings: Default::default(),
+
+                tool_output_bytes: None,
             }],
             ..Config::default()
         };

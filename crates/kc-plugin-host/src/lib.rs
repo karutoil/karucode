@@ -26,8 +26,8 @@
 use async_trait::async_trait;
 use kc_core::config::PluginConfig;
 use kc_core::plugin::{
-    hooks, hosted_panel_id, PluginDiagnostics, PluginManifest, PluginPanel, PluginStatus,
-    ToolCallContext,
+    hooks, hosted_panel_id, tool_output::Grants, PluginDiagnostics, PluginManifest, PluginPanel,
+    PluginStatus, ToolCallContext,
 };
 use kc_core::tool::{Tool, ToolClass};
 use serde::{Deserialize, Serialize};
@@ -409,6 +409,10 @@ pub struct PluginHost {
     timeouts: Arc<TimeoutRefs>,
     /// Where the manifest-only plugins live, kept so a rescan can look again.
     data_dir: PathBuf,
+    /// The operator's per-plugin tool-output grants, shared with every slot (and
+    /// handed back to the server, which is the only writer). One map behind an
+    /// `RwLock`, so a decision applies to the very next tool call.
+    grants: Arc<Grants>,
     /// Sender handed to every slot so an inbound `notify` frame reaches the
     /// server. `None` until [`PluginHost::listen_notifications`] is called.
     notify_tx: Option<mpsc::UnboundedSender<PluginNotice>>,
@@ -420,11 +424,16 @@ impl PluginHost {
     /// used are kept as `failed` diagnostics with a message that says why.
     pub fn discover(configs: &[PluginConfig], data_dir: &Path) -> Self {
         let timeouts = Arc::new(TimeoutRefs::default());
+        // One grant map for the life of the host. It starts empty and every
+        // plugin therefore keeps the global `limits.max_tool_output_bytes`; the
+        // server fills it from the stored operator decisions at startup and
+        // keeps it current, so a grant or a revocation needs no reload.
+        let grants = Arc::new(Grants::new());
         let plugins: Vec<PluginSlot> = discover_entries(configs, data_dir)
             .into_iter()
             // Nothing is listening yet: `listen_notifications` is called after
             // `discover`.
-            .map(|entry| entry.into_slot(Arc::clone(&timeouts), None, None))
+            .map(|entry| entry.into_slot(Arc::clone(&timeouts), None, None, Arc::clone(&grants)))
             .collect();
         let live_plugins = LivePlugins::default();
         live_plugins.replace(&plugins);
@@ -433,8 +442,18 @@ impl PluginHost {
             live_plugins,
             timeouts,
             data_dir: data_dir.to_path_buf(),
+            grants,
             notify_tx: None,
         }
+    }
+
+    /// The per-plugin tool-output grants this host applies.
+    ///
+    /// Handed to the server, which is the only side that writes it: reading the
+    /// operator's recorded decisions at startup, and applying an answer as soon
+    /// as it is given. A plugin cannot reach this map at all.
+    pub fn tool_output_grants(&self) -> Arc<Grants> {
+        Arc::clone(&self.grants)
     }
 
     /// Override the interaction budgets. Applies to plugins that are already
@@ -799,8 +818,12 @@ impl PluginHost {
                 .position(|slot| slot.config.name == name)
                 .map(|idx| self.plugins.remove(idx));
             let Some(old) = existing else {
-                let slot =
-                    entry.into_slot(Arc::clone(&self.timeouts), None, self.notify_tx.as_ref());
+                let slot = entry.into_slot(
+                    Arc::clone(&self.timeouts),
+                    None,
+                    self.notify_tx.as_ref(),
+                    Arc::clone(&self.grants),
+                );
                 if let Some(shared) = started_slot(&slot) {
                     starts.push(shared);
                 }
@@ -826,6 +849,7 @@ impl PluginHost {
                 Arc::clone(&self.timeouts),
                 Some(&old.config),
                 self.notify_tx.as_ref(),
+                Arc::clone(&self.grants),
             );
             if let Some(shared) = started_slot(&slot) {
                 starts.push(shared);
@@ -895,6 +919,7 @@ impl PluginHost {
             Arc::clone(&self.timeouts),
             Some(&old.config),
             self.notify_tx.as_ref(),
+            Arc::clone(&self.grants),
         );
         let shared = slot.shared.clone();
         let enabled = slot.config.enabled;
@@ -970,6 +995,7 @@ impl DiscoveredEntry {
         timeouts: Arc<TimeoutRefs>,
         previous: Option<&PluginConfig>,
         notify_tx: Option<&mpsc::UnboundedSender<PluginNotice>>,
+        grants: Arc<Grants>,
     ) -> PluginSlot {
         let DiscoveredEntry {
             mut config,
@@ -988,7 +1014,7 @@ impl DiscoveredEntry {
             PluginStatus::Disabled
         };
         let shared = if setup_error.is_none() {
-            let shared = PluginShared::new(config.clone(), timeouts, status);
+            let shared = PluginShared::new(config.clone(), timeouts, grants, status);
             // A rebuilt slot is a brand-new `PluginShared`. Without this, a
             // plugin that is loaded or reloaded after `listen_notifications` was
             // called would be built with no listener and its `notify` frames
@@ -1088,7 +1114,9 @@ fn discover_entries(configs: &[PluginConfig], data_dir: &Path) -> Vec<Discovered
                         let source = manifest_path.display().to_string();
                         let trusted = strip_disk_trust_settings(&mut cfg, &source);
                         let wildcard = strip_disk_permission_wildcard(&mut cfg, &source);
-                        let warnings: Vec<String> = trusted.into_iter().chain(wildcard).collect();
+                        let budget = strip_disk_tool_output(&mut cfg, &source);
+                        let warnings: Vec<String> =
+                            trusted.into_iter().chain(wildcard).chain(budget).collect();
                         let fingerprint = Fingerprint::of(&cfg, Some(&manifest_path));
                         push_entry_with_warnings(
                             &mut out,
@@ -1108,6 +1136,8 @@ fn discover_entries(configs: &[PluginConfig], data_dir: &Path) -> Vec<Discovered
                             env: BTreeMap::new(),
                             permissions: Vec::new(),
                             settings: BTreeMap::new(),
+
+                            tool_output_bytes: None,
                         };
                         let fingerprint = Fingerprint::of(&cfg, Some(&manifest_path));
                         push_entry(
@@ -1514,6 +1544,26 @@ fn strip_disk_permission_wildcard(config: &mut PluginConfig, source: &str) -> Op
     Some(warning)
 }
 
+/// Drop a tool-output budget a plugin's own manifest declares.
+///
+/// The only writer of a grant is the operator's recorded decision, so a number
+/// in `plugin.toml` is not a grant and not a narrowing either: it is ignored and
+/// reported, exactly like `settings.trust` and `settings.read_only_tools`. A
+/// plugin that ships its own manifest must not be able to raise - or quietly
+/// lower - the bound its results are held to.
+fn strip_disk_tool_output(config: &mut PluginConfig, source: &str) -> Option<String> {
+    let declared = config.tool_output_bytes.take()?;
+    let warning = format!(
+        "ignored `tool_output_bytes = {declared}` declared by the plugin manifest at {source}: a \
+         per-plugin tool-output budget is the operator's decision, granted after they accept a \
+         request for it, and is honoured only together with that recorded decision. The global \
+         limits.max_tool_output_bytes default applies instead; ask for a grant with `karucode \
+         plugin tool-output request <name> --bytes <n> --reason \"...\"`"
+    );
+    warn!("{warning}");
+    Some(warning)
+}
+
 /// Shape of `<data_dir>/plugins/<name>/plugin.toml`.
 #[derive(Debug, Deserialize)]
 struct PluginFile {
@@ -1529,6 +1579,10 @@ struct PluginFile {
     env: BTreeMap<String, String>,
     #[serde(default)]
     settings: BTreeMap<String, Value>,
+    /// Parsed only so it can be *refused*: a plugin's own manifest may not
+    /// narrow or raise its tool-output budget. See [`strip_disk_tool_output`].
+    #[serde(default)]
+    tool_output_bytes: Option<usize>,
 }
 
 /// Read one `plugin.toml`. Returns the config plus an optional setup error (for
@@ -1559,6 +1613,7 @@ fn load_plugin_file(path: &Path) -> Result<(PluginConfig, Option<String>), Strin
             env: file.env,
             permissions: file.permissions,
             settings: file.settings,
+            tool_output_bytes: file.tool_output_bytes,
         },
         error,
     ))

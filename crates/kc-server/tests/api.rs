@@ -2731,6 +2731,8 @@ async fn broken_plugin_and_mcp_servers_are_isolated() {
         env: Default::default(),
         permissions: Vec::new(),
         settings: Default::default(),
+
+        tool_output_bytes: None,
     };
     let mcp_config = McpServerConfig {
         name: "broken-mcp".into(),
@@ -5169,6 +5171,7 @@ fn inline_plugin(name: &str, source: &str) -> kc_core::config::PluginConfig {
         env: Default::default(),
         permissions: Vec::new(),
         settings: Default::default(),
+        tool_output_bytes: None,
     }
 }
 
@@ -5430,6 +5433,8 @@ async fn plugin_reload_routes_rescan_hot_load_and_hot_unload() {
         env,
         permissions: Vec::new(),
         settings: Default::default(),
+
+        tool_output_bytes: None,
     };
     let h = HarnessBuilder::new(vec![text("ok")])
         .plugin(plugin)

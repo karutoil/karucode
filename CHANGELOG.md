@@ -12,20 +12,6 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Changed
 
-- **Anyone can file an issue, and the templates now work.** The two issue
-  templates were issue-form YAML saved as `.md`, so GitHub showed them as
-  markdown: a reporter's issue body arrived as the raw form definition, with
-  none of the required fields, dropdowns or placeholders that were written in
-  it. They are `.yml` now (with a `title:` prefix each). `blank_issues_enabled`
-  was `false`, which hides the blank issue from everyone below write access, so
-  a stranger whose report fit neither template had no way in at all; it is
-  `true` now. `tests/test_issue_templates.py` checks the directory against
-  GitHub's form schema — every rule exercised against a file that violates
-  exactly it — and the new `intake` CI job runs it, with the release waiting on
-  that gate, so the intake cannot silently rot again. `README.md` and
-  `CONTRIBUTING.md` link the tracker directly and say that any GitHub account
-  may open an issue.
-
 - **The documentation is release-ready.** The front door and the docs tree were
   audited against the code (ten parallel audits plus a dedicated API writer)
   and brought in line: the README's hero image pointed at an untracked PNG
@@ -125,6 +111,42 @@ matters to an operator says which behaviour changed, not which number.
   asserts that a tap in its centre lands inside it (30 checks).
 
 ### Added
+
+- **A plugin can have its own tool-output budget, and only the operator can grant
+  it.** Every tool result is cut at `limits.max_tool_output_bytes` (24,000 bytes),
+  which is exactly wrong for a plugin whose tool returns a whole feature, a
+  document or a bundle: the model then pages through what it could have had in one
+  call. One plugin can now have its own budget, higher **or** lower, and the grant
+  is a **recorded operator decision** rather than a config value. While
+  implementing or installing a plugin the agent asks —
+  `karucode plugin tool-output request <plugin> --bytes 400000 --reason "…"` —
+  which opens a question in Settings → Plugins & MCP and waits for an answer;
+  until the operator says yes the plugin keeps the global default, and silence, a
+  dismissal or the wait running out is a no. A refusal is remembered: the same
+  request cannot be filed again until the operator clears it, so an agent cannot
+  grind the answer down by re-asking. Nothing is set automatically, and nothing a
+  plugin ships can grant it: `tool_output_bytes` in its own `plugin.toml` is
+  ignored with a warning, `karucode plugin install` strips it from an installed
+  manifest, and `[[plugins]] tool_output_bytes` in `config.toml` only *narrows* a
+  grant. The accepted range is 2,000..=1,000,000 bytes, bounded by the new
+  `limits.max_plugin_tool_output_bytes` ceiling (a request above it is rejected,
+  and an existing grant is clamped when read, so lowering the ceiling retires a
+  larger grant). `GET /api/plugins` shows the effective value with who granted it
+  and when, `GET /api/plugins/:name/tool-output` returns the record plus an
+  append-only trail of `requested`/`granted`/`refused`/`cleared` events, and
+  `POST /api/plugins/:name/tool-output/decision` (the browser, or
+  `karucode plugin tool-output decide`, which refuses without a terminal) is the
+  only call that creates a grant. A decision applies to the very next tool call
+  with no reload, and the result survives the request-side re-cut that used to
+  re-impose the global default on stored results. `scripts/e2e_tool_output_budget.py`
+  drives the whole flow against the real binary and a real plugin (11 checks).
+
+- **`scripts/e2e_tool_output_budget.py` runs in CI, not just on the machine that
+  wrote it.** The suite that drives the grant flow end to end (ask, answer,
+  grant, the granted result kept whole, a second ask refused, clearing
+  restoring the default) was referenced by nothing, so it could have rotted red
+  without a single job noticing. The `e2e` job runs it beside the smoke suite,
+  which is the gate the release waits on.
 
 - **MCP servers reload without a restart.** `POST /api/mcp/reload` re-reads
   `[[mcp_servers]]` and reconciles the running connections: new names start,

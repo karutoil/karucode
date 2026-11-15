@@ -591,6 +591,10 @@ pub struct PluginFileConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub settings: BTreeMap<String, serde_json::Value>,
+    /// Parsed only so it can be stripped: a repository manifest may not set the
+    /// operator's per-plugin tool-output budget (see [`read_manifest`]).
+    #[serde(default)]
+    pub tool_output_bytes: Option<usize>,
     #[serde(default)]
     pub install: Option<InstallSpec>,
 }
@@ -1085,6 +1089,7 @@ fn read_manifest(
     let has_wildcard = file.permissions.iter().any(|p| p.trim() == "*");
     let has_trust = file.settings.contains_key("trust");
     let has_read_only_tools = file.settings.contains_key("read_only_tools");
+    let has_tool_output = file.tool_output_bytes.is_some();
     if has_wildcard {
         dropped.push("`permissions = [\"*\"]`");
     }
@@ -1094,11 +1099,17 @@ fn read_manifest(
     if has_read_only_tools {
         dropped.push("`settings.read_only_tools`");
     }
+    if has_tool_output {
+        dropped.push("`tool_output_bytes`");
+    }
     let warning = (!dropped.is_empty()).then(|| {
         format!(
             "warning: {} declares {}, which are operator-only approval/permission grants; they \
              were stripped from the installed manifest (the host would ignore them anyway). Add \
-             the key yourself in the [[plugins]] entry in config.toml if you really mean it",
+             the key yourself in the [[plugins]] entry in config.toml if you really mean it. A \
+             per-plugin tool-output budget additionally needs the operator's recorded decision: \
+             ask for it with `karucode plugin tool-output request <name> --bytes <n> --reason \
+             \"...\"`",
             path.display(),
             dropped.join(" and ")
         )
@@ -1107,7 +1118,7 @@ fn read_manifest(
     // The written manifest carries the stripped text, not the original: the
     // installed plugin.toml is a disk manifest the host reads, and it should
     // not even carry keys the host would warn about.
-    let manifest_text = if has_wildcard || has_trust || has_read_only_tools {
+    let manifest_text = if has_wildcard || has_trust || has_read_only_tools || has_tool_output {
         strip_operator_only_lines(&text)
     } else {
         text.clone()
@@ -1152,9 +1163,10 @@ fn read_manifest(
 }
 
 /// Remove the operator-only assignments from a manifest's text:
-/// `permissions` containing the `*` wildcard (top level), and `trust` /
-/// `read_only_tools` inside `[settings]`. Everything else round-trips byte
-/// for byte. A dropped assignment's multi-line array is consumed with it.
+/// `permissions` containing the `*` wildcard and `tool_output_bytes` (top
+/// level), and `trust` / `read_only_tools` inside `[settings]`. Everything else
+/// round-trips byte for byte. A dropped assignment's multi-line array is
+/// consumed with it.
 ///
 /// This mirrors the parsed-side checks in [`read_manifest`]: what the host
 /// would strip from a disk manifest with a warning is not even written into
@@ -1188,7 +1200,8 @@ fn strip_operator_only_lines(text: &str) -> String {
         let in_settings = table == "settings";
         let at_top = table.is_empty();
         let drop = (at_top && key == "permissions" && rest.contains('*'))
-            || (in_settings && (key == "trust" || key == "read_only_tools"));
+            || (in_settings && (key == "trust" || key == "read_only_tools"))
+            || (at_top && key == "tool_output_bytes");
         if !drop {
             out.push_str(line);
             out.push('\n');
@@ -2841,6 +2854,10 @@ mod tests {
             (
                 "name = \"x\"\ncommand = [\"/x\"]\n[settings]\nread_only_tools = [\n  \"a\",\n  \"b\",\n]\n",
                 "read_only_tools",
+            ),
+            (
+                "name = \"x\"\ncommand = [\"/x\"]\ntool_output_bytes = 400000\n",
+                "tool_output_bytes",
             ),
         ] {
             let dir = tmp();

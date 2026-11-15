@@ -163,6 +163,16 @@ impl Tool for PluginTool {
         self.class
     }
 
+    /// The operator's grant for this plugin, if there is one.
+    ///
+    /// `None` keeps the global `limits.max_tool_output_bytes` in force. The value
+    /// is read from the shared grant map here rather than captured at
+    /// construction, because a decision can land while a run is in flight and the
+    /// very next call must observe it.
+    fn output_budget(&self) -> Option<usize> {
+        self.shared.tool_output_budget()
+    }
+
     async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
         if let Err(e) = self.shared.ensure_ready().await {
             return ToolOutcome::err(format!(
@@ -288,6 +298,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect(),
+            tool_output_bytes: None,
         }
     }
 

@@ -88,7 +88,14 @@ pub fn init(args: &PluginInitArgs) -> anyhow::Result<()> {
          enabled = true\n\n\
          Then check `GET /api/plugins` and call `plugin__{name}__echo`.\n\
          Talk to it without the server:  cd {} && cargo run --quiet\n\
-         After upgrading karucode, refresh the vendored SDK:  karucode plugin sdk {}",
+         After upgrading karucode, refresh the vendored SDK:  karucode plugin sdk {}\n\n\
+         If this plugin's tools return big payloads, I will ask you to approve a budget\n\
+         of my own for it - the per-plugin tool-output limit on how many bytes of one\n\
+         tool result reach the model. The global default is 24000 bytes; a tool that\n\
+         returns documents or whole-feature bundles usually wants 120000-400000. That\n\
+         needs your explicit yes (a request you answer in Settings > Plugins & MCP, or\n\
+         with `karucode plugin tool-output`): nothing is set automatically, and a no or\n\
+         a silence keeps the global default for good.",
         format_args!(
             "plugin protocol {}",
             kc_core::plugin::PLUGIN_PROTOCOL_VERSION

@@ -548,6 +548,7 @@ impl HarnessBuilder {
         // Mirrors the bootstrap: externals start concurrently and a broken one
         // is isolated as a failed diagnostic.
         let mut plugin_host = PluginHost::discover(&self.plugin_configs, &data_dir);
+        let tool_output_grants = plugin_host.tool_output_grants();
         let mut mcp_manager = McpManager::new(&self.mcp_configs);
         tokio::join!(plugin_host.start_all(), mcp_manager.connect_all());
         let plugins = Arc::new(AsyncMutex::new(plugin_host));
@@ -592,6 +593,14 @@ impl HarnessBuilder {
         let api_keys = kc_server::api_keys::ApiKeyStore::load(store.clone())
             .await
             .expect("api keys");
+        let plugin_tool_output = Arc::new(
+            kc_server::plugin_tool_output::PluginToolOutput::load(
+                Arc::clone(&store),
+                tool_output_grants,
+                settings.clone(),
+            )
+            .await,
+        );
 
         let state = AppState::new(AppStateDeps {
             settings,
@@ -608,6 +617,7 @@ impl HarnessBuilder {
             allowed_hosts,
             web_auth,
             api_keys,
+            plugin_tool_output,
         });
         state.reload_tools().await;
         let router = build_router(state.clone());

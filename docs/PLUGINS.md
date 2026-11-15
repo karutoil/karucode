@@ -181,11 +181,13 @@ Every install writes `install.json` beside `plugin.toml`: the source
 sha256, the final command and a timestamp.
 
 **A repository manifest may not grant itself operator power.**
-`permissions = ["*"]`, `settings.trust` and `settings.read_only_tools` are
-refused as install errors — the same keys the host strips from a disk manifest
-(§6). Narrow permissions (`files.read`, `shell`, …) are copied as written. If
-you want an approval exemption for an installed plugin, add the key yourself in
-the `[[plugins]]` entry in `config.toml`.
+`permissions = ["*"]`, `settings.trust`, `settings.read_only_tools` and
+`tool_output_bytes` are stripped from an installed manifest with a warning — the
+same keys the host strips from a disk manifest (§6). Narrow permissions
+(`files.read`, `shell`, …) are copied as written. If you want an approval
+exemption for an installed plugin, add the key yourself in the `[[plugins]]` entry
+in `config.toml`; a tool-output budget additionally needs the operator's answer to
+a request (§5.1).
 
 `--data-dir` and `--config` choose the target directory exactly like the server
 flags. The command starts nothing, stops nothing, and writes only under the
@@ -614,6 +616,11 @@ surfaced in the tool failure, so write something actionable.
 
 * Name: `plugin__<plugin>__<tool>`. The prefix makes collisions with first-party
   tools impossible.
+* Output budget: a tool result is cut at `limits.max_tool_output_bytes` (24,000
+  bytes by default) before the model sees it, unless the operator granted this
+  plugin its own budget — see §5.1. A cut result names the bound it hit; for a
+  granted plugin it names that plugin's own budget, because the global key is not
+  what cut it.
 * Description: your `description`, trimmed, or `Plugin tool \`<tool>\`.` when it
   is empty. The host does **not** append an origin/trust/permission paragraph to
   every tool. Instead the system prompt names the plugins whose tools are exposed
@@ -639,6 +646,71 @@ surfaced in the tool failure, so write something actionable.
   failed `ToolOutcome` with text that says what happened and what to try. A
   broken plugin can never panic the host or corrupt the tool registry.
 
+### 5.1 Per-plugin tool-output budget (the operator's decision)
+
+`limits.max_tool_output_bytes` is the default for every plugin. A single plugin
+can have its own budget instead — higher **or** lower — and the only thing that
+creates one is a **recorded operator decision**. The agent asks; the operator
+answers. There is no automatic path: not at scaffold, install, upgrade, start or
+first run, and no default, no inference from tool count or index size.
+
+The ask, from the agent's side:
+
+```bash
+karucode plugin tool-output request kc-codegraph --bytes 400000 \
+  --reason "returns whole-feature bundles; 24000 cuts them mid-symbol"
+```
+
+* It creates a request (plugin, exact bytes, reason) and waits (`--wait`, 180 s by
+  default) for an answer. The operator answers in **Settings → Plugins & MCP**, or
+  from a terminal with `karucode plugin tool-output decide <plugin> --allow
+  [--bytes <n>]` / `--refuse`, which refuses without a TTY — an agent has no
+  terminal, so it cannot answer its own request.
+* **Until an answer is recorded, nothing changes.** The plugin keeps the global
+  default, and the listing says so.
+* Silence, a dismissal and the wait running out are all a **no**. The refusal is
+  recorded and `request` refuses to re-file it: one ask is one ask. Only the
+  operator reopens it (`karucode plugin tool-output clear <plugin>`, or Clear in
+  the UI).
+* The accepted range is 2,000..=1,000,000 bytes, bounded by
+  `limits.max_plugin_tool_output_bytes` (1,000,000 by default). A request outside
+  it is rejected with `400` naming the range and the ceiling — not silently
+  clamped.
+
+What can and cannot express a grant:
+
+| Surface | Effect |
+| --- | --- |
+| `POST /api/plugins/:name/tool-output/decision`, the UI, the TTY CLI | **creates** the grant; requires the admin credential when one is configured |
+| `[[plugins]] tool_output_bytes` in `config.toml` | only **narrows** a grant; alone it grants nothing and the global default applies |
+| `tool_output_bytes` in the plugin's own `plugin.toml` | **ignored** with a warning (the host strips it before the config is used) |
+| the same key in a repository manifest | **stripped** by `karucode plugin install`, with a warning |
+| `settings`, `env`, an SDK call, any flag | no effect |
+
+The last three rows are the point: a plugin ships its own manifest, so a budget it
+could set is a budget it could raise for itself, and an agent that could write the
+key would be answering its own question.
+
+Every decision is stored with the value, what was asked for, the reason, the
+surface that answered (`web`, `cli-tty`, `api`), who (`operator`, or `no answer`)
+and when — `GET /api/plugins/:name/tool-output` returns the record plus the
+append-only trail of `requested`/`granted`/`refused`/`cleared` events, and
+`GET /api/plugins` carries the effective value per plugin. A grant applies to the
+very next tool call, with no reload and no restart.
+
+A grant is a per-result ceiling, not a promise: the turn's share of the context
+window (`limits.context_max_chars / 2`) still applies on top, so a 400 KB grant
+only fully lands on a window that can pay for it. Ask from what one result really
+needs — 120,000–400,000 for a whole feature or a document, and *less* than the
+default for a tool that returns a summary.
+
+**A record, not a sandbox.** The guarantee is "a plugin cannot, and no
+plugin-facing surface grants one". On an install with `admin_token` or web auth,
+the decision route needs that credential, so a shell cannot answer it. On a
+default loopback install nothing is authenticated — exactly like
+`PATCH /api/config` — so an operator who needs the stronger property configures
+`admin_token`.
+
 ---
 
 ## 6. Permissions (declarative, not a sandbox)
@@ -659,6 +731,11 @@ permissions are:
   are ignored in a plugin-shipped disk `plugin.toml`, with a warning in diagnostics.
   Narrow names in that disk manifest remain deliberate reviewed grants, but they
   cannot delegate whatever the running process later chooses to declare.
+* `tool_output_bytes` is not a permission at all, and is treated more strictly:
+  it is ignored in a disk manifest (with a warning), stripped from an installed
+  one, and honoured from the operator's `[[plugins]]` entry only to *narrow* a
+  grant the operator made (§5.1). No config key, setting or environment variable
+  grants a budget — only an answered request does.
 
 Runtime-manifest permissions outside the effective set are ignored and reported
 in `GET /api/plugins` (in the plugin's `error` field, with status still `ready`)

@@ -159,6 +159,20 @@ max_iterations = 0
 # Hard wall-clock ceiling for the whole run (24h).
 max_run_secs = 86400
 max_tool_output_bytes = 24000
+# Ceiling for a PER-PLUGIN tool-output budget, in bytes (2,000..=1,000,000).
+#
+# max_tool_output_bytes above is the default for every plugin. One plugin can be
+# given its own budget instead - higher or lower - and only an answered operator
+# request creates one: an agent asks with `karucode plugin tool-output request
+# <plugin> --bytes <n> --reason "..."`, and you answer in Settings > Plugins & MCP
+# (or with `karucode plugin tool-output decide`, which needs a terminal). Nothing
+# is ever set automatically, and a refusal is remembered.
+#
+# This key is the ceiling a grant may reach: a request above it is rejected, and an
+# existing grant is clamped to it when read, so lowering it retires a larger grant.
+# It grants NOTHING by itself - raising it does not raise any plugin's budget,
+# because that needs your recorded answer.
+max_plugin_tool_output_bytes = 1000000
 max_command_output_bytes = 32000
 command_timeout_secs = 120
 max_command_timeout_secs = 600
@@ -318,6 +332,12 @@ ephemeral_sessions = false
 # command = ["example-hello"]
 # enabled = true
 # permissions = ["files.read"]
+# Per-plugin tool-output budget: NARROWS a budget you granted (see
+# max_plugin_tool_output_bytes above) and does nothing on its own. A plugin's own
+# plugin.toml cannot set it, and neither can an agent: a budget is created only by
+# your answer to a request. Same value here lowers the grant; a value needs the
+# grant to exist first.
+# tool_output_bytes = 400000
 
 # Hot plugin reloads. Off by default: a reload replaces plugin processes, so it is
 # an explicit choice. With it on, the server re-reads the [[plugins]] entries above

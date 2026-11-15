@@ -1440,7 +1440,16 @@ is {})",
             let fitted = context::fit_with_notes_and_limits(
                 base.clone(),
                 turn_limits,
-                spec.limits.max_tool_output_bytes,
+                // The stored-tool-result re-cut. A grant is *not* undone here:
+                // every tool message was already cut at its own ceiling when it
+                // was written (24,000, or the budget the operator granted that
+                // plugin), so re-cutting at the global default would quietly
+                // re-impose 24,000 on a result a plugin was allowed to keep
+                // whole. The largest budget in play is the honest bound.
+                spec.tools
+                    .max_output_budget()
+                    .min(spec.limits.plugin_tool_output_ceiling())
+                    .max(spec.limits.max_tool_output_bytes),
                 &notes,
             );
             // What this request holds, in the units the provider will bill: the
@@ -2962,24 +2971,33 @@ fn announced_arguments(call: &ToolCall) -> serde_json::Value {
 /// a file and page that - and a plugin or MCP tool's arguments belong to another
 /// process, so all the runtime knows is that they are the tool's own. Naming the
 /// real call is the difference between an incomplete answer and a next step.
-fn tool_cut_advice(tool: Option<&Arc<dyn Tool>>) -> &'static str {
+fn tool_cut_advice(tool: Option<&Arc<dyn Tool>>) -> String {
     let Some(tool) = tool else {
-        return TOOL_OUTPUT_LIMIT_ADVICE;
+        return TOOL_OUTPUT_LIMIT_ADVICE.to_string();
     };
     let spec = tool.spec();
     match (&spec.origin, spec.name.as_str()) {
         (ToolOrigin::Builtin, "read_file") => {
             "re-issue read_file with a later `offset=` or a smaller `limit=`, or raise \
              limits.max_tool_output_bytes"
+                .to_string()
         }
         (ToolOrigin::Builtin, "run_command") => {
             "re-run it as `cmd > out.txt 2>&1` and read `out.txt` with read_file \
              `offset=`/`limit=`, or raise limits.max_tool_output_bytes"
+                .to_string()
         }
+        // A granted plugin is cut by *its own* budget, so naming the global key
+        // would send the model to a number that is not the binding one. It also
+        // says who can change it: the grant is the operator's, not the agent's.
+        (ToolOrigin::Plugin { name }, _) if tool.output_budget().is_some() => format!(
+            "narrow the tool's own arguments; this result hit plugin `{name}`'s own tool-output \
+             budget, which only the operator can change"
+        ),
         (ToolOrigin::Plugin { .. } | ToolOrigin::Mcp { .. }, _) => {
-            "narrow the tool's own arguments, or raise limits.max_tool_output_bytes"
+            "narrow the tool's own arguments, or raise limits.max_tool_output_bytes".to_string()
         }
-        _ => TOOL_OUTPUT_LIMIT_ADVICE,
+        _ => TOOL_OUTPUT_LIMIT_ADVICE.to_string(),
     }
 }
 
@@ -3025,8 +3043,20 @@ async fn run_one_tool(
         });
     }
 
-    let max_bytes = spec.limits.max_tool_output_bytes.min(remaining);
     let tool = spec.tools.get(&call.name);
+    // A plugin the operator granted its own tool-output budget is held to that
+    // instead of the global default; every other tool keeps
+    // `limits.max_tool_output_bytes`. The grant is clamped to
+    // `limits.max_plugin_tool_output_bytes` here (the runtime is the side that
+    // holds the live limits), so lowering the ceiling retires a larger earlier
+    // grant without touching the stored decision. `remaining` still applies on
+    // top: a grant changes the per-result ceiling, never the turn's share of the
+    // window.
+    let max_bytes = match tool.as_ref().and_then(|tool| tool.output_budget()) {
+        Some(granted) => granted.min(spec.limits.plugin_tool_output_ceiling()),
+        None => spec.limits.max_tool_output_bytes,
+    }
+    .min(remaining);
     // `usage` marks a failure about *how the call was written* rather than about
     // what it did, so the working call is appended to the result. A failing test
     // run is not a usage error and must not be dressed up as one.
@@ -3253,8 +3283,8 @@ async fn run_one_tool(
     // continuation, and this catches what is left over. The advice has to match
     // the tool, because "re-issue the call with a narrower request" is not a next
     // step for a command whose output is already gone.
-    let (output, cut) =
-        truncate_output_with_advice(&outcome.content, max_bytes, tool_cut_advice(tool.as_ref()));
+    let advice = tool_cut_advice(tool.as_ref());
+    let (output, cut) = truncate_output_with_advice(&outcome.content, max_bytes, &advice);
     let truncated = cut || outcome.truncated;
     let duration_ms = started.elapsed().as_millis() as u64;
 

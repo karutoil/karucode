@@ -43,6 +43,7 @@ import type {
   McpServer,
   McpRescanResponse,
   PluginDiagnostics,
+  PluginToolOutputRecord,
   PluginPanelData,
   PluginUiActionResult,
   PluginRescanResponse,
@@ -1824,6 +1825,59 @@ export function setPluginEnabled(
     method: 'POST',
     body: { enabled },
   });
+}
+
+/**
+ * One plugin's tool-output budget: the value in force, the answer on record and
+ * the audit trail behind it.
+ */
+export function getPluginToolOutput(
+  name: string,
+  options: CallOptions = {},
+): Promise<PluginToolOutputRecord> {
+  return apiRequest<PluginToolOutputRecord>(
+    `/api/plugins/${encodeURIComponent(name)}/tool-output`,
+    options,
+  );
+}
+
+/**
+ * Answer a plugin's tool-output request.
+ *
+ * This is the operator's half of the flow and the only call that creates a
+ * grant: the agent files the request, a person answers it here. `bytes` may
+ * differ from what was asked for (a grant can lower it); `reason` is recorded
+ * with the answer.
+ */
+export function decidePluginToolOutput(
+  name: string,
+  decision: 'grant' | 'refuse',
+  bytes: number | null,
+  reason: string,
+  adminToken?: string,
+  options: CallOptions = {},
+): Promise<PluginToolOutputRecord> {
+  return apiRequest<PluginToolOutputRecord>(
+    `/api/plugins/${encodeURIComponent(name)}/tool-output/decision`,
+    {
+      ...options,
+      method: 'POST',
+      headers: adminHeaders(adminToken, options),
+      body: { decision, bytes, reason, channel: 'web' },
+    },
+  );
+}
+
+/** Forget an answer, so the plugin can be asked again (or asked differently). */
+export function clearPluginToolOutput(
+  name: string,
+  adminToken?: string,
+  options: CallOptions = {},
+): Promise<PluginToolOutputRecord> {
+  return apiRequest<PluginToolOutputRecord>(
+    `/api/plugins/${encodeURIComponent(name)}/tool-output`,
+    { ...options, method: 'DELETE', headers: adminHeaders(adminToken, options) },
+  );
 }
 
 /**

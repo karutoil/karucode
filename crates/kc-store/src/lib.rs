@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 26;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -400,6 +400,42 @@ CREATE TABLE IF NOT EXISTS session_compaction_state (
 );
 "#;
 
+// Per-plugin tool-output budgets. `plugin_tool_output` holds the decision in
+// force (one row per plugin), `plugin_tool_output_requests` the ask waiting for
+// an answer, and `plugin_tool_output_events` the append-only audit trail of both.
+// Nothing a plugin ships writes here: the rows are created by the agent asking
+// and by the operator answering, and a grant is only ever the operator's.
+const MIGRATION_26: &str = r#"
+CREATE TABLE IF NOT EXISTS plugin_tool_output (
+ plugin          TEXT PRIMARY KEY,
+ decision        TEXT NOT NULL,
+ bytes           INTEGER,
+ requested_bytes INTEGER NOT NULL,
+ reason          TEXT NOT NULL DEFAULT '',
+ decided_by      TEXT NOT NULL,
+ channel         TEXT NOT NULL,
+ decided_at      INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS plugin_tool_output_requests (
+ plugin       TEXT PRIMARY KEY,
+ bytes        INTEGER NOT NULL,
+ reason       TEXT NOT NULL DEFAULT '',
+ requested_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS plugin_tool_output_events (
+ id              INTEGER PRIMARY KEY AUTOINCREMENT,
+ plugin          TEXT NOT NULL,
+ kind            TEXT NOT NULL,
+ bytes           INTEGER,
+ requested_bytes INTEGER NOT NULL DEFAULT 0,
+ reason          TEXT NOT NULL DEFAULT '',
+ actor           TEXT NOT NULL,
+ at              INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plugin_tool_output_events_plugin
+ ON plugin_tool_output_events(plugin, id);
+"#;
+
 const MIGRATION_12: &str = r#"
 CREATE TABLE IF NOT EXISTS missions (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -640,6 +676,15 @@ const SCHEMA_TABLES: &[&str] = &[
 
 fn limit_i64(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
+}
+
+/// A stored `INTEGER` byte count back into the `usize` the wire types use.
+///
+/// Saturating rather than failing: a row written by a newer build with a larger
+/// number must not make the table unreadable, and the value is clamped to the
+/// grant range before it is ever applied.
+fn usize_of(value: i64) -> usize {
+    usize::try_from(value.max(0)).unwrap_or(usize::MAX)
 }
 
 /// A SQLite `INTEGER` token count back into the `u32` the wire type uses.
@@ -1773,6 +1818,7 @@ impl SqliteStore {
                     23 => MIGRATION_23,
                     24 => MIGRATION_24,
                     25 => MIGRATION_25,
+                    26 => MIGRATION_26,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -1797,6 +1843,323 @@ impl SqliteStore {
         })
         .await
     }
+
+    // ---- per-plugin tool-output budgets -------------------------------------
+    //
+    // Three tables, three jobs: the decision in force, the ask waiting for an
+    // answer, and an append-only trail of both. These are inherent methods
+    // rather than `Store` trait methods because nothing but the operator-facing
+    // server writes them, and a grant is deliberately not part of the generic
+    // store surface every other component implements.
+
+    /// The decision in force for `plugin`, if the operator has answered.
+    pub async fn plugin_tool_output(
+        &self,
+        plugin: &str,
+    ) -> Result<Option<kc_core::plugin::tool_output::Record>> {
+        let plugin = plugin.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT plugin, decision, bytes, requested_bytes, reason, decided_by, channel, \
+                     decided_at FROM plugin_tool_output WHERE plugin = ?1",
+                )
+                .map_err(|e| db_err("plugin_tool_output prepare", e))?;
+            let mut rows = stmt
+                .query_map(params![plugin], map_tool_output_record)
+                .map_err(|e| db_err("plugin_tool_output query", e))?;
+            match rows.next() {
+                Some(row) => row
+                    .map(Some)
+                    .map_err(|e| db_err("plugin_tool_output row", e)),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    /// Every decision, for the load into the in-process grant map at startup.
+    pub async fn plugin_tool_output_all(
+        &self,
+    ) -> Result<Vec<kc_core::plugin::tool_output::Record>> {
+        self.read(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT plugin, decision, bytes, requested_bytes, reason, decided_by, channel, \
+                     decided_at FROM plugin_tool_output ORDER BY plugin ASC",
+                )
+                .map_err(|e| db_err("plugin_tool_output_all prepare", e))?;
+            let rows = stmt
+                .query_map([], map_tool_output_record)
+                .map_err(|e| db_err("plugin_tool_output_all query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("plugin_tool_output_all rows", e))
+        })
+        .await
+    }
+
+    /// The ask waiting for an answer, if one is pending.
+    pub async fn plugin_tool_output_request(
+        &self,
+        plugin: &str,
+    ) -> Result<Option<kc_core::plugin::tool_output::Request>> {
+        let plugin = plugin.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT plugin, bytes, reason, requested_at FROM plugin_tool_output_requests \
+                     WHERE plugin = ?1",
+                )
+                .map_err(|e| db_err("plugin_tool_output_request prepare", e))?;
+            let mut rows = stmt
+                .query_map(params![plugin], |row| {
+                    Ok(kc_core::plugin::tool_output::Request {
+                        plugin: row.get(0)?,
+                        bytes: usize_of(row.get::<_, i64>(1)?),
+                        reason: row.get(2)?,
+                        requested_at: row.get(3)?,
+                    })
+                })
+                .map_err(|e| db_err("plugin_tool_output_request query", e))?;
+            match rows.next() {
+                Some(row) => row
+                    .map(Some)
+                    .map_err(|e| db_err("plugin_tool_output_request row", e)),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    /// File an ask, and record it in the trail.
+    ///
+    /// Returns `false` - writing nothing - when the operator has already decided
+    /// for this plugin: one ask is one ask, so a refusal cannot be ground down by
+    /// re-asking. Only [`clear_plugin_tool_output`](Self::clear_plugin_tool_output)
+    /// (the operator's own action) reopens it.
+    pub async fn request_plugin_tool_output(
+        &self,
+        request: &kc_core::plugin::tool_output::Request,
+    ) -> Result<bool> {
+        let request = request.clone();
+        self.with(move |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("request_plugin_tool_output begin", e))?;
+            let decided: Option<String> = tx
+                .query_row(
+                    "SELECT decision FROM plugin_tool_output WHERE plugin = ?1",
+                    params![request.plugin],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| db_err("request_plugin_tool_output decision", e))?;
+            if decided.is_some() {
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO plugin_tool_output_requests (plugin, bytes, reason, requested_at) \
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(plugin) DO UPDATE SET bytes = excluded.bytes, \
+                 reason = excluded.reason, requested_at = excluded.requested_at",
+                params![
+                    request.plugin,
+                    limit_i64(request.bytes),
+                    request.reason,
+                    request.requested_at
+                ],
+            )
+            .map_err(|e| db_err("request_plugin_tool_output insert", e))?;
+            insert_tool_output_event(
+                &tx,
+                "requested",
+                &request.plugin,
+                None,
+                request.bytes,
+                &request.reason,
+                "agent",
+                request.requested_at,
+            )?;
+            tx.commit()
+                .map_err(|e| db_err("request_plugin_tool_output commit", e))?;
+            Ok(true)
+        })
+        .await
+    }
+
+    /// Write the operator's answer: the decision, the closed ask and the audit
+    /// line, in one transaction so a recorded grant and its trail cannot diverge.
+    pub async fn decide_plugin_tool_output(
+        &self,
+        record: &kc_core::plugin::tool_output::Record,
+    ) -> Result<()> {
+        let record = record.clone();
+        self.with(move |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("decide_plugin_tool_output begin", e))?;
+            tx.execute(
+                "INSERT INTO plugin_tool_output (plugin, decision, bytes, requested_bytes, reason, \
+                 decided_by, channel, decided_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(plugin) DO UPDATE SET decision = excluded.decision, \
+                 bytes = excluded.bytes, requested_bytes = excluded.requested_bytes, \
+                 reason = excluded.reason, decided_by = excluded.decided_by, \
+                 channel = excluded.channel, decided_at = excluded.decided_at",
+                params![
+                    record.plugin,
+                    record.decision.as_str(),
+                    record.bytes.map(limit_i64),
+                    limit_i64(record.requested_bytes),
+                    record.reason,
+                    record.decided_by,
+                    record.channel,
+                    record.decided_at
+                ],
+            )
+            .map_err(|e| db_err("decide_plugin_tool_output insert", e))?;
+            tx.execute(
+                "DELETE FROM plugin_tool_output_requests WHERE plugin = ?1",
+                params![record.plugin],
+            )
+            .map_err(|e| db_err("decide_plugin_tool_output close request", e))?;
+            insert_tool_output_event(
+                &tx,
+                record.decision.as_str(),
+                &record.plugin,
+                record.bytes,
+                record.requested_bytes,
+                &record.reason,
+                &format!("{} ({})", record.decided_by, record.channel),
+                record.decided_at,
+            )?;
+            tx.commit()
+                .map_err(|e| db_err("decide_plugin_tool_output commit", e))?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Forget a decision and any pending ask, so the operator can be asked again
+    /// (or re-decide) later. Returns `false` when there was nothing to clear.
+    pub async fn clear_plugin_tool_output(
+        &self,
+        plugin: &str,
+        actor: &str,
+        at: i64,
+    ) -> Result<bool> {
+        let plugin = plugin.to_string();
+        let actor = actor.to_string();
+        self.with(move |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("clear_plugin_tool_output begin", e))?;
+            let removed = tx
+                .execute(
+                    "DELETE FROM plugin_tool_output WHERE plugin = ?1",
+                    params![plugin],
+                )
+                .map_err(|e| db_err("clear_plugin_tool_output delete", e))?;
+            tx.execute(
+                "DELETE FROM plugin_tool_output_requests WHERE plugin = ?1",
+                params![plugin],
+            )
+            .map_err(|e| db_err("clear_plugin_tool_output requests", e))?;
+            if removed > 0 {
+                insert_tool_output_event(&tx, "cleared", &plugin, None, 0, "", &actor, at)?;
+            }
+            tx.commit()
+                .map_err(|e| db_err("clear_plugin_tool_output commit", e))?;
+            Ok(removed > 0)
+        })
+        .await
+    }
+
+    /// The audit trail for one plugin, oldest first.
+    pub async fn plugin_tool_output_events(
+        &self,
+        plugin: &str,
+    ) -> Result<Vec<kc_core::plugin::tool_output::Event>> {
+        let plugin = plugin.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT plugin, kind, bytes, requested_bytes, reason, actor, at \
+                     FROM plugin_tool_output_events WHERE plugin = ?1 ORDER BY id ASC",
+                )
+                .map_err(|e| db_err("plugin_tool_output_events prepare", e))?;
+            let rows = stmt
+                .query_map(params![plugin], |row| {
+                    Ok(kc_core::plugin::tool_output::Event {
+                        plugin: row.get(0)?,
+                        kind: row.get(1)?,
+                        bytes: row.get::<_, Option<i64>>(2)?.map(usize_of),
+                        requested_bytes: usize_of(row.get::<_, i64>(3)?),
+                        reason: row.get(4)?,
+                        actor: row.get(5)?,
+                        at: row.get(6)?,
+                    })
+                })
+                .map_err(|e| db_err("plugin_tool_output_events query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("plugin_tool_output_events rows", e))
+        })
+        .await
+    }
+}
+
+/// Map one `plugin_tool_output` row onto the core record.
+fn map_tool_output_record(row: &Row<'_>) -> rusqlite::Result<kc_core::plugin::tool_output::Record> {
+    use kc_core::plugin::tool_output::{Decision, Record};
+    let raw: String = row.get(1)?;
+    let decision = Decision::parse(&raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown plugin tool-output decision `{raw}`"),
+            )),
+        )
+    })?;
+    Ok(Record {
+        plugin: row.get(0)?,
+        decision,
+        bytes: row.get::<_, Option<i64>>(2)?.map(usize_of),
+        requested_bytes: usize_of(row.get::<_, i64>(3)?),
+        reason: row.get(4)?,
+        decided_by: row.get(5)?,
+        channel: row.get(6)?,
+        decided_at: row.get(7)?,
+    })
+}
+
+/// Append one audit line inside a caller's transaction.
+#[allow(clippy::too_many_arguments)]
+fn insert_tool_output_event(
+    tx: &rusqlite::Transaction<'_>,
+    kind: &str,
+    plugin: &str,
+    bytes: Option<usize>,
+    requested_bytes: usize,
+    reason: &str,
+    actor: &str,
+    at: i64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO plugin_tool_output_events \
+         (plugin, kind, bytes, requested_bytes, reason, actor, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            plugin,
+            kind,
+            bytes.map(limit_i64),
+            limit_i64(requested_bytes),
+            reason,
+            actor,
+            at
+        ],
+    )
+    .map_err(|e| db_err("insert plugin_tool_output event", e))?;
+    Ok(())
 }
 
 fn map_mission(row: &Row<'_>) -> rusqlite::Result<Mission> {
@@ -5431,6 +5794,7 @@ mod tests {
                 23 => MIGRATION_23,
                 24 => MIGRATION_24,
                 25 => MIGRATION_25,
+                26 => MIGRATION_26,
                 other => panic!("no batch for v{other}"),
             };
             for (_, table, column, decl) in ADDED_COLUMNS
@@ -11900,5 +12264,189 @@ mod project_tests {
                 .result_panel_width,
             Some(640)
         );
+    }
+}
+
+/// Per-plugin tool-output decisions: the record, the pending ask and the trail.
+///
+/// The store is the only place a grant can live. These tests pin the two
+/// properties the rest of the feature relies on: a decision is written together
+/// with its audit line, and an ask cannot be repeated once the operator has
+/// answered - a refusal is not a prompt to ask again.
+#[cfg(test)]
+mod tool_output_tests {
+    use crate::tests::TempDb;
+    use kc_core::plugin::tool_output::{Decision, Record, Request};
+
+    fn request(plugin: &str, bytes: usize) -> Request {
+        Request {
+            plugin: plugin.to_string(),
+            bytes,
+            reason: "returns whole-feature bundles".into(),
+            requested_at: 1_000,
+        }
+    }
+
+    fn record(plugin: &str, decision: Decision, bytes: Option<usize>) -> Record {
+        Record {
+            plugin: plugin.to_string(),
+            decision,
+            bytes,
+            requested_bytes: 400_000,
+            reason: "returns whole-feature bundles".into(),
+            decided_by: "operator".into(),
+            channel: "web".into(),
+            decided_at: 2_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_grant_round_trips_with_its_audit_trail() {
+        let db = TempDb::new("tool-output-grant");
+        let store = db.open().await;
+
+        assert!(store
+            .request_plugin_tool_output(&request("kc-codegraph", 400_000))
+            .await
+            .expect("request"));
+        let pending = store
+            .plugin_tool_output_request("kc-codegraph")
+            .await
+            .expect("pending")
+            .expect("a pending ask");
+        assert_eq!(pending.bytes, 400_000);
+
+        store
+            .decide_plugin_tool_output(&record("kc-codegraph", Decision::Granted, Some(400_000)))
+            .await
+            .expect("decide");
+
+        let decided = store
+            .plugin_tool_output("kc-codegraph")
+            .await
+            .expect("decision")
+            .expect("a decision");
+        assert_eq!(decided.decision, Decision::Granted);
+        assert_eq!(decided.granted_bytes(), Some(400_000));
+        assert_eq!(decided.decided_by, "operator");
+        assert_eq!(decided.channel, "web");
+        assert_eq!(decided.decided_at, 2_000);
+        assert!(
+            store
+                .plugin_tool_output_request("kc-codegraph")
+                .await
+                .expect("pending")
+                .is_none(),
+            "answering closes the ask"
+        );
+
+        let events = store
+            .plugin_tool_output_events("kc-codegraph")
+            .await
+            .expect("events");
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["requested", "granted"]);
+        assert_eq!(
+            events[0].actor, "agent",
+            "the ask is attributed to the agent"
+        );
+        assert_eq!(events[1].bytes, Some(400_000));
+
+        // A reopened database still knows the decision: a restart must not
+        // silently fall back to the global default.
+        drop(store);
+        let reopened = db.open().await;
+        assert_eq!(
+            reopened
+                .plugin_tool_output("kc-codegraph")
+                .await
+                .expect("decision after reopen")
+                .expect("a decision")
+                .granted_bytes(),
+            Some(400_000)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_remembered_and_cannot_be_re_asked() {
+        let db = TempDb::new("tool-output-refusal");
+        let store = db.open().await;
+
+        assert!(store
+            .request_plugin_tool_output(&request("wordy", 120_000))
+            .await
+            .expect("request"));
+        store
+            .decide_plugin_tool_output(&record("wordy", Decision::Refused, None))
+            .await
+            .expect("refuse");
+
+        assert!(
+            !store
+                .request_plugin_tool_output(&request("wordy", 120_000))
+                .await
+                .expect("second request"),
+            "one ask is one ask: a recorded refusal is not re-asked"
+        );
+        assert!(
+            store
+                .plugin_tool_output_request("wordy")
+                .await
+                .expect("pending")
+                .is_none(),
+            "the refused request was not re-filed"
+        );
+        let record = store
+            .plugin_tool_output("wordy")
+            .await
+            .expect("decision")
+            .expect("a decision");
+        assert_eq!(record.decision, Decision::Refused);
+        assert_eq!(record.granted_bytes(), None, "a refusal grants nothing");
+    }
+
+    #[tokio::test]
+    async fn clearing_reopens_the_ask_and_is_audited() {
+        let db = TempDb::new("tool-output-clear");
+        let store = db.open().await;
+
+        assert!(store
+            .request_plugin_tool_output(&request("wordy", 120_000))
+            .await
+            .expect("request"));
+        store
+            .decide_plugin_tool_output(&record("wordy", Decision::Refused, None))
+            .await
+            .expect("refuse");
+
+        assert!(
+            store
+                .clear_plugin_tool_output("wordy", "operator (web)", 3_000)
+                .await
+                .expect("clear"),
+            "clearing a recorded decision reports that it did something"
+        );
+        assert!(!store
+            .clear_plugin_tool_output("wordy", "operator (web)", 3_000)
+            .await
+            .expect("clear again"));
+        assert!(store
+            .plugin_tool_output("wordy")
+            .await
+            .expect("decision")
+            .is_none());
+        assert!(
+            store
+                .request_plugin_tool_output(&request("wordy", 120_000))
+                .await
+                .expect("re-ask"),
+            "after the operator clears it, the agent may ask once more"
+        );
+        let events = store
+            .plugin_tool_output_events("wordy")
+            .await
+            .expect("events");
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["requested", "refused", "cleared", "requested"]);
     }
 }

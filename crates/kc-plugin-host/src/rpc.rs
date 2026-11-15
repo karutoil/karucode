@@ -23,12 +23,13 @@
 
 use kc_core::config::PluginConfig;
 use kc_core::plugin::{
-    allowed_ui_url, hideable_ui_target, known_ui_slot, methods, ui_kind_supported, valid_panel_id,
-    valid_ui_id, PluginDiagnostics, PluginError, PluginManifest, PluginPanel, PluginPanelData,
-    PluginStatus, PluginToolDef, PluginToolResult, PluginUiActionResult, PluginUiContribution,
-    ToolCallContext, MAX_UI_CONTRIBUTIONS, MAX_UI_LABEL_BYTES, MAX_UI_MESSAGE_BYTES,
-    MAX_UI_RESULT_MESSAGE_BYTES, MAX_UI_RESULT_REFRESH, MAX_UI_TITLE_BYTES, PANEL_SOURCE_STATIC,
-    PANEL_SOURCE_TOOL, PLUGIN_PROTOCOL_VERSION, UI_HIDEABLE, UI_KIND_HIDE,
+    allowed_ui_url, hideable_ui_target, known_ui_slot, methods, tool_output::Grants,
+    ui_kind_supported, valid_panel_id, valid_ui_id, PluginDiagnostics, PluginError, PluginManifest,
+    PluginPanel, PluginPanelData, PluginStatus, PluginToolDef, PluginToolResult,
+    PluginUiActionResult, PluginUiContribution, ToolCallContext, MAX_UI_CONTRIBUTIONS,
+    MAX_UI_LABEL_BYTES, MAX_UI_MESSAGE_BYTES, MAX_UI_RESULT_MESSAGE_BYTES, MAX_UI_RESULT_REFRESH,
+    MAX_UI_TITLE_BYTES, PANEL_SOURCE_STATIC, PANEL_SOURCE_TOOL, PLUGIN_PROTOCOL_VERSION,
+    UI_HIDEABLE, UI_KIND_HIDE,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -295,6 +296,9 @@ pub(crate) struct PluginShared {
     /// Rate limiting for plugin-raised notifications: a plugin that floods `notify`
     /// must not be able to flood a person's desktop.
     notify_budget: Mutex<NotifyBudget>,
+    /// The operator's tool-output grants, shared with the host. Read on every
+    /// tool call, so an answer applies at once; a plugin has no path to it.
+    grants: Arc<Grants>,
 }
 
 /// One notification a plugin asked for, already validated by the host.
@@ -343,6 +347,7 @@ impl PluginShared {
     pub(crate) fn new(
         config: PluginConfig,
         timeouts: Arc<TimeoutRefs>,
+        grants: Arc<Grants>,
         status: PluginStatus,
     ) -> Arc<Self> {
         let name = config.name.clone();
@@ -350,6 +355,7 @@ impl PluginShared {
             name,
             config,
             timeouts,
+            grants,
             inner: Mutex::new(Inner {
                 status,
                 manifest: None,
@@ -482,6 +488,20 @@ impl PluginShared {
 
     pub(crate) fn config(&self) -> PluginConfig {
         self.config.clone()
+    }
+
+    /// The budget this plugin's tool results are held to, or `None` for the
+    /// global `limits.max_tool_output_bytes`.
+    ///
+    /// Read from the shared grant map on every call, so the operator's answer
+    /// applies to the next tool call without a reload or a restart. The value is
+    /// the operator's decision, narrowed by the operator's own
+    /// `[[plugins]] tool_output_bytes` when the config sets one; the runtime
+    /// still applies `limits.max_plugin_tool_output_bytes` and the turn's share
+    /// of the window on top. Nothing the plugin declares is consulted.
+    pub(crate) fn tool_output_budget(&self) -> Option<usize> {
+        self.grants
+            .effective_bytes(&self.name, self.config.tool_output_bytes)
     }
 
     /// Point this slot's inbound `notify` frames at a listener (or nowhere).
@@ -2228,10 +2248,13 @@ mod tests {
             env: Default::default(),
             permissions: Vec::new(),
             settings: Default::default(),
+
+            tool_output_bytes: None,
         };
         let shared = PluginShared::new(
             config,
             Arc::new(TimeoutRefs::default()),
+            Arc::new(Grants::new()),
             PluginStatus::Ready,
         );
         let (tx, rx) = mpsc::channel(OUT_QUEUE_DEPTH);
@@ -2426,10 +2449,12 @@ mod notify_tests {
             env: Default::default(),
             permissions: Vec::new(),
             settings: Default::default(),
+            tool_output_bytes: None,
         };
         PluginShared::new(
             config,
             Arc::new(TimeoutRefs::default()),
+            Arc::new(Grants::new()),
             PluginStatus::Ready,
         )
     }

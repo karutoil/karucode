@@ -1681,8 +1681,17 @@ visible immediately.
                 "capabilities": ["tools"], "permissions": ["files.read"],
                 "hooks": ["before_prompt"] },
   "tools": [ { "name": "hello", "description": "...", "parameters": {} } ],
-  "error": null, "pid": 1234, "restart_count": 0 }
+  "error": null, "pid": 1234, "restart_count": 0,
+  "tool_output": {
+    "effective_bytes": 24000, "granted": false,
+    "global_bytes": 24000, "ceiling_bytes": 1000000,
+    "granted_bytes": null, "decided_by": null, "decided_at": null,
+    "reason": null, "pending": null } }
 ```
+`tool_output.effective_bytes` is the ceiling the runtime really applies to one
+result from this plugin: the operator's grant when there is one, otherwise
+`limits.max_tool_output_bytes`. `pending` is an ask waiting for an answer
+(`{bytes, reason, requested_at}`) and grants nothing by itself.
 
 `POST /api/plugins/:name/enable` `{ "enabled": true }` → `PluginDiagnostics`
 
@@ -1720,6 +1729,57 @@ the reason in `error`, exactly like `/enable`.
 With `plugins_watch = true` in the config file the server calls the rescan route's
 code path on a timer (`plugins_watch_secs`, clamped to 1..=600) whenever its plugin
 sources move, so none of this needs to be triggered by hand.
+
+### Per-plugin tool-output budget
+
+`limits.max_tool_output_bytes` (24,000 bytes) caps one tool result for every tool.
+One plugin may have its own budget instead, higher or lower, and only an operator
+decision creates it: the agent files a request, a person answers it. See the
+`plugins` topic, §4 and §5.1.
+
+`GET /api/plugins/:name/tool-output` →
+```json
+{ "plugin": "kc-codegraph",
+  "effective_bytes": 400000, "granted": true,
+  "global_bytes": 24000, "ceiling_bytes": 1000000, "declared_bytes": null,
+  "decision": { "plugin": "kc-codegraph", "decision": "granted", "bytes": 400000,
+                "requested_bytes": 400000, "reason": "whole-feature bundles",
+                "decided_by": "operator", "channel": "web", "decided_at": 1793285052052 },
+  "pending": null,
+  "history": [ { "plugin": "kc-codegraph", "kind": "requested", "bytes": null,
+                 "requested_bytes": 400000, "reason": "whole-feature bundles",
+                 "actor": "agent", "at": 1793285000000 },
+               { "plugin": "kc-codegraph", "kind": "granted", "bytes": 400000,
+                 "requested_bytes": 400000, "reason": "whole-feature bundles",
+                 "actor": "operator (web)", "at": 1793285052052 } ] }
+```
+`history` is append-only: `requested`, `granted`, `refused`, `cleared`. Unknown
+plugin → `404 not_found`.
+
+`POST /api/plugins/:name/tool-output/request` `{ "bytes": 400000, "reason": "…" }`
+→ the same shape, with `pending` set and `effective_bytes` unchanged. This is the
+agent's call and it **grants nothing**. Errors: `400 bad_request` outside
+2,000..=`limits.max_plugin_tool_output_bytes` (the message names both numbers);
+`409` when the operator already answered — one ask is one ask.
+
+`POST /api/plugins/:name/tool-output/decision`
+`{ "decision": "grant"|"refuse", "bytes": 400000, "reason": "…", "channel": "web" }`
+→ the same shape with the answer recorded. `bytes` defaults to what was requested
+and may be *lower* (or lower than the global default: a grant narrows as well as
+raises). This is the **only** call that creates a grant; it requires
+`X-Karucode-Admin-Token` when `admin_token` is configured, exactly like
+`POST /api/plugins/install`. `channel` is the surface that answered (`web`,
+`cli-tty`, `api`); `channel: "timeout"` can only ever refuse, whatever `decision`
+says, and is recorded with `decided_by: "no answer"`.
+
+`DELETE /api/plugins/:name/tool-output` → the same shape, `decision`/`pending`
+gone, `effective_bytes` back to the global default. Operator-only like the
+decision; this is how a refusal is lifted so the plugin can be asked again.
+
+A recorded answer applies to the very next tool call — no reload, no restart. The
+plugin's own `plugin.toml` cannot set it (the host ignores the key with a warning
+and `plugin install` strips it), and `[[plugins]] tool_output_bytes` in the config
+file only narrows a grant.
 
 `plugin_panels` in `GET /api/config` lists the inspector tabs the ready plugins
 declare, grouped per plugin. A panel is `{"id","hosted_id","title","icon",

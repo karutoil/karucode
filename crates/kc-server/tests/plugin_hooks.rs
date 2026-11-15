@@ -81,6 +81,8 @@ async fn state_adapter_forwards_turn_and_notifications_without_holding_the_host_
         env,
         permissions: Vec::new(),
         settings: Default::default(),
+
+        tool_output_bytes: None,
     };
     let h = HarnessBuilder::new(vec![text("provider answered")])
         .no_ai_titles()

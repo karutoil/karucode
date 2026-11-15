@@ -3,11 +3,11 @@
 
 # Write and install a plugin
 
-> Build a plugin with the SDK, register it, install a plugin collection from a GitHub repository or a local directory, and debug it when it fails to start.
+> Build a plugin with the SDK, register it, install a plugin collection from a GitHub repository or a local directory, ask the operator for a tool-output budget, and debug it when it fails to start.
 
 - **Slug:** `plugins`
-- **Tags:** plugins, extension, sdk, tools, hooks, jsonrpc, panels, ui, buttons, commands, shortcuts, notifications
-- **Applies to:** `config:[[plugins]]`, `file:~/.local/share/karucode/plugins/<name>/plugin.toml`, `file:index.toml`, `config:[install]`, `config:install.build`, `config:install.build_timeout_secs`, `config:install.exclude`, `file:install.json`, `dir:plugins/example-hello`, `tool:plugin__<plugin>__<tool>`, `cmd:cargo build -p example-hello`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin sdk --check`, `cmd:karucode plugin install`, `cmd:karucode plugin install --list`, `cmd:karucode plugin install --force`, `cmd:karucode plugin install --ref`, `cmd:karucode plugin install --no-build`, `cmd:karucode plugin install --build-timeout-secs`, `cmd:karucode plugin install --data-dir`, `url:codeload.github.com/<owner>/<repo>/tar.gz/<ref>`, `env:GH_TOKEN`, `env:GITHUB_TOKEN`, `file:src/sdk.rs`, `file:src/protocol.rs`, `doc:docs/PLUGINS.md`, `env:KARUCODE_PLUGIN_NAME`, `env:KARUCODE_PLUGIN_PROTOCOL`, `env:KARUCODE_PLUGIN_PERMISSIONS`, `env:KARUCODE_PLUGIN_SETTINGS`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `config:panels`, `config:ui`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:notifications.plugin`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:POST /api/plugins/install/preview`, `route:POST /api/plugins/install`, `route:GET /api/plugins/install/:id`, `route:POST /api/plugins/install/:id/cancel`, `route:GET /api/plugins/:name/panels/:panel`, `route:POST /api/plugins/:name/ui/actions/:action`, `config:plugin_panels`, `config:plugin_ui`, `method:notify`, `method:ui/action`, `hook:on_notify`, `hook:before_prompt`, `fn:PluginBuilder::panel`, `fn:PluginBuilder::button`, `fn:PluginBuilder::message_button`, `fn:PluginBuilder::command`, `fn:PluginBuilder::message_command`, `fn:PluginBuilder::keybinding`, `fn:PluginBuilder::message_keybinding`, `fn:PluginBuilder::hide`, `fn:PluginBuilder::on_ui_action`, `fn:PluginBuilder::on_notify`, `fn:notify`, `fn:normalise_ui_keys`
+- **Tags:** plugins, extension, sdk, tools, hooks, jsonrpc, panels, ui, buttons, commands, shortcuts, notifications, budget, tool-output
+- **Applies to:** `config:[[plugins]]`, `file:~/.local/share/karucode/plugins/<name>/plugin.toml`, `file:index.toml`, `config:[install]`, `config:install.build`, `config:install.build_timeout_secs`, `config:install.exclude`, `file:install.json`, `dir:plugins/example-hello`, `tool:plugin__<plugin>__<tool>`, `cmd:cargo build -p example-hello`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin sdk --check`, `cmd:karucode plugin install`, `cmd:karucode plugin install --list`, `cmd:karucode plugin install --force`, `cmd:karucode plugin install --ref`, `cmd:karucode plugin install --no-build`, `cmd:karucode plugin install --build-timeout-secs`, `cmd:karucode plugin install --data-dir`, `cmd:karucode plugin tool-output request`, `cmd:karucode plugin tool-output show`, `cmd:karucode plugin tool-output decide`, `cmd:karucode plugin tool-output clear`, `config:plugins.tool_output_bytes`, `config:limits.max_plugin_tool_output_bytes`, `config:limits.max_tool_output_bytes`, `url:codeload.github.com/<owner>/<repo>/tar.gz/<ref>`, `env:GH_TOKEN`, `env:GITHUB_TOKEN`, `file:src/sdk.rs`, `file:src/protocol.rs`, `doc:docs/PLUGINS.md`, `env:KARUCODE_PLUGIN_NAME`, `env:KARUCODE_PLUGIN_PROTOCOL`, `env:KARUCODE_PLUGIN_PERMISSIONS`, `env:KARUCODE_PLUGIN_SETTINGS`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `config:panels`, `config:ui`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:notifications.plugin`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/tool-output`, `route:POST /api/plugins/:name/tool-output/request`, `route:POST /api/plugins/:name/tool-output/decision`, `route:DELETE /api/plugins/:name/tool-output`, `route:POST /api/plugins/install/preview`, `route:POST /api/plugins/install`, `route:GET /api/plugins/install/:id`, `route:POST /api/plugins/install/:id/cancel`, `route:GET /api/plugins/:name/panels/:panel`, `route:POST /api/plugins/:name/ui/actions/:action`, `config:plugin_panels`, `config:plugin_ui`, `method:notify`, `method:ui/action`, `hook:on_notify`, `hook:before_prompt`, `fn:PluginBuilder::panel`, `fn:PluginBuilder::button`, `fn:PluginBuilder::message_button`, `fn:PluginBuilder::command`, `fn:PluginBuilder::message_command`, `fn:PluginBuilder::keybinding`, `fn:PluginBuilder::message_keybinding`, `fn:PluginBuilder::hide`, `fn:PluginBuilder::on_ui_action`, `fn:PluginBuilder::on_notify`, `fn:notify`, `fn:normalise_ui_keys`, `ui:Settings > Plugins & MCP`
 - **Source:** `crates/kc-plugin-sdk/src/lib.rs:49`
 
 ---
@@ -94,7 +94,7 @@ or as a manifest the host discovers on disk at
 `<data_dir>/plugins/<name>/plugin.toml` (same keys, `command` required). A
 duplicate name fails the slot with an error naming both sources instead of
 silently running one of them. Either source can be added while the server is
-running — see §4.
+running — see §5.
 
 ## 3. Run and inspect
 
@@ -107,7 +107,47 @@ curl -s -X POST localhost:8787/api/plugins/example-hello/enable \
 Status is `stopped`, `starting`, `ready`, `failed` or `disabled`. Enabling resets
 the restart budget.
 
-## 4. Install plugins from a GitHub repository
+## 4. Give it a tool-output budget (ask the operator)
+
+Every tool result is capped at `limits.max_tool_output_bytes` - **24,000 bytes
+by default**. A plugin whose tools return *big* things (a whole feature, a
+document, a bundle of files) hits that cap constantly, and the model then
+spends turns paging through what it could have had in one call.
+
+A single plugin can have its own budget instead, higher or lower. It is the
+**operator's** decision, so *ask* for it - never set it. While you are
+implementing or installing the plugin:
+
+```bash
+karucode plugin tool-output request kc-codegraph --bytes 400000 \
+  --reason "returns whole-feature bundles; 24000 cuts them mid-symbol"
+```
+
+* the request names the plugin, the exact byte value and the reason. It opens a
+  question in **Settings > Plugins & MCP** and waits (`--wait`, 180 s by
+  default) for an answer;
+* **until the operator says yes, nothing changes**: the plugin keeps the global
+  default and you carry on with it;
+* silence, a dismissal or the wait running out is a **no**. The refusal is
+  recorded and the same request cannot be filed again - one ask is one ask. Do
+  not re-ask to grind the operator down: only they can reopen it (Settings >
+  Plugins & MCP, or `karucode plugin tool-output clear <plugin>`);
+* nothing you can write grants one. `tool_output_bytes` in the plugin's own
+  `plugin.toml` is ignored with a warning, `karucode plugin install` strips it
+  from an installed manifest, and `[[plugins]] tool_output_bytes` in the config
+  file may only *narrow* a grant - on its own it grants nothing;
+* the accepted range is **2,000..=1,000,000 bytes**, bounded by
+  `limits.max_plugin_tool_output_bytes` (1,000,000 by default). A request
+  outside it is rejected with the number to pick instead.
+
+What to ask for: start from what one result really needs. A tool that returns a
+whole feature or a document usually wants **120,000-400,000**; a tool that
+returns a summary or a status line may want *less* than the default, and a
+lower grant is just as valid - it keeps a chatty plugin from flooding the
+window. `karucode plugin tool-output show [<plugin>]` prints the value in
+force, who granted it, when, and the audit trail behind it.
+
+## 5. Install plugins from a GitHub repository
 
 `karucode plugin install` fetches a repository, builds what needs building
 and places each plugin under `<data_dir>/plugins/<name>/` — the disk-manifest
@@ -184,7 +224,7 @@ for the admin credential the moment it is needed. The HTTP routes are
 `POST /api/plugins/install/preview`, `POST /api/plugins/install`,
 `GET /api/plugins/install/:id` and `POST /api/plugins/install/:id/cancel`.
 
-## 5. Install, upgrade and remove a plugin without a restart
+## 6. Install, upgrade and remove a plugin without a restart
 
 The host re-reads its sources on demand, so none of the three needs a server
 restart:
@@ -421,6 +461,13 @@ exemptions would defeat the policy; the host logs the refusal and repeats it in
 the plugin's `error` field rather than obeying it silently. Every other
 `settings` key still reaches the plugin.
 
+A plugin's tool-output budget (§4) is stricter still: it is not a config key at
+all but a **recorded operator decision**. `tool_output_bytes` in the plugin's
+own `plugin.toml` is ignored with a warning, `karucode plugin install` strips
+it from an installed manifest, and `[[plugins]] tool_output_bytes` in
+`config.toml` only narrows what the operator granted. `GET /api/plugins` shows
+the effective value, who granted it and when.
+
 ## Tool names
 
 A tool is exposed as `plugin__<plugin>__<tool>`. The prefix prevents collisions
@@ -456,6 +503,10 @@ scripts.
 * Results are truncated and rendered as text. A tool result still cannot
   inject UI; a panel contributes **data** (rendered by a first-party
   component, or as read-only JSON) and never markup or script.
+* A result is cut at `limits.max_tool_output_bytes` (24,000 bytes) unless the
+  operator granted this plugin its own budget (§4). The cut marker says which
+  of the two bounds was hit, and a granted plugin's marker names its own
+  budget rather than the global key - that key is not the binding one.
 * A panel id that is not lowercase `a-z0-9-_.`, a duplicate id, an unknown
   `source`, or a `source = "tool"` panel naming a tool the plugin does not
   advertise all fail the handshake; the reason is in `PluginDiagnostics.error`

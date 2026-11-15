@@ -23,6 +23,7 @@ fn cfg(name: &str) -> PluginConfig {
         env: BTreeMap::new(),
         permissions: Vec::new(),
         settings: BTreeMap::new(),
+        tool_output_bytes: None,
     }
 }
 
@@ -576,4 +577,93 @@ fn the_operator_entry_may_still_exempt_a_tool() {
     );
     assert!(host.diagnostics()[0].error.is_none());
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A tool-output budget is the operator's, so a `plugin.toml` in the plugin's own
+/// directory may not set one - not to raise it and not to lower it quietly.
+#[test]
+fn a_disk_manifest_cannot_set_its_own_tool_output_budget() {
+    let dir = temp_dir("disk-tool-output");
+    let plugin_dir = dir.join("plugins/greedy");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        r#"
+name = "greedy"
+command = ["sh", "-c", "exit 0"]
+tool_output_bytes = 400000
+"#,
+    )
+    .unwrap();
+
+    let host = PluginHost::discover(&[], &dir);
+    let diags = host.diagnostics();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].status, PluginStatus::Stopped, "still usable");
+    let note = diags[0].error.clone().unwrap_or_default();
+    assert!(note.contains("tool_output_bytes"), "{note}");
+    assert!(note.contains("ignored"), "{note}");
+
+    assert_eq!(
+        host.plugins[0].config.tool_output_bytes, None,
+        "the host never sees a manifest's number"
+    );
+    // Therefore the plugin's tools are held to the global default: with no
+    // operator decision recorded, the shared map answers `None`.
+    let grants = host.tool_output_grants();
+    assert_eq!(grants.effective_bytes("greedy", None), None);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The grant path end to end at the host's own boundary: the map the tool reads
+/// answers with the operator's decision, and a refusal answers with nothing.
+#[tokio::test]
+async fn a_grant_reaches_the_plugin_tool_and_a_refusal_falls_back() {
+    use crate::rpc::{PluginShared, TimeoutRefs};
+    use kc_core::plugin::tool_output::{Decision, Grants, Record};
+
+    let grants = Arc::new(Grants::new());
+    let shared = PluginShared::new(
+        cfg("bundle"),
+        Arc::new(TimeoutRefs::default()),
+        Arc::clone(&grants),
+        PluginStatus::Ready,
+    );
+    assert_eq!(
+        shared.tool_output_budget(),
+        None,
+        "an unanswered plugin keeps the global default"
+    );
+
+    grants.set(Record {
+        plugin: "bundle".into(),
+        decision: Decision::Granted,
+        bytes: Some(400_000),
+        requested_bytes: 400_000,
+        reason: "whole-feature bundles".into(),
+        decided_by: "operator".into(),
+        channel: "web".into(),
+        decided_at: 1,
+    });
+    assert_eq!(
+        shared.tool_output_budget(),
+        Some(400_000),
+        "the operator's answer applies to the very next call, with no reload"
+    );
+
+    grants.set(Record {
+        plugin: "bundle".into(),
+        decision: Decision::Refused,
+        bytes: None,
+        requested_bytes: 400_000,
+        reason: String::new(),
+        decided_by: "operator".into(),
+        channel: "web".into(),
+        decided_at: 2,
+    });
+    assert_eq!(
+        shared.tool_output_budget(),
+        None,
+        "a refusal is not a budget: the global default governs"
+    );
 }

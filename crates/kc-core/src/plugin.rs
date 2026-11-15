@@ -596,6 +596,187 @@ pub mod permissions {
     pub const SESSION_READ: &str = "session.read";
 }
 
+/// Per-plugin tool-output budgets: how many bytes of one tool result a single
+/// plugin may return to the model.
+///
+/// The global bound is `limits.max_tool_output_bytes` (24,000 bytes by default)
+/// and it stays the default for every plugin with no grant. A plugin may be
+/// given its own budget - higher or lower - and that grant is a **record of an
+/// operator decision**, never something a plugin can create for itself:
+///
+/// * a `plugin.toml` in the plugin's own directory cannot set it: the key is
+///   ignored there (with a warning) and stripped out of an installed manifest,
+///   exactly like `settings.trust` and `settings.read_only_tools`;
+/// * `[[plugins]] tool_output_bytes` in the operator's `config.toml` may only
+///   *narrow* a grant - on its own it grants nothing, so an agent that edits its
+///   own config still gets the global default;
+/// * the only writer of a grant is the operator-facing decision (the web UI or
+///   an authenticated route), and every decision records who, when and why.
+///
+/// There is no environment variable, plugin setting or manifest key that creates
+/// a grant. Values are rejected outside [`MIN_BYTES`]`..=`[`MAX_BYTES`] at
+/// request time and clamped again when read, so lowering
+/// `limits.max_plugin_tool_output_bytes` retires an older, larger grant.
+pub mod tool_output {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::RwLock;
+
+    /// Smallest budget a grant may carry. It is the floor the runtime already
+    /// keeps for any tool result (`TURN_RESULT_FLOOR_BYTES`), so a smaller grant
+    /// would only starve the model of the result it asked for.
+    pub const MIN_BYTES: usize = 2_000;
+    /// Largest budget a grant may carry. The turn's share of the context window
+    /// and the 8 MiB protocol framing cap both bite long before this; a bigger
+    /// number would only be a promise the host cannot keep.
+    pub const MAX_BYTES: usize = 1_000_000;
+    /// How long a request waits for the operator before the silence is read as
+    /// "no". Silence, a dismissal and a timeout are all a refusal.
+    pub const DEFAULT_WAIT_SECS: u64 = 180;
+    /// Ceiling for a caller-requested wait, so a blocked plugin install cannot
+    /// park a run for an hour.
+    pub const MAX_WAIT_SECS: u64 = 900;
+
+    /// Clamp a byte value into the range a grant may carry.
+    pub fn clamp_bytes(bytes: usize) -> usize {
+        bytes.clamp(MIN_BYTES, MAX_BYTES)
+    }
+
+    /// The operator's answer, as stored.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Decision {
+        Granted,
+        Refused,
+    }
+
+    impl Decision {
+        pub fn as_str(self) -> &'static str {
+            match self {
+                Decision::Granted => "granted",
+                Decision::Refused => "refused",
+            }
+        }
+
+        pub fn parse(raw: &str) -> Option<Self> {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "granted" | "grant" | "allow" | "allowed" | "yes" => Some(Decision::Granted),
+                "refused" | "refuse" | "deny" | "denied" | "no" => Some(Decision::Refused),
+                _ => None,
+            }
+        }
+    }
+
+    /// One recorded decision: the audit record behind a grant or a refusal.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct Record {
+        pub plugin: String,
+        pub decision: Decision,
+        /// The granted value. `None` on a refusal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub bytes: Option<usize>,
+        /// What was asked for, so a refusal still says what it refused.
+        pub requested_bytes: usize,
+        #[serde(default)]
+        pub reason: String,
+        /// Who decided: `operator` for a person, `no answer` for a timeout or a
+        /// dismissal. Never an agent identity - no agent path writes a grant.
+        pub decided_by: String,
+        /// Which surface answered: `web`, `cli-tty` or `api`.
+        pub channel: String,
+        /// Unix milliseconds.
+        pub decided_at: i64,
+    }
+
+    impl Record {
+        /// The bytes this record grants, if any. A refusal grants nothing.
+        pub fn granted_bytes(&self) -> Option<usize> {
+            match self.decision {
+                Decision::Granted => self.bytes.map(clamp_bytes),
+                Decision::Refused => None,
+            }
+        }
+    }
+
+    /// A request waiting for the operator to answer.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct Request {
+        pub plugin: String,
+        pub bytes: usize,
+        #[serde(default)]
+        pub reason: String,
+        pub requested_at: i64,
+    }
+
+    /// One line of the append-only audit trail.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct Event {
+        pub plugin: String,
+        /// `requested`, `granted`, `refused` or `cleared`.
+        pub kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub bytes: Option<usize>,
+        pub requested_bytes: usize,
+        #[serde(default)]
+        pub reason: String,
+        /// Who caused it: an agent (a request) or the operator (a decision).
+        pub actor: String,
+        /// Unix milliseconds.
+        pub at: i64,
+    }
+
+    /// The grants in force, shared between the server (which writes them) and
+    /// the plugin host (which reads them on every tool call).
+    ///
+    /// Reads are lock-cheap and lock-tiny: a tool call does one map lookup, so a
+    /// decision takes effect on the very next call without a reload.
+    #[derive(Debug, Default)]
+    pub struct Grants {
+        inner: RwLock<BTreeMap<String, Record>>,
+    }
+
+    impl Grants {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Replace the grant in force for `plugin`. A refusal is stored too, so
+        /// the host can tell "never asked" from "the operator said no".
+        pub fn set(&self, record: Record) {
+            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            guard.insert(record.plugin.clone(), record);
+        }
+
+        /// Forget the decision for `plugin`, allowing a fresh request.
+        pub fn clear(&self, plugin: &str) {
+            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            guard.remove(plugin);
+        }
+
+        pub fn record(&self, plugin: &str) -> Option<Record> {
+            self.inner
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(plugin)
+                .cloned()
+        }
+
+        /// The budget the host applies to this plugin's tool results, or `None`
+        /// when the global `limits.max_tool_output_bytes` still governs it.
+        ///
+        /// `declared` is the operator's `[[plugins]] tool_output_bytes`: it can
+        /// only narrow what the decision granted, never widen it. The ceiling in
+        /// `limits.max_plugin_tool_output_bytes` is applied by the runtime, which
+        /// is the side that holds the live [`crate::config::Limits`].
+        pub fn effective_bytes(&self, plugin: &str, declared: Option<usize>) -> Option<usize> {
+            let record = self.record(plugin)?;
+            let granted = record.granted_bytes()?;
+            let narrowed = declared.map_or(granted, |declared| granted.min(declared));
+            Some(clamp_bytes(narrowed))
+        }
+    }
+}
+
 /// Response payload of a `tools/call` request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginToolResult {
@@ -652,6 +833,94 @@ pub struct ToolCallContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The grant map is the one place the effective budget comes from, so its
+    /// three answers are pinned here: a grant applies, a refusal (and an absent
+    /// decision) falls back to the global default, and the operator's own
+    /// `tool_output_bytes` can only narrow what they granted.
+    #[test]
+    fn grants_apply_narrow_refuse_and_clear() {
+        use tool_output::{Decision, Grants};
+
+        let grants = Grants::new();
+        // Nothing recorded: the global `limits.max_tool_output_bytes` governs.
+        assert_eq!(grants.effective_bytes("kc-codegraph", None), None);
+
+        grants.set(tool_output::Record {
+            plugin: "kc-codegraph".into(),
+            decision: Decision::Granted,
+            bytes: Some(400_000),
+            requested_bytes: 400_000,
+            reason: "whole-feature bundles".into(),
+            decided_by: "operator".into(),
+            channel: "web".into(),
+            decided_at: 1,
+        });
+        assert_eq!(
+            grants.effective_bytes("kc-codegraph", None),
+            Some(400_000),
+            "the grant raises the ceiling above the 24,000 default"
+        );
+        assert_eq!(
+            grants.effective_bytes("kc-codegraph", Some(50_000)),
+            Some(50_000),
+            "the operator's config value narrows their own grant"
+        );
+        assert_eq!(
+            grants.effective_bytes("kc-codegraph", Some(900_000)),
+            Some(400_000),
+            "and it can never widen it"
+        );
+
+        // A refusal is a decision too, and it grants nothing.
+        grants.set(tool_output::Record {
+            plugin: "wordy".into(),
+            decision: Decision::Refused,
+            bytes: None,
+            requested_bytes: 120_000,
+            reason: String::new(),
+            decided_by: "operator".into(),
+            channel: "web".into(),
+            decided_at: 2,
+        });
+        assert_eq!(
+            grants.effective_bytes("wordy", None),
+            None,
+            "a refusal falls back to the global default"
+        );
+
+        // Clearing reopens the question rather than restoring the old grant.
+        grants.clear("kc-codegraph");
+        assert_eq!(grants.effective_bytes("kc-codegraph", None), None);
+    }
+
+    #[test]
+    fn a_granted_value_is_clamped_to_the_accepted_range() {
+        use tool_output::{Decision, Grants, MAX_BYTES, MIN_BYTES};
+        let grants = Grants::new();
+        let record = |bytes: usize| tool_output::Record {
+            plugin: "p".into(),
+            decision: Decision::Granted,
+            bytes: Some(bytes),
+            requested_bytes: bytes,
+            reason: String::new(),
+            decided_by: "operator".into(),
+            channel: "web".into(),
+            decided_at: 1,
+        };
+        grants.set(record(0));
+        assert_eq!(
+            grants.effective_bytes("p", None),
+            Some(MIN_BYTES),
+            "a stored zero cannot starve a result to nothing"
+        );
+        grants.set(record(usize::MAX));
+        assert_eq!(
+            grants.effective_bytes("p", None),
+            Some(MAX_BYTES),
+            "and an absurd value cannot promise more than the host will send"
+        );
+    }
 
     #[test]
     fn manifest_defaults_protocol_version() {

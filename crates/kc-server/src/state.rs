@@ -419,6 +419,9 @@ pub struct AppStateDeps {
     pub web_auth: Arc<WebAuth>,
     /// Application API keys: named, scoped, expiring bearer credentials.
     pub api_keys: Arc<crate::api_keys::ApiKeyStore>,
+    /// The per-plugin tool-output decisions and the ask. Owns the only writer of
+    /// the grant map the plugin host reads.
+    pub plugin_tool_output: Arc<crate::plugin_tool_output::PluginToolOutput>,
 }
 
 pub struct AppStateInner {
@@ -437,6 +440,9 @@ pub struct AppStateInner {
     /// UI. In-process: a restart clears it, and the filesystem effect of any
     /// finished job is already visible through `GET /api/plugins`.
     pub installs: crate::routes::plugin_install::InstallJobRegistry,
+    /// Per-plugin tool-output budgets: the stored answers, and the only writer
+    /// of the grant map the plugin host consults on every tool call.
+    pub plugin_tool_output: Arc<crate::plugin_tool_output::PluginToolOutput>,
     /// Project id -> confined workspace, plus the default workspace.
     pub projects: Arc<ProjectRegistry>,
     /// DNS-rebinding `Host` allowlist (see [`crate::host`]).
@@ -519,6 +525,7 @@ impl AppState {
                 mission_schedulers: std::sync::Mutex::new(HashMap::new()),
                 web_auth,
                 api_keys: deps.api_keys,
+                plugin_tool_output: deps.plugin_tool_output,
                 proxy: RwLock::new(CachedProxy {
                     fingerprint: String::new(),
                     trust,
@@ -535,6 +542,11 @@ impl AppState {
 
     pub fn settings(&self) -> &Arc<SettingsHandle> {
         &self.inner.settings
+    }
+
+    /// Per-plugin tool-output budgets: the stored answers and the live grants.
+    pub fn plugin_tool_output(&self) -> &Arc<crate::plugin_tool_output::PluginToolOutput> {
+        &self.inner.plugin_tool_output
     }
 
     pub fn runtime(&self) -> &Arc<Runtime> {

@@ -1939,3 +1939,46 @@
   border-color: var(--accent);
   color: var(--text);
 }
+
+/* ---------- per-plugin tool-output budget ------------------------------
+   The effective ceiling, and the operator's answer to a plugin's request.
+   The ask is a real question, so it gets the accent border; a granted budget
+   is quiet, because it is no longer something to decide. */
+
+.plugin-budget {
+  display: flex;
+  grid-column: 2 / -1;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.plugin-budget-ask {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  font-size: var(--fs-tiny);
+}
+
+.plugin-budget-ask p {
+  flex: 1 1 18ch;
+  margin: 0;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.plugin-budget-ask input {
+  min-width: 13ch;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+}

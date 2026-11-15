@@ -2053,6 +2053,64 @@ impl Tool for BigOutputTool {
     }
 }
 
+/// A plugin tool that returns a body of the size it is asked for, carrying the
+/// per-plugin tool-output budget the operator granted it (or none).
+///
+/// The real grant comes from the host's shared `Grants` map, which the plugin
+/// tool reads on every call; this fake stands in for that one value so the
+/// runtime's decision - which ceiling applies to this result - can be driven
+/// without a subprocess. It is `ReadOnly` only so the approval policy stays out
+/// of the way: the class has nothing to do with truncation.
+pub(crate) struct PluginOutputTool {
+    pub name: String,
+    pub plugin: String,
+    pub budget: Option<usize>,
+}
+
+impl PluginOutputTool {
+    pub(crate) fn boxed(name: &str, plugin: &str, budget: Option<usize>) -> Arc<dyn Tool> {
+        Arc::new(Self {
+            name: name.to_string(),
+            plugin: plugin.to_string(),
+            budget,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for PluginOutputTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Return a body of `bytes` characters.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "bytes": { "type": "integer" } }
+            }),
+            origin: kc_core::tool::ToolOrigin::Plugin {
+                name: self.plugin.clone(),
+            },
+        }
+    }
+
+    fn class(&self) -> ToolClass {
+        ToolClass::ReadOnly
+    }
+
+    fn output_budget(&self) -> Option<usize> {
+        self.budget
+    }
+
+    async fn invoke(&self, request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+        let bytes = request
+            .arguments
+            .get("bytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1_000) as usize;
+        ToolOutcome::ok("a".repeat(bytes))
+    }
+}
+
 /// Returns an image, but only when the tool context says the model accepts one.
 ///
 /// Mirrors what `read_file` does: the decision is the tool's, the capability is

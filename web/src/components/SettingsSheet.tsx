@@ -34,6 +34,7 @@ import { SettingsAdvanced } from './SettingsAdvanced';
 import { AccessSettings } from './AccessSettings';
 import { SkillsSettings } from './SkillsSettings';
 import { PluginInstallSection } from './PluginInstallSection';
+import { PluginToolOutputRow } from './PluginToolOutput';
 import { UpdateSettings } from './UpdateSettings';
 import { Dialog } from './Dialog';
 import {
@@ -3275,6 +3276,10 @@ export function SettingsSheet(): JSX.Element | null {
                                     {plugin.tools.length} tool{plugin.tools.length === 1 ? '' : 's'}
                                   </span>
                                   {plugin.error ? <span class="diagnostics-error">{plugin.error}</span> : null}
+                                  <PluginToolOutputRow
+                                    plugin={plugin}
+                                    onChanged={() => setDiagnosticsKey((key) => key + 1)}
+                                  />
                                   <span class="diagnostics-actions">
                                     <button
                                       type="button"

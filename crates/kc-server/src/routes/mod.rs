@@ -242,6 +242,20 @@ pub fn api_router() -> Router<AppState> {
         )
         .route("/plugins/:name/enable", post(plugins::enable_plugin))
         .route("/plugins/:name/reload", post(plugins::reload_plugin))
+        // Per-plugin tool-output budgets: read the record, file the ask, answer
+        // it, forget it. The decision and the clear are operator-only.
+        .route(
+            "/plugins/:name/tool-output",
+            get(plugins::get_tool_output).delete(plugins::clear_tool_output),
+        )
+        .route(
+            "/plugins/:name/tool-output/request",
+            post(plugins::request_tool_output),
+        )
+        .route(
+            "/plugins/:name/tool-output/decision",
+            post(plugins::decide_tool_output),
+        )
         .route("/plugins/:name/panels/:panel", get(plugins::read_panel))
         .route(
             "/plugins/:name/ui/actions/:action",

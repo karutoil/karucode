@@ -52,6 +52,7 @@ fn plugin(name: &str, env_name: &str) -> PluginConfig {
         env,
         permissions: Vec::new(),
         settings: BTreeMap::new(),
+        tool_output_bytes: None,
     }
 }
 
@@ -598,6 +599,8 @@ async fn a_broken_plugin_does_not_block_other_plugins() {
         env: BTreeMap::new(),
         permissions: Vec::new(),
         settings: BTreeMap::new(),
+
+        tool_output_bytes: None,
     };
     broken
         .settings
@@ -761,6 +764,7 @@ fn greedy_config(name: &str, dir: &std::path::Path, permissions: Vec<String>) ->
         env: BTreeMap::new(),
         permissions,
         settings: BTreeMap::new(),
+        tool_output_bytes: None,
     }
 }
 
@@ -909,6 +913,8 @@ async fn a_secret_in_the_parent_environment_does_not_reach_the_plugin() {
         env: BTreeMap::new(),
         permissions: Vec::new(),
         settings: BTreeMap::new(),
+
+        tool_output_bytes: None,
     };
     // The configured table wins and is deliberately not filtered: an operator
     // may hand a plugin its own credential on purpose.
@@ -1005,6 +1011,8 @@ async fn oversized_hook_output_is_capped_before_it_reaches_the_prompt() {
         env: BTreeMap::new(),
         permissions: Vec::new(),
         settings: BTreeMap::new(),
+
+        tool_output_bytes: None,
     };
     let mut host = PluginHost::discover(&[cfg], &dir);
     host.start_all().await;
@@ -1182,6 +1190,8 @@ for line in sys.stdin:
         env: BTreeMap::new(),
         permissions: Vec::new(),
         settings: BTreeMap::new(),
+
+        tool_output_bytes: None,
     };
     let mut host = PluginHost::discover(&[cfg], &dir);
     host.start_all().await;
@@ -1242,6 +1252,8 @@ async fn a_panel_naming_a_missing_tool_is_a_discovery_error_not_a_crash() {
         env: BTreeMap::new(),
         permissions: Vec::new(),
         settings: BTreeMap::new(),
+
+        tool_output_bytes: None,
     };
     let mut host = PluginHost::discover(&[cfg], &dir);
     host.start_all().await;
@@ -1361,6 +1373,7 @@ fn script_plugin(dir: &std::path::Path, name: &str, script: &str) -> PluginConfi
         env: BTreeMap::new(),
         permissions: Vec::new(),
         settings: BTreeMap::new(),
+        tool_output_bytes: None,
     }
 }
 
@@ -2457,6 +2470,8 @@ async fn an_over_long_stderr_line_does_not_kill_the_plugin() {
             env: BTreeMap::new(),
             permissions: Vec::new(),
             settings: BTreeMap::new(),
+
+            tool_output_bytes: None,
         }],
         &dir,
     );
@@ -2558,6 +2573,8 @@ async fn a_plugins_grandchildren_are_killed_with_it() {
             env,
             permissions: Vec::new(),
             settings: BTreeMap::new(),
+
+            tool_output_bytes: None,
         }],
         &dir,
     );
@@ -2613,6 +2630,8 @@ async fn a_reload_does_not_orphan_the_old_processes_children() {
         env,
         permissions: Vec::new(),
         settings: BTreeMap::new(),
+
+        tool_output_bytes: None,
     };
     let mut host = PluginHost::discover(std::slice::from_ref(&config), &dir);
     host.start_all().await;
@@ -2847,6 +2866,7 @@ fn colliding_plugin(
         env,
         permissions: Vec::new(),
         settings: BTreeMap::new(),
+        tool_output_bytes: None,
     }
 }
 
@@ -3065,6 +3085,8 @@ async fn unexpected_idle_stdout_eof_fails_reaps_and_restarts_the_plugin() {
         env: BTreeMap::new(),
         permissions: Vec::new(),
         settings: BTreeMap::new(),
+
+        tool_output_bytes: None,
     };
     let mut host = PluginHost::discover(&[config], &dir);
     host.start_all().await;
@@ -3183,6 +3205,8 @@ async fn turn_echo_host(dir: &std::path::Path, name: &str) -> PluginHost {
         env: BTreeMap::new(),
         permissions: Vec::new(),
         settings: BTreeMap::new(),
+
+        tool_output_bytes: None,
     };
     let mut host = PluginHost::discover(&[cfg], dir);
     host.start_all().await;

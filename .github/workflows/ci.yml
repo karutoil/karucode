@@ -411,6 +411,12 @@ jobs:
           path: target/release
       - run: chmod +x target/release/karucode target/release/example-hello
       - run: python3 scripts/e2e_smoke.py --binary target/release/karucode
+      # The per-plugin tool-output budget as an operator sees it: ask, answer,
+      # grant, exhaustion and revocation against the real binary and a real
+      # plugin. It has its own port pair and its own stub provider, so it runs
+      # beside the smoke suite without either one's state touching the other.
+      # Unwired, this suite passed only on the machine that wrote it.
+      - run: python3 scripts/e2e_tool_output_budget.py --binary target/release/karucode
 
   audit:
     name: dependency audit

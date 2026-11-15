@@ -229,6 +229,8 @@ pub enum CliAction {
     PluginSdk(crate::scaffold::PluginSdkArgs),
     /// `karucode plugin install <source> [names…] [flags]`
     PluginInstall(crate::plugin_install::PluginInstallOptions),
+    /// `karucode plugin tool-output <request|show|decide|clear> …`
+    PluginToolOutput(crate::plugin_tool_output::ToolOutputArgs),
     /// `karucode update [--check|--stage|--apply]`
     Update(crate::update::UpdateOptions),
 }
@@ -256,6 +258,15 @@ Commands:
   plugin install <source>  Install plugins from a GitHub repository
                            (owner/repo, a URL, owner/repo@ref) or a local
                            directory; --list shows what a source offers
+  plugin tool-output request <plugin> --bytes <n> --reason <why>
+                           Ask the operator for a per-plugin tool-output budget
+                           (they answer in Settings > Plugins & MCP)
+  plugin tool-output show [<plugin>]
+                           Print the budget in force and its audit trail
+  plugin tool-output decide <plugin> --allow [--bytes <n>] | --refuse
+                           Answer a request (interactive terminal only)
+  plugin tool-output clear <plugin>
+                           Forget an answer so it can be asked again
   update                   Check for a newer build (--check), download and verify it
                            (--stage), or install it (--apply, which needs write
                            access to the binary; --restart restarts the service)
@@ -422,8 +433,12 @@ fn parse_plugin(args: &[OsString]) -> anyhow::Result<CliAction> {
         "install" => Ok(CliAction::PluginInstall(
             crate::plugin_install::parse_plugin_install(&words)?,
         )),
+        "tool-output" => Ok(CliAction::PluginToolOutput(
+            crate::plugin_tool_output::parse_tool_output(&words)?,
+        )),
         other => bail!(
-            "unknown `plugin` command `{other}`; expected `init`, `sdk` or `install`\n\n{}",
+            "unknown `plugin` command `{other}`; expected `init`, `sdk`, `install` or \
+             `tool-output`\n\n{}",
             Cli::usage()
         ),
     }
@@ -662,11 +677,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     ensure_private_dir(&config.data_dir)?;
 
     let db_path = config.db_path();
-    let store: Arc<dyn Store> = Arc::new(
+    let sqlite_store = Arc::new(
         SqliteStore::open(&db_path)
             .await
             .map_err(|e| anyhow!("could not open the database at {}: {e}", db_path.display()))?,
     );
+    let store: Arc<dyn Store> = Arc::clone(&sqlite_store) as Arc<dyn Store>;
 
     let settings = SettingsHandle::new(config.clone(), Arc::clone(&store))
         .await
@@ -688,6 +704,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     // Plugin host and MCP manager start concurrently: a slow plugin must not
     // delay MCP servers and vice versa.
     let mut plugin_host = PluginHost::discover(&config.plugins, &config.data_dir);
+    // The host owns the grant map every plugin tool reads; the server owns the
+    // only writer of it. Hand the same handle to both, so an operator's answer
+    // reaches the next tool call without a reload.
+    let tool_output_grants = plugin_host.tool_output_grants();
     // Subscribe *before* `start_all`: a plugin that raises a notification during
     // its own startup would otherwise have it dropped on the floor.
     let plugin_notices = plugin_host.listen_notifications();
@@ -741,6 +761,18 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         }
     };
 
+    // Load the stored per-plugin tool-output decisions into the host's grant map:
+    // a grant survives a restart, and a refusal keeps its "already asked" answer
+    // so nothing re-prompts at startup.
+    let plugin_tool_output = Arc::new(
+        crate::plugin_tool_output::PluginToolOutput::load(
+            Arc::clone(&sqlite_store),
+            tool_output_grants,
+            Arc::clone(&settings),
+        )
+        .await,
+    );
+
     let state = AppState::new(AppStateDeps {
         settings: settings.clone(),
         store: Arc::clone(&store),
@@ -756,6 +788,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         allowed_hosts: std::env::var(crate::host::ALLOWED_HOSTS_ENV).ok(),
         web_auth,
         api_keys,
+        plugin_tool_output,
     });
     state.reload_tools().await;
     // Temporary sessions, last call: recovery above has already marked this
@@ -1452,7 +1485,10 @@ mod tests {
 
         let err = parse(&["plugin", "deploy", "x"]).unwrap_err().to_string();
         assert!(err.contains("unknown `plugin` command `deploy`"), "{err}");
-        assert!(err.contains("expected `init`, `sdk` or `install`"), "{err}");
+        assert!(
+            err.contains("expected `init`, `sdk`, `install` or `tool-output`"),
+            "{err}"
+        );
 
         let err = parse(&["plugin", "init"]).unwrap_err().to_string();
         assert!(err.contains("needs a target directory"), "{err}");

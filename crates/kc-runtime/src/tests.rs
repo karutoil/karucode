@@ -10,8 +10,8 @@ use crate::subagent::SPAWN_AGENT_TOOL;
 use crate::tests_support::{
     test_inner_with_settings, ApprovalTool, BigOutputTool, EchoTool, ExternalTool, FailingTool,
     FakeSettings, FollowUpTool, GateTool, Harness, HarnessBuilder, ImageTool, LegacyPromptHook,
-    PanicTool, PathProbeTool, ProbeTool, RequiredArgsTool, Script, ScriptedFactory, SlowCancelTool,
-    SteerTool, TurnRecordingHook, WriteWorkspaceFileTool,
+    PanicTool, PathProbeTool, PluginOutputTool, ProbeTool, RequiredArgsTool, Script,
+    ScriptedFactory, SlowCancelTool, SteerTool, TurnRecordingHook, WriteWorkspaceFileTool,
 };
 use crate::{ActiveRun, QueuedInput, QueuedKind, RecoveryReport, Runtime, RuntimeDeps};
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, ApprovalRequest};
@@ -2583,6 +2583,181 @@ async fn large_tool_output_is_truncated_to_the_configured_budget() {
         tool_message.content.len()
     );
     assert!(tool_message.content.contains("bytes omitted"));
+}
+
+/// The operator's answer, applied: a granted plugin keeps a result the global
+/// default would have cut.
+///
+/// This is the whole point of the feature - `kc-codegraph` returning a
+/// whole-feature bundle - so it is asserted on the bytes the model actually
+/// receives, not on the flag alone.
+#[tokio::test]
+async fn a_granted_plugin_budget_raises_the_per_result_ceiling() {
+    let limits = Limits {
+        // Deliberately the defaults in spirit: 24,000 globally, and a window big
+        // enough that the turn's share is not what cuts.
+        max_tool_output_bytes: 24_000,
+        context_max_chars: 4_000_000,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "plugin__bundle__feature", "{\"bytes\":60000}")]),
+        Script::text("done"),
+    ])
+    .tool(PluginOutputTool::boxed(
+        "plugin__bundle__feature",
+        "bundle",
+        Some(400_000),
+    ))
+    .settings(FakeSettings::default().with_limits(limits))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("whole feature").await;
+    let finished = tool_finished(&events);
+    assert!(
+        !finished[0].3,
+        "a result inside the plugin's own budget is not truncated"
+    );
+    let messages = h.session_messages().await;
+    let tool_message = messages.iter().find(|m| m.role == "tool").unwrap();
+    assert_eq!(
+        tool_message.content.len(),
+        60_000,
+        "the granted budget keeps the whole result"
+    );
+
+    // And it survives the request-side re-cut: the second request carries the
+    // result whole, not quietly re-cut at the global default. That re-cut is the
+    // path a stored message takes on its way back to the model, and imposing
+    // 24,000 there would undo the grant without changing anything visible in the
+    // transcript.
+    let requests = h.factory.requests();
+    let second = requests
+        .iter()
+        .find(|request| {
+            request
+                .messages
+                .iter()
+                .any(|m| m.role == kc_core::message::Role::Tool)
+        })
+        .expect("the follow-up request carries the tool result");
+    let carried = second
+        .messages
+        .iter()
+        .find(|m| m.role == kc_core::message::Role::Tool)
+        .unwrap();
+    assert_eq!(
+        carried.content.len(),
+        60_000,
+        "the request sends the granted result whole"
+    );
+}
+
+#[tokio::test]
+async fn a_granted_plugin_budget_lowers_the_per_result_ceiling() {
+    let limits = Limits {
+        max_tool_output_bytes: 24_000,
+        context_max_chars: 4_000_000,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "plugin__small__summary", "{\"bytes\":10000}")]),
+        Script::text("done"),
+    ])
+    .tool(PluginOutputTool::boxed(
+        "plugin__small__summary",
+        "small",
+        Some(3_000),
+    ))
+    .settings(FakeSettings::default().with_limits(limits))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("summary").await;
+    let finished = tool_finished(&events);
+    assert!(finished[0].3, "the grant is below the result and cuts it");
+    let messages = h.session_messages().await;
+    let tool_message = messages.iter().find(|m| m.role == "tool").unwrap();
+    assert!(
+        tool_message.content.len() <= 3_000,
+        "content: {} bytes",
+        tool_message.content.len()
+    );
+}
+
+#[tokio::test]
+async fn a_plugin_without_a_grant_keeps_the_global_default() {
+    let limits = Limits {
+        max_tool_output_bytes: 24_000,
+        context_max_chars: 4_000_000,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "plugin__plain__dump", "{\"bytes\":60000}")]),
+        Script::text("done"),
+    ])
+    // No grant: the operator has not answered a request for this plugin, so the
+    // global ceiling still governs it.
+    .tool(PluginOutputTool::boxed(
+        "plugin__plain__dump",
+        "plain",
+        None,
+    ))
+    .settings(FakeSettings::default().with_limits(limits))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("dump").await;
+    let finished = tool_finished(&events);
+    assert!(finished[0].3);
+    let messages = h.session_messages().await;
+    let tool_message = messages.iter().find(|m| m.role == "tool").unwrap();
+    assert!(
+        tool_message.content.len() <= 24_000,
+        "content: {} bytes",
+        tool_message.content.len()
+    );
+}
+
+/// A grant above `limits.max_plugin_tool_output_bytes` is clamped, and the cut
+/// names the plugin's own budget rather than a global key that is not binding.
+#[tokio::test]
+async fn a_grant_is_clamped_to_the_configured_ceiling() {
+    let limits = Limits {
+        max_tool_output_bytes: 24_000,
+        max_plugin_tool_output_bytes: 5_000,
+        context_max_chars: 4_000_000,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "plugin__bundle__feature", "{\"bytes\":60000}")]),
+        Script::text("done"),
+    ])
+    .tool(PluginOutputTool::boxed(
+        "plugin__bundle__feature",
+        "bundle",
+        Some(400_000),
+    ))
+    .settings(FakeSettings::default().with_limits(limits))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("whole feature").await;
+    let finished = tool_finished(&events);
+    assert!(finished[0].3);
+    assert!(
+        finished[0].2.len() <= 5_000,
+        "the ceiling caps the grant: {} bytes",
+        finished[0].2.len()
+    );
+    assert!(
+        finished[0]
+            .2
+            .contains("plugin `bundle`'s own tool-output budget"),
+        "the cut says which budget cut it: {}",
+        finished[0].2
+    );
 }
 
 #[tokio::test]

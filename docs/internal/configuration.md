@@ -7,7 +7,7 @@
 
 - **Slug:** `configuration`
 - **Tags:** config, settings, configuration, toml, env
-- **Applies to:** `env:KARUCODE_MALLOC_ARENA_MAX`, `env:KARUCODE_MALLOC_TRIM_SECS`, `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_PARALLEL_TOOL_CALLS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `env:KARUCODE_MCP_WATCH`, `env:KARUCODE_MCP_WATCH_SECS`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `env:KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_concurrent`, `config:subagents.max_iterations`, `config:subagents.max_depth`, `config:subagents.timeout_secs`, `config:[notifications]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:mcp_watch`, `config:mcp_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `config:limits.parallel_tool_calls`, `config:limits.max_turn_retries`, `config:limits.turn_retry_delay_ms`, `config:limits.model_compaction`, `config:limits.compaction_model`, `config:limits.compaction_max_tokens`, `config:limits.compaction_timeout_secs`, `config:notifications.enabled`, `config:notifications.min_run_secs`, `config:notifications.ephemeral_sessions`, `config:[access]`, `config:access.enabled`, `config:access.public_url`, `config:access.session_days`, `config:access.tunnel`, `config:access.trusted_proxies`, `env:KARUCODE_ACCESS_ENABLED`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_SESSION_DAYS`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`, `config:[updates]`, `config:updates.check`, `config:updates.check_secs`, `config:updates.manifest_url`, `config:updates.auto_apply`, `env:KARUCODE_UPDATE_CHECK`, `env:KARUCODE_UPDATE_CHECK_SECS`, `env:KARUCODE_UPDATE_MANIFEST_URL`, `env:KARUCODE_UPDATE_AUTO_APPLY`, `route:GET /api/update`, `route:POST /api/update/check`, `route:POST /api/update/apply`, `ui:Settings > Updates`
+- **Applies to:** `env:KARUCODE_MALLOC_ARENA_MAX`, `env:KARUCODE_MALLOC_TRIM_SECS`, `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_PARALLEL_TOOL_CALLS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `env:KARUCODE_MCP_WATCH`, `env:KARUCODE_MCP_WATCH_SECS`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `env:KARUCODE_NOTIFICATIONS_EPHEMERAL_SESSIONS`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `config:[model]`, `config:[limits]`, `config:limits.max_plugin_tool_output_bytes`, `config:plugins.tool_output_bytes`, `config:[approvals]`, `config:[subagents]`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_concurrent`, `config:subagents.max_iterations`, `config:subagents.max_depth`, `config:subagents.timeout_secs`, `config:[notifications]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:mcp_watch`, `config:mcp_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `config:limits.parallel_tool_calls`, `config:limits.max_turn_retries`, `config:limits.turn_retry_delay_ms`, `config:limits.model_compaction`, `config:limits.compaction_model`, `config:limits.compaction_max_tokens`, `config:limits.compaction_timeout_secs`, `config:notifications.enabled`, `config:notifications.min_run_secs`, `config:notifications.ephemeral_sessions`, `config:[access]`, `config:access.enabled`, `config:access.public_url`, `config:access.session_days`, `config:access.tunnel`, `config:access.trusted_proxies`, `env:KARUCODE_ACCESS_ENABLED`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_SESSION_DAYS`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`, `config:[updates]`, `config:updates.check`, `config:updates.check_secs`, `config:updates.manifest_url`, `config:updates.auto_apply`, `env:KARUCODE_UPDATE_CHECK`, `env:KARUCODE_UPDATE_CHECK_SECS`, `env:KARUCODE_UPDATE_MANIFEST_URL`, `env:KARUCODE_UPDATE_AUTO_APPLY`, `route:GET /api/update`, `route:POST /api/update/check`, `route:POST /api/update/apply`, `ui:Settings > Updates`
 - **Source:** `crates/kc-server/src/settings.rs:14`
 
 ---
@@ -82,6 +82,37 @@ Environment: `KARUCODE_UPDATE_CHECK`, `KARUCODE_UPDATE_CHECK_SECS`,
 would fail. `manifest_url` and `auto_apply` need the admin credential (below):
 the manifest names the binary that will replace this one. The `updates` topic
 has the manifest format, the privileged apply and the CLI.
+
+## Per-plugin tool-output budgets
+
+Every tool result is capped at `limits.max_tool_output_bytes` (24,000 bytes).
+One plugin can have its own budget instead, and it is the **operator's**
+decision: an agent implementing or installing a plugin asks for one with the
+exact byte value and a reason, and the answer - not a config edit - creates it.
+
+```toml
+[limits]
+max_plugin_tool_output_bytes = 1_000_000   # ceiling any grant may reach
+
+[[plugins]]
+name = "kc-codegraph"
+tool_output_bytes = 400_000                # narrows a grant; grants nothing itself
+```
+
+* `limits.max_plugin_tool_output_bytes` is the ceiling; a request above it is
+  **rejected**, and an existing grant is clamped to it when read, so lowering
+  it retires a larger grant. It grants nothing by itself.
+* `[[plugins]] tool_output_bytes` may only *narrow* what the operator
+  granted. Without a recorded decision the global default applies and the key
+  is reported as ignored, so writing it - or a plugin's own `plugin.toml`,
+  which the host strips with a warning - is not a way to raise a budget.
+* `GET /api/plugins` shows the effective value per plugin with who granted it
+  and when; `GET /api/plugins/:name/tool-output` shows the audit trail.
+* A grant applies to the next tool call, with no reload. The per-turn share of
+  the context window still applies on top, so a large grant only fully lands
+  on a window that can pay for it.
+
+The whole procedure is step 4 of the `plugins` topic.
 
 ## The admin gate
 

@@ -975,6 +975,24 @@ pub trait Tool: Send + Sync {
         !matches!(self.class(), ToolClass::ReadOnly)
     }
 
+    /// This tool's own ceiling on how many bytes of one result reach the model,
+    /// or `None` to use the global `limits.max_tool_output_bytes`.
+    ///
+    /// Only a **plugin** tool returns anything here, and only when the operator
+    /// granted that plugin its own tool-output budget (see the `plugins` topic).
+    /// Nothing a plugin ships can set it: the value comes from the operator's
+    /// recorded decision, which the host reads on every call, so a grant or a
+    /// revocation applies to the very next tool call with no reload.
+    ///
+    /// The runtime takes `min` of this, `limits.max_plugin_tool_output_bytes`
+    /// (the ceiling a grant may reach) and what is left of the turn's share of
+    /// the context window, then truncates the result to that. Returning `Some`
+    /// therefore never widens the turn budget - it only changes the per-result
+    /// ceiling that the global default sets.
+    fn output_budget(&self) -> Option<usize> {
+        None
+    }
+
     async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome;
 }
 
@@ -1008,6 +1026,23 @@ impl ToolRegistry {
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
+    }
+
+    /// The largest per-tool output budget among the registered tools, or `0`
+    /// when every tool uses the global default.
+    ///
+    /// Used only where a stored tool message is *re-cut* on its way back out
+    /// (the request builder): re-cutting at the global default would silently
+    /// re-impose 24,000 bytes on a result the operator allowed a plugin to keep
+    /// larger, so that path takes the largest budget in play instead. The result
+    /// was already cut at its own ceiling when it was stored, so this can never
+    /// let a result through above the bound it was written under.
+    pub fn max_output_budget(&self) -> usize {
+        self.tools
+            .values()
+            .filter_map(|tool| tool.output_budget())
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn remove(&mut self, name: &str) -> Option<Arc<dyn Tool>> {

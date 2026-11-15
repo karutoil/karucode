@@ -4,7 +4,7 @@
 // @kc-title: What the agent is told about reading, tool output and stopping
 // @kc-summary: The rules in the system prompt that keep a run from bloating: read the narrow window, continue a cut result from the offset it names, never repeat a call, and stop when the work is done.
 // @kc-tags: system prompt, tool output, truncation, loop guard, tokens, budget, rules
-// @kc-applies-to: concept:system prompt, tool:read_file, tool:search_files, tool:karucode_docs, tool:spawn_agent, config:limits.max_tool_output_bytes, config:limits.max_command_output_bytes, config:limits.max_iterations, config:limits.max_run_secs, config:subagents.timeout_secs
+// @kc-applies-to: concept:system prompt, tool:read_file, tool:search_files, tool:karucode_docs, tool:spawn_agent, config:limits.max_tool_output_bytes, config:limits.max_plugin_tool_output_bytes, config:[[plugins]], config:plugins.tool_output_bytes, config:limits.max_command_output_bytes, config:limits.max_iterations, config:limits.max_run_secs, config:subagents.timeout_secs
 //
 // The system prompt is **message[0] of every request in every run**, so it is the
 // one text billed on every turn of every session. It therefore carries rules, not
@@ -48,6 +48,15 @@
 // (24,000 by default) is the per-result ceiling, and `limits.max_command_output_bytes`
 // (32,000) is what a command streams, so a long build log is cut there and not by
 // the first key.
+//
+// A single plugin may have its own budget, higher or lower than that default,
+// when the operator granted it one (`[[plugins]] tool_output_bytes`, the
+// `plugins` topic). The agent asks for it while it implements or installs the
+// plugin - one ask, naming the plugin, the exact byte value and why - and the
+// operator's answer is the only thing that creates it. Silence is a no, a
+// refusal is remembered and is not re-asked, and nothing here is set
+// automatically. A result cut by that per-plugin bound says so, so the agent
+// does not quote a global key that is not the binding one.
 //
 // # Why a repeat is refused, and what ends a spinning run
 //
