@@ -187,6 +187,20 @@ jobs:
       - run: python3 tests/test_check_readme.py
       - run: python3 scripts/check_readme.py
 
+  # The issue templates are the first thing a stranger touches, and nothing else
+  # in CI looks at them: a form GitHub cannot parse is invisible until someone
+  # opens an issue and finds raw YAML in the body, which is exactly what the two
+  # `.md` files did. GitHub parses these files as YAML, so the check does too
+  # rather than scanning lines and drifting from the real schema.
+  intake:
+    name: issue templates
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m pip install --quiet "pyyaml==6.0.3"
+      - run: python3 tests/test_issue_templates.py
+
   # The updater is the script that can take a working service down, and it is
   # shell: no type system will find its mistakes. Its tests run it as a real
   # process against a real git repo with systemctl/cargo/install.sh stubbed, so
@@ -452,6 +466,7 @@ jobs:
         test-server-rest,
         test-release,
         readme,
+        intake,
         packaging,
         packaging-tests,
         docs,

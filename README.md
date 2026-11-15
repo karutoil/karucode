@@ -739,7 +739,10 @@ Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). HTTP contract:
 
 ## Support
 
-* **Bugs and feature requests:** file an issue with the output of
+* **Bugs and feature requests:** [open an issue](https://github.com/karutoil/karucode/issues/new/choose).
+  Anyone with a GitHub account can file one — no invitation, no role, no
+  maintainer in the loop first — and the tracker offers a bug report, a feature
+  request, or a blank issue if neither fits. Include the output of
   `karucode --version` and the smallest reproduction you can manage.
 * **Security:** read [SECURITY.md](SECURITY.md) before exposing the server
   beyond loopback. It documents the trust model and how to report a

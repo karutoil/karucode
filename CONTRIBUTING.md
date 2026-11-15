@@ -69,6 +69,12 @@ cargo test -p kc-docs
 
 ## Reporting
 
-Bugs and feature requests go to the issue tracker; security reports follow
-[SECURITY.md](SECURITY.md). When reporting a bug, include the output of
-`karucode --version` and the smallest reproduction you can manage.
+Bugs and feature requests go to the [issue tracker][issues]; security reports
+follow [SECURITY.md](SECURITY.md). Anyone with a GitHub account can open an
+issue — there is no invitation and no maintainer gate — and a blank issue is
+always available when neither template fits.
+
+When reporting a bug, include the output of `karucode --version` and the
+smallest reproduction you can manage.
+
+[issues]: https://github.com/karutoil/karucode/issues/new/choose

@@ -1,5 +1,6 @@
 name: Feature request
 description: Something karucode should do that it does not.
+title: "[feature] "
 labels: ["enhancement"]
 body:
   - type: textarea
