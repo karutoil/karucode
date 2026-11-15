@@ -12,6 +12,20 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Changed
 
+- **Anyone can file an issue, and the templates now work.** The two issue
+  templates were issue-form YAML saved as `.md`, so GitHub showed them as
+  markdown: a reporter's issue body arrived as the raw form definition, with
+  none of the required fields, dropdowns or placeholders that were written in
+  it. They are `.yml` now (with a `title:` prefix each). `blank_issues_enabled`
+  was `false`, which hides the blank issue from everyone below write access, so
+  a stranger whose report fit neither template had no way in at all; it is
+  `true` now. `tests/test_issue_templates.py` checks the directory against
+  GitHub's form schema — every rule exercised against a file that violates
+  exactly it — and the new `intake` CI job runs it, with the release waiting on
+  that gate, so the intake cannot silently rot again. `README.md` and
+  `CONTRIBUTING.md` link the tracker directly and say that any GitHub account
+  may open an issue.
+
 - **The documentation is release-ready.** The front door and the docs tree were
   audited against the code (ten parallel audits plus a dedicated API writer)
   and brought in line: the README's hero image pointed at an untracked PNG
