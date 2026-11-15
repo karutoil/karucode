@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { Composer, type ComposerProps } from './Composer';
 import type { Activity } from '../state/selectors';
 import type { WorkspaceTree } from '../api/types';
 import { configFixture, resetAppState } from '../test/fixtures';
 import { emptyChatState } from '../state/chat';
+import * as actions from '../state/actions';
 import * as store from '../state/store';
 import * as workbench from '../state/workbench';
 import { describeApprovals } from '../lib/approvalCopy';
@@ -112,6 +113,141 @@ describe('Composer', () => {
 
     await waitFor(() => expect(props.onSend).toHaveBeenCalled());
     expect(textarea.value).toBe('Keep me');
+  });
+
+  describe('which Enter sends', () => {
+    it('starts a new line on a plain Enter by default', () => {
+      const { props, textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'first line' } });
+      const enter = createEvent.keyDown(textarea, { key: 'Enter' });
+      fireEvent(textarea, enter);
+
+      // Not swallowed: the browser's own newline is what happens here.
+      expect(enter.defaultPrevented).toBe(false);
+      expect(props.onSend).not.toHaveBeenCalled();
+      expect(textarea.value).toBe('first line');
+    });
+
+    it('sends on a plain Enter once Enter-sends is chosen', async () => {
+      store.sendKey.value = 'enter';
+      const { props, textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'Ship it' } });
+      const enter = createEvent.keyDown(textarea, { key: 'Enter' });
+      fireEvent(textarea, enter);
+
+      expect(enter.defaultPrevented).toBe(true);
+      await waitFor(() => expect(props.onSend).toHaveBeenCalledWith('Ship it'));
+      await waitFor(() => expect(textarea.value).toBe(''));
+    });
+
+    it('leaves Shift and Alt Enter to the browser when Enter sends', () => {
+      store.sendKey.value = 'enter';
+      const { props, textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'two lines' } });
+      for (const init of [{ shiftKey: true }, { altKey: true }]) {
+        const chord = createEvent.keyDown(textarea, { key: 'Enter', ...init });
+        fireEvent(textarea, chord);
+        expect(chord.defaultPrevented).toBe(false);
+      }
+      expect(props.onSend).not.toHaveBeenCalled();
+      expect(textarea.value).toBe('two lines');
+    });
+
+    it('writes the line break itself for Ctrl/Cmd+Enter when Enter sends', async () => {
+      // No browser types a break for a Command/Ctrl chord, so "the chord starts a
+      // new line" has to be something the composer does rather than promises.
+      store.sendKey.value = 'enter';
+      const { props, textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'one' } });
+      textarea.setSelectionRange(3, 3);
+      const chord = createEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
+      fireEvent(textarea, chord);
+
+      expect(chord.defaultPrevented).toBe(true);
+      expect(props.onSend).not.toHaveBeenCalled();
+      await waitFor(() => expect(textarea.value).toBe('one\n'));
+      // The caret lands after the break, ready for the next line.
+      await waitFor(() => expect(textarea.selectionStart).toBe(4));
+    });
+
+    it('does not send while an IME is composing', () => {
+      // Japanese, Chinese and Korean input confirm a word with Enter; sending
+      // there would submit half a sentence and lose the composition.
+      store.sendKey.value = 'enter';
+      const { props, textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'こんにちは' } });
+      const composing = createEvent.keyDown(textarea, { key: 'Enter', isComposing: true });
+      fireEvent(textarea, composing);
+
+      expect(composing.defaultPrevented).toBe(false);
+      expect(props.onSend).not.toHaveBeenCalled();
+    });
+
+    it('leaves Enter to the @-mention menu', async () => {
+      store.sendKey.value = 'enter';
+      const { props, textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'look at @main.ts' } });
+      const listbox = await screen.findByRole('listbox');
+      expect(listbox).toBeTruthy();
+
+      // Enter completes the mention; it must not also send the half-written line.
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      await waitFor(() => expect(textarea.value).toBe('look at @src/main.ts '));
+      expect(props.onSend).not.toHaveBeenCalled();
+    });
+
+    it('queues the draft on a plain Enter while a run is in flight', async () => {
+      store.sendKey.value = 'enter';
+      const { props, textarea } = renderComposer({
+        running: true,
+        status: { kind: 'streaming', label: 'Streaming' },
+        onQueue: vi.fn(async () => true),
+      });
+      fireEvent.input(textarea, { target: { value: 'also check the fixtures' } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+
+      await waitFor(() => expect(props.onQueue).toHaveBeenCalledTimes(1));
+      expect(
+        (props.onQueue as unknown as { mock: { calls: [string][] } }).mock.calls[0]?.[0],
+      ).toBe('steer');
+    });
+
+    it('falls through to a line break on an empty box', () => {
+      store.sendKey.value = 'enter';
+      const { props, textarea } = renderComposer();
+      const enter = createEvent.keyDown(textarea, { key: 'Enter' });
+      fireEvent(textarea, enter);
+
+      expect(enter.defaultPrevented).toBe(false);
+      expect(props.onSend).not.toHaveBeenCalled();
+    });
+
+    it('names the chord in the hint and on the Send button', () => {
+      store.sendKey.value = 'enter';
+      const { container } = renderComposer();
+      const hint = container.querySelector('.composer-hint') as HTMLElement;
+      expect(hint.textContent?.replace(/\s+/g, ' ').trim()).toBe('Enter to send·@ reference files');
+      expect(screen.getByRole('button', { name: 'Send message (Enter)' })).toBeTruthy();
+    });
+
+    it('remembers the choice per browser', () => {
+      // The signal is reset between tests, storage is not: start from a clean
+      // slate so this proves the write rather than inheriting one.
+      localStorage.removeItem('karucode.composerSendKey');
+      store.sendKey.value = 'modifier-enter';
+      expect(store.readSendKey()).toBe('modifier-enter');
+      actions.setSendKey('enter');
+      expect(store.sendKey.value).toBe('enter');
+      expect(localStorage.getItem('karucode.composerSendKey')).toBe('enter');
+      expect(store.readSendKey()).toBe('enter');
+
+      // A value this build does not know is not a reason to guess.
+      localStorage.setItem('karucode.composerSendKey', 'sideways');
+      expect(store.readSendKey()).toBe('modifier-enter');
+
+      actions.setSendKey('modifier-enter');
+      expect(localStorage.getItem('karucode.composerSendKey')).toBe('modifier-enter');
+    });
   });
 
   it('retains draft-driven auto-grow and re-measures wrapping after a resize', async () => {

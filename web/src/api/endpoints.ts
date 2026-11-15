@@ -825,6 +825,25 @@ export function setSessionModel(
   });
 }
 
+/**
+ * Set this session's subagent-worktree override, or pass null to follow
+ * `config.subagents.worktrees` again.
+ *
+ * `false` is a real override, not "unset": a session can keep its children in the
+ * shared tree after the install turned isolation on.
+ */
+export function setSessionWorktrees(
+  id: string,
+  worktrees: boolean | null,
+  options: CallOptions = {},
+): Promise<Session> {
+  return apiRequest<Session>(`/api/sessions/${encodeURIComponent(id)}`, {
+    ...options,
+    method: 'PATCH',
+    body: { worktrees },
+  });
+}
+
 export function deleteSession(id: string, options: CallOptions = {}): Promise<{ deleted: boolean }> {
   return apiRequest<{ deleted: boolean }>(`/api/sessions/${encodeURIComponent(id)}`, {
     ...options,

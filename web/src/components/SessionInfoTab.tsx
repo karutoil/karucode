@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useEffect } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import type { SessionInfo, SessionInfoAgent, UsageTotals } from '../api/types';
 import {
   cacheDetail,
@@ -398,6 +398,88 @@ function AgentsSection({ info }: { info: SessionInfo }): JSX.Element | null {
   );
 }
 
+/**
+ * This session's subagent isolation: follow the install default, always isolate,
+ * or always share.
+ *
+ * Three states, because the feature has three scopes and this is the middle one.
+ * "Follow the install default" is `null` on the wire, so it is not the same as
+ * "off": a session that chose the default keeps following the settings screen as
+ * it changes, while one that chose "share" stays shared. The line under the
+ * control says which of those is in force *right now*, because the button the
+ * reader pressed is not necessarily the one deciding - a per-spawn `worktree`
+ * argument can still override it.
+ */
+function SubagentsSection({ info }: { info: SessionInfo }): JSX.Element {
+  const override = info.session.worktrees ?? null;
+  // The install-wide default, so "follow" can name what it is following.
+  const install = store.config.value?.subagents?.worktrees ?? false;
+  const effective = override ?? install;
+  const [saving, setSaving] = useState(false);
+
+  const choose = (value: boolean | null): void => {
+    if (value === override || saving) return;
+    setSaving(true);
+    void actions.setSessionWorktrees(value).finally(() => setSaving(false));
+  };
+
+  const choices: { value: boolean | null; label: string; title: string }[] = [
+    {
+      value: null,
+      label: 'Install default',
+      title: `Follow the settings screen: subagents ${install ? 'get their own worktree' : 'share this working tree'} today.`,
+    },
+    {
+      value: true,
+      label: 'Own worktree',
+      title:
+        'Every subagent in this session gets its own checkout under .karucode/worktrees; its changes come back on a karucode/subagent/<id> branch.',
+    },
+    {
+      value: false,
+      label: 'Share tree',
+      title: 'Subagents in this session edit this working tree directly, even if the install default isolates them.',
+    },
+  ];
+
+  return (
+    <section class="si-section" aria-label="Subagent isolation">
+      <div class="inspector-kicker-row">
+        <span class="inspector-kicker">Subagent isolation</span>
+        <span class="inspector-kicker-note">
+          {override === null ? 'install default' : 'this session'}
+        </span>
+      </div>
+
+      <div class="si-choice" role="group" aria-label="Where this session's subagents work">
+        {choices.map((choice) => (
+          <button
+            key={String(choice.value)}
+            type="button"
+            class={`si-choice-button${override === choice.value ? ' is-active' : ''}`}
+            aria-pressed={override === choice.value}
+            data-testid={`session-worktrees-${choice.value === null ? 'inherit' : String(choice.value)}`}
+            title={choice.title}
+            disabled={saving}
+            onClick={() => choose(choice.value)}
+          >
+            {choice.label}
+          </button>
+        ))}
+      </div>
+
+      <p class="si-note">
+        {effective
+          ? 'Subagents in this session run in their own git checkout, started from this working tree as it is now. Nothing is merged for you: a child that changed files hands them back on a karucode/subagent/<id> branch. Needs a repository with at least one commit.'
+          : 'Subagents in this session run in this working tree, so their edits are visible immediately and two children editing one file will interleave.'}
+        {override === null
+          ? ` Following the settings screen, which has it ${install ? 'on' : 'off'} for the whole install.`
+          : ` This session overrides the settings screen, which has isolation ${install ? 'on' : 'off'} for the whole install. A single spawn can still override this with its own \`worktree\` argument.`}
+      </p>
+    </section>
+  );
+}
+
 /** The most recent runs, as a short timeline. */
 function RecentRuns({ info }: { info: SessionInfo }): JSX.Element | null {
   const runs = info.runs.recent;
@@ -523,6 +605,7 @@ export function SessionInfoTab(): JSX.Element {
       <UsageSection info={info} />
       <WorkSection info={info} />
       <AgentsSection info={info} />
+      <SubagentsSection info={info} />
       <RecentRuns info={info} />
 
       <p class="inspector-note">

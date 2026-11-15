@@ -23,6 +23,25 @@ pub trait Settings: Send + Sync {
     async fn approval_policy(&self) -> ApprovalPolicy;
     async fn subagent_config(&self) -> SubagentConfig;
 
+    /// Change the install-wide `subagents.worktrees` default, on behalf of the
+    /// top-level agent (`subagent_worktrees` with `scope: "global"`).
+    ///
+    /// A *write* is deliberately not part of the read surface this trait was
+    /// built for, so it is defaulted: an embedding or a test that has no settings
+    /// persistence must not silently accept a change it cannot keep. The server
+    /// implements it over the same validated, persisted update
+    /// `PATCH /api/config` uses, which means `lock_settings` refuses it too and a
+    /// failed write changes nothing.
+    async fn set_subagent_worktrees(&self, on: bool) -> Result<(), String> {
+        let _ = on;
+        Err(
+            "this deployment cannot change install settings from a tool; \
+             change `subagents.worktrees` in the config file, or use \
+             `scope: \"session\"` to change only this conversation"
+                .into(),
+        )
+    }
+
     /// Live `[skills]` settings: the switches, the hand-added skills and the ids
     /// the user turned off.
     ///

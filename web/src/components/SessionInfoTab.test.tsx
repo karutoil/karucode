@@ -414,4 +414,84 @@ describe('SessionInfoTab', () => {
     const expected = ((49_000 / 1_000_000) * 3 + (4_100 / 1_000_000) * 15).toFixed(3);
     expect(await screen.findByText(`$${expected}`)).not.toBeNull();
   });
+
+  /**
+   * Subagent isolation has three scopes and this is the middle one, so the
+   * control has to distinguish "off" from "follow the install" - they look the
+   * same until the settings screen changes, and then one of them moves.
+   */
+  it('offers the session worktree override, defaulting to the install setting', async () => {
+    stubInfo(fullInfo());
+    seedSession();
+    // `seedSession` installs the fixture config, so the install-wide switch has to
+    // be set after it - the whole point of this control is which of the two wins.
+    const config = structuredClone(configFixture);
+    config.subagents.worktrees = false;
+    store.config.value = config;
+    render(<SessionInfoTab />);
+    await screen.findByText('Main agent context');
+
+    const inherit = await screen.findByRole('button', { name: 'Install default' });
+    expect(inherit.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Own worktree' }).getAttribute('aria-pressed')).toBe(
+      'false',
+    );
+    // The install default is off, so the note says what that means today.
+    expect(screen.getByText(/run in this working tree/)).not.toBeNull();
+    expect(screen.getByText(/Following the settings screen, which has it off/)).not.toBeNull();
+  });
+
+  it('patches the session when the override is changed', async () => {
+    const info = fullInfo();
+    const patches: { url: string; body: Record<string, unknown> }[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (!url.endsWith('/info')) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        patches.push({ url, body });
+        // The server answers with the stored row: what it returns is what the
+        // control must show, rather than what the click hoped for.
+        return new Response(JSON.stringify({ ...info.session, worktrees: body.worktrees }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(info), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    seedSession();
+    render(<SessionInfoTab />);
+    await screen.findByText('Main agent context');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Own worktree' }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.url).toContain('/api/sessions/s_ab12');
+    expect(patches[0]?.body).toEqual({ worktrees: true });
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Own worktree' }).getAttribute('aria-pressed'),
+      ).toBe('true'),
+    );
+    expect(screen.getByText(/own git checkout/)).not.toBeNull();
+  });
+
+  it('keeps a session that opted out shared while the install default isolates', async () => {
+    // `false` is an override, not "unset": this session said share.
+    stubInfo(fullInfo({ session: { ...fullInfo().session, worktrees: false } }));
+    seedSession();
+    const config = structuredClone(configFixture);
+    config.subagents.worktrees = true;
+    store.config.value = config;
+    render(<SessionInfoTab />);
+    await screen.findByText('Main agent context');
+
+    expect(
+      screen.getByRole('button', { name: 'Share tree' }).getAttribute('aria-pressed'),
+    ).toBe('true');
+    expect(screen.getByText(/run in this working tree/)).not.toBeNull();
+    expect(screen.getByText(/overrides the settings screen, which has isolation on/)).not.toBeNull();
+  });
 });

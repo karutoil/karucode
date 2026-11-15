@@ -759,6 +759,14 @@ export function Composer({
   const canType = disabledReason === null;
   const attachmentReady = canSendAttachments(attachments);
   const hasContent = draft.trim() !== '' || attachments.some((attachment) => attachment.status === 'ready');
+  // Which Enter sends. Read from the store during render, so switching it in
+  // Settings applies to the very next key press with no reload - and so the hint,
+  // the buttons' names and the behaviour can never disagree.
+  const enterSends = store.sendKey.value === 'enter';
+  /** The sending chord, spelled the way the foot hint and the buttons spell it. */
+  const sendChord = enterSends ? 'Enter' : 'Ctrl Enter';
+  /** The same chord in a full sentence, for accessible names. */
+  const sendChordLong = enterSends ? 'Enter' : 'Command or Control + Enter';
   // While a run is in flight the same box sends into the queue instead of
   // starting one, because starting one is exactly what the API refuses with a
   // 409. `canQueue` is therefore the "running" half of `canSend`.
@@ -840,6 +848,27 @@ export function Composer({
     setCaret(element.selectionStart ?? element.value.length);
   };
 
+  /**
+   * Start a new line at the caret, for a chord the browser will not type.
+   *
+   * Shift+Enter is typed by the browser itself. A Command/Ctrl+Enter produces no
+   * text at all in Chrome or Firefox, so when Enter is the send key the composer
+   * has to write the break into the draft itself - otherwise the setting's own
+   * hint would promise something the key does not do. Going through the draft
+   * (rather than editing `value` directly) keeps the controlled textarea, the
+   * auto-grow re-measurement and the text that is finally sent the same string.
+   */
+  const insertLineBreak = (element: HTMLTextAreaElement): void => {
+    const start = element.selectionStart ?? element.value.length;
+    const end = element.selectionEnd ?? start;
+    setDraft(`${element.value.slice(0, start)}\n${element.value.slice(end)}`);
+    // Writing the controlled value back drops the caret at the end of the text,
+    // so put it after the newline once that render has landed.
+    requestAnimationFrame(() => {
+      textarea.current?.setSelectionRange(start + 1, start + 1);
+    });
+  };
+
   // Phones get a short placeholder: at 16px (the iOS no-zoom size) the desktop
   // sentence wraps to two lines in a 390px column, and an empty dock would then
   // stand two lines tall before the user has typed anything. Read from the store
@@ -855,7 +884,7 @@ export function Composer({
           ? 'Steer the run…'
           : 'Queue a follow-up…'
         : queueMode === 'steer'
-          ? 'The agent is working — type to steer it, or press Enter to queue…'
+          ? `The agent is working — type to steer it, or press ${enterSends ? 'Enter' : 'Ctrl+Enter'} to queue…`
           : 'The agent is working — type the next thing to do once it finishes…'
       : narrowViewport
         ? 'Ask karucode anything…'
@@ -1013,7 +1042,33 @@ export function Composer({
                   return;
                 }
               }
-              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              if (event.key === 'Enter') {
+                // An IME's Enter confirms the composition it is part of, not the
+                // message: Japanese, Chinese and Korean input all end a word this
+                // way, and sending there would submit half of one.
+                if (event.isComposing || event.keyCode === 229) return;
+                const chord = event.metaKey || event.ctrlKey;
+                if (enterSends) {
+                  // Enter sends; Shift and Alt start a line the way the browser
+                  // already knows how. With nothing to send, Enter falls through
+                  // to a line break too, rather than swallowing the key.
+                  if (event.shiftKey || event.altKey) return;
+                  if (chord) {
+                    // No browser types a line break for a Command/Ctrl chord
+                    // (Chrome and Firefox produce no text at all for it), so
+                    // "the chord starts a new line" is a promise this handler has
+                    // to keep itself.
+                    event.preventDefault();
+                    insertLineBreak(event.currentTarget);
+                    return;
+                  }
+                  if (!(running ? canQueue : canSend)) return;
+                  event.preventDefault();
+                  void submit();
+                  return;
+                }
+                // Default: a plain Enter is a line break, the chord sends.
+                if (!chord) return;
                 event.preventDefault();
                 void submit();
               } else if (event.key === 'Escape' && running) {
@@ -1102,8 +1157,8 @@ export function Composer({
                   disabled={!canQueue}
                   aria-label={
                     queueMode === 'steer'
-                      ? 'Queue this message and steer the running turn (Command or Control + Enter)'
-                      : 'Queue this follow-up for the next turn (Command or Control + Enter)'
+                      ? `Queue this message and steer the running turn (${sendChordLong})`
+                      : `Queue this follow-up for the next turn (${sendChordLong})`
                   }
                   title={QUEUE_TITLE[queueMode]}
                 >
@@ -1128,8 +1183,8 @@ export function Composer({
               type="submit"
               class="button button-primary button-send"
               disabled={!canSend}
-              aria-label="Send message (Command or Control + Enter)"
-              title="Send (Command or Control + Enter)"
+              aria-label={`Send message (${sendChordLong})`}
+              title={`Send (${sendChordLong})`}
             >
               <ArrowUpIcon size={14} />
             </button>
@@ -1196,13 +1251,13 @@ export function Composer({
             <span class="composer-hint" aria-hidden="true">
               {running ? (
                 <>
-                  <strong>Ctrl Enter</strong> to {queueMode === 'steer' ? 'steer' : 'queue a follow-up'}
+                  <strong>{sendChord}</strong> to {queueMode === 'steer' ? 'steer' : 'queue a follow-up'}
                   <span class="composer-hint-sep">·</span>
                   <strong>Esc</strong> to stop
                 </>
               ) : (
                 <>
-                  <strong>Ctrl Enter</strong> to send
+                  <strong>{sendChord}</strong> to send
                   <span class="composer-hint-sep">·</span>
                   <strong>@</strong> reference {mentionLabel ?? 'files'}
                 </>

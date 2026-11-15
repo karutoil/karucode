@@ -862,8 +862,24 @@ emitting `session_model_changed`:
 ```
 
 `PATCH /api/sessions/:id` — `{ "model": { … } }` sets, `{ "model": null }`
-clears; `title` and `model` may be sent in one request. A request with neither is
-`400 bad_request`.
+clears; `title` and `model` may be sent in one request. A request with none of
+`title`, `model` or `worktrees` is `400 bad_request`.
+
+The same `PATCH` carries this session's subagent-worktree override, and
+`POST /api/sessions` accepts it at creation:
+
+```json
+{ "worktrees": true }    // subagents spawned here get their own git checkout
+{ "worktrees": false }   // they share this working tree, even if the install isolates
+{ "worktrees": null }    // follow subagents.worktrees again
+```
+
+It is a tri-state, not a flag: `false` is a real override, so a session can opt
+out of an install that turned isolation on. It is read when a subagent is
+spawned, so it applies to the next one and never moves a running child. The
+narrowest scope is the `worktree` argument on `spawn_agent`/`spawn_agents`, which
+applies to one call and is not stored. The `subagents` topic has the details of
+what an isolated child gets.
 
 `DELETE /api/sessions/:id` → `{ "deleted": true }`
 

@@ -1319,6 +1319,195 @@ async fn session_model_subroute_pins_and_clears() {
     assert_eq!(missing.error_code(), "not_found");
 }
 
+/// A session's subagent-worktree override is a tri-state on the session row, and
+/// `false` is a real override rather than "unset": that is what lets one
+/// conversation opt out of an install that turned isolation on.
+#[tokio::test]
+async fn session_worktree_override_is_a_per_session_tristate() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+
+    // Creation accepts it, so a session can start isolated.
+    let created = h
+        .post(
+            "/api/sessions",
+            json!({ "title": "isolated", "worktrees": true }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.text());
+    assert_eq!(created.json()["worktrees"], json!(true));
+    let id = created.json()["id"].as_str().expect("id").to_string();
+
+    // A session that follows the install default sends no key at all, so `null`
+    // and "never set" are the same state on the wire.
+    let plain = h.create_session(Some("plain")).await;
+    let detail = h.get(&format!("/api/sessions/{plain}")).await.json();
+    assert!(detail["session"].get("worktrees").is_none());
+
+    // `false` is an override, and it is stored as one.
+    let off = h
+        .patch(
+            &format!("/api/sessions/{id}"),
+            json!({ "worktrees": false }),
+        )
+        .await;
+    assert_eq!(off.status, StatusCode::OK, "{}", off.text());
+    assert_eq!(off.json()["worktrees"], json!(false));
+    let detail = h.get(&format!("/api/sessions/{id}")).await.json();
+    assert_eq!(detail["session"]["worktrees"], json!(false));
+
+    // `null` goes back to following `subagents.worktrees`.
+    let cleared = h
+        .patch(&format!("/api/sessions/{id}"), json!({ "worktrees": null }))
+        .await;
+    assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.text());
+    assert!(cleared.json().get("worktrees").is_none());
+
+    // A body that names none of the three patchable fields is still refused.
+    let empty = h.patch(&format!("/api/sessions/{id}"), json!({})).await;
+    assert_eq!(empty.status, StatusCode::BAD_REQUEST);
+    assert_eq!(empty.error_code(), "bad_request");
+
+    // A non-boolean is refused rather than coerced to `true`.
+    let wrong = h
+        .patch(
+            &format!("/api/sessions/{id}"),
+            json!({ "worktrees": "yes" }),
+        )
+        .await;
+    assert_eq!(wrong.status, StatusCode::BAD_REQUEST);
+    assert_eq!(wrong.error_code(), "bad_request");
+}
+
+/// The agent's own switch for the two wider scopes. `subagent_worktrees` with no
+/// `scope` moves only this session; `scope: "global"` moves the install default
+/// through the same validated update `PATCH /api/config` uses, so
+/// `KARUCODE_LOCK_SETTINGS` refuses it.
+#[tokio::test]
+async fn the_agent_can_set_session_and_install_worktrees() {
+    let h = HarnessBuilder::new(Vec::new())
+        .auto_approvals()
+        .build()
+        .await;
+    let id = h.create_session(Some("isolation")).await;
+    let send = format!("/api/sessions/{id}/messages");
+
+    // Session scope is the default: the install default must not move with it.
+    h.factory
+        .push(tool_call("subagent_worktrees", r#"{"mode":"on"}"#));
+    h.factory.push(text("This session isolates its children."));
+    assert_eq!(
+        h.post(
+            &send,
+            json!({ "content": "use worktrees for this session" })
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&id).await;
+    assert_eq!(
+        h.get(&format!("/api/sessions/{id}")).await.json()["session"]["worktrees"],
+        json!(true)
+    );
+    assert_eq!(
+        h.get("/api/config").await.json()["subagents"]["worktrees"],
+        json!(false),
+        "a session override must never move the install default"
+    );
+
+    // Global scope writes the install default, and it is persisted.
+    h.factory.push(tool_call(
+        "subagent_worktrees",
+        r#"{"mode":"on","scope":"global"}"#,
+    ));
+    h.factory.push(text("Global."));
+    assert_eq!(
+        h.post(&send, json!({ "content": "enable worktrees globally" }))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&id).await;
+    assert_eq!(
+        h.get("/api/config").await.json()["subagents"]["worktrees"],
+        json!(true)
+    );
+    assert!(
+        store_of(&h)
+            .all_settings()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|(key, value)| key == "subagents.worktrees" && value == "true"),
+        "the install-wide default must survive a restart, not live in memory"
+    );
+
+    // `inherit` clears the session override, so it follows the new default.
+    h.factory
+        .push(tool_call("subagent_worktrees", r#"{"mode":"inherit"}"#));
+    h.factory.push(text("Following the default again."));
+    assert_eq!(
+        h.post(&send, json!({ "content": "just follow the default" }))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&id).await;
+    assert!(
+        h.get(&format!("/api/sessions/{id}")).await.json()["session"]
+            .get("worktrees")
+            .is_none(),
+        "clearing the override must leave no key behind"
+    );
+}
+
+/// With settings locked, the session scope still works (it is not install
+/// configuration) and the global scope is refused instead of silently ignored.
+#[tokio::test]
+async fn a_locked_install_refuses_the_global_worktree_scope_only() {
+    let h = HarnessBuilder::new(Vec::new())
+        .auto_approvals()
+        .lock_settings()
+        .build()
+        .await;
+    let id = h.create_session(Some("locked")).await;
+    let send = format!("/api/sessions/{id}/messages");
+
+    h.factory.push(tool_call(
+        "subagent_worktrees",
+        r#"{"mode":"on","scope":"global"}"#,
+    ));
+    h.factory.push(text("Refused."));
+    assert_eq!(
+        h.post(&send, json!({ "content": "enable worktrees globally" }))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&id).await;
+    assert_eq!(
+        h.get("/api/config").await.json()["subagents"]["worktrees"],
+        json!(false),
+        "a locked install must not accept the change"
+    );
+
+    h.factory
+        .push(tool_call("subagent_worktrees", r#"{"mode":"on"}"#));
+    h.factory.push(text("This session isolates."));
+    assert_eq!(
+        h.post(&send, json!({ "content": "use worktrees here" }))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&id).await;
+    assert_eq!(
+        h.get(&format!("/api/sessions/{id}")).await.json()["session"]["worktrees"],
+        json!(true),
+        "a session override is not install configuration and must still work"
+    );
+}
+
 #[tokio::test]
 async fn session_lifecycle_events_reach_the_stream() {
     let h = HarnessBuilder::new(Vec::new()).build().await;

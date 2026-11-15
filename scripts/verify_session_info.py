@@ -423,8 +423,8 @@ def main() -> int:
               not any(t.startswith("Commands") for t in tabs), str(tabs))
         check("the inspector has a Session tab", any(t.startswith("Session") for t in tabs), str(tabs))
         check("the built-in tab count is unchanged (4)",
-              len([t for t in tabs if t in ("Files", "Changes", "Session", "Agents")
-                   or t.startswith(("Files", "Changes", "Session", "Agents"))]) == 4, str(tabs))
+              len([t for t in tabs if t in ("Files", "Changes", "Git", "Session", "Session usage", "Agents")
+                   or t.startswith(("Files", "Changes", "Git", "Session", "Agents"))]) == 4, str(tabs))
 
         # The app opens the most recently updated session, which is the
         # no-window one: select the demo session first, the way a user would.
@@ -443,18 +443,21 @@ def main() -> int:
         )
         check("the demo session can be selected from the rail", picked == "clicked", str(picked))
         time.sleep(1.2)
-        # The inspector starts collapsed; open it, or the panel is measured at
-        # its 64px collapsed width and every layout check below is meaningless.
+        # The inspector starts collapsed on narrow viewports; ensure it is open.
         opened = session.evaluate(
             """
+            const panel = document.getElementById('workbench-results') || document.querySelector('.inspector');
+            if (panel && !panel.classList.contains('is-collapsed') && panel.clientWidth > 100) {
+              return 'true';
+            }
             const deadline = Date.now() + 10000;
             while (Date.now() < deadline) {
               const button = Array.from(document.querySelectorAll('button')).find(
-                (node) => /toggle workspace inspector/i.test(node.getAttribute('aria-label') || '')
+                (node) => /inspector/i.test(node.getAttribute('aria-label') || '')
               );
               if (button) {
                 if (button.getAttribute('aria-expanded') !== 'true') button.click();
-                return button.getAttribute('aria-expanded');
+                return button.getAttribute('aria-expanded') || 'true';
               }
               await new Promise((r) => setTimeout(r, 150));
             }
@@ -565,6 +568,109 @@ def main() -> int:
                 check("the tool breakdown names real tools",
                       any(name in ("read_file", "run_command", "spawn_agent") for name in panel["tools"]),
                       str(panel["tools"]))
+
+        # ---- session-scoped subagent isolation -----------------------------
+        # The middle of the feature's three scopes. What a unit test cannot show
+        # is that the control reaches the server and comes back: the aria state
+        # below is set from the PATCH response, so a pressed button *is* proof
+        # the write landed.
+        isolation = session.evaluate(
+            """
+            const panel = document.getElementById('inspector-panel-session');
+            if (!panel) return null;
+            const inherit = panel.querySelector('[data-testid="session-worktrees-inherit"]');
+            const own = panel.querySelector('[data-testid="session-worktrees-true"]');
+            if (!inherit || !own) return { missing: true };
+            return {
+              inheritPressed: inherit.getAttribute('aria-pressed'),
+              ownPressed: own.getAttribute('aria-pressed'),
+              labels: Array.from(panel.querySelectorAll('.si-choice-button')).map(
+                (node) => (node.textContent || '').trim()
+              ),
+              text: panel.innerText,
+            };
+            """
+        )
+        check("the Session tab offers the session's subagent isolation",
+              isolation is not None and not isolation.get("missing"), str(isolation))
+        if isolation and not isolation.get("missing"):
+            check("...with three choices, not a switch",
+                  isolation["labels"] == ["Install default", "Own worktree", "Share tree"],
+                  str(isolation["labels"]))
+            check("...starting on the install default",
+                  isolation["inheritPressed"] == "true" and isolation["ownPressed"] == "false",
+                  f"inherit={isolation['inheritPressed']} own={isolation['ownPressed']}")
+            check("...and saying which install default it follows",
+                  "Following the settings screen, which has it off" in isolation["text"],
+                  isolation["text"][-200:])
+
+        picked_override = session.evaluate(
+            """
+            const panel = document.getElementById('inspector-panel-session');
+            const own = panel && panel.querySelector('[data-testid="session-worktrees-true"]');
+            if (!own) return null;
+            own.click();
+            const deadline = Date.now() + 15000;
+            while (Date.now() < deadline) {
+              const button = panel.querySelector('[data-testid="session-worktrees-true"]');
+              // The state only moves once the PATCH answered, so waiting for it
+              // is waiting for the server, not for the click.
+              if (button && button.getAttribute('aria-pressed') === 'true') {
+                return { pressed: 'true', text: panel.innerText };
+              }
+              await new Promise((r) => setTimeout(r, 100));
+            }
+            return { pressed: 'false', text: panel.innerText };
+            """
+        )
+        stored = http_json(f"{base}/api/sessions/{first}")["session"].get("worktrees")
+        check("clicking Own worktree stores the override on the session",
+              stored is True, str(stored))
+        check("...and the control follows the server's answer",
+              picked_override is not None and picked_override["pressed"] == "true",
+              str(picked_override and picked_override["pressed"]))
+        check("...and the panel explains what a worktree means",
+              picked_override is not None and "own git checkout" in picked_override["text"],
+              "")
+
+        # Scroll it into view for the screenshot a human will look at.
+        session.evaluate(
+            """
+            const group = document.querySelector('.si-choice');
+            if (group) group.scrollIntoView({block: 'center'});
+            return true;
+            """
+        )
+        time.sleep(0.3)
+        shot_isolation = session.cdp("Page.captureScreenshot", {"format": "png"})
+        if isinstance(shot_isolation, dict) and shot_isolation.get("data"):
+            import base64 as _b64
+
+            out = Path("/tmp/kc-session-isolation.png")
+            out.write_bytes(_b64.b64decode(shot_isolation["data"]))
+            print(f"  screenshot: {out}", flush=True)
+
+        cleared_override = session.evaluate(
+            """
+            const panel = document.getElementById('inspector-panel-session');
+            const inherit = panel && panel.querySelector('[data-testid="session-worktrees-inherit"]');
+            if (!inherit) return null;
+            inherit.click();
+            const deadline = Date.now() + 15000;
+            while (Date.now() < deadline) {
+              const button = panel.querySelector('[data-testid="session-worktrees-inherit"]');
+              if (button && button.getAttribute('aria-pressed') === 'true') return { pressed: 'true' };
+              await new Promise((r) => setTimeout(r, 100));
+            }
+            return { pressed: 'false' };
+            """
+        )
+        cleared_on_server = http_json(f"{base}/api/sessions/{first}")["session"]
+        check("clearing the override puts the session back on the install default",
+              "worktrees" not in cleared_on_server, str(cleared_on_server.get("worktrees")))
+        check("...and the control shows that too",
+              cleared_override is not None and cleared_override["pressed"] == "true",
+              str(cleared_override))
 
         # Pictures, so a human can check it is not merely present but readable:
         # the inspector's own column, top and scrolled to the agents.

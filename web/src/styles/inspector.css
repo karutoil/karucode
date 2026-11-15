@@ -1611,6 +1611,48 @@
   line-height: 1.5;
 }
 
+/* Session-scoped subagent isolation: the same segmented-control shape as the
+ * Agents tab's scope switch (`agent-scope`), sized for three short labels. The
+ * selected segment lifts out of the well rather than tinting, so the choice
+ * survives both themes without a per-theme rule. */
+.si-choice {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+  padding: var(--space-1);
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.si-choice-button {
+  padding: var(--space-2) 4px;
+  border: 0;
+  border-radius: calc(var(--radius) - 3px);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  font-weight: 550;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.si-choice-button:hover:not(:disabled) {
+  color: var(--text-secondary);
+}
+
+.si-choice-button.is-active {
+  background: var(--surface);
+  color: var(--text-user);
+  box-shadow: 0 0 0 1px var(--line-card);
+}
+
+.si-choice-button:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
 /* Definition lists: label left, value right, hairline between rows. */
 .si-meta {
   display: flex;

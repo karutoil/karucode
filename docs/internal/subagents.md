@@ -7,7 +7,7 @@
 
 - **Slug:** `subagents`
 - **Tags:** subagents, delegation, agents, parallel, background, spawn_agent, spawn_agents, send_message, long-running
-- **Applies to:** `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `config:[subagents]`, `config:subagents.max_concurrent`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_iterations`, `config:subagents.timeout_secs`, `config:subagents.worktrees`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_WORKTREES`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `route:GET /api/sessions/:id`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `route:PATCH /api/config`, `route:GET /api/config`, `event:agent_spawned`, `event:agent_progress`, `event:agent_paused`, `event:agent_message`, `event:agent_note`, `event:agent_finished`, `ui:AgentsTab`
+- **Applies to:** `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `tool:subagent_worktrees`, `field:worktree`, `config:[subagents]`, `config:subagents.max_concurrent`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_iterations`, `config:subagents.timeout_secs`, `config:subagents.worktrees`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_WORKTREES`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `route:GET /api/sessions/:id`, `route:PATCH /api/sessions/:id`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `route:PATCH /api/config`, `route:GET /api/config`, `event:agent_spawned`, `event:agent_progress`, `event:agent_paused`, `event:agent_message`, `event:agent_note`, `event:agent_finished`, `ui:AgentsTab`
 - **Source:** `crates/kc-runtime/src/subagent.rs:20`
 
 ---
@@ -120,9 +120,46 @@ worktrees = true   # KARUCODE_SUBAGENT_WORKTREES=1 also works
 
 You do not have to edit the file yourself. Ask the agent - "turn on worktrees
 for subagents" - and it changes the same setting through
-`PATCH /api/config` (`{"subagents": {"worktrees": true}}`); the settings screen
-under **Subagents** has the switch as well. It applies to the next spawn, no
-restart needed, and it is persisted.
+`PATCH /api/config` (`{"subagents": {"worktrees": true}}`) or by calling
+`subagent_worktrees` with `scope: "global"`; the settings screen under
+**Subagents** has the switch as well. It applies to the next spawn, no restart
+needed, and it is persisted.
+
+### Three scopes: one round, one session, the whole install
+
+The install-wide key is the **default**, not the last word. There are three
+scopes and the narrowest one that is set wins:
+
+| Scope | How you ask | Where it lives |
+| --- | --- | --- |
+| this round | `"worktree": true` (or `false`) on one `spawn_agent`/`spawn_agents` call | nothing - the argument itself |
+| this session | `subagent_worktrees` with `mode: "on"/"off"/"inherit"`, or `PATCH /api/sessions/:id` `{"worktrees": ...}` | the session row (`sessions.worktrees`), so it survives a restart |
+| the install | `subagents.worktrees` | the config |
+
+So "use worktrees for this round of subagents" is a spawn argument, "use
+worktrees for the rest of our session" is the tool (or the inspector's
+**Session** tab, section *Subagent isolation*), and "disable worktrees globally"
+is `subagent_worktrees` with `scope: "global"` or the settings screen. In the
+runtime the order is literal: the call's `worktree` argument, else the
+session's `worktrees`, else `subagents.worktrees`. Any of them can say *off* as
+well as *on* - a session that opted out stays shared after the install turns
+isolation on.
+
+```json
+{"name": "spawn_agents", "arguments": {"worktree": true, "tasks": [
+  {"task": "port the parser", "name": "parser"},
+  {"task": "port the printer", "name": "printer"}
+]}}
+{"name": "subagent_worktrees", "arguments": {"mode": "on"}}
+{"name": "subagent_worktrees", "arguments": {"mode": "off", "scope": "global"}}
+```
+
+The decision is made once per spawn, at the moment the child starts: a settings
+change never moves a running child, and the next one follows the new value. A
+per-call argument leaves no trace - it is not remembered as the session's
+setting. `subagent_worktrees` is the top-level agent's tool only: a subagent is
+never offered it, because neither its siblings' isolation nor the install
+default was delegated to it.
 
 **What a child gets.** A detached checkout at
 `<workspace>/.karucode/worktrees/<agent-id>`, and every path tool it calls -
@@ -157,9 +194,12 @@ git branch -D karucode/subagent/<agent-id>      # when you are done with it
 
 **When it refuses.** Only a git repository with at least one commit can support
 a worktree. In a plain directory, or a repo with no commits, the spawn is
-refused with a message naming `subagents.worktrees` - it never falls back to
-the shared tree, because a child quietly running somewhere other than where you
-asked is the surprise this feature exists to avoid.
+refused - it never falls back to the shared tree, because a child quietly
+running somewhere other than where you asked is the surprise this feature
+exists to avoid. The refusal names the scope that asked: `subagents.worktrees`
+for the install default, and for the other two it also says whether this
+spawn's `worktree` argument or this session's `subagent_worktrees` setting is
+the one to change.
 
 **What it costs.** One `git worktree add` and a full checkout per child, so a
 large repository makes spawns slower; the untracked-file copy adds to that.
@@ -279,8 +319,13 @@ row or concurrency slot is left behind.
 * **Subagents share the parent's live workspace by default**, including dirty
   and untracked files. Child edits are immediately visible and survive
   completion; `owned_paths` provides advisory conflict reporting, not locking
-  or isolation. Turn on `subagents.worktrees` (next section) when two children
-  would otherwise race on the same files.
+  or isolation. Turn on `subagents.worktrees` (next section) - or isolate just
+  one session or one round with `subagent_worktrees` / a spawn's `worktree`
+  argument - when two children would otherwise race on the same files.
+* Isolation is chosen at spawn time, from three places (call argument, session
+  override, install default). If you turn it off and children still get their
+  own checkout, the session has an override: `subagent_worktrees`
+  `{"mode": "inherit"}` clears it, and the refusal text names the scope.
 * Recursion is off by default; enabling it without a depth budget turns one
   question into an expensive fan-out.
 * Subagent runs cost tokens and time. Delegating a one-file read is slower than

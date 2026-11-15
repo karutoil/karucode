@@ -288,6 +288,7 @@ impl Store for FakeStore {
             workspace: workspace.to_string(),
             project_id: project_id.map(str::to_string),
             model: None,
+            worktrees: None,
             ephemeral,
             created_at: now,
             updated_at: now,
@@ -423,6 +424,18 @@ impl Store for FakeStore {
         match db.sessions.iter_mut().find(|s| s.id == id) {
             Some(s) => {
                 s.model = model.cloned();
+                s.updated_at = now_ms();
+                Ok(())
+            }
+            None => Err(Error::NotFound(format!("session {id}"))),
+        }
+    }
+
+    async fn set_session_worktrees(&self, id: &str, worktrees: Option<bool>) -> Result<()> {
+        let mut db = self.db();
+        match db.sessions.iter_mut().find(|s| s.id == id) {
+            Some(s) => {
+                s.worktrees = worktrees;
                 s.updated_at = now_ms();
                 Ok(())
             }

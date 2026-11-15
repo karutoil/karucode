@@ -2620,6 +2620,28 @@ export function SettingsSheet(): JSX.Element | null {
                               <option value="click">Open on click</option>
                             </select>
                           </Field>
+                          <Field
+                            id="settings-send-key"
+                            label="Composer send key"
+                            hint={
+                              store.sendKey.value === 'enter'
+                                ? 'Enter sends; Shift+Enter or Ctrl/Cmd+Enter starts a new line.'
+                                : 'Ctrl/Cmd+Enter sends; Enter starts a new line.'
+                            }
+                          >
+                            <select
+                              id="settings-send-key"
+                              class="input"
+                              aria-describedby="settings-send-key-hint"
+                              value={store.sendKey.value}
+                              onChange={(event) =>
+                                actions.setSendKey(event.currentTarget.value as store.SendKey)
+                              }
+                            >
+                              <option value="modifier-enter">Ctrl/Cmd + Enter sends</option>
+                              <option value="enter">Enter sends</option>
+                            </select>
+                          </Field>
                         </div>
                       </section>
 

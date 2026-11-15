@@ -1939,6 +1939,47 @@ export async function clearSessionModelSelection(): Promise<boolean> {
   }
 }
 
+/**
+ * Set this session's subagent-worktree override, or clear it to follow the
+ * install-wide `subagents.worktrees` default again.
+ *
+ * This is the UI half of the same three scopes the agent has: the settings screen
+ * owns the install default, this owns one conversation, and a single spawn can
+ * still override it with its `worktree` argument. The server's answer is
+ * authoritative and is written into the open session's `SessionInfo` so the
+ * control reflects it without waiting for the next poll.
+ */
+export async function setSessionWorktrees(worktrees: boolean | null): Promise<boolean> {
+  const sessionId = store.currentSessionId.value;
+  if (!sessionId) return false;
+  try {
+    const session = await api.setSessionWorktrees(sessionId, worktrees);
+    const info = store.sessionInfo.value;
+    if (info && info.session.id === sessionId && store.currentSessionId.value === sessionId) {
+      store.sessionInfo.value = {
+        ...info,
+        session: { ...info.session, worktrees: session.worktrees ?? null },
+      };
+    }
+    store.pushToast(
+      worktrees === true
+        ? 'Subagents in this session now get their own worktree.'
+        : worktrees === false
+          ? 'Subagents in this session now share this working tree.'
+          : 'Subagents in this session follow the install default again.',
+      'success',
+    );
+    return true;
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+      return false;
+    }
+    store.pushToast(toErrorMessage(error));
+    return false;
+  }
+}
+
 /** models.dev catalog: provider list or one provider's models. */
 export async function loadCatalog(
   provider?: string,
@@ -2533,6 +2574,20 @@ export function setProjectMenuOpen(mode: store.ProjectMenuOpen): void {
   if (store.projectMenuOpen.value === mode) return;
   store.projectMenuOpen.value = mode;
   store.persistProjectMenuOpen(mode);
+}
+
+/**
+ * Choose which key sends a message from the composer.
+ *
+ * Only the composer's key handling changes: the Send/Queue buttons, the queue
+ * toggle, Stop and Escape are the same controls in both modes. The choice is
+ * remembered per browser, like the theme, and applies to the next key press -
+ * no reload, because the composer reads the signal during its own render.
+ */
+export function setSendKey(mode: store.SendKey): void {
+  if (store.sendKey.value === mode) return;
+  store.sendKey.value = mode;
+  store.persistSendKey(mode);
 }
 
 export function closeSheets(): void {

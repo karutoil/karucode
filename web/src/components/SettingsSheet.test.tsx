@@ -1203,6 +1203,11 @@ describe('SettingsSheet appearance', () => {
         'settings-project-dropdown-hint',
         'Hover: resting on the project name opens the list of projects.',
       ],
+      [
+        'Composer send key',
+        'settings-send-key-hint',
+        'Ctrl/Cmd+Enter sends; Enter starts a new line.',
+      ],
     ] as const;
 
     for (const [label, hintId, hintText] of controls) {
@@ -1233,6 +1238,37 @@ describe('SettingsSheet appearance', () => {
     fireEvent.change(select, { target: { value: 'hover' } });
     expect(store.projectMenuOpen.value).toBe('hover');
     expect(localStorage.getItem('karucode.projectMenuOpen')).toBe('hover');
+    expect(patches).toHaveLength(0);
+  });
+
+  it('offers Enter-sends as a browser-stored composer choice', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    await openTab('Appearance');
+    const appearance = await screen.findByRole('region', { name: 'Theme and layout' });
+    const select = within(appearance).getByLabelText('Composer send key') as HTMLSelectElement;
+    expect(Array.from(select.options).map((option) => option.value)).toEqual([
+      'modifier-enter',
+      'enter',
+    ]);
+    // The chord this composer has always used is the default, so an existing
+    // install keeps typing the way it did.
+    expect(select.value).toBe('modifier-enter');
+
+    fireEvent.change(select, { target: { value: 'enter' } });
+    expect(store.sendKey.value).toBe('enter');
+    expect(localStorage.getItem('karucode.composerSendKey')).toBe('enter');
+    // The hint follows the choice, so it describes the key now in force.
+    expect(document.getElementById('settings-send-key-hint')?.textContent).toContain(
+      'Enter sends;',
+    );
+    // Browser preference, not config: the shared Save button must not send it on.
+    expect(patches).toHaveLength(0);
+
+    fireEvent.change(select, { target: { value: 'modifier-enter' } });
+    expect(store.sendKey.value).toBe('modifier-enter');
+    expect(localStorage.getItem('karucode.composerSendKey')).toBe('modifier-enter');
     expect(patches).toHaveLength(0);
   });
 

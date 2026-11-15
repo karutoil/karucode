@@ -141,6 +141,12 @@ struct TitleBody {
     /// an object pins this session to that profile + model.
     #[serde(default, deserialize_with = "double_option")]
     model: Option<Option<SessionModelBody>>,
+    /// Per-session worktree override for the subagents this session spawns.
+    /// Absent leaves it alone; `null` clears it (the session follows
+    /// `subagents.worktrees` again); `true`/`false` pins this conversation on or
+    /// off for as long as it exists.
+    #[serde(default, deserialize_with = "double_option")]
+    worktrees: Option<Option<bool>>,
     /// Create a **temporary** session: excluded from every listing, never
     /// auto-titled, and deleted automatically once its work is over (see
     /// `ephemeral-sessions`). Absent (`false`) is the durable chat every
@@ -357,6 +363,19 @@ pub async fn create_session(State(state): State<AppState>, body: Bytes) -> ApiRe
         }
         None => created,
     };
+    // A session created already isolated (or already shared): the same override
+    // `PATCH /api/sessions/:id` sets, applied before the first message can spawn
+    // anything, so there is no window where the install default decides.
+    let session = match body.worktrees.flatten() {
+        Some(worktrees) => {
+            state
+                .store()
+                .set_session_worktrees(id.as_str(), Some(worktrees))
+                .await?;
+            session_or_404(&state, id.as_str()).await?
+        }
+        None => session,
+    };
     // Runtime-stamped so the SSE `seq` stays monotonic for all clients.
     state.runtime().emit(
         Some(session.id.as_str()),
@@ -460,9 +479,10 @@ pub async fn rename_session(
         Some(raw) => Some(normalize_title(Some(raw))?),
         None => None,
     };
-    if title.is_none() && body.model.is_none() {
+    if title.is_none() && body.model.is_none() && body.worktrees.is_none() {
         return Err(ApiError::bad_request(
-            "title or model is required (send `model: null` to follow the default model)",
+            "title, model or worktrees is required (send `model: null` to follow the default \
+             model, or `worktrees: null` to follow the install-wide subagent isolation)",
         ));
     }
 
@@ -488,6 +508,12 @@ pub async fn rename_session(
         }
         None => None,
     };
+
+    // `Some(Some(..))` pins the session, `Some(None)` clears the override.
+    // Applied before the read below, so the response carries the new value.
+    if let Some(worktrees) = body.worktrees {
+        state.store().set_session_worktrees(&id, worktrees).await?;
+    }
 
     let session = session_or_404(&state, &id).await?;
     if let Some(model) = changed_model {

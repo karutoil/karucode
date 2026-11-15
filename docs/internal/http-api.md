@@ -59,7 +59,7 @@ curl -s -X POST localhost:8787/api/sessions/abc/messages \
 | `GET`/`POST`/`DELETE /api/sessions` | list (temporary sessions excluded), create (`"ephemeral": true` for a temporary one), and sweep every idle temporary session |
 | `GET /api/sessions/:id` | one session with its own transcript (subagent rows excluded; `?messages=N`, default 5000, max 50000) |
 | `GET /api/sessions/:id/info` | the session's counts and token totals: messages, turns, tool calls, working time, per-agent usage, window fill |
-| `PATCH /api/sessions/:id`, `PATCH /api/sessions/:id/model` | rename, and pin or clear this session's model |
+| `PATCH /api/sessions/:id`, `PATCH /api/sessions/:id/model` | rename, pin or clear this session's model, and set or clear this session's worktree override (`{"worktrees": true/false/null}`) |
 | `POST /api/sessions/:id/expire` | retire a temporary session now (same teardown as an automatic expiry) |
 | `POST /api/sessions/:id/messages` | start a run (SSE progress arrives on `/api/events`); `?mode=steer` folds the message into the run in flight, `?mode=follow_up` starts one after it |
 | `GET /api/sessions/:id/queues`, `DELETE /api/sessions/:id/queues/:queued_id` | the messages waiting for the run, and recall one (it never reaches the model) |
@@ -281,6 +281,38 @@ session, so concurrent sessions use different models. If the pinned profile or
 model is deleted later, the run falls back to the default instead of failing.
 Subagents inherit their session's pin. `reasoning_effort` accepts `none`,
 `minimal`, `low`, `medium`, `high` or `max` and is forwarded to the endpoint.
+
+## Per-session subagent isolation
+
+`subagents.worktrees` (see `PATCH /api/config`) is the install-wide default for
+whether a subagent gets its own git checkout. One conversation can override it
+without moving that default, and the override is a real tri-state:
+
+```bash
+# Subagents spawned in this session from now on get their own worktree.
+curl -s -X PATCH localhost:8787/api/sessions/abc \
+  -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+  -d '{"worktrees": true}'
+
+# Keep this session's children in the shared tree even though the install
+# default isolates them. `false` is an override, not "unset".
+curl -s -X PATCH localhost:8787/api/sessions/abc \
+  -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+  -d '{"worktrees": false}'
+
+# Follow the install-wide default again.
+curl -s -X PATCH localhost:8787/api/sessions/abc \
+  -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+  -d '{"worktrees": null}'
+```
+
+The value is on the session row as `worktrees` (absent when the session
+follows the default), it is read at *spawn* time, and it applies to the next
+subagent: nothing restarts, and children already running stay where they
+started. `POST /api/sessions` accepts the same field, so a session can start
+isolated. The narrowest scope - one batch - is the `worktree` argument on
+`spawn_agent`/`spawn_agents`, which needs no state at all; the `subagents`
+topic has the full precedence and what a child gets.
 
 ## Rewinding a session
 

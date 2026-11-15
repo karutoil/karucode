@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 26;
+const SCHEMA_VERSION: i64 = 27;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -436,6 +436,16 @@ CREATE INDEX IF NOT EXISTS idx_plugin_tool_output_events_plugin
  ON plugin_tool_output_events(plugin, id);
 "#;
 
+/// Schema v27: a per-session override for subagent git worktrees.
+///
+/// The column is in [`ADDED_COLUMNS`] (SQLite has no `ADD COLUMN IF NOT
+/// EXISTS`), so the batch is empty. `NULL` - the value every existing row gets -
+/// means "follow `subagents.worktrees`", which is exactly how those sessions
+/// behaved before the column existed. `1`/`0` pin the session on or off so one
+/// conversation can isolate its children (or stop isolating them) without
+/// changing the install default for every other session.
+const MIGRATION_27: &str = "";
+
 const MIGRATION_12: &str = r#"
 CREATE TABLE IF NOT EXISTS missions (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -549,6 +559,7 @@ const ADDED_COLUMNS: &[(i64, &str, &str, &str)] = &[
     (20, "sessions", "control", "INTEGER NOT NULL DEFAULT 0"),
     (22, "projects", "result_panel_width", "INTEGER"),
     (24, "sessions", "ephemeral", "INTEGER NOT NULL DEFAULT 0"),
+    (27, "sessions", "worktrees", "INTEGER"),
 ];
 
 pub struct SqliteStore {
@@ -785,6 +796,9 @@ fn map_session(row: &Row<'_>) -> rusqlite::Result<Session> {
         workspace: row.get("workspace")?,
         project_id: row.get("project_id")?,
         model: json_opt(row.get("model")?, "sessions.model"),
+        worktrees: row
+            .get::<_, Option<i64>>("worktrees")?
+            .map(|value| value == 1),
         ephemeral: row
             .get::<_, Option<i64>>("ephemeral")?
             .is_some_and(|value| value == 1),
@@ -1819,6 +1833,7 @@ impl SqliteStore {
                     24 => MIGRATION_24,
                     25 => MIGRATION_25,
                     26 => MIGRATION_26,
+                    27 => MIGRATION_27,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -2869,7 +2884,7 @@ impl Store for SqliteStore {
             )
             .map_err(|e| db_err("create control session", e))?;
             conn.query_row(
-                "SELECT id,title,workspace,project_id,model,created_at,updated_at,ephemeral FROM sessions WHERE id=?1",
+                "SELECT id,title,workspace,project_id,model,worktrees,created_at,updated_at,ephemeral FROM sessions WHERE id=?1",
                 params![id],
                 map_session,
             )
@@ -2961,7 +2976,7 @@ impl Store for SqliteStore {
             )
             .map_err(|e| db_err("create_session", e))?;
             conn.query_row(
-                "SELECT id, title, workspace, project_id, model, created_at, updated_at, ephemeral FROM sessions WHERE id = ?1",
+                "SELECT id, title, workspace, project_id, model, worktrees, created_at, updated_at, ephemeral FROM sessions WHERE id = ?1",
                 params![id],
                 map_session,
             )
@@ -3024,7 +3039,7 @@ impl Store for SqliteStore {
         let id = id.to_string();
         self.read(move |conn| {
             let mut stmt = conn
-                .prepare("SELECT id, title, workspace, project_id, model, created_at, updated_at, ephemeral FROM sessions WHERE id = ?1")
+                .prepare("SELECT id, title, workspace, project_id, model, worktrees, created_at, updated_at, ephemeral FROM sessions WHERE id = ?1")
                 .map_err(|e| db_err("get_session prepare", e))?;
             let mut rows = stmt.query_map(params![id], map_session).map_err(|e| db_err("get_session query", e))?;
             match rows.next() {
@@ -3091,6 +3106,28 @@ impl Store for SqliteStore {
                     params![id, json, now],
                 )
                 .map_err(|e| db_err("set_session_model", e))?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("session {id}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn set_session_worktrees(&self, id: &str, worktrees: Option<bool>) -> Result<()> {
+        let id = id.to_string();
+        // `Some(true)`/`Some(false)` are stored as 1/0; `None` is SQL NULL, which
+        // is what "follow the install default" is encoded as. Writing NULL rather
+        // than 0 matters: 0 is a real override that keeps children in the shared
+        // tree even after the install default is turned on.
+        let value = worktrees.map(i64::from);
+        self.with(move |conn| {
+            let n = conn
+                .execute(
+                    "UPDATE sessions SET worktrees = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, value, now_ms()],
+                )
+                .map_err(|e| db_err("set_session_worktrees", e))?;
             if n == 0 {
                 return Err(Error::NotFound(format!("session {id}")));
             }
@@ -5795,6 +5832,7 @@ mod tests {
                 24 => MIGRATION_24,
                 25 => MIGRATION_25,
                 26 => MIGRATION_26,
+                27 => MIGRATION_27,
                 other => panic!("no batch for v{other}"),
             };
             for (_, table, column, decl) in ADDED_COLUMNS
@@ -7174,6 +7212,73 @@ mod tests {
         // An unknown session is a NotFound, not a silent no-op.
         assert!(matches!(
             store.set_session_model("s_missing", Some(&selection)).await,
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_worktree_override_round_trips() {
+        let db = TempDb::new("session-worktrees");
+        let store = db.open().await;
+
+        let created = store
+            .create_session("s_1", "First", "/workspace", None, false)
+            .await
+            .expect("create");
+        assert_eq!(
+            created.worktrees, None,
+            "a new session follows the install-wide subagent setting"
+        );
+
+        store
+            .set_session_worktrees("s_1", Some(true))
+            .await
+            .expect("pin worktrees on");
+        assert_eq!(
+            store
+                .get_session("s_1")
+                .await
+                .unwrap()
+                .expect("some")
+                .worktrees,
+            Some(true)
+        );
+
+        // `false` is an override, not the same thing as "unset": it has to survive
+        // a round trip as its own value or a session could never opt out of an
+        // install that turned isolation on.
+        store
+            .set_session_worktrees("s_1", Some(false))
+            .await
+            .expect("pin worktrees off");
+        assert_eq!(
+            store
+                .get_session("s_1")
+                .await
+                .unwrap()
+                .expect("some")
+                .worktrees,
+            Some(false)
+        );
+
+        // Clearing goes back to following the install default.
+        store
+            .set_session_worktrees("s_1", None)
+            .await
+            .expect("clear the override");
+        assert_eq!(
+            store
+                .get_session("s_1")
+                .await
+                .unwrap()
+                .expect("some")
+                .worktrees,
+            None
+        );
+
+        // An unknown session is a NotFound, not a silent no-op.
+        assert!(matches!(
+            store.set_session_worktrees("s_missing", Some(true)).await,
             Err(Error::NotFound(_))
         ));
     }

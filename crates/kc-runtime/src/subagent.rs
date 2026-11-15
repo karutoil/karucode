@@ -21,7 +21,7 @@
 // @kc-title: Delegate work to subagents
 // @kc-summary: How spawn_agent, spawn_agents and the control tools work - blocking and background, sequential and parallel - and the limits they run under.
 // @kc-tags: subagents, delegation, agents, parallel, background, spawn_agent, spawn_agents, send_message, long-running
-// @kc-applies-to: tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, config:[subagents], config:subagents.max_concurrent, config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_iterations, config:subagents.timeout_secs, config:subagents.worktrees, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_WORKTREES, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, route:GET /api/sessions/:id, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:PATCH /api/config, route:GET /api/config, event:agent_spawned, event:agent_progress, event:agent_paused, event:agent_message, event:agent_note, event:agent_finished, ui:AgentsTab
+// @kc-applies-to: tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, tool:subagent_worktrees, field:worktree, config:[subagents], config:subagents.max_concurrent, config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_iterations, config:subagents.timeout_secs, config:subagents.worktrees, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_WORKTREES, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, route:GET /api/sessions/:id, route:PATCH /api/sessions/:id, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:PATCH /api/config, route:GET /api/config, event:agent_spawned, event:agent_progress, event:agent_paused, event:agent_message, event:agent_note, event:agent_finished, ui:AgentsTab
 //
 // The model can call `spawn_agent` with a self-contained task and a list of
 // `owned_paths`. A subagent is a **nested, bounded agent loop**: it gets a fresh
@@ -131,9 +131,46 @@
 //
 // You do not have to edit the file yourself. Ask the agent - "turn on worktrees
 // for subagents" - and it changes the same setting through
-// `PATCH /api/config` (`{"subagents": {"worktrees": true}}`); the settings screen
-// under **Subagents** has the switch as well. It applies to the next spawn, no
-// restart needed, and it is persisted.
+// `PATCH /api/config` (`{"subagents": {"worktrees": true}}`) or by calling
+// `subagent_worktrees` with `scope: "global"`; the settings screen under
+// **Subagents** has the switch as well. It applies to the next spawn, no restart
+// needed, and it is persisted.
+//
+// ## Three scopes: one round, one session, the whole install
+//
+// The install-wide key is the **default**, not the last word. There are three
+// scopes and the narrowest one that is set wins:
+//
+// | Scope | How you ask | Where it lives |
+// | --- | --- | --- |
+// | this round | `"worktree": true` (or `false`) on one `spawn_agent`/`spawn_agents` call | nothing - the argument itself |
+// | this session | `subagent_worktrees` with `mode: "on"/"off"/"inherit"`, or `PATCH /api/sessions/:id` `{"worktrees": ...}` | the session row (`sessions.worktrees`), so it survives a restart |
+// | the install | `subagents.worktrees` | the config |
+//
+// So "use worktrees for this round of subagents" is a spawn argument, "use
+// worktrees for the rest of our session" is the tool (or the inspector's
+// **Session** tab, section *Subagent isolation*), and "disable worktrees globally"
+// is `subagent_worktrees` with `scope: "global"` or the settings screen. In the
+// runtime the order is literal: the call's `worktree` argument, else the
+// session's `worktrees`, else `subagents.worktrees`. Any of them can say *off* as
+// well as *on* - a session that opted out stays shared after the install turns
+// isolation on.
+//
+// ```json
+// {"name": "spawn_agents", "arguments": {"worktree": true, "tasks": [
+//   {"task": "port the parser", "name": "parser"},
+//   {"task": "port the printer", "name": "printer"}
+// ]}}
+// {"name": "subagent_worktrees", "arguments": {"mode": "on"}}
+// {"name": "subagent_worktrees", "arguments": {"mode": "off", "scope": "global"}}
+// ```
+//
+// The decision is made once per spawn, at the moment the child starts: a settings
+// change never moves a running child, and the next one follows the new value. A
+// per-call argument leaves no trace - it is not remembered as the session's
+// setting. `subagent_worktrees` is the top-level agent's tool only: a subagent is
+// never offered it, because neither its siblings' isolation nor the install
+// default was delegated to it.
 //
 // **What a child gets.** A detached checkout at
 // `<workspace>/.karucode/worktrees/<agent-id>`, and every path tool it calls -
@@ -168,9 +205,12 @@
 //
 // **When it refuses.** Only a git repository with at least one commit can support
 // a worktree. In a plain directory, or a repo with no commits, the spawn is
-// refused with a message naming `subagents.worktrees` - it never falls back to
-// the shared tree, because a child quietly running somewhere other than where you
-// asked is the surprise this feature exists to avoid.
+// refused - it never falls back to the shared tree, because a child quietly
+// running somewhere other than where you asked is the surprise this feature
+// exists to avoid. The refusal names the scope that asked: `subagents.worktrees`
+// for the install default, and for the other two it also says whether this
+// spawn's `worktree` argument or this session's `subagent_worktrees` setting is
+// the one to change.
 //
 // **What it costs.** One `git worktree add` and a full checkout per child, so a
 // large repository makes spawns slower; the untracked-file copy adds to that.
@@ -290,8 +330,13 @@
 // * **Subagents share the parent's live workspace by default**, including dirty
 //   and untracked files. Child edits are immediately visible and survive
 //   completion; `owned_paths` provides advisory conflict reporting, not locking
-//   or isolation. Turn on `subagents.worktrees` (next section) when two children
-//   would otherwise race on the same files.
+//   or isolation. Turn on `subagents.worktrees` (next section) - or isolate just
+//   one session or one round with `subagent_worktrees` / a spawn's `worktree`
+//   argument - when two children would otherwise race on the same files.
+// * Isolation is chosen at spawn time, from three places (call argument, session
+//   override, install default). If you turn it off and children still get their
+//   own checkout, the session has an override: `subagent_worktrees`
+//   `{"mode": "inherit"}` clears it, and the refusal text names the scope.
 // * Recursion is off by default; enabling it without a depth budget turns one
 //   question into an expensive fan-out.
 // * Subagent runs cost tokens and time. Delegating a one-file read is slower than
@@ -376,6 +421,8 @@ pub const RESUME_AGENTS_TOOL: &str = "resume_agents";
 pub const KILL_AGENTS_TOOL: &str = "kill_agents";
 /// A subagent reports what it is doing, for its parent and the roster.
 pub const REPORT_STATUS_TOOL: &str = "report_status";
+/// Turn git worktrees for subagents on or off, for this session or the install.
+pub const SUBAGENT_WORKTREES_TOOL: &str = "subagent_worktrees";
 
 /// The delegate tools a child keeps at *every* depth, even with recursion off.
 ///
@@ -412,6 +459,7 @@ pub const DELEGATE_TOOLS: &[&str] = &[
     RESUME_AGENTS_TOOL,
     KILL_AGENTS_TOOL,
     REPORT_STATUS_TOOL,
+    SUBAGENT_WORKTREES_TOOL,
 ];
 
 /// How long a timed-out or cancelled subagent's tools get to observe the
@@ -647,7 +695,10 @@ pub(crate) fn install_delegate_tools(inner: &Arc<RuntimeInner>, registry: &mut T
         Arc::new(KillAgentsTool {
             inner: weak.clone(),
         }),
-        Arc::new(ReportStatusTool { inner: weak }),
+        Arc::new(ReportStatusTool {
+            inner: weak.clone(),
+        }),
+        Arc::new(SubagentWorktreesTool { inner: weak }),
     ] {
         registry.register(tool);
     }
@@ -687,6 +738,82 @@ struct SpawnOptions {
     /// Wait for a background fan-out before returning, so the whole batch is one
     /// result. Only meaningful with `background: true`.
     wait: bool,
+    /// This call's own isolation choice. `None` leaves the decision to the
+    /// session override and then the install default; `Some(true)`/`Some(false)`
+    /// pin it for exactly this batch, which is what "use worktrees for this
+    /// round of subagents" asks for.
+    worktree: Option<bool>,
+}
+
+/// Where a spawn's isolation decision came from, most specific first.
+///
+/// It is carried into the child so a refusal can name the switch the caller can
+/// actually change: "subagents.worktrees is on" is unhelpful advice to somebody
+/// who never touched that key and asked for isolation in one conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorktreeSource {
+    /// The `worktree` argument of this spawn call.
+    Call,
+    /// This session's `subagent_worktrees` setting.
+    Session,
+    /// `subagents.worktrees`.
+    Global,
+}
+
+impl WorktreeSource {
+    /// How the refusal text names this source, or `None` for the install-wide
+    /// setting the underlying message already names.
+    fn refusal_note(self) -> Option<&'static str> {
+        match self {
+            Self::Call => Some(
+                "this spawn asked for a worktree with `worktree: true`; drop the argument, or \
+                 turn the setting off, to let subagents share the parent workspace",
+            ),
+            Self::Session => Some(
+                "this session's `subagent_worktrees` setting asks for worktrees; clear it with \
+                 `subagent_worktrees` `{\"mode\": \"inherit\"}` to let subagents share the parent \
+                 workspace",
+            ),
+            Self::Global => None,
+        }
+    }
+}
+
+/// One spawn's resolved isolation: *where* the child runs and *which* scope
+/// decided it.
+///
+/// The two travel together because the second is only ever read when the first is
+/// `true` and the checkout could not be created: the refusal has to name the
+/// switch the caller can change, and "subagents.worktrees is on" is wrong advice
+/// to somebody who asked for isolation in one conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorktreePlan {
+    on: bool,
+    source: WorktreeSource,
+}
+
+/// Resolve one spawn's isolation: the call's own argument first, then the
+/// session override, then `subagents.worktrees`.
+///
+/// The order is the whole point of the feature. A per-call `worktree` is the
+/// narrowest statement ("this round") and wins outright, a session override is
+/// the next ("the rest of this conversation"), and the install setting is the
+/// fallback everything used to rely on.
+fn resolve_worktrees(call: Option<bool>, session: Option<bool>, global: bool) -> WorktreePlan {
+    match (call, session) {
+        (Some(on), _) => WorktreePlan {
+            on,
+            source: WorktreeSource::Call,
+        },
+        (None, Some(on)) => WorktreePlan {
+            on,
+            source: WorktreeSource::Session,
+        },
+        (None, None) => WorktreePlan {
+            on: global,
+            source: WorktreeSource::Global,
+        },
+    }
 }
 
 pub(crate) struct SpawnAgentTool {
@@ -740,6 +867,10 @@ fn spawn_spec(fan_out: bool) -> ToolSpec {
                     "wait": {
                         "type": "boolean",
                         "description": "With `background: true`, still wait for the whole batch and return its summaries."
+                    },
+                    "worktree": {
+                        "type": "boolean",
+                        "description": "Run these subagents in their own git worktrees for this call only: true isolates them, false keeps them in the shared tree. Omit to follow this session's `subagent_worktrees` setting and then `subagents.worktrees`."
                     }
                 },
                 "required": ["tasks"],
@@ -775,6 +906,10 @@ fn spawn_spec(fan_out: bool) -> ToolSpec {
                     "background": {
                         "type": "boolean",
                         "description": "Return immediately instead of waiting for the subagent; collect the result with `wait_for_agents`."
+                    },
+                    "worktree": {
+                        "type": "boolean",
+                        "description": "Run this subagent in its own git worktree for this call only: true isolates it, false keeps it in the shared tree. Omit to follow this session's `subagent_worktrees` setting and then `subagents.worktrees`."
                     }
                 },
                 "required": ["task"],
@@ -855,9 +990,22 @@ fn parse_spawn_options(request: &ToolCallRequest) -> Result<SpawnOptions> {
             "`{key}` must be a boolean"
         ))),
     };
+    // A tri-state rather than a flag: absent is "whoever is above me decides",
+    // and `null` means the same thing so a client that always sends the key does
+    // not accidentally pin every spawn.
+    let worktree = match request.arguments.get("worktree") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Bool(b)) => Some(*b),
+        Some(_) => {
+            return Err(kc_core::Error::BadRequest(
+                "`worktree` must be a boolean or null".into(),
+            ))
+        }
+    };
     Ok(SpawnOptions {
         background: flag("background")?,
         wait: flag("wait")?,
+        worktree,
     })
 }
 
@@ -984,19 +1132,30 @@ async fn spawn_batch(
     }
 
     // The session's model pin decides the child's model; an explicit `model`
-    // argument still overrides it for just that child. A missing session is not
-    // fatal: fall back to the default model.
-    let session_selection = match store.get_session(&session_id.0).await {
-        Ok(session) => session.and_then(|session| session.model),
+    // argument still overrides it for just that child. The same row carries the
+    // session's worktree override, so one read answers both. A missing session is
+    // not fatal: fall back to the default model and to the install-wide setting.
+    let session_row = match store.get_session(&session_id.0).await {
+        Ok(session) => session,
         Err(e) => {
             tracing::warn!(
                 session = %session_id.0,
                 error = %e,
-                "could not read the session model selection; using the default model"
+                "could not read the session row; using the default model and install-wide subagent isolation"
             );
             None
         }
     };
+    let session_selection = session_row
+        .as_ref()
+        .and_then(|session| session.model.clone());
+    // Resolved once per batch: every child of this call shares one answer, which
+    // is what makes "use worktrees for this round" mean the whole round.
+    let worktree = resolve_worktrees(
+        options.worktree,
+        session_row.as_ref().and_then(|session| session.worktrees),
+        cfg.worktrees,
+    );
     let limits = inner.deps.settings.limits().await;
     let policy = inner.deps.settings.approval_policy().await;
     // A spawn's `model` is free text the caller typed; nothing downstream checks
@@ -1097,6 +1256,7 @@ async fn spawn_batch(
             child_depth,
             &cfg,
             options.background,
+            worktree,
         )
         .await
         {
@@ -1388,9 +1548,12 @@ struct PreparedChild {
     /// The parent's workspace: a child works in the project it was spawned from,
     /// never anywhere else.
     workspace: Arc<kc_core::paths::Workspace>,
+    /// Where this child runs, already resolved from the call argument, the
+    /// session override and `subagents.worktrees` - and which of the three
+    /// decided, so a refusal can name it.
+    worktree: WorktreePlan,
     /// Path-claim warnings, reported with the result.
     warnings: Vec<String>,
-    task: String,
 }
 
 /// Register an agent and everything around it, without starting its loop.
@@ -1409,6 +1572,7 @@ async fn prepare_child(
     child_depth: u8,
     cfg: &kc_core::config::SubagentConfig,
     background: bool,
+    worktree: WorktreePlan,
 ) -> Result<PreparedChild> {
     let agent_id = AgentId::new();
     let short_id: String = {
@@ -1526,8 +1690,8 @@ async fn prepare_child(
         history: vec![Message::user(spawn.task.clone())],
         journal,
         workspace: Arc::clone(&ctx.workspace),
+        worktree,
         warnings,
-        task: spawn.task.clone(),
     })
 }
 
@@ -1554,8 +1718,8 @@ async fn start_child(
         history,
         journal,
         workspace,
+        worktree,
         warnings,
-        task,
     } = prepared;
     let agent_id = AgentId(record.id.clone());
     let session_id = crate::SessionId(record.session_id.clone());
@@ -1637,7 +1801,7 @@ async fn start_child(
             spec,
             _permit_holder(permit),
             warnings_for_task,
-            task,
+            worktree,
         )
         .await;
     });
@@ -1663,7 +1827,7 @@ async fn run_child_loop(
     mut spec: LoopSpec,
     _permit: SubagentPermit,
     mut warnings: Vec<String>,
-    _task: String,
+    plan: WorktreePlan,
 ) {
     let agent_id = live.id.clone();
     let session_id = live.session_id.clone();
@@ -1673,15 +1837,20 @@ async fn run_child_loop(
     // Where the child works. The default is the parent's live workspace: a child
     // sees dirty and untracked parent state, its edits land immediately, and the
     // journal and its tools resolve the same tree, so a rewind never targets a
-    // temporary checkout. `settings.subagents.worktrees = true` replaces that with
-    // a per-child git worktree, created here so a failure can still be reported
-    // through this function's normal paths.
-    let (spec, worktree) = if cfg.worktrees {
+    // temporary checkout. `worktree` is the spawn's already-resolved answer - its
+    // own `worktree` argument, else this session's override, else
+    // `settings.subagents.worktrees` - so the decision and the refusal that can
+    // follow are made where the caller can still see which of the three asked.
+    let (spec, worktree) = if plan.on {
         let root = spec.workspace.root();
         let guard = match crate::worktree::WorktreeGuard::isolated(root, &agent_id.0) {
             Ok(guard) => guard,
             Err(e) => {
-                return finish_failed_spawn(inner, &live, record, warnings, e.to_string()).await
+                let reason = match plan.source.refusal_note() {
+                    Some(note) => format!("{e} ({note})"),
+                    None => e.to_string(),
+                };
+                return finish_failed_spawn(inner, &live, record, warnings, reason).await;
             }
         };
         warnings.extend(guard.warnings().iter().cloned());
@@ -1975,6 +2144,15 @@ fn child_tool_registry(
     let parent = inner.tool_view();
     let mut registry = ToolRegistry::new();
     for name in parent.names() {
+        // `subagent_worktrees` is the top-level agent's alone, at every depth and
+        // with recursion anywhere on the scale: it writes this session's override
+        // and, globally, the install default - neither of which a child was
+        // delegated. Dropping it here (rather than refusing inside the tool) keeps
+        // it out of the child's catalogue, so a model never plans around a tool it
+        // cannot use.
+        if name == SUBAGENT_WORKTREES_TOOL {
+            continue;
+        }
         if !can_delegate && DELEGATION_ONLY_TOOLS.contains(&name.as_str()) {
             continue;
         }
@@ -3134,6 +3312,223 @@ impl Tool for ReportStatusTool {
     }
 }
 
+/// Turn subagent git worktrees on or off, for one session or the whole install.
+///
+/// This is the middle and outermost of the three scopes the feature has. The
+/// narrowest - "use worktrees for this round" - is the `worktree` argument on
+/// `spawn_agent`/`spawn_agents`, which needs no state at all. This tool owns the
+/// other two: the session's own override (`scope: "session"`, the default) and
+/// the install-wide `subagents.worktrees` default the settings screen shows.
+///
+/// Only the top-level agent gets it. [`child_tool_registry`] drops it for every
+/// child at every depth: a subagent deciding how its *siblings* are spawned, or
+/// what the whole install does, was never delegated to it.
+pub(crate) struct SubagentWorktreesTool {
+    inner: Weak<RuntimeInner>,
+}
+
+#[async_trait]
+impl Tool for SubagentWorktreesTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: SUBAGENT_WORKTREES_TOOL.to_string(),
+            description: "Turn git worktrees for subagents on or off, and say at which scope. \
+                          `scope: \"session\"` (the default) changes only this conversation - \
+                          'use worktrees for the rest of our session'. `scope: \"global\"` changes \
+                          the install-wide `subagents.worktrees` default that the settings screen \
+                          shows. For a single round of subagents, pass `worktree: true` or \
+                          `false` to `spawn_agent`/`spawn_agents` instead of calling this. The \
+                          change applies to the next spawn: nothing restarts, and children \
+                          already running keep the tree they started in."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["on", "off", "inherit"],
+                        "description": "`on`: every subagent gets its own git checkout. `off`: subagents share the parent's working tree. `inherit` (session scope only) clears this session's override and follows the install default again."
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["session", "global"],
+                        "description": "`session` (default) changes this conversation only; `global` changes the install-wide default."
+                    }
+                },
+                "required": ["mode"],
+                "additionalProperties": false
+            }),
+            origin: kc_core::tool::ToolOrigin::Builtin,
+        }
+    }
+
+    fn class(&self) -> ToolClass {
+        ToolClass::Delegate
+    }
+
+    async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        let Some(inner) = self.inner.upgrade() else {
+            return ToolOutcome::err("the runtime is shutting down");
+        };
+        // `on`/`off`/`inherit` is the whole vocabulary; every synonym here is one
+        // a model reaches for when a user says "turn it off" or "clear that".
+        let mode =
+            match request
+                .opt_str("mode")
+                .map(|value| value.trim().to_ascii_lowercase())
+            {
+                Some(mode) if matches!(mode.as_str(), "on" | "enable" | "enabled" | "true") => {
+                    Some(true)
+                }
+                Some(mode) if matches!(mode.as_str(), "off" | "disable" | "disabled" | "false") => {
+                    Some(false)
+                }
+                Some(mode)
+                    if matches!(
+                        mode.as_str(),
+                        "inherit" | "default" | "clear" | "reset" | "unset"
+                    ) =>
+                {
+                    None
+                }
+                Some(other) => {
+                    return ToolOutcome::err(format!(
+                        "`mode` must be `on`, `off` or `inherit`, not `{other}`"
+                    ))
+                }
+                None => return ToolOutcome::err(
+                    "`mode` is required: `on`, `off`, or `inherit` to follow the install default",
+                ),
+            };
+        let scope = request
+            .opt_str("scope")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_else(|| "session".to_string());
+        let global = ctx.settings.subagent_config().await.worktrees;
+
+        match scope.as_str() {
+            "session" => {
+                let session_id = ctx.approvals.session_id.clone();
+                if let Err(e) = inner
+                    .deps
+                    .store
+                    .set_session_worktrees(&session_id.0, mode)
+                    .await
+                {
+                    return ToolOutcome::err(format!(
+                        "could not change this session's worktree override: {e}"
+                    ));
+                }
+                let effective = mode.unwrap_or(global);
+                let what = match mode {
+                    Some(true) => "on for this session".to_string(),
+                    Some(false) => "off for this session".to_string(),
+                    None => format!(
+                        "following the install default ({})",
+                        if global { "on" } else { "off" }
+                    ),
+                };
+                ToolOutcome {
+                    ok: true,
+                    content: format!(
+                        "worktrees for subagents: {what}. New subagents in this session {}.\n{}\n\n\
+                         The install default is unchanged ({}). A single spawn can still override \
+                         this either way with its `worktree` argument.",
+                        if effective {
+                            "get their own git checkout"
+                        } else {
+                            "share this working tree"
+                        },
+                        worktree_explanation(effective),
+                        if global { "on" } else { "off" },
+                    ),
+                    truncated: false,
+                    meta: Some(serde_json::json!({
+                        "scope": "session",
+                        "session_worktrees": mode,
+                        "global": global,
+                        "effective": effective,
+                    })),
+                    images: Vec::new(),
+                }
+            }
+            "global" => {
+                let Some(on) = mode else {
+                    return ToolOutcome::err(
+                        "the install-wide default has no `inherit`: pass `mode: \"on\"` or `\"off\"` \
+                         to set it, or `scope: \"session\"` with `mode: \"inherit\"` to clear this \
+                         session's override and follow it",
+                    );
+                };
+                if let Err(e) = ctx.settings.set_subagent_worktrees(on).await {
+                    return ToolOutcome::err(format!("could not change subagents.worktrees: {e}"));
+                }
+                // The session's own override still wins over this, so say which
+                // one a spawn in *this* conversation will actually use.
+                let session = inner
+                    .deps
+                    .store
+                    .get_session(&ctx.approvals.session_id.0)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|session| session.worktrees);
+                let effective = session.unwrap_or(on);
+                let mut content = format!(
+                    "worktrees for subagents: {} for the whole install (subagents.worktrees). \
+                     New subagents in every session follow it unless that session overrides it.\n{}",
+                    if on { "on" } else { "off" },
+                    worktree_explanation(on),
+                );
+                if session.is_some() {
+                    content.push_str(&format!(
+                        "\n\nThis session has its own override ({}), so its subagents {} until you \
+                         clear it with `subagent_worktrees` `{{\"mode\": \"inherit\"}}`.",
+                        if effective { "on" } else { "off" },
+                        if effective {
+                            "keep getting their own checkout"
+                        } else {
+                            "keep sharing this working tree"
+                        },
+                    ));
+                }
+                ToolOutcome {
+                    ok: true,
+                    content,
+                    truncated: false,
+                    meta: Some(serde_json::json!({
+                        "scope": "global",
+                        "global": on,
+                        "session_worktrees": session,
+                        "effective": effective,
+                    })),
+                    images: Vec::new(),
+                }
+            }
+            other => ToolOutcome::err(format!(
+                "`scope` must be `session` or `global`, not `{other}`"
+            )),
+        }
+    }
+}
+
+/// The "what that means" sentence the worktree tools answer with.
+///
+/// Both scopes need it: turning isolation on is not self-explanatory, and the
+/// part that surprises people is that nothing is merged for them.
+fn worktree_explanation(on: bool) -> &'static str {
+    if on {
+        "Each child gets a detached checkout under `.karucode/worktrees/<agent-id>`, started from \
+         your working tree as it is right now; its edits never touch yours. A child that changed \
+         files has them committed onto `karucode/subagent/<agent-id>` when it finishes - nothing \
+         is merged for you, and its summary names the branch. It needs a git repository with at \
+         least one commit: in a plain directory the spawn is refused rather than silently shared."
+    } else {
+        "Children run in this working tree, so their edits are visible immediately and survive \
+         completion. Two children editing the same file will interleave."
+    }
+}
+
 /// Convenience for embedders that build their own registry: install the
 /// runtime built-ins into `registry`.
 pub fn install_builtins(registry: &mut ToolRegistry, runtime: &Arc<crate::Runtime>) {
@@ -3741,6 +4136,237 @@ mod tests {
         assert!(
             result.contains("not inside a git repository"),
             "the refusal must say why: {result}"
+        );
+    }
+
+    /// The session's own override isolates its children even though the install
+    /// default says to share: this is "use worktrees for the rest of our session".
+    #[tokio::test]
+    async fn a_session_override_isolates_children_with_the_install_default_off() {
+        if !git_available() {
+            return;
+        }
+        use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+        use kc_core::store::Store as _;
+        let child_task = "probe the session's own tree";
+        let mut h = HarnessBuilder::new(vec![
+            Script::call(&[(
+                "root_spawn",
+                SPAWN_AGENT_TOOL,
+                &serde_json::json!({ "task": child_task }).to_string(),
+            )]),
+            Script::text("parent done"),
+        ])
+        .tool(Arc::new(WorktreeProbe))
+        .settings(FakeSettings::default().with_subagents(worktree_test_settings(false)))
+        .build()
+        .await;
+        h.factory.key(
+            child_task,
+            vec![
+                Script::call(&[("child_probe", "worktree_probe", "{}")]),
+                Script::text("child done"),
+            ],
+        );
+        init_repo_with_commit(&h.workspace_dir);
+        h.store
+            .set_session_worktrees(h.session(), Some(true))
+            .await
+            .expect("pin the session to worktrees");
+
+        let events = h.run_to_finish("isolate this session's children").await;
+        h.wait_idle().await;
+
+        let probe = tool_output(&events, "child_probe");
+        assert!(
+            probe.contains(crate::worktree::WORKTREE_DIR),
+            "the session override must give the child its own checkout: {probe}"
+        );
+        assert!(
+            !h.workspace_dir.join("child-file.txt").exists(),
+            "an isolated child's edit must not land in the parent's working tree"
+        );
+    }
+
+    /// The other direction: a session that turned isolation off keeps its children
+    /// in the shared tree even after the install default was turned on.
+    #[tokio::test]
+    async fn a_session_override_keeps_children_shared_with_the_install_default_on() {
+        if !git_available() {
+            return;
+        }
+        use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+        use kc_core::store::Store as _;
+        let child_task = "probe the shared tree anyway";
+        let mut h = HarnessBuilder::new(vec![
+            Script::call(&[(
+                "root_spawn",
+                SPAWN_AGENT_TOOL,
+                &serde_json::json!({ "task": child_task }).to_string(),
+            )]),
+            Script::text("parent done"),
+        ])
+        .tool(Arc::new(WorktreeProbe))
+        .settings(FakeSettings::default().with_subagents(worktree_test_settings(true)))
+        .build()
+        .await;
+        h.factory.key(
+            child_task,
+            vec![
+                Script::call(&[("child_probe", "worktree_probe", "{}")]),
+                Script::text("child done"),
+            ],
+        );
+        init_repo_with_commit(&h.workspace_dir);
+        h.store
+            .set_session_worktrees(h.session(), Some(false))
+            .await
+            .expect("pin the session to the shared tree");
+
+        let events = h.run_to_finish("share this session's tree").await;
+        h.wait_idle().await;
+
+        let probe = tool_output(&events, "child_probe");
+        assert!(
+            !probe.contains(crate::worktree::WORKTREE_DIR),
+            "a session override to off must win over the install default: {probe}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(h.workspace_dir.join("child-file.txt")).unwrap(),
+            "from the child\n",
+            "a shared child's edit lands in the parent tree"
+        );
+    }
+
+    /// One round only: the `worktree` argument isolates this spawn and leaves the
+    /// session's stored choice alone, which is what "this round of subagents" is.
+    #[tokio::test]
+    async fn a_worktree_argument_isolates_one_round_and_is_not_remembered() {
+        if !git_available() {
+            return;
+        }
+        use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+        use kc_core::store::Store as _;
+        let child_task = "probe this round's tree";
+        let mut h = HarnessBuilder::new(vec![
+            Script::call(&[(
+                "root_spawn",
+                SPAWN_AGENT_TOOL,
+                &serde_json::json!({ "task": child_task, "worktree": true }).to_string(),
+            )]),
+            Script::text("parent done"),
+        ])
+        .tool(Arc::new(WorktreeProbe))
+        .settings(FakeSettings::default().with_subagents(worktree_test_settings(false)))
+        .build()
+        .await;
+        h.factory.key(
+            child_task,
+            vec![
+                Script::call(&[("child_probe", "worktree_probe", "{}")]),
+                Script::text("child done"),
+            ],
+        );
+        init_repo_with_commit(&h.workspace_dir);
+
+        let events = h.run_to_finish("isolate this one round").await;
+        h.wait_idle().await;
+
+        let probe = tool_output(&events, "child_probe");
+        assert!(
+            probe.contains(crate::worktree::WORKTREE_DIR),
+            "the per-call argument must isolate the child: {probe}"
+        );
+        assert!(
+            !h.workspace_dir.join("child-file.txt").exists(),
+            "an isolated child's edit must not land in the parent's working tree"
+        );
+        let session = h.store.get_session(h.session()).await.unwrap().unwrap();
+        assert_eq!(
+            session.worktrees, None,
+            "a per-round argument must not become the session's setting"
+        );
+    }
+
+    /// The tool is the "rest of our session" path: what it records is what the
+    /// next spawn uses, with no restart and no global change.
+    #[tokio::test]
+    async fn the_worktrees_tool_sets_the_session_scope_for_later_spawns() {
+        if !git_available() {
+            return;
+        }
+        use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+        use kc_core::store::Store as _;
+        let child_task = "probe the tool's tree";
+        let mut h = HarnessBuilder::new(vec![
+            Script::call(&[(
+                "set_worktrees",
+                SUBAGENT_WORKTREES_TOOL,
+                &serde_json::json!({ "mode": "on" }).to_string(),
+            )]),
+            Script::call(&[(
+                "root_spawn",
+                SPAWN_AGENT_TOOL,
+                &serde_json::json!({ "task": child_task }).to_string(),
+            )]),
+            Script::text("parent done"),
+        ])
+        .tool(Arc::new(WorktreeProbe))
+        .settings(FakeSettings::default().with_subagents(worktree_test_settings(false)))
+        .build()
+        .await;
+        h.factory.key(
+            child_task,
+            vec![
+                Script::call(&[("child_probe", "worktree_probe", "{}")]),
+                Script::text("child done"),
+            ],
+        );
+        init_repo_with_commit(&h.workspace_dir);
+
+        let events = h.run_to_finish("turn worktrees on for this session").await;
+        h.wait_idle().await;
+
+        let answer = tool_output(&events, "set_worktrees");
+        assert!(
+            answer.contains("on for this session"),
+            "the tool must say what it set: {answer}"
+        );
+        let session = h.store.get_session(h.session()).await.unwrap().unwrap();
+        assert_eq!(session.worktrees, Some(true));
+        let probe = tool_output(&events, "child_probe");
+        assert!(
+            probe.contains(crate::worktree::WORKTREE_DIR),
+            "the spawn after the tool must use the session override: {probe}"
+        );
+    }
+
+    /// A subagent is never offered the switch: it can neither change how its
+    /// siblings are spawned nor what the install does.
+    #[tokio::test]
+    async fn a_child_never_sees_the_worktrees_tool() {
+        use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+        let h = HarnessBuilder::new(vec![Script::text("parent done")])
+            .settings(FakeSettings::default().with_subagents(worktree_test_settings(false)))
+            .build()
+            .await;
+
+        assert!(
+            h.runtime.tools().get(SUBAGENT_WORKTREES_TOOL).is_some(),
+            "the top-level agent has it"
+        );
+        // Recursion on: the deepest child that may delegate still does not get it.
+        let mut cfg = worktree_test_settings(false);
+        cfg.allow_recursive = true;
+        cfg.max_depth = 3;
+        let child = child_tool_registry(h.runtime.shared(), 1, &cfg);
+        assert!(
+            child.get(SUBAGENT_WORKTREES_TOOL).is_none(),
+            "a subagent must not be able to change isolation for the session or the install"
+        );
+        assert!(
+            child.get(SPAWN_AGENT_TOOL).is_some(),
+            "the same registry still lets a recursive child spawn"
         );
     }
 
@@ -4528,7 +5154,7 @@ mod tests {
                         &inner,
                         &ctx,
                         vec![spawn],
-                        &SpawnOptions { background: false, wait: false },
+                        &SpawnOptions { background: false, wait: false, worktree: None },
                         false,
                     ) => Some(outcome),
                 }
@@ -4735,6 +5361,78 @@ mod tests {
             parse_spawn_options(&request(serde_json::json!({ "background": true }))).unwrap();
         assert!(options.background);
         assert!(parse_spawn_options(&request(serde_json::json!({ "background": "yes" }))).is_err());
+    }
+
+    /// `worktree` is a tri-state, not a flag: absent and `null` both mean "whoever
+    /// is above me decides", so a client that always sends the key cannot pin
+    /// every spawn by accident.
+    #[test]
+    fn the_worktree_argument_is_a_tri_state() {
+        let request = |value: serde_json::Value| ToolCallRequest {
+            call_id: "c".into(),
+            name: SPAWN_AGENT_TOOL.into(),
+            arguments: value,
+        };
+        for absent in [
+            serde_json::json!({ "task": "x" }),
+            serde_json::json!({ "task": "x", "worktree": null }),
+        ] {
+            let options = parse_spawn_options(&request(absent)).unwrap();
+            assert_eq!(options.worktree, None);
+        }
+        let on = parse_spawn_options(&request(serde_json::json!({ "worktree": true }))).unwrap();
+        assert_eq!(on.worktree, Some(true));
+        let off = parse_spawn_options(&request(serde_json::json!({ "worktree": false }))).unwrap();
+        assert_eq!(off.worktree, Some(false));
+        assert!(
+            parse_spawn_options(&request(serde_json::json!({ "worktree": "yes" }))).is_err(),
+            "a non-boolean must be refused, not coerced"
+        );
+    }
+
+    /// The three scopes, in the order the docs promise: the call, then the
+    /// session, then the install.
+    #[test]
+    fn the_narrowest_worktree_scope_wins() {
+        let plan = |on: bool, source: WorktreeSource| WorktreePlan { on, source };
+        assert_eq!(
+            resolve_worktrees(Some(true), Some(false), false),
+            plan(true, WorktreeSource::Call),
+            "a per-call argument beats both other scopes, in either direction"
+        );
+        assert_eq!(
+            resolve_worktrees(Some(false), None, true),
+            plan(false, WorktreeSource::Call)
+        );
+        assert_eq!(
+            resolve_worktrees(None, Some(true), false),
+            plan(true, WorktreeSource::Session)
+        );
+        assert_eq!(
+            resolve_worktrees(None, Some(false), true),
+            plan(false, WorktreeSource::Session),
+            "a session that turned it off stays off after the install default is turned on"
+        );
+        assert_eq!(
+            resolve_worktrees(None, None, true),
+            plan(true, WorktreeSource::Global)
+        );
+        assert_eq!(
+            resolve_worktrees(None, None, false),
+            plan(false, WorktreeSource::Global)
+        );
+    }
+
+    /// A refusal has to point at the switch the caller can actually change: the
+    /// install-wide message alone is useless advice to somebody who asked for one
+    /// round of isolated children.
+    #[test]
+    fn a_refusal_names_the_scope_that_asked_for_isolation() {
+        assert!(WorktreeSource::Global.refusal_note().is_none());
+        let call = WorktreeSource::Call.refusal_note().unwrap();
+        assert!(call.contains("worktree: true"), "{call}");
+        let session = WorktreeSource::Session.refusal_note().unwrap();
+        assert!(session.contains("subagent_worktrees"), "{session}");
     }
 
     #[test]

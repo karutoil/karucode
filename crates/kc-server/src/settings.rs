@@ -379,6 +379,14 @@
 // quietly sharing the tree. The `subagents` topic explains what the child sees,
 // where its changes go, and how to merge them back.
 //
+// This key is the install-wide **default**, not the only switch. One session can
+// override it (`PATCH /api/sessions/:id` `{"worktrees": true/false/null}`, the
+// agent's `subagent_worktrees` tool, or the inspector's **Session** tab), and one
+// spawn can override that with a `worktree` argument. The narrowest scope that is
+// set wins; a per-call argument is never remembered, a session override is stored
+// on the session and survives a restart, and clearing the override (`null` /
+// `mode: "inherit"`) puts the session back on this key.
+//
 // `limits.context_max_chars` decides how much conversation is sent to the model.
 // Leave it at `0` (the default) and the budget is **derived from the resolved
 // model**: its `context_window` minus the room its answer needs, at four
@@ -1431,6 +1439,23 @@ impl Settings for SettingsHandle {
 
     async fn subagent_config(&self) -> SubagentConfig {
         self.read().subagents.clone()
+    }
+
+    /// The install-wide worktree default, written through the same validated,
+    /// persisted update `PATCH /api/config` uses - so `lock_settings` refuses it
+    /// and a failed write leaves the previous value live.
+    async fn set_subagent_worktrees(&self, on: bool) -> Result<(), String> {
+        let patch = ConfigPatch {
+            subagents: Some(SubagentsPatch {
+                worktrees: Some(on),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        self.update(&patch)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     async fn notify_config(&self) -> kc_core::config::NotificationsConfig {

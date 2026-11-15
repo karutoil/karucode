@@ -370,6 +370,9 @@ export function resetAppState(): void {
   // The project dropdown's open mode is a stored browser preference too: a test
   // that switched it to click must not hand a click-only rail to the next one.
   store.projectMenuOpen.value = 'hover';
+  // The composer's send key is a stored browser preference too: a test that
+  // switched it to Enter-sends must not make the next test's plain Enter submit.
+  store.sendKey.value = 'modifier-enter';
   store.mobileSheet.value = null;
   store.inspectorTab.value = 'workspace';
   store.settingsOpen.value = false;

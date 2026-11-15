@@ -838,6 +838,15 @@ export interface Session {
   workspace: string;
   /** Per-session model pin; unset follows the install-wide default. */
   model?: SessionModelSelection | null;
+  /**
+   * Per-session override for subagent git worktrees: `true` isolates this
+   * session's children, `false` keeps them in the shared tree, and absent (which
+   * the server skips entirely) follows `config.subagents.worktrees`.
+   *
+   * `false` is an override, not "unset" - a session can opt out of an install
+   * that turned isolation on.
+   */
+  worktrees?: boolean | null;
   /** Project the session runs in (null for a session created without one). */
   project_id: string | null;
   /**

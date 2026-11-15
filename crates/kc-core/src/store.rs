@@ -107,6 +107,15 @@ pub struct Session {
     /// so several sessions can run different models at the same time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<SessionModelSelection>,
+    /// Per-session override for subagent git worktrees. `None` (the default,
+    /// and every row written before the column existed) follows
+    /// `subagents.worktrees`; `Some(true)` gives every child spawned in this
+    /// session its own checkout, `Some(false)` keeps them in the shared tree
+    /// even when the install default is on. A single spawn can still override
+    /// either way with its own `worktree` argument, so this is the middle of
+    /// three scopes rather than the last word.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktrees: Option<bool>,
     /// True for a temporary session. Ephemeral sessions are excluded from every
     /// listing (they exist for an API client's own bookkeeping, not the rail)
     /// and are deleted when their work is over - by the finishing run, by
@@ -1037,6 +1046,11 @@ pub trait Store: Send + Sync {
         id: &str,
         model: Option<&SessionModelSelection>,
     ) -> Result<()>;
+    /// Set (`Some`) or clear (`None`) a session's worktree override for the
+    /// subagents it spawns. `None` goes back to following
+    /// `subagents.worktrees`. The next spawn in the session reads the new value:
+    /// no restart, and nothing to re-resolve for children already running.
+    async fn set_session_worktrees(&self, id: &str, worktrees: Option<bool>) -> Result<()>;
     async fn delete_session(&self, id: &str) -> Result<()>;
     async fn touch_session(&self, id: &str) -> Result<()>;
     /// Attach a session (typically one created before projects existed) to a

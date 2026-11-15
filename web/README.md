@@ -296,7 +296,9 @@ Agents tab).
   cards, per-run error banners and interrupted notices. Completed turns fold by
   default in built-in themes; errors, approvals, running work and notices remain
   discoverable, and full cards/ungrouped activity stay available explicitly.
-- Composer: auto-grow and resize re-measurement, Cmd/Ctrl+Enter send, Stop/Esc,
+- Composer: auto-grow and resize re-measurement, Cmd/Ctrl+Enter send (or Enter,
+  see the **Composer send key** choice in Settings → Appearance → Theme and
+  layout), Stop/Esc,
   disabled explanations, character counter after 4000 and live activity status. It
   is an opaque floating dock over the transcript, including while reading history,
   and reserves its measured height via `--composer-h` — see `lib/dockHeight.ts` and

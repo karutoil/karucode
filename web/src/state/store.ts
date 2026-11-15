@@ -184,6 +184,43 @@ export function persistProjectMenuOpen(mode: ProjectMenuOpen): void {
   writeString(PROJECT_MENU_OPEN_KEY, mode);
 }
 
+/**
+ * Which key sends a message from the composer.
+ *
+ * `modifier-enter` is the behaviour this composer has always had: Enter starts a
+ * new line and Command/Ctrl+Enter sends. `enter` is the chat-app habit: Enter
+ * sends and Command/Ctrl+Enter (or Shift+Enter) inserts a line break. Both are
+ * legitimate - a person who writes long, multi-paragraph prompts wants Enter to
+ * make a paragraph, a person who dashes off one-liners wants Enter to send - so
+ * this is a real choice rather than a rewrite of the old one. The default stays
+ * `modifier-enter`, which means nobody's half-finished message starts sending
+ * itself after an upgrade.
+ *
+ * A per-browser preference (like the theme and the project dropdown), not a
+ * server setting: it describes how this person types.
+ */
+export type SendKey = 'modifier-enter' | 'enter';
+
+const SEND_KEY_KEY = 'karucode.composerSendKey';
+
+const SEND_KEYS: readonly SendKey[] = ['modifier-enter', 'enter'];
+
+export function readSendKey(): SendKey {
+  try {
+    if (typeof localStorage === 'undefined') return 'modifier-enter';
+    const stored = localStorage.getItem(SEND_KEY_KEY);
+    // An older or hand-edited value is not a reason to guess: modifier-enter is
+    // the behaviour this build has always had.
+    return SEND_KEYS.includes(stored as SendKey) ? (stored as SendKey) : 'modifier-enter';
+  } catch {
+    return 'modifier-enter';
+  }
+}
+
+export function persistSendKey(mode: SendKey): void {
+  writeString(SEND_KEY_KEY, mode);
+}
+
 export function readLastSessionId(): string | null {
   try {
     return typeof localStorage === 'undefined' ? null : localStorage.getItem(LAST_SESSION_KEY);
@@ -365,6 +402,7 @@ export const railCollapsed = signal(readBool(RAIL_KEY, false));
 export const inspectorCollapsed = signal(readBool(INSPECTOR_KEY, false));
 export const inspectorMode = signal<InspectorMode>(readInspectorMode());
 export const projectMenuOpen = signal<ProjectMenuOpen>(readProjectMenuOpen());
+export const sendKey = signal<SendKey>(readSendKey());
 export const mobileSheet = signal<MobileSheet>(null);
 export const inspectorTab = signal<InspectorTab>('workspace');
 /**

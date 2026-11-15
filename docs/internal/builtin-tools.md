@@ -29,14 +29,18 @@
 
 The delegate family - `spawn_agent`, `spawn_agents`, `send_message`,
 `wait_for_agents`, `list_subagents`, `agent_history`, `pause_agents`,
-`resume_agents`, `kill_agents` and `report_status` - is registered by the
-runtime (`crates/kc-runtime/src/subagent.rs`), not here: every one of them needs
-the runtime's live agent registry, which a stateless tool cannot reach. They are
-class `delegate`, and `spawn_agent`/`spawn_agents` take a `background` flag that
-detaches the child so the caller can keep working. The `subagents` topic is
-their reference; this page lists them so the table above is the whole built-in
-surface. Plugin tools are namespaced `plugin__<plugin>__<tool>` and MCP tools
-`mcp__<server>__<tool>`, so a collision with a first-party name is impossible.
+`resume_agents`, `kill_agents`, `report_status` and `subagent_worktrees` - is
+registered by the runtime (`crates/kc-runtime/src/subagent.rs`), not here: every
+one of them needs the runtime's live agent registry, which a stateless tool
+cannot reach. They are class `delegate`, and `spawn_agent`/`spawn_agents` take a
+`background` flag that detaches the child so the caller can keep working, plus a
+`worktree` flag that isolates just that call. `subagent_worktrees` is the
+top-level agent's alone: it sets this session's worktree override, or the
+install-wide default with `scope: "global"`, and no subagent is offered it. The
+`subagents` topic is their reference; this page lists them so the table above is
+the whole built-in surface. Plugin tools are namespaced
+`plugin__<plugin>__<tool>` and MCP tools `mcp__<server>__<tool>`, so a collision
+with a first-party name is impossible.
 
 ## Examples the model is expected to use
 
