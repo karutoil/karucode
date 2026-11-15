@@ -78,6 +78,14 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Fixed
 
+- **The transcript stops jumping and flashing while it scrolls.** A short
+  conversation is no longer windowed: below 150 rows every row is laid out for
+  real, so there is no window padding and no `contain-intrinsic-size` jump under
+  the reader. The measuring pass now ignores the scroll event its own correction
+  produced, so the row range cannot feed itself - the frame-rate loop that showed
+  as the transcript flashing. The scroll-anchoring opt-out moved onto the scroll
+  container, where it disables anchoring for the scroller rather than for one
+  descendant.
 - **The model and reasoning pickers appear where you tapped, above the dock.**
   Below 800px the menu became `position: fixed` to escape the pill row's
   `overflow: hidden` clip, but kept `bottom: calc(100% + 6px)` - and `100%` of a
