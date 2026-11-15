@@ -166,6 +166,12 @@
 // * the request names the plugin, the exact byte value and the reason. It opens a
 //   question in **Settings > Plugins & MCP** and waits (`--wait`, 180 s by
 //   default) for an answer;
+// * **any installed plugin can ask, however it was installed**: a `[[plugins]]`
+//   entry in `config.toml` and a manifest at
+//   `<data_dir>/plugins/<name>/plugin.toml` (`karucode plugin install`) are one
+//   registry. Whatever `GET /api/plugins` lists can be asked about; a name in
+//   neither place is a `404`, and a plugin that is installed but failed to start
+//   still counts - fix it, its budget is waiting;
 // * **until the operator says yes, nothing changes**: the plugin keeps the global
 //   default and you carry on with it;
 // * silence, a dismissal or the wait running out is a **no**. The refusal is

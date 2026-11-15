@@ -769,6 +769,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             Arc::clone(&sqlite_store),
             tool_output_grants,
             Arc::clone(&settings),
+            Arc::clone(&plugins),
         )
         .await,
     );

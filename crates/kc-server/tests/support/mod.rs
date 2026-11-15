@@ -284,6 +284,9 @@ pub struct HarnessBuilder {
     web_dir: Option<PathBuf>,
     extra_tools: Vec<Arc<dyn Tool>>,
     plugin_configs: Vec<PluginConfig>,
+    /// Plugins installed as `<data_dir>/plugins/<name>/plugin.toml` manifests,
+    /// with no `[[plugins]]` entry — the other half of discovery.
+    disk_plugin_configs: Vec<PluginConfig>,
     mcp_configs: Vec<McpServerConfig>,
     /// Put `mcp_configs` in a config file and point the snapshot at it, so a
     /// reload re-reads the file like a real install.
@@ -321,6 +324,7 @@ impl HarnessBuilder {
             web_dir: None,
             extra_tools: Vec::new(),
             plugin_configs: Vec::new(),
+            disk_plugin_configs: Vec::new(),
             mcp_configs: Vec::new(),
             mcp_config_file: false,
             bind_host: "127.0.0.1".into(),
@@ -440,6 +444,15 @@ impl HarnessBuilder {
         self
     }
 
+    /// Install a plugin the way `karucode plugin install` does: a manifest at
+    /// `<data_dir>/plugins/<name>/plugin.toml` and **no** `[[plugins]]` entry.
+    /// The host discovers both sources, so the plugin is real to `GET
+    /// /api/plugins` while the config file has never heard of it.
+    pub fn disk_plugin(mut self, config: PluginConfig) -> Self {
+        self.disk_plugin_configs.push(config);
+        self
+    }
+
     pub fn mcp(mut self, config: McpServerConfig) -> Self {
         self.mcp_configs.push(config);
         self
@@ -483,6 +496,19 @@ impl HarnessBuilder {
         std::fs::create_dir_all(&data_dir).expect("data dir");
         let workspace_dir = workspace_dir.canonicalize().unwrap_or(workspace_dir);
         let data_dir = data_dir.canonicalize().unwrap_or(data_dir);
+
+        // Disk-manifest plugins, exactly where `karucode plugin install` puts
+        // them: `<data_dir>/plugins/<name>/plugin.toml`, and no `[[plugins]]`
+        // entry anywhere. `PluginHost::discover` below finds both sources.
+        for config in &self.disk_plugin_configs {
+            let dir = data_dir.join("plugins").join(&config.name);
+            std::fs::create_dir_all(&dir).expect("plugin dir");
+            std::fs::write(
+                dir.join("plugin.toml"),
+                toml::to_string(config).expect("plugin manifest"),
+            )
+            .expect("plugin manifest");
+        }
 
         let web_dir = self.web_dir;
         let db_path = data_dir.join("karucode.db");
@@ -598,6 +624,7 @@ impl HarnessBuilder {
                 Arc::clone(&store),
                 tool_output_grants,
                 settings.clone(),
+                Arc::clone(&plugins),
             )
             .await,
         );

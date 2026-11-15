@@ -354,6 +354,12 @@ async fn an_unknown_plugin_is_a_404_rather_than_a_silent_no_op() {
     let h = harness(None, plugin("real")).build().await;
     let response = h.get("/api/plugins/imaginary/tool-output").await;
     assert_eq!(response.status.as_u16(), 404);
+    let body = response.json();
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("imaginary") && message.contains("[[plugins]]"),
+        "the 404 names the plugin and both ways to install it: {message}"
+    );
     let (status, _) = post(
         &h,
         "/api/plugins/imaginary/tool-output/request",
@@ -362,4 +368,76 @@ async fn an_unknown_plugin_is_a_404_rather_than_a_silent_no_op() {
     )
     .await;
     assert_eq!(status, 404);
+}
+
+/// `karucode plugin install` leaves a manifest at
+/// `<data_dir>/plugins/<name>/plugin.toml` and no `[[plugins]]` entry anywhere.
+/// That plugin is listed by `GET /api/plugins` and its tools run, so it must be
+/// able to ask for a tool-output budget too - the existence check used to read
+/// the config entries only and answered 404 to every disk-manifest plugin.
+#[tokio::test]
+async fn a_plugin_installed_as_a_disk_manifest_can_ask_for_a_budget() {
+    let h = HarnessBuilder::new(vec![support::text("ok")])
+        .disk_plugin(plugin("codegraph"))
+        .build()
+        .await;
+
+    // Discovered from disk alone: the config snapshot has no entry for it.
+    let listed = h.get("/api/plugins").await.json();
+    let entry = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "codegraph")
+        .expect("a disk-manifest plugin is listed");
+    assert_eq!(
+        entry["tool_output"]["effective_bytes"], 24_000,
+        "the listing already resolves its budget: {entry}"
+    );
+
+    // The bug: this answered 404 `no plugin named `codegraph` is configured`.
+    let response = h.get("/api/plugins/codegraph/tool-output").await;
+    assert_eq!(
+        response.status.as_u16(),
+        200,
+        "a disk-manifest plugin has a budget like any other: {}",
+        response.text()
+    );
+    let view = response.json();
+    assert_eq!(view["plugin"], "codegraph");
+    assert_eq!(view["effective_bytes"], 24_000);
+    assert_eq!(view["granted"], false);
+
+    // And the whole ask-and-answer flow works on it, not just the read.
+    let (status, asked) = post(
+        &h,
+        "/api/plugins/codegraph/tool-output/request",
+        json!({"bytes": 400_000, "reason": "returns whole-feature bundles"}),
+        &[],
+    )
+    .await;
+    assert_eq!(status, 200, "{asked}");
+    assert_eq!(asked["pending"]["bytes"], 400_000);
+
+    let (status, decided) = post(
+        &h,
+        "/api/plugins/codegraph/tool-output/decision",
+        json!({"decision": "grant", "bytes": 400_000}),
+        &[("x-karucode-client", "web")],
+    )
+    .await;
+    assert_eq!(status, 200, "{decided}");
+    assert_eq!(decided["effective_bytes"], 400_000, "{decided}");
+    assert_eq!(decided["granted"], true);
+
+    // What the model will get is the same number the listing shows.
+    let listed = h.get("/api/plugins").await.json();
+    let entry = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "codegraph")
+        .unwrap();
+    assert_eq!(entry["tool_output"]["effective_bytes"], 400_000);
+    assert_eq!(entry["tool_output"]["granted"], true);
 }

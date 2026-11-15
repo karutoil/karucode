@@ -615,6 +615,38 @@ tool_output_bytes = 400000
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// "Is there a plugin called this?" is the registry's answer, not the config
+/// file's: a disk manifest and a plugin that failed to start both own their
+/// name, so the budget routes can accept them while `[[plugins]]` never mentions
+/// them. See `knows`.
+#[test]
+fn a_disk_manifest_owns_its_name_in_the_registry() {
+    let dir = temp_dir("knows");
+    let plugin_dir = dir.join("plugins/installed");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        r#"
+name = "installed"
+command = ["sh", "-c", "exit 0"]
+"#,
+    )
+    .unwrap();
+    // A config entry whose command cannot run: discovered, kept as a slot, and
+    // never silently dropped from the name space.
+    let mut broken = cfg("broken");
+    broken.command = Vec::new();
+
+    let host = PluginHost::discover(&[broken], &dir);
+    assert!(host.knows("installed"), "a disk manifest is a known plugin");
+    assert!(host.knows("broken"), "a failed slot still owns its name");
+    assert!(
+        !host.knows("imaginary"),
+        "a name nothing declares is a typo, not a request"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// The grant path end to end at the host's own boundary: the map the tool reads
 /// answers with the operator's decision, and a refusal answers with nothing.
 #[tokio::test]

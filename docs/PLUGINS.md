@@ -666,6 +666,12 @@ karucode plugin tool-output request kc-codegraph --bytes 400000 \
   from a terminal with `karucode plugin tool-output decide <plugin> --allow
   [--bytes <n>]` / `--refuse`, which refuses without a TTY — an agent has no
   terminal, so it cannot answer its own request.
+* **Any installed plugin can ask, however it was installed.** A `[[plugins]]`
+  entry in `config.toml` and a manifest at
+  `<data_dir>/plugins/<name>/plugin.toml` (`karucode plugin install`) are one
+  registry, so whatever `GET /api/plugins` lists is askable. A name in neither
+  place answers `404`; a plugin that is installed but failed to start still owns
+  its name, so its budget can be decided before it works.
 * **Until an answer is recorded, nothing changes.** The plugin keeps the global
   default, and the listing says so.
 * Silence, a dismissal and the wait running out are all a **no**. The refusal is

@@ -520,6 +520,16 @@ impl PluginHost {
             .collect()
     }
 
+    /// Whether the registry has a slot for this name, ready or not.
+    ///
+    /// This is the full answer to "is there a plugin called this?": discovery
+    /// merges `[[plugins]]` entries with the `<data_dir>/plugins/*/plugin.toml`
+    /// manifests, so a plugin installed on disk is as known as one in the config
+    /// file, and one that failed to start still owns its name.
+    pub fn knows(&self, name: &str) -> bool {
+        self.plugins.iter().any(|slot| slot.config.name == name)
+    }
+
     /// Diagnostics for one plugin.
     pub fn diagnostics_for(&self, name: &str) -> Option<PluginDiagnostics> {
         let tools = colliding_tools(&self.plugins);

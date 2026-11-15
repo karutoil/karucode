@@ -112,6 +112,10 @@ pub struct PluginToolOutput {
     store: Arc<SqliteStore>,
     grants: Arc<Grants>,
     settings: Arc<SettingsHandle>,
+    /// The live registry, consulted for "does this plugin exist". It is the same
+    /// source `GET /api/plugins` reads, so the listing and a budget request can
+    /// never disagree about which names are real.
+    plugins: Arc<tokio::sync::Mutex<kc_plugin_host::PluginHost>>,
 }
 
 impl PluginToolOutput {
@@ -123,11 +127,13 @@ impl PluginToolOutput {
         store: Arc<SqliteStore>,
         grants: Arc<Grants>,
         settings: Arc<SettingsHandle>,
+        plugins: Arc<tokio::sync::Mutex<kc_plugin_host::PluginHost>>,
     ) -> Self {
         let service = Self {
             store,
             grants,
             settings,
+            plugins,
         };
         service.reload().await;
         service
@@ -381,19 +387,22 @@ impl PluginToolOutput {
 
     /// A budget belongs to a plugin that exists; asking for one on a name the
     /// host does not know is a typo, not a request.
+    ///
+    /// "Exists" is the registry's own answer, not the config file's: a plugin
+    /// installed as a disk manifest at `<data_dir>/plugins/<name>/plugin.toml`
+    /// has no `[[plugins]]` entry, and one that failed to start still owns its
+    /// name. Both are askable, exactly as both are listed by `GET /api/plugins`.
     async fn refuse_unknown(&self, plugin: &str) -> ApiResult<()> {
-        let known = self
-            .settings
-            .snapshot()
-            .plugins
-            .iter()
-            .any(|p| p.name == plugin);
+        let known = {
+            let host = self.plugins.lock().await;
+            host.knows(plugin)
+        };
         if known {
             return Ok(());
         }
         Err(ApiError::not_found(format!(
-            "no plugin named `{plugin}` is configured. Add its [[plugins]] entry (or install it) \
-             first; then ask for a tool-output budget."
+            "no plugin named `{plugin}` is loaded. Add its [[plugins]] entry (or install it, and \
+             reload if the server is already running) first; then ask for a tool-output budget."
         )))
     }
 }
