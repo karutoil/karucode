@@ -29,10 +29,41 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / ".github" / "ISSUE_TEMPLATE"
 
 # The field types in GitHub's form schema (docs.github.com, "Syntax for GitHub's
-# form schema"). `upload` and `checkboxes` are newer; none of the templates here
-# has to use them, but a future one may.
-FORM_TYPES = {"markdown", "input", "textarea", "dropdown", "checkboxes", "upload"}
-NO_ATTRIBUTES = {"markdown"}
+# form schema"), with the attribute and validation keys each one accepts. A key
+# outside its type's set is silently ignored by GitHub, so a misspelled
+# `required: true` under the wrong type reads as an optional field forever.
+FORM_TYPES = {
+    "markdown": {
+        "attributes": {"value"},
+        "validations": set(),
+        "needs_id": False,
+    },
+    "input": {
+        "attributes": {"label", "description", "placeholder", "value"},
+        "validations": {"required", "min_length"},
+        "needs_id": True,
+    },
+    "textarea": {
+        "attributes": {"label", "description", "placeholder", "value", "render"},
+        "validations": {"required", "min_length"},
+        "needs_id": True,
+    },
+    "dropdown": {
+        "attributes": {"label", "description", "multiple", "options", "default"},
+        "validations": {"required"},
+        "needs_id": True,
+    },
+    "checkboxes": {
+        "attributes": {"label", "description", "options"},
+        "validations": {"required"},
+        "needs_id": True,
+    },
+    "upload": {
+        "attributes": {"label", "description", "accept"},
+        "validations": {"required"},
+        "needs_id": True,
+    },
+}
 FIELD_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 GOOD_FORM = """\
@@ -92,6 +123,61 @@ def check_contact_links(config: dict) -> list[str]:
     return problems
 
 
+def options_of(where: str, kind: str, attributes: dict) -> list[str]:
+    """The `options` of a dropdown or a checkbox set, which GitHub requires to be
+    non-empty and, for a dropdown, distinct — two identical choices render as one
+    and the reporter cannot tell which they picked."""
+    problems = []
+    options = attributes.get("options")
+    if not isinstance(options, list) or not options:
+        return [f"{where} ({kind}) needs a non-empty attributes.options"]
+
+    if kind == "dropdown":
+        if not all(isinstance(option, str) and option.strip() for option in options):
+            problems.append(f"{where} (dropdown): every option must be text")
+        elif len(set(options)) != len(options):
+            duplicated = sorted({o for o in options if options.count(o) > 1})
+            problems.append(
+                f"{where} (dropdown): repeated option(s): " + ", ".join(duplicated)
+            )
+        default = attributes.get("default")
+        if default is not None and (
+            isinstance(default, bool)
+            or not isinstance(default, int)
+            or not 0 <= default < len(options)
+        ):
+            problems.append(
+                f"{where} (dropdown): attributes.default must be an index into "
+                f"options (0..{len(options) - 1})"
+            )
+    else:
+        for index, option in enumerate(options, start=1):
+            if not isinstance(option, dict):
+                problems.append(
+                    f"{where} (checkboxes): options[{index}] must be a mapping with "
+                    "a label"
+                )
+                continue
+            label = option.get("label")
+            if not isinstance(label, str) or not label.strip():
+                problems.append(
+                    f"{where} (checkboxes): options[{index}] needs a label, the text "
+                    "beside the box"
+                )
+            unknown = set(option) - {"label", "required"}
+            if unknown:
+                problems.append(
+                    f"{where} (checkboxes): options[{index}] has key(s) GitHub does "
+                    "not accept: " + ", ".join(sorted(unknown))
+                )
+            if "required" in option and not isinstance(option["required"], bool):
+                problems.append(
+                    f"{where} (checkboxes): options[{index}].required must be true "
+                    "or false"
+                )
+    return problems
+
+
 def check_form(name: str, data) -> list[str]:
     """Every rule a form has to satisfy to be usable by a stranger."""
     if not isinstance(data, dict):
@@ -137,41 +223,74 @@ def check_form(name: str, data) -> list[str]:
             )
             continue
 
+        spec = FORM_TYPES[kind]
         attributes = field.get("attributes")
-        if kind not in NO_ATTRIBUTES:
+
+        if spec["needs_id"]:
             fillable += 1
-            if not isinstance(attributes, dict):
-                problems.append(f"{where} ({kind}) needs attributes")
-                continue
-            label = attributes.get("label")
-            if not isinstance(label, str) or not label.strip():
-                problems.append(f"{where} ({kind}) needs attributes.label, the "
-                                "prompt the reporter reads")
             field_id = field.get("id")
             if not isinstance(field_id, str) or not FIELD_ID.match(field_id):
-                problems.append(f"{where} ({kind}) needs an id of letters, digits, "
-                                "'-' or '_'")
+                problems.append(
+                    f"{where} ({kind}) needs an id of letters, digits, '-' or '_'"
+                )
             elif field_id in seen_ids:
-                # Two fields sharing an id lose the second one's answer.
+                # Two fields sharing an id lose the second one's answer, and the
+                # URL prefill for it becomes ambiguous.
                 problems.append(f"{where} reuses the id {field_id!r}")
             else:
                 seen_ids.add(field_id)
-            if kind == "dropdown":
-                options = attributes.get("options")
-                if not isinstance(options, list) or not options:
-                    problems.append(f"{where} (dropdown) needs options")
+        elif "id" in field:
+            problems.append(f"{where} (markdown) takes no id; it submits nothing")
+
+        if attributes is None:
+            if spec["needs_id"]:
+                problems.append(f"{where} ({kind}) needs attributes")
+                continue
+        elif not isinstance(attributes, dict):
+            problems.append(f"{where} ({kind}): attributes must be a mapping")
+        else:
+            unknown = set(attributes) - spec["attributes"]
+            if unknown:
+                # GitHub ignores a key its schema does not list, so the field
+                # renders without whatever the author meant to ask for.
+                problems.append(
+                    f"{where} ({kind}): attribute(s) GitHub does not accept: "
+                    + ", ".join(sorted(unknown))
+                )
+            if spec["needs_id"]:
+                label = attributes.get("label")
+                if not isinstance(label, str) or not label.strip():
+                    problems.append(
+                        f"{where} ({kind}) needs attributes.label, the prompt the "
+                        "reporter reads"
+                    )
+                if kind in ("dropdown", "checkboxes"):
+                    problems.extend(options_of(where, kind, attributes))
 
         validations = field.get("validations")
         if validations is not None:
             if not isinstance(validations, dict):
                 problems.append(f"{where}: validations must be a mapping")
             else:
-                for key, value in validations.items():
-                    if key != "required":
-                        problems.append(f"{where}: unknown validation {key!r}")
-                    elif not isinstance(value, bool):
-                        problems.append(f"{where}: validations.required must be true "
-                                        "or false")
+                for key, value in sorted(validations.items()):
+                    if key not in spec["validations"]:
+                        problems.append(
+                            f"{where} ({kind}): validation {key!r} is not part of "
+                            "that field type; GitHub would ignore it"
+                        )
+                    elif key == "required":
+                        if not isinstance(value, bool):
+                            problems.append(
+                                f"{where}: validations.required must be true or false"
+                            )
+                    elif key == "min_length":
+                        # A non-empty floor on a text answer: `required` alone lets
+                        # a reporter submit "." and satisfy the form.
+                        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                            problems.append(
+                                f"{where}: validations.min_length must be a "
+                                "non-negative integer"
+                            )
 
     if not fillable:
         # A form of nothing but markdown is a template with no fields: the
@@ -373,7 +492,7 @@ class IntakeRules(unittest.TestCase):
                 "config.yml": GOOD_CONFIG,
                 "bug_report.yml": GOOD_FORM.replace("type: input", "type: dropdown"),
             },
-            "needs options",
+            "needs a non-empty attributes.options",
         )
 
     def test_required_must_be_a_boolean(self):
@@ -389,6 +508,102 @@ class IntakeRules(unittest.TestCase):
         self.assert_problem(
             {"config.yml": GOOD_CONFIG, "bug_report.yml": "name: [unclosed\n"},
             "not valid YAML",
+        )
+
+    def test_min_length_is_accepted(self):
+        # `required` only proves a box is not empty; a length floor is how the
+        # forms ask for a reproduction worth reading.
+        form = GOOD_FORM.replace(
+            "    validations:\n      required: true",
+            "    validations:\n      required: true\n      min_length: 20",
+        )
+        self.assertIn("min_length", form)
+        self.assertEqual(
+            problems_in({"config.yml": GOOD_CONFIG, "bug_report.yml": form}), []
+        )
+
+    def test_a_validation_the_type_does_not_take_is_rejected(self):
+        # `min_length` on a dropdown is silently dropped by GitHub, so the form
+        # would look validated and submit an empty answer.
+        form = GOOD_FORM.replace(
+            "  - type: input\n    id: version\n    attributes:\n"
+            "      label: karucode version\n"
+            "      description: Output of `karucode --version`.\n"
+            "    validations:\n      required: true\n",
+            "  - type: dropdown\n    id: version\n    attributes:\n"
+            "      label: karucode version\n      options:\n        - 1\n        - 2\n"
+            "    validations:\n      min_length: 3\n",
+        )
+        self.assert_problem(
+            {"config.yml": GOOD_CONFIG, "bug_report.yml": form},
+            "'min_length' is not part of that field type",
+        )
+
+    def test_an_attribute_the_type_does_not_take_is_rejected(self):
+        form = GOOD_FORM.replace(
+            "      description: Output of `karucode --version`.\n",
+            "      description: Output of `karucode --version`.\n"
+            "      options:\n        - a\n",
+        )
+        self.assert_problem(
+            {"config.yml": GOOD_CONFIG, "bug_report.yml": form},
+            "attribute(s) GitHub does not accept: options",
+        )
+
+    def test_a_repeated_dropdown_option_is_rejected(self):
+        form = GOOD_FORM.replace(
+            "  - type: input\n    id: version\n    attributes:\n"
+            "      label: karucode version\n"
+            "      description: Output of `karucode --version`.\n"
+            "    validations:\n      required: true\n",
+            "  - type: dropdown\n    id: version\n    attributes:\n"
+            "      label: karucode version\n"
+            "      options:\n        - \"107\"\n        - \"107\"\n",
+        )
+        self.assert_problem(
+            {"config.yml": GOOD_CONFIG, "bug_report.yml": form},
+            "repeated option(s): 107",
+        )
+
+    def test_a_dropdown_default_outside_its_options_is_rejected(self):
+        form = GOOD_FORM.replace(
+            "  - type: input\n    id: version\n    attributes:\n"
+            "      label: karucode version\n"
+            "      description: Output of `karucode --version`.\n"
+            "    validations:\n      required: true\n",
+            "  - type: dropdown\n    id: version\n    attributes:\n"
+            "      label: karucode version\n"
+            "      options:\n        - 107\n        - 108\n      default: 5\n",
+        )
+        self.assert_problem(
+            {"config.yml": GOOD_CONFIG, "bug_report.yml": form},
+            "attributes.default must be an index",
+        )
+
+    def test_a_checkbox_option_without_a_label_is_rejected(self):
+        form = GOOD_FORM.replace(
+            "  - type: input\n    id: version\n    attributes:\n"
+            "      label: karucode version\n"
+            "      description: Output of `karucode --version`.\n"
+            "    validations:\n      required: true\n",
+            "  - type: checkboxes\n    id: version\n    attributes:\n"
+            "      label: Agreement\n      options:\n        - required: true\n",
+        )
+        self.assert_problem(
+            {"config.yml": GOOD_CONFIG, "bug_report.yml": form},
+            "options[1] needs a label",
+        )
+
+    def test_a_markdown_element_cannot_carry_an_id(self):
+        # Nothing is submitted from markdown, so an id there is a field the
+        # author believes they are collecting.
+        form = GOOD_FORM.replace(
+            "  - type: markdown\n    attributes:\n",
+            "  - type: markdown\n    id: intro\n    attributes:\n",
+        )
+        self.assert_problem(
+            {"config.yml": GOOD_CONFIG, "bug_report.yml": form},
+            "(markdown) takes no id",
         )
 
 
