@@ -48,6 +48,8 @@
 //   mounted on first use and then hidden rather than remounted as views change.
 // * **Project rail** (64 px where shown): projects use their real `favicon.ico`
 //   or initials, with **Theme studio**, command-palette and settings shortcuts.
+//   Right-clicking a project tile (or clicking its active kebab) opens a menu with
+//   **New session**, **Rename…** and **Delete project…**.
 //   App mounts it only for the control plane or for an intentionally collapsed
 //   desktop task rail, where it keeps compact project switching and RailPeek.
 //   The expanded ordinary Workbench instead puts project switching, management
@@ -377,7 +379,7 @@
 //   because its anchor is a snapshot of where the pointer was. Rows that answer a
 //   right-click offer the actions they already offer by a visible control: session
 //   rows (both rails and the control plane's dashboard) offer Rename, Copy title and
-//   Delete, git history rows offer Copy sha and Copy subject, a changed-file row
+//   Delete, project tiles in the rail offer New session, Rename and Delete, git history rows offer Copy sha and Copy subject, a changed-file row
 //   offers Copy path, file-tree rows offer Open and Copy path, notification rows
 //   offer Open, Mark as read and Copy text, agent cards offer Details, Pause/Resume,
 //   Stop and Copy agent id, and terminal chips offer Rename and Close. A right-click

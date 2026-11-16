@@ -6,6 +6,7 @@ import * as actions from '../state/actions';
 import { ProjectRail, pathHint, projectInitials } from './ProjectRail';
 import { Dialog } from './Dialog';
 import * as railPeek from '../state/railPeek';
+import { controlPlaneOpen } from '../state/controlPlane';
 
 vi.mock('../state/actions', () => ({
   switchProject: vi.fn(async () => undefined),
@@ -15,6 +16,7 @@ vi.mock('../state/actions', () => ({
   openThemeStudio: vi.fn(),
   togglePalette: vi.fn(),
   openSettings: vi.fn(),
+  startDraftSession: vi.fn(),
 }));
 
 const NOW = 1_710_000_100_000;
@@ -57,6 +59,7 @@ function renderRail() {
 
 beforeEach(() => {
   setProjects([mainProject, docsProject], mainProject.id);
+  controlPlaneOpen.value = false;
   vi.mocked(actions.switchProject).mockClear();
   vi.mocked(actions.createProject).mockClear();
   vi.mocked(actions.createProject).mockResolvedValue(null);
@@ -64,6 +67,7 @@ beforeEach(() => {
   vi.mocked(actions.renameProjectById).mockResolvedValue(true);
   vi.mocked(actions.deleteProjectById).mockClear();
   vi.mocked(actions.deleteProjectById).mockResolvedValue(true);
+  vi.mocked(actions.startDraftSession).mockClear();
 });
 
 describe('ProjectRail', () => {
@@ -384,6 +388,55 @@ describe('ProjectRail', () => {
     const activeItem = screen.getByRole('button', { name: 'Switch to KaruCode (/home/me/karucode)' });
     fireEvent.contextMenu(activeItem);
     expect(screen.getByRole('menu', { name: 'Project actions for KaruCode' })).not.toBeNull();
+  });
+
+  it('starts a new session for the active project from the tile context menu', () => {
+    controlPlaneOpen.value = true;
+    renderRail();
+
+    const activeItem = screen.getByRole('button', { name: 'Switch to KaruCode (/home/me/karucode)' });
+    fireEvent.contextMenu(activeItem);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'New session' }));
+
+    expect(actions.startDraftSession).toHaveBeenCalledTimes(1);
+    expect(actions.switchProject).not.toHaveBeenCalled();
+    expect(controlPlaneOpen.value).toBe(false);
+  });
+
+  it('switches project and starts a new session when chosen for another project', async () => {
+    vi.mocked(actions.switchProject).mockImplementation(async (id) => {
+      store.currentProjectId.value = id;
+    });
+    renderRail();
+
+    const idleItem = screen.getByRole('button', { name: 'Switch to Docs Site (/home/me/docs)' });
+    fireEvent.contextMenu(idleItem);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'New session' }));
+
+    expect(actions.switchProject).toHaveBeenCalledWith(docsProject.id, { openLatest: false });
+    await vi.waitFor(() => expect(actions.startDraftSession).toHaveBeenCalledTimes(1));
+  });
+
+  it('aborts the draft if project switch was superseded', async () => {
+    let resolveSwitch!: () => void;
+    const switching = new Promise<void>((resolve) => {
+      resolveSwitch = resolve;
+    });
+    vi.mocked(actions.switchProject).mockImplementation(() => switching);
+    renderRail();
+
+    const idleItem = screen.getByRole('button', { name: 'Switch to Docs Site (/home/me/docs)' });
+    fireEvent.contextMenu(idleItem);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'New session' }));
+
+    expect(actions.switchProject).toHaveBeenCalledWith(docsProject.id, { openLatest: false });
+    expect(actions.startDraftSession).not.toHaveBeenCalled();
+
+    // A newer navigation switched to another project while Docs switch was pending.
+    store.currentProjectId.value = 'p_other';
+    resolveSwitch();
+    await vi.waitFor(() => expect(actions.switchProject).toHaveBeenCalled());
+    expect(actions.startDraftSession).not.toHaveBeenCalled();
   });
 });
 

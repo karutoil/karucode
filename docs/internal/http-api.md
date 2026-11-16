@@ -56,7 +56,7 @@ curl -s -X POST localhost:8787/api/sessions/abc/messages \
 | `POST /api/provider/test` | live probe of a profile, base_url or model |
 | `GET /api/models/catalog`, `/api/models/lookup` | models.dev metadata, cached |
 | `GET`/`POST /api/projects` | list and create projects; `PATCH /api/projects/:id/preferences` stores the Workbench result width; `GET /api/projects/:id/favicon` serves the project's own `favicon.ico` (`204` when it has none) |
-| `GET`/`POST`/`DELETE /api/sessions` | list (temporary sessions excluded), create (`"ephemeral": true` for a temporary one), and sweep every idle temporary session |
+| `GET`/`POST`/`DELETE /api/sessions` | list (temporary sessions excluded), create (`"ephemeral": true` for a temporary one), and sweep every idle temporary session. The list is `{"sessions": [...], "annotations": [...]}`: `annotations` is how a plugin asked the rail to draw each row (a `group`, a `sort_key`, `badges`) via the `before_session_list` hook, merged by id and **display only** - the `sessions` array itself is what the store returned, and an annotation can never hide or add a session |
 | `GET /api/sessions/:id` | one session with its own transcript (subagent rows excluded; `?messages=N`, default 5000, max 50000) |
 | `GET /api/sessions/:id/info` | the session's counts and token totals: messages, turns, tool calls, working time, per-agent usage, window fill |
 | `PATCH /api/sessions/:id`, `PATCH /api/sessions/:id/model` | rename, pin or clear this session's model, and set or clear this session's worktree override (`{"worktrees": true/false/null}`) |

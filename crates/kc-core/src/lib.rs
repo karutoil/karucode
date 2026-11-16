@@ -38,15 +38,15 @@ pub use checkpoint::{FileCheckpoint, RewindFile, RewindPreview, UndoOutcome};
 pub use cidr::{cloudflare_ranges, CidrRange, CidrSet};
 pub use error::{Error, Result};
 pub use events::{Event, EventEnvelope, EventSink};
+pub use hooks::{
+    GateDecision, ModelRequestGate, StopDecision, StopGate, ToolCallGate, ToolResultGate,
+};
 pub use ids::{AgentId, ApprovalId, RunId, SessionId};
 pub use message::{Message, Role, ToolCall};
 pub use notify::{Notify, NotifyKind};
 pub use paths::Workspace;
 pub use queue::{
     AttachmentMode, QueuedAttachment, QueuedKind, QueuedMessage, MAX_QUEUED_ATTACHMENTS,
-};
-pub use hooks::{
-    GateDecision, ModelRequestGate, StopDecision, StopGate, ToolCallGate, ToolResultGate,
 };
 pub use settings::Settings;
 pub use skill::{CustomSkill, Skill, SkillRegistry, SkillRoot, SkillSource, SkillsConfig};

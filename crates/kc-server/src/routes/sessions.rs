@@ -345,7 +345,9 @@ pub async fn list_sessions(
         let host = state.plugins().lock().await;
         host.session_list_annotations(project_id, summaries).await
     };
-    Ok(Json(json!({ "sessions": sessions, "annotations": annotations })))
+    Ok(Json(
+        json!({ "sessions": sessions, "annotations": annotations }),
+    ))
 }
 
 pub async fn create_session(State(state): State<AppState>, body: Bytes) -> ApiResult<Json<Value>> {

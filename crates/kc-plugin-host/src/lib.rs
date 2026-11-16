@@ -438,13 +438,7 @@ impl PluginHost {
             // Nothing is listening yet: `listen_notifications` is called after
             // `discover`.
             .map(|entry| {
-                entry.into_slot(
-                    Arc::clone(&timeouts),
-                    None,
-                    None,
-                    Arc::clone(&grants),
-                    None,
-                )
+                entry.into_slot(Arc::clone(&timeouts), None, None, Arc::clone(&grants), None)
             })
             .collect();
         let live_plugins = LivePlugins::default();
@@ -1082,13 +1076,7 @@ impl DiscoveredEntry {
             PluginStatus::Disabled
         };
         let shared = if setup_error.is_none() {
-            let shared = PluginShared::new(
-                config.clone(),
-                timeouts,
-                grants,
-                status,
-                state_backend,
-            );
+            let shared = PluginShared::new(config.clone(), timeouts, grants, status, state_backend);
             // A rebuilt slot is a brand-new `PluginShared`. Without this, a
             // plugin that is loaded or reloaded after `listen_notifications` was
             // called would be built with no listener and its `notify` frames
@@ -2269,7 +2257,10 @@ impl kc_core::hooks::Hooks for PluginHooks {
         fan_out(&self.plugins.snapshot(), hooks::ON_TOOL_RESULT, &payload).await;
     }
 
-    async fn on_tool_call(&self, call: &kc_core::hooks::ToolCallGate) -> kc_core::hooks::GateDecision {
+    async fn on_tool_call(
+        &self,
+        call: &kc_core::hooks::ToolCallGate,
+    ) -> kc_core::hooks::GateDecision {
         fold_gate_answers(gate_tool_call(gate_targets(self), call).await)
     }
 
@@ -2281,7 +2272,10 @@ impl kc_core::hooks::Hooks for PluginHooks {
         append_to_prompt(gate_targets(self), request).await
     }
 
-    async fn on_stop(&self, stop: &kc_core::hooks::StopGate) -> Option<kc_core::hooks::StopDecision> {
+    async fn on_stop(
+        &self,
+        stop: &kc_core::hooks::StopGate,
+    ) -> Option<kc_core::hooks::StopDecision> {
         keep_going(gate_targets(self), stop).await
     }
 
@@ -2337,7 +2331,10 @@ impl kc_core::hooks::Hooks for PluginHost {
         fan_out(&self.ready_plugins(), hooks::ON_TOOL_RESULT, &payload).await;
     }
 
-    async fn on_tool_call(&self, call: &kc_core::hooks::ToolCallGate) -> kc_core::hooks::GateDecision {
+    async fn on_tool_call(
+        &self,
+        call: &kc_core::hooks::ToolCallGate,
+    ) -> kc_core::hooks::GateDecision {
         fold_gate_answers(gate_tool_call(self.ready_plugins(), call).await)
     }
 
@@ -2349,7 +2346,10 @@ impl kc_core::hooks::Hooks for PluginHost {
         append_to_prompt(self.ready_plugins(), request).await
     }
 
-    async fn on_stop(&self, stop: &kc_core::hooks::StopGate) -> Option<kc_core::hooks::StopDecision> {
+    async fn on_stop(
+        &self,
+        stop: &kc_core::hooks::StopGate,
+    ) -> Option<kc_core::hooks::StopDecision> {
         keep_going(self.ready_plugins(), stop).await
     }
 
@@ -2426,10 +2426,7 @@ async fn session_list_annotations(
         // Accept either `{sessions: [...]}` (the documented shape) or a bare array,
         // so a plugin that returns the list directly is understood rather than
         // silently dropped.
-        let rows = value
-            .get("sessions")
-            .cloned()
-            .unwrap_or(value.clone());
+        let rows = value.get("sessions").cloned().unwrap_or(value.clone());
         let Ok(rows) = serde_json::from_value::<Vec<SessionListAnnotation>>(rows) else {
             warn!(
                 hook = hooks::BEFORE_SESSION_LIST,
@@ -2445,8 +2442,8 @@ async fn session_list_annotations(
             for badge in &mut row.badges {
                 let (text, _) = cap_text(badge.text.trim(), MAX_UI_BADGE_BYTES);
                 badge.text = text;
-                badge.tone = kc_core::plugin::ui_tone_or_default(Some(badge.tone.as_str()))
-                    .to_string();
+                badge.tone =
+                    kc_core::plugin::ui_tone_or_default(Some(badge.tone.as_str())).to_string();
             }
             row.badges.retain(|b| !b.text.is_empty());
             // The first plugin to annotate a row wins it: two plugins disagreeing
@@ -2599,7 +2596,11 @@ async fn keep_going(
         "max_continuations": stop.max_continuations,
     });
     for value in fan_out(&plugins, hooks::ON_STOP, &payload).await {
-        if !value.get("continue").and_then(Value::as_bool).unwrap_or(false) {
+        if !value
+            .get("continue")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             continue;
         }
         let reason = value

@@ -49,8 +49,8 @@
 // @kc-doc: plugins
 // @kc-title: Write and install a plugin
 // @kc-summary: Build a plugin with the SDK, register it, install a plugin collection from a GitHub repository or a local directory, ask the operator for a tool-output budget, and debug it when it fails to start.
-// @kc-tags: plugins, extension, sdk, tools, hooks, jsonrpc, panels, ui, buttons, commands, shortcuts, notifications, budget, tool-output
-// @kc-applies-to: config:[[plugins]], file:~/.local/share/karucode/plugins/<name>/plugin.toml, file:index.toml, config:[install], config:install.build, config:install.build_timeout_secs, config:install.exclude, file:install.json, dir:plugins/example-hello, tool:plugin__<plugin>__<tool>, cmd:cargo build -p example-hello, cmd:karucode plugin init, cmd:karucode plugin sdk, cmd:karucode plugin sdk --check, cmd:karucode plugin install, cmd:karucode plugin install --list, cmd:karucode plugin install --force, cmd:karucode plugin install --ref, cmd:karucode plugin install --no-build, cmd:karucode plugin install --build-timeout-secs, cmd:karucode plugin install --data-dir, cmd:karucode plugin tool-output request, cmd:karucode plugin tool-output show, cmd:karucode plugin tool-output decide, cmd:karucode plugin tool-output clear, config:plugins.tool_output_bytes, config:limits.max_plugin_tool_output_bytes, config:limits.max_tool_output_bytes, url:codeload.github.com/<owner>/<repo>/tar.gz/<ref>, env:GH_TOKEN, env:GITHUB_TOKEN, file:src/sdk.rs, file:src/protocol.rs, doc:docs/PLUGINS.md, env:KARUCODE_PLUGIN_NAME, env:KARUCODE_PLUGIN_PROTOCOL, env:KARUCODE_PLUGIN_PERMISSIONS, env:KARUCODE_PLUGIN_SETTINGS, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, config:panels, config:ui, config:plugins_watch, config:plugins_watch_secs, config:notifications.plugin, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/tool-output, route:POST /api/plugins/:name/tool-output/request, route:POST /api/plugins/:name/tool-output/decision, route:DELETE /api/plugins/:name/tool-output, route:POST /api/plugins/install/preview, route:POST /api/plugins/install, route:GET /api/plugins/install/:id, route:POST /api/plugins/install/:id/cancel, route:GET /api/plugins/:name/panels/:panel, route:POST /api/plugins/:name/ui/actions/:action, config:plugin_panels, config:plugin_ui, method:notify, method:ui/action, hook:on_notify, hook:before_prompt, fn:PluginBuilder::panel, fn:PluginBuilder::button, fn:PluginBuilder::message_button, fn:PluginBuilder::command, fn:PluginBuilder::message_command, fn:PluginBuilder::keybinding, fn:PluginBuilder::message_keybinding, fn:PluginBuilder::hide, fn:PluginBuilder::on_ui_action, fn:PluginBuilder::on_notify, fn:notify, fn:normalise_ui_keys, ui:Settings > Plugins & MCP
+// @kc-tags: plugins, extension, sdk, tools, hooks, jsonrpc, panels, ui, buttons, commands, shortcuts, notifications, budget, tool-output, state, gates, badges, session-list, chips
+// @kc-applies-to: config:[[plugins]], file:~/.local/share/karucode/plugins/<name>/plugin.toml, file:index.toml, config:[install], config:install.build, config:install.build_timeout_secs, config:install.exclude, file:install.json, dir:plugins/example-hello, tool:plugin__<plugin>__<tool>, cmd:cargo build -p example-hello, cmd:karucode plugin init, cmd:karucode plugin sdk, cmd:karucode plugin sdk --check, cmd:karucode plugin install, cmd:karucode plugin install --list, cmd:karucode plugin install --force, cmd:karucode plugin install --ref, cmd:karucode plugin install --no-build, cmd:karucode plugin install --build-timeout-secs, cmd:karucode plugin install --data-dir, cmd:karucode plugin tool-output request, cmd:karucode plugin tool-output show, cmd:karucode plugin tool-output decide, cmd:karucode plugin tool-output clear, config:plugins.tool_output_bytes, config:limits.max_plugin_tool_output_bytes, config:limits.max_tool_output_bytes, url:codeload.github.com/<owner>/<repo>/tar.gz/<ref>, env:GH_TOKEN, env:GITHUB_TOKEN, file:src/sdk.rs, file:src/protocol.rs, doc:docs/PLUGINS.md, env:KARUCODE_PLUGIN_NAME, env:KARUCODE_PLUGIN_PROTOCOL, env:KARUCODE_PLUGIN_PERMISSIONS, env:KARUCODE_PLUGIN_SETTINGS, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, config:panels, config:ui, config:plugins_watch, config:plugins_watch_secs, config:notifications.plugin, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/tool-output, route:POST /api/plugins/:name/tool-output/request, route:POST /api/plugins/:name/tool-output/decision, route:DELETE /api/plugins/:name/tool-output, route:POST /api/plugins/install/preview, route:POST /api/plugins/install, route:GET /api/plugins/install/:id, route:POST /api/plugins/install/:id/cancel, route:GET /api/plugins/:name/panels/:panel, route:POST /api/plugins/:name/ui/actions/:action, config:plugin_panels, config:plugin_ui, method:notify, method:ui/action, hook:on_notify, hook:before_prompt, fn:PluginBuilder::panel, fn:PluginBuilder::button, fn:PluginBuilder::message_button, fn:PluginBuilder::command, fn:PluginBuilder::message_command, fn:PluginBuilder::keybinding, fn:PluginBuilder::message_keybinding, fn:PluginBuilder::hide, fn:PluginBuilder::on_ui_action, fn:PluginBuilder::on_notify, fn:PluginBuilder::on_tool_call, fn:PluginBuilder::on_tool_result_gate, fn:PluginBuilder::on_model_request, fn:PluginBuilder::on_stop, fn:PluginBuilder::on_session_list, fn:PluginBuilder::chip_with, fn:PluginBuilder::message_chip, fn:notify, fn:normalise_ui_keys, method:plugin/state/get, method:plugin/state/set, method:plugin/state/delete, method:plugin/state/list, hook:before_session_list, slot:session.row.badge, slot:session.header.chip, ui:Settings > Plugins & MCP
 //
 // A plugin is a separate executable that speaks newline-delimited JSON-RPC 2.0 on
 // stdin/stdout, protocol version `1`. It never links the harness, so it can be
@@ -472,6 +472,93 @@
 // * contributions reach the browser as `GET /api/config`'s `plugin_ui`, and the
 //   click posts to `POST /api/plugins/:name/ui/actions/:action`. A plugin that
 //   declares no `ui` changes nothing.
+//
+// # Gate hooks: refuse a call, rewrite a result, keep a run going
+//
+// The observational hooks (`before_prompt`, `on_run_end`, `on_tool_result`,
+// `on_notify`) can *see* a run. These four can *change* it, which is what a policy
+// plugin needs:
+//
+// * `on_tool_call` — before a tool runs. Return
+//   `{"block": true, "reason": "…"}` to refuse (the reason becomes the result the
+//   model reads), or `{"arguments": {…}}` to run the call with different arguments.
+//   A block is never an approval: a call the approval policy would ask about is
+//   still asked about.
+// * `on_tool_result` — before the model sees the output. Return
+//   `{"output": "…"}` to replace it (redact a secret, summarise 40 kB of log). The
+//   replacement is truncated to the tool's own budget, so it can shrink but never
+//   grow the context.
+// * `on_model_request` — append to the system prompt for one request. Return a
+//   string or `{"text": "…"}`; 4 KiB in total across plugins.
+// * `on_stop` — a run is about to end. Return `{"continue": true, "reason": "…"}`
+//   to keep going for another turn, up to `limits.max_stop_continuations`
+//   (3 by default) across all plugins.
+//
+// ```rust
+// PluginBuilder::new("guard", "0.1.0").on_tool_call(|call: Value| {
+//     let cmd = call["arguments"]["command"].as_str().unwrap_or("");
+//     if call["class"] == "shell" && cmd.contains("rm -rf /") {
+//         return json!({"block": true, "reason": "that deletes the filesystem"});
+//     }
+//     json!(null) // anything that is not a block/rewrite means "run it as asked"
+// });
+// ```
+//
+// Every gate is bounded and failure-tolerant: a plugin that panics, hangs or is
+// dead is treated as "no opinion", so a broken gate degrades to the stock
+// behaviour instead of stopping the session.
+//
+// # Durable state: `plugin/state/*`
+//
+// A plugin is a process; its memory dies on every restart, rebuild and upgrade.
+// These four calls keep data instead:
+//
+// | method | params | returns |
+// | --- | --- | --- |
+// | `plugin/state/get` | `{scope, key}` | `{value}` (`null` when unset) |
+// | `plugin/state/set` | `{scope, key, value}` | `{ok, keys}` |
+// | `plugin/state/delete` | `{scope, key}` | `{deleted}` |
+// | `plugin/state/list` | `{scope, prefix?, limit?}` | `{entries: [{key, value}]}` |
+//
+// `scope` is `session` (one conversation), `project` (every session in one
+// project) or `install` (this server). The **owner id is filled in by the host**
+// from the session the call belongs to, never chosen by the plugin, so a plugin
+// cannot read another conversation's rows. Keys are `[a-z0-9._-]`, a value is at
+// most 64 KiB of JSON, and a plugin holds at most 4 096 keys and 8 MiB per scope —
+// the write that would cross a limit is refused *before* it lands, with a message
+// naming it. Use `HostClient::global().state_set(state_scope::SESSION, &id, "", "k", json!(…))`
+// and `state_get`/`state_list`/`state_delete` from any handler.
+//
+// # Slash commands and chips
+//
+// A `command` contribution appears in the `/` menu as **`/plugin-<plugin>-<id>`**
+// — the prefix is what guarantees a plugin can never shadow `/help`, a skill id or
+// another plugin. Running it calls that plugin's `ui/action` with the typed
+// remainder in `params.args`, costs no tokens and needs no approval: a command is
+// the person typing, exactly like a click.
+//
+// A `button` in a **badge** slot (`session.row.badge`, `session.header.chip`)
+// draws a chip: it carries `text` and `tone` (`neutral`, `accent`, `success`,
+// `warn`, `danger`, `muted`) instead of a label and an icon. `kind: "replace"`
+// renames a whitelisted label (`label.session`, `label.project`, …); nothing that
+// states a safety property is replaceable.
+//
+// # Shaping the session rail: `before_session_list`
+//
+// Declare the hook and return groups, order and chips for the sessions the server
+// is about to list:
+//
+// ```json
+// {"sessions": [{"id": "s_ab12", "group": 0, "badges": [{"text": "open", "tone": "accent"}]}]}
+// ```
+//
+// The answer arrives as `GET /api/sessions`'s `annotations` and is **display
+// only**: an id the server did not list is dropped, and nothing a plugin says can
+// hide a session from the operator, the API or another client. Lower `group`
+// sorts first; `sort_key` breaks ties within a group.
+//
+// A complete worked example — status chips, `/`-commands, a stop gate and the same
+// thing as a tool — lives in `plugins/session-status`.
 //
 // # The call context
 //
@@ -1006,12 +1093,7 @@ impl HostClient {
     /// Returns the JSON-RPC `result` on success, and the error *message* on a
     /// JSON-RPC error - so a caller can put it in a tool result verbatim instead
     /// of guessing what went wrong.
-    pub fn call(
-        &self,
-        method: &str,
-        params: Value,
-        timeout: Duration,
-    ) -> Result<Value, String> {
+    pub fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
         // Our ids carry `PLUGIN_REQUEST_FLAG`, so they can never equal an id the
         // host allocated for its own request (it counts up from 1). The host echoes
         // ours on the reply; without the flag the two id spaces collide on the very
@@ -1216,7 +1298,6 @@ fn route_inbound(client: &HostClient, value: &Value) -> bool {
         None => false,
     }
 }
-
 
 struct ToolEntry {
     def: PluginToolDef,
@@ -2063,11 +2144,9 @@ impl PluginBuilder {
     /// Receive `{project_id, sessions: [{id, title, updated_at, status}]}` and
     /// return `{"sessions": [{id, group?, sort_key?, badges?}]}`. Display only: an
     /// id the host did not list is dropped, and nothing can hide a session.
-    pub fn on_session_list(
-        self,
-        handler: impl Fn(Value) -> Value + Send + Sync + 'static,
-    ) -> Self {
-        self.capability("hooks").hook("before_session_list", handler)
+    pub fn on_session_list(self, handler: impl Fn(Value) -> Value + Send + Sync + 'static) -> Self {
+        self.capability("hooks")
+            .hook("before_session_list", handler)
     }
 
     /// Contribute a **chip** — a small coloured label with an action — into a
@@ -2295,6 +2374,86 @@ impl PluginBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two id spaces must stay disjoint, in both directions.
+    ///
+    /// This is the bug that cost the most to find: both sides numbered their own
+    /// requests from 1, so a plugin's first `plugin/state/*` call aliased the
+    /// host's own request, the host read the question as its answer, and a hook
+    /// timed out while its reply was logged as "unknown request id". The rules
+    /// pinned here are what keeps that from coming back.
+    #[test]
+    fn plugin_request_ids_never_collide_with_host_ids() {
+        let client = HostClient::global();
+        // What `call` allocates: the counter with the marker set.
+        let marked = |n: u64| (n & !PLUGIN_REQUEST_FLAG) | PLUGIN_REQUEST_FLAG;
+        assert_eq!(marked(1), PLUGIN_REQUEST_FLAG | 1);
+        // A host id (1, 2, 3...) never carries the marker, however many it makes.
+        for host_id in 1..1_000u64 {
+            assert_eq!(host_id & PLUGIN_REQUEST_FLAG, 0);
+            assert_ne!(host_id, marked(host_id));
+        }
+        // The client's own counter produces marked ids only.
+        client.inner.next_id.store(0, Ordering::SeqCst);
+        let first = (client.inner.next_id.fetch_add(1, Ordering::SeqCst) + 1)
+            & !PLUGIN_REQUEST_FLAG
+            | PLUGIN_REQUEST_FLAG;
+        assert_ne!(first & PLUGIN_REQUEST_FLAG, 0);
+    }
+
+    /// A frame with the marker is a reply only when a waiter registered it; a
+    /// frame without it is always a request for a worker, never a reply - even
+    /// when its number happens to equal one this plugin is waiting on.
+    #[test]
+    fn an_unmarked_frame_is_never_taken_as_our_reply() {
+        let client = HostClient::global();
+        client.inner.next_id.store(0, Ordering::SeqCst);
+        let pending_id = (client.inner.next_id.fetch_add(1, Ordering::SeqCst) + 1)
+            & !PLUGIN_REQUEST_FLAG
+            | PLUGIN_REQUEST_FLAG;
+        let (tx, rx) = mpsc::channel();
+        client.inner.pending.lock().unwrap().insert(pending_id, tx);
+
+        // The host's own request that happens to use the same number.
+        let host_request = json!({"jsonrpc": "2.0", "id": pending_id & !PLUGIN_REQUEST_FLAG,
+                                  "method": "hooks/run", "params": {}});
+        assert!(
+            !route_inbound(&client, &host_request),
+            "an unmarked id must never satisfy our waiter"
+        );
+        // The real answer, marked, does.
+        let answer = json!({"jsonrpc": "2.0", "id": pending_id, "result": {"value": 7}});
+        assert!(route_inbound(&client, &answer));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap()["result"]["value"],
+            7
+        );
+        assert!(client.inner.pending.lock().unwrap().is_empty());
+    }
+
+    /// A frame with no `method` is a response, and answering it back is how a
+    /// plugin ends up in a ping-pong with its own host.
+    #[test]
+    fn a_response_is_never_answered() {
+        let plugin = Plugin {
+            tables: Arc::new(Tables {
+                manifest: PluginBuilder::new("t", "1").manifest.clone(),
+                tools: BTreeMap::new(),
+                hooks: BTreeMap::new(),
+                panels: BTreeMap::new(),
+                ui_actions: BTreeMap::new(),
+            }),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(plugin
+            .handle_request(json!({"jsonrpc": "2.0", "id": 9, "result": {"ok": true}}))
+            .is_none());
+        // A real request still is answered.
+        assert!(plugin
+            .handle_request(json!({"jsonrpc": "2.0", "id": 9,
+                                   "method": methods::SHUTDOWN, "params": {}}))
+            .is_some());
+    }
 
     /// A latch the test opens from another thread: the `slow` tool waits on it.
     type Latch = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;

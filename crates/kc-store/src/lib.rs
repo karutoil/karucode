@@ -1846,11 +1846,8 @@ impl SqliteStore {
         scope: &str,
         owner_id: &str,
     ) -> Result<i64> {
-        let (plugin, scope, owner_id) = (
-            plugin.to_string(),
-            scope.to_string(),
-            owner_id.to_string(),
-        );
+        let (plugin, scope, owner_id) =
+            (plugin.to_string(), scope.to_string(), owner_id.to_string());
         self.read(move |conn| {
             conn.query_row(
                 "SELECT COALESCE(SUM(LENGTH(value)), 0) FROM plugin_state \

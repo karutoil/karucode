@@ -30,16 +30,47 @@ export const UI_SLOT_COMPOSER_TOOLBAR = 'composer.toolbar';
 export const UI_SLOT_INSPECTOR_HEADER = 'inspector.header';
 /** The session header row above the transcript. */
 export const UI_SLOT_SESSION_HEADER = 'session.header';
+/** The workspace status bar at the bottom of the window. */
+export const UI_SLOT_STATUS_BAR = 'statusbar.item';
+/** A chip on one row of the project rail's session list. */
+export const UI_SLOT_SESSION_ROW_BADGE = 'session.row.badge';
+/** An item in a rail session row's right-click menu. */
+export const UI_SLOT_SESSION_ROW_MENU = 'session.row.menu';
+/** A chip beside the open session's title. */
+export const UI_SLOT_SESSION_HEADER_CHIP = 'session.header.chip';
 
 /** Every slot the app mounts. A button for any other slot is dropped. */
 export const UI_SLOT_IDS: readonly string[] = [
   UI_SLOT_COMPOSER_TOOLBAR,
   UI_SLOT_INSPECTOR_HEADER,
   UI_SLOT_SESSION_HEADER,
+  UI_SLOT_STATUS_BAR,
+  UI_SLOT_SESSION_ROW_BADGE,
+  UI_SLOT_SESSION_ROW_MENU,
+  UI_SLOT_SESSION_HEADER_CHIP,
 ];
+
+/**
+ * Slots whose entry is a **chip** rather than a labelled control.
+ *
+ * A chip shows `text` and a `tone`; everything else about it is a button (it
+ * carries one `action` or one `message`). Kept here as one list so the renderer
+ * and the payload validation cannot disagree.
+ */
+export const UI_BADGE_SLOTS: readonly string[] = [
+  UI_SLOT_SESSION_ROW_BADGE,
+  UI_SLOT_SESSION_HEADER_CHIP,
+];
+
+/** The tones a chip may use. Mirrors `kc_core::plugin::UI_TONES`. */
+export const UI_TONES: readonly string[] = ['neutral', 'accent', 'success', 'warn', 'danger', 'muted'];
+/** The tone drawn when a chip names none, or names one this build does not have. */
+export const UI_TONE_DEFAULT = 'neutral';
 
 /** The composer's paperclip / attach-files button. */
 export const UI_HIDE_COMPOSER_ATTACH = 'composer.attach';
+/** The composer's model / provider picker. */
+export const UI_HIDE_COMPOSER_MODEL = 'composer.model';
 /** The results inspector's **Files** tab. */
 export const UI_HIDE_INSPECTOR_TAB_WORKSPACE = 'inspector.tab.workspace';
 /** The results inspector's **Git** tab. */
@@ -57,6 +88,16 @@ export const UI_HIDE_INSPECTOR_TAB_AGENTS = 'inspector.tab.agents';
  * popped out, so it lives in the header the workbench always draws.
  */
 export const UI_HIDE_CONTEXT_BUTTON = 'inspector.context';
+/** The rail's footer (theme and settings buttons). */
+export const UI_HIDE_RAIL_FOOTER = 'rail.footer';
+/** The session header's action buttons, beside the title. */
+export const UI_HIDE_SESSION_HEADER_ACTIONS = 'session.header.actions';
+/** The notification bell and its panel. */
+export const UI_HIDE_NOTIFICATIONS = 'notifications';
+/** The workspace status bar. */
+export const UI_HIDE_STATUS_BAR = 'statusbar';
+/** The visible command-palette affordance (the chord stays bound). */
+export const UI_HIDE_COMMAND_PALETTE = 'command-palette';
 
 /**
  * Every built-in element a plugin may hide.
@@ -67,11 +108,43 @@ export const UI_HIDE_CONTEXT_BUTTON = 'inspector.context';
  */
 export const UI_HIDE_TARGETS: readonly string[] = [
   UI_HIDE_COMPOSER_ATTACH,
+  UI_HIDE_COMPOSER_MODEL,
   UI_HIDE_INSPECTOR_TAB_WORKSPACE,
   UI_HIDE_INSPECTOR_TAB_CHANGES,
   UI_HIDE_INSPECTOR_TAB_SESSION,
   UI_HIDE_INSPECTOR_TAB_AGENTS,
   UI_HIDE_CONTEXT_BUTTON,
+  UI_HIDE_RAIL_FOOTER,
+  UI_HIDE_SESSION_HEADER_ACTIONS,
+  UI_HIDE_NOTIFICATIONS,
+  UI_HIDE_STATUS_BAR,
+  UI_HIDE_COMMAND_PALETTE,
+];
+
+/** The product name in the rail's lockup. */
+export const UI_REPLACE_APP_NAME = 'app.name';
+/** The word for a conversation ("Session"). */
+export const UI_REPLACE_SESSION_LABEL = 'label.session';
+/** The word for a workspace root ("Project"). */
+export const UI_REPLACE_PROJECT_LABEL = 'label.project';
+/** The "New session" button label. */
+export const UI_REPLACE_NEW_SESSION_LABEL = 'label.new-session';
+/** The empty-state greeting above the composer. */
+export const UI_REPLACE_GREETING = 'empty.greeting';
+
+/**
+ * Every element a plugin may **replace the text of**, rather than hide.
+ *
+ * Mirrors `kc_core::plugin::UI_REPLACEABLE`. Nothing that states a safety
+ * property is on it: a plugin may rename "Project" to "Workspace", never relabel
+ * an approval control or rewrite the unsandboxed-shell warning.
+ */
+export const UI_REPLACE_TARGETS: readonly string[] = [
+  UI_REPLACE_APP_NAME,
+  UI_REPLACE_SESSION_LABEL,
+  UI_REPLACE_PROJECT_LABEL,
+  UI_REPLACE_NEW_SESSION_LABEL,
+  UI_REPLACE_GREETING,
 ];
 
 /** Cap on a label. Matches the host's `MAX_UI_LABEL_BYTES` closely enough. */

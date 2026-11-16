@@ -990,11 +990,14 @@ async function doRefreshSessions(): Promise<void> {
     projectRead === projectGeneration &&
     read === sessionListReadGeneration;
   try {
-    const list = await api.listSessions(projectId);
+    const { sessions: list, annotations } = await api.listSessionsWithAnnotations(projectId);
     if (!isCurrent()) return;
     // Even an unscoped read (no open project) must not put a control chat or
     // another project's session into the rail: see `projectSessionsOnly`.
     const rows = projectSessionsOnly(list);
+    // Display only, and read straight through: the server already merged and
+    // validated these by id, and nothing here may filter the session list itself.
+    store.sessionAnnotations.value = annotations;
     const membershipChanged = sessionsChanged(store.sessions.value, rows);
     store.sessions.value = rows;
     store.sessionsLoading.value = false;
@@ -1092,10 +1095,13 @@ export async function bootstrap(force = false): Promise<void> {
         null;
       store.currentProjectId.value = project?.id ?? null;
       store.writeLastProjectId(project?.id ?? null);
-      const list = await api.listSessions(project?.id ?? null);
+      const { sessions: list, annotations } = await api.listSessionsWithAnnotations(
+        project?.id ?? null,
+      );
       // The same invariant as every other write: a boot with no project reads the
       // unscoped list, which contains control chats and every project's rows.
       store.sessions.value = projectSessionsOnly(list);
+      store.sessionAnnotations.value = annotations;
       store.sessionsLoading.value = false;
       await refreshAgents();
       store.authError.value = null;
@@ -2113,14 +2119,14 @@ export async function refreshProjects(): Promise<void> {
  * Show another project. Sessions are fetched per project from the server, so
  * switching never mixes two projects' histories (or their chat state).
  */
-interface ProjectSwitchOptions {
+export interface ProjectSwitchOptions {
   navigationOwner?: number;
   /** A targeted open waits and selects its own session after the project read. */
   openLatest?: boolean;
 }
 
-export async function switchProject(id: string): Promise<void> {
-  await switchProjectInternal(id);
+export async function switchProject(id: string, options: ProjectSwitchOptions = {}): Promise<void> {
+  await switchProjectInternal(id, options);
 }
 
 async function switchProjectInternal(id: string, options: ProjectSwitchOptions = {}): Promise<void> {

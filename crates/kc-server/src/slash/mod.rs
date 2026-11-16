@@ -69,6 +69,30 @@
 // skill ... the diff in src/api" as your turn, which is exactly what you would
 // have typed by hand.
 //
+// # Plugin commands
+//
+// A plugin can contribute a command. It appears in the menu as
+// **`/plugin-<plugin>-<id>`** — the prefix is deliberate: it is what guarantees a
+// plugin can never shadow `/help`, a skill id or another plugin's command.
+//
+// ```bash
+// GET /api/commands
+// # {"commands": [..., {"name": "plugin-session-status-complete",
+// #   "source": "plugin", "category": "extend", ...}]}
+//
+// curl -s -X POST localhost:8787/api/sessions/s_ab12/messages \
+//   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+//   -d '{"content": "/plugin-session-status-complete shipped the parsers"}'
+// # {"mode": "command", "state": "ok", "command": "plugin-session-status-complete", ...}
+// ```
+//
+// Running one calls that plugin's `ui/action` with the typed remainder in
+// `params.args`. It is the same path a click on a contributed button takes: it
+// costs no tokens and needs no approval, because the person typed it. Only a
+// **ready** plugin contributes: a plugin that failed to start adds nothing to the
+// menu, and a command that vanishes between listing and running is refused with a
+// message naming the plugin.
+//
 // # Limits worth knowing
 //
 // * A command is answered in **any** message mode: `?mode=steer` and

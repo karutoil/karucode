@@ -569,13 +569,10 @@ pub(super) async fn plugin(
     // call and the host still refuses an action no contribution declares.
     let contribution = {
         let ui_model = ui.ui();
-        ui_model
-            .contributions
-            .into_iter()
-            .find(|c| {
-                c.kind == kc_core::plugin::UI_KIND_COMMAND
-                    && kc_plugin_host::hosted_command_name(&c.plugin, &c.id) == name
-            })
+        ui_model.contributions.into_iter().find(|c| {
+            c.kind == kc_core::plugin::UI_KIND_COMMAND
+                && kc_plugin_host::hosted_command_name(&c.plugin, &c.id) == name
+        })
     };
     let Some(contribution) = contribution else {
         return Ok(Reply::fail(format!(

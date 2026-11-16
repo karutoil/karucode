@@ -1490,8 +1490,7 @@ is {})",
             // then fitted with that block reserved, so it cannot push the turn
             // over the window.
             let extra_system = {
-                let mut names: Vec<String> =
-                    tool_specs.iter().map(|t| t.name.clone()).collect();
+                let mut names: Vec<String> = tool_specs.iter().map(|t| t.name.clone()).collect();
                 names.sort();
                 let gate = kc_core::hooks::ModelRequestGate {
                     session_id: spec.session_id.0.clone(),
@@ -1956,8 +1955,8 @@ is {})",
             // more turn carrying its reason as the note the next iteration
             // starts from. The budget is per run and lives in the settings, not
             // in the plugin: a hook must never be able to make a run unendable.
-            if let Some(reason) = stop_gate_continuation(&inner, &spec, &ctx, stop_continuations)
-                .await
+            if let Some(reason) =
+                stop_gate_continuation(&inner, &spec, &ctx, stop_continuations).await
             {
                 stop_continuations += 1;
                 ctx.notice(
@@ -1972,13 +1971,13 @@ is {})",
                     &spec.session_id,
                     &spec.run_id,
                     spec.agent_id.as_ref(),
-                    &Message::user(&format!("[keep going] {reason}")),
+                    &Message::user(format!("[keep going] {reason}")),
                 )
                 .await
                 {
                     ctx.error("store", format!("could not persist the stop note: {e}"));
                 }
-                history.push(Message::user(&format!("[keep going] {reason}")));
+                history.push(Message::user(format!("[keep going] {reason}")));
                 continue;
             }
             return LoopOutcome::new(RunStatus::Completed, None, last_text, iterations);
@@ -3889,17 +3888,14 @@ async fn stop_gate_continuation(
             }
         }
     };
-    decision
-        .filter(|d| d.keep_going)
-        .map(|d| {
-            if d.reason.trim().is_empty() {
-                "a plugin asked for another turn".to_string()
-            } else {
-                d.reason
-            }
-        })
+    decision.filter(|d| d.keep_going).map(|d| {
+        if d.reason.trim().is_empty() {
+            "a plugin asked for another turn".to_string()
+        } else {
+            d.reason
+        }
+    })
 }
-
 
 /// Consume the provider stream, emitting deltas live.
 async fn consume(

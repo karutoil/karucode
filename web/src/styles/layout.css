@@ -636,6 +636,39 @@
   height: 5px;
 }
 
+/*
+ * A chip a plugin contributed (§R4, `session.row.badge`).
+ *
+ * Text, always: the tone is a second cue, never the only one, so a reader who
+ * cannot tell `success` from `danger` still reads the word the plugin wrote. The
+ * tone only tints it. Sits in the row's head beside the title, because the meta
+ * line is already at its width limit on a narrow rail.
+ */
+.session-chip {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  max-width: 9ch;
+  overflow: hidden;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill, 999px);
+  background: var(--surface-2, transparent);
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-tiny);
+  font-weight: 500;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-chip-accent { border-color: currentColor; color: var(--accent-fill); }
+.session-chip-success { border-color: currentColor; color: var(--success); }
+.session-chip-warn { border-color: currentColor; color: var(--warning); }
+.session-chip-danger { border-color: currentColor; color: var(--danger); }
+.session-chip-muted { opacity: 0.75; }
+
 .session-state-running {
   color: var(--accent-fill);
 }

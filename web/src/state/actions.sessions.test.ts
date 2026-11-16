@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../api/endpoints', () => ({
   listSessions: vi.fn(),
+  listSessionsWithAnnotations: vi.fn(),
   listAgents: vi.fn(async () => []),
   getAgents: vi.fn(async () => []),
   getSession: vi.fn(),
@@ -38,8 +39,14 @@ beforeEach(() => {
   store.currentProjectId.value = 'p1';
   store.currentSessionId.value = null;
   store.sessions.value = [];
+  store.sessionAnnotations.value = [];
   store.sessionsLoading.value = true;
 });
+
+/** What `refreshSessions` reads now: the sessions plus whatever a plugin asked for. */
+function listed(sessions: unknown[], annotations: unknown[] = []) {
+  return { sessions, annotations } as never;
+}
 
 describe('refreshing a project session list', () => {
   it('does not re-read the whole agent list when only a run boundary changed', async () => {
@@ -48,9 +55,9 @@ describe('refreshing a project session list', () => {
     // megabytes on a project with history - and nothing about a run boundary
     // changes its membership or its labels.
     store.sessions.value = [projectSession] as never;
-    vi.mocked(api.listSessions).mockResolvedValue([
+    vi.mocked(api.listSessionsWithAnnotations).mockResolvedValue(listed([
       { ...projectSession, running: true, message_count: 9, updated_at: 5 },
-    ] as never);
+    ]));
 
     await actions.refreshSessions();
 
@@ -59,34 +66,65 @@ describe('refreshing a project session list', () => {
 
   it('re-reads the agent list when a session is added, removed or renamed', async () => {
     store.sessions.value = [projectSession] as never;
-    vi.mocked(api.listSessions).mockResolvedValue([
+    vi.mocked(api.listSessionsWithAnnotations).mockResolvedValue(listed([
       { ...projectSession, title: 'Project work, renamed' },
-    ] as never);
+    ]));
     await actions.refreshSessions();
     expect(api.listAgents).toHaveBeenCalledTimes(1);
 
     // A project switch clears the list first, so the new project's agents are
     // always read.
     store.sessions.value = [];
-    vi.mocked(api.listSessions).mockResolvedValue([projectSession] as never);
+    vi.mocked(api.listSessionsWithAnnotations).mockResolvedValue(listed([projectSession]));
     await actions.refreshSessions();
     expect(api.listAgents).toHaveBeenCalledTimes(2);
   });
 
   it('keeps the open, project-less control chat instead of closing it', async () => {
     store.currentSessionId.value = 's-control';
-    vi.mocked(api.listSessions).mockImplementation((async (projectId?: string) =>
-      projectId ? [projectSession] : [projectSession, controlSession]) as never);
+    vi.mocked(api.listSessionsWithAnnotations).mockImplementation((async (projectId?: string) =>
+      listed(projectId ? [projectSession] : [projectSession, controlSession])) as never);
     await actions.refreshSessions();
     expect(store.currentSessionId.value).toBe('s-control');
   });
 
   it('still closes a session that no longer exists anywhere', async () => {
     store.currentSessionId.value = 's-gone';
-    vi.mocked(api.listSessions).mockImplementation((async (projectId?: string) =>
-      projectId ? [projectSession] : [projectSession]) as never);
+    // The rail's list no longer contains it; the global existence check (which
+    // keeps a project-less control chat open) does not either, so it is gone.
+    vi.mocked(api.listSessionsWithAnnotations).mockResolvedValue(listed([projectSession]));
+    vi.mocked(api.listSessions).mockResolvedValue([projectSession] as never);
     await actions.refreshSessions();
     expect(store.currentSessionId.value).toBe('s-project');
+  });
+
+  it('keeps plugin annotations beside the list and never inside it', async () => {
+    // §R4: a plugin shapes how the rail draws a row, not what the row is.
+    vi.mocked(api.listSessionsWithAnnotations).mockResolvedValue(
+      listed(
+        [projectSession],
+        [{ id: 's-project', group: 1, badges: [{ text: 'completed', tone: 'muted' }] }],
+      ),
+    );
+    await actions.refreshSessions();
+
+    expect(store.sessionAnnotations.value).toEqual([
+      { id: 's-project', group: 1, badges: [{ text: 'completed', tone: 'muted' }] },
+    ]);
+    // The session row itself is untouched: no annotation key leaked into it, and
+    // nothing was filtered out because a plugin had an opinion.
+    expect(store.sessions.value.map((session) => session.id)).toEqual(['s-project']);
+    expect(store.sessions.value[0]).not.toHaveProperty('badges');
+    expect(store.sessions.value[0]).not.toHaveProperty('group');
+  });
+
+  it('clears stale annotations when a later list has none', async () => {
+    store.sessionAnnotations.value = [{ id: 's-project', group: 1 }];
+    vi.mocked(api.listSessionsWithAnnotations).mockResolvedValue(listed([projectSession]));
+    await actions.refreshSessions();
+    // A plugin that was disabled (or stopped answering) must not keep painting
+    // chips from the previous read.
+    expect(store.sessionAnnotations.value).toEqual([]);
   });
 
   it('never inserts a control chat into the project list', async () => {
@@ -140,7 +178,7 @@ describe('refreshing a project session list', () => {
       claims: [],
       running: false,
     } as never);
-    vi.mocked(api.listSessions).mockResolvedValue([other] as never);
+    vi.mocked(api.listSessionsWithAnnotations).mockResolvedValue(listed([other]));
     store.sessions.value = [projectSession as never];
     await actions.openSession('s-other');
     expect(store.currentProjectId.value).toBe('p2');
@@ -148,7 +186,9 @@ describe('refreshing a project session list', () => {
     // project it belonged to.
     expect(store.currentSessionId.value).toBe('s-other');
     expect(store.sessions.value.map((session) => session.id)).toEqual(['s-other']);
-    await vi.waitFor(() => expect(api.listSessions).toHaveBeenCalledWith('p2'));
+    await vi.waitFor(() =>
+      expect(api.listSessionsWithAnnotations).toHaveBeenCalledWith('p2'),
+    );
     expect(store.sessions.value.map((session) => session.id)).toEqual(['s-other']);
   });
 
@@ -158,8 +198,8 @@ describe('refreshing a project session list', () => {
     // the write - not the reader - has to hold the invariant.
     store.currentProjectId.value = null;
     const projectless = { ...projectSession, id: 's-projectless', project_id: null };
-    vi.mocked(api.listSessions).mockResolvedValue(
-      [projectSession, controlSession, projectless] as never,
+    vi.mocked(api.listSessionsWithAnnotations).mockResolvedValue(
+      listed([projectSession, controlSession, projectless]),
     );
     await actions.refreshSessions();
     expect(store.sessions.value.map((session) => session.id)).toEqual([

@@ -18,6 +18,7 @@ import type {
   QueuedAttachment,
   SessionInfo,
   SessionModelSelection,
+  SessionAnnotation,
   SessionSummary,
   Toast,
   UpdateStatus,
@@ -304,6 +305,15 @@ export const onboardingStep = signal(0);
 export const accessSettings = signal<AccessSettingsSummary | null>(null);
 
 export const sessions = signal<SessionSummary[]>([]);
+/**
+ * How plugins asked the rail to draw each session (§R4): a group, a sort key and
+ * chips, merged by the server from `before_session_list` answers.
+ *
+ * Kept beside `sessions` rather than inside it because it is *display* only: the
+ * session rows themselves are what the server listed, and code that reads a
+ * session must not have to know a plugin exists. Empty when no plugin answers.
+ */
+export const sessionAnnotations = signal<SessionAnnotation[]>([]);
 export const sessionsLoading = signal(true);
 export const currentSessionId = signal<string | null>(null);
 

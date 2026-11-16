@@ -6,8 +6,8 @@
 > Build a plugin with the SDK, register it, install a plugin collection from a GitHub repository or a local directory, ask the operator for a tool-output budget, and debug it when it fails to start.
 
 - **Slug:** `plugins`
-- **Tags:** plugins, extension, sdk, tools, hooks, jsonrpc, panels, ui, buttons, commands, shortcuts, notifications, budget, tool-output
-- **Applies to:** `config:[[plugins]]`, `file:~/.local/share/karucode/plugins/<name>/plugin.toml`, `file:index.toml`, `config:[install]`, `config:install.build`, `config:install.build_timeout_secs`, `config:install.exclude`, `file:install.json`, `dir:plugins/example-hello`, `tool:plugin__<plugin>__<tool>`, `cmd:cargo build -p example-hello`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin sdk --check`, `cmd:karucode plugin install`, `cmd:karucode plugin install --list`, `cmd:karucode plugin install --force`, `cmd:karucode plugin install --ref`, `cmd:karucode plugin install --no-build`, `cmd:karucode plugin install --build-timeout-secs`, `cmd:karucode plugin install --data-dir`, `cmd:karucode plugin tool-output request`, `cmd:karucode plugin tool-output show`, `cmd:karucode plugin tool-output decide`, `cmd:karucode plugin tool-output clear`, `config:plugins.tool_output_bytes`, `config:limits.max_plugin_tool_output_bytes`, `config:limits.max_tool_output_bytes`, `url:codeload.github.com/<owner>/<repo>/tar.gz/<ref>`, `env:GH_TOKEN`, `env:GITHUB_TOKEN`, `file:src/sdk.rs`, `file:src/protocol.rs`, `doc:docs/PLUGINS.md`, `env:KARUCODE_PLUGIN_NAME`, `env:KARUCODE_PLUGIN_PROTOCOL`, `env:KARUCODE_PLUGIN_PERMISSIONS`, `env:KARUCODE_PLUGIN_SETTINGS`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `config:panels`, `config:ui`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:notifications.plugin`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/tool-output`, `route:POST /api/plugins/:name/tool-output/request`, `route:POST /api/plugins/:name/tool-output/decision`, `route:DELETE /api/plugins/:name/tool-output`, `route:POST /api/plugins/install/preview`, `route:POST /api/plugins/install`, `route:GET /api/plugins/install/:id`, `route:POST /api/plugins/install/:id/cancel`, `route:GET /api/plugins/:name/panels/:panel`, `route:POST /api/plugins/:name/ui/actions/:action`, `config:plugin_panels`, `config:plugin_ui`, `method:notify`, `method:ui/action`, `hook:on_notify`, `hook:before_prompt`, `fn:PluginBuilder::panel`, `fn:PluginBuilder::button`, `fn:PluginBuilder::message_button`, `fn:PluginBuilder::command`, `fn:PluginBuilder::message_command`, `fn:PluginBuilder::keybinding`, `fn:PluginBuilder::message_keybinding`, `fn:PluginBuilder::hide`, `fn:PluginBuilder::on_ui_action`, `fn:PluginBuilder::on_notify`, `fn:notify`, `fn:normalise_ui_keys`, `ui:Settings > Plugins & MCP`
+- **Tags:** plugins, extension, sdk, tools, hooks, jsonrpc, panels, ui, buttons, commands, shortcuts, notifications, budget, tool-output, state, gates, badges, session-list, chips
+- **Applies to:** `config:[[plugins]]`, `file:~/.local/share/karucode/plugins/<name>/plugin.toml`, `file:index.toml`, `config:[install]`, `config:install.build`, `config:install.build_timeout_secs`, `config:install.exclude`, `file:install.json`, `dir:plugins/example-hello`, `tool:plugin__<plugin>__<tool>`, `cmd:cargo build -p example-hello`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin sdk --check`, `cmd:karucode plugin install`, `cmd:karucode plugin install --list`, `cmd:karucode plugin install --force`, `cmd:karucode plugin install --ref`, `cmd:karucode plugin install --no-build`, `cmd:karucode plugin install --build-timeout-secs`, `cmd:karucode plugin install --data-dir`, `cmd:karucode plugin tool-output request`, `cmd:karucode plugin tool-output show`, `cmd:karucode plugin tool-output decide`, `cmd:karucode plugin tool-output clear`, `config:plugins.tool_output_bytes`, `config:limits.max_plugin_tool_output_bytes`, `config:limits.max_tool_output_bytes`, `url:codeload.github.com/<owner>/<repo>/tar.gz/<ref>`, `env:GH_TOKEN`, `env:GITHUB_TOKEN`, `file:src/sdk.rs`, `file:src/protocol.rs`, `doc:docs/PLUGINS.md`, `env:KARUCODE_PLUGIN_NAME`, `env:KARUCODE_PLUGIN_PROTOCOL`, `env:KARUCODE_PLUGIN_PERMISSIONS`, `env:KARUCODE_PLUGIN_SETTINGS`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `config:panels`, `config:ui`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:notifications.plugin`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/tool-output`, `route:POST /api/plugins/:name/tool-output/request`, `route:POST /api/plugins/:name/tool-output/decision`, `route:DELETE /api/plugins/:name/tool-output`, `route:POST /api/plugins/install/preview`, `route:POST /api/plugins/install`, `route:GET /api/plugins/install/:id`, `route:POST /api/plugins/install/:id/cancel`, `route:GET /api/plugins/:name/panels/:panel`, `route:POST /api/plugins/:name/ui/actions/:action`, `config:plugin_panels`, `config:plugin_ui`, `method:notify`, `method:ui/action`, `hook:on_notify`, `hook:before_prompt`, `fn:PluginBuilder::panel`, `fn:PluginBuilder::button`, `fn:PluginBuilder::message_button`, `fn:PluginBuilder::command`, `fn:PluginBuilder::message_command`, `fn:PluginBuilder::keybinding`, `fn:PluginBuilder::message_keybinding`, `fn:PluginBuilder::hide`, `fn:PluginBuilder::on_ui_action`, `fn:PluginBuilder::on_notify`, `fn:PluginBuilder::on_tool_call`, `fn:PluginBuilder::on_tool_result_gate`, `fn:PluginBuilder::on_model_request`, `fn:PluginBuilder::on_stop`, `fn:PluginBuilder::on_session_list`, `fn:PluginBuilder::chip_with`, `fn:PluginBuilder::message_chip`, `fn:notify`, `fn:normalise_ui_keys`, `method:plugin/state/get`, `method:plugin/state/set`, `method:plugin/state/delete`, `method:plugin/state/list`, `hook:before_session_list`, `slot:session.row.badge`, `slot:session.header.chip`, `ui:Settings > Plugins & MCP`
 - **Source:** `crates/kc-plugin-sdk/src/lib.rs:49`
 
 ---
@@ -432,6 +432,93 @@ fn main() -> std::io::Result<()> {
 * contributions reach the browser as `GET /api/config`'s `plugin_ui`, and the
   click posts to `POST /api/plugins/:name/ui/actions/:action`. A plugin that
   declares no `ui` changes nothing.
+
+## Gate hooks: refuse a call, rewrite a result, keep a run going
+
+The observational hooks (`before_prompt`, `on_run_end`, `on_tool_result`,
+`on_notify`) can *see* a run. These four can *change* it, which is what a policy
+plugin needs:
+
+* `on_tool_call` — before a tool runs. Return
+  `{"block": true, "reason": "…"}` to refuse (the reason becomes the result the
+  model reads), or `{"arguments": {…}}` to run the call with different arguments.
+  A block is never an approval: a call the approval policy would ask about is
+  still asked about.
+* `on_tool_result` — before the model sees the output. Return
+  `{"output": "…"}` to replace it (redact a secret, summarise 40 kB of log). The
+  replacement is truncated to the tool's own budget, so it can shrink but never
+  grow the context.
+* `on_model_request` — append to the system prompt for one request. Return a
+  string or `{"text": "…"}`; 4 KiB in total across plugins.
+* `on_stop` — a run is about to end. Return `{"continue": true, "reason": "…"}`
+  to keep going for another turn, up to `limits.max_stop_continuations`
+  (3 by default) across all plugins.
+
+```rust
+PluginBuilder::new("guard", "0.1.0").on_tool_call(|call: Value| {
+    let cmd = call["arguments"]["command"].as_str().unwrap_or("");
+    if call["class"] == "shell" && cmd.contains("rm -rf /") {
+        return json!({"block": true, "reason": "that deletes the filesystem"});
+    }
+    json!(null) // anything that is not a block/rewrite means "run it as asked"
+});
+```
+
+Every gate is bounded and failure-tolerant: a plugin that panics, hangs or is
+dead is treated as "no opinion", so a broken gate degrades to the stock
+behaviour instead of stopping the session.
+
+## Durable state: `plugin/state/*`
+
+A plugin is a process; its memory dies on every restart, rebuild and upgrade.
+These four calls keep data instead:
+
+| method | params | returns |
+| --- | --- | --- |
+| `plugin/state/get` | `{scope, key}` | `{value}` (`null` when unset) |
+| `plugin/state/set` | `{scope, key, value}` | `{ok, keys}` |
+| `plugin/state/delete` | `{scope, key}` | `{deleted}` |
+| `plugin/state/list` | `{scope, prefix?, limit?}` | `{entries: [{key, value}]}` |
+
+`scope` is `session` (one conversation), `project` (every session in one
+project) or `install` (this server). The **owner id is filled in by the host**
+from the session the call belongs to, never chosen by the plugin, so a plugin
+cannot read another conversation's rows. Keys are `[a-z0-9._-]`, a value is at
+most 64 KiB of JSON, and a plugin holds at most 4 096 keys and 8 MiB per scope —
+the write that would cross a limit is refused *before* it lands, with a message
+naming it. Use `HostClient::global().state_set(state_scope::SESSION, &id, "", "k", json!(…))`
+and `state_get`/`state_list`/`state_delete` from any handler.
+
+## Slash commands and chips
+
+A `command` contribution appears in the `/` menu as **`/plugin-<plugin>-<id>`**
+— the prefix is what guarantees a plugin can never shadow `/help`, a skill id or
+another plugin. Running it calls that plugin's `ui/action` with the typed
+remainder in `params.args`, costs no tokens and needs no approval: a command is
+the person typing, exactly like a click.
+
+A `button` in a **badge** slot (`session.row.badge`, `session.header.chip`)
+draws a chip: it carries `text` and `tone` (`neutral`, `accent`, `success`,
+`warn`, `danger`, `muted`) instead of a label and an icon. `kind: "replace"`
+renames a whitelisted label (`label.session`, `label.project`, …); nothing that
+states a safety property is replaceable.
+
+## Shaping the session rail: `before_session_list`
+
+Declare the hook and return groups, order and chips for the sessions the server
+is about to list:
+
+```json
+{"sessions": [{"id": "s_ab12", "group": 0, "badges": [{"text": "open", "tone": "accent"}]}]}
+```
+
+The answer arrives as `GET /api/sessions`'s `annotations` and is **display
+only**: an id the server did not list is dropped, and nothing a plugin says can
+hide a session from the operator, the API or another client. Lower `group`
+sorts first; `sort_key` breaks ties within a group.
+
+A complete worked example — status chips, `/`-commands, a stop gate and the same
+thing as a tool — lives in `plugins/session-status`.
 
 ## The call context
 

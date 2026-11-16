@@ -26,11 +26,11 @@ use kc_core::plugin::{
     allowed_ui_url, hideable_ui_target, known_ui_slot, methods, replaceable_ui_target,
     tool_output::Grants, ui_kind_supported, valid_panel_id, valid_ui_id, PluginDiagnostics,
     PluginError, PluginManifest, PluginPanel, PluginPanelData, PluginStatus, PluginToolDef,
-    PluginToolResult, MAX_UI_BADGE_BYTES, UI_KIND_REPLACE, UI_REPLACEABLE,
-    PluginUiActionResult, PluginUiContribution, ToolCallContext, MAX_UI_CONTRIBUTIONS,
-    MAX_UI_LABEL_BYTES, MAX_UI_MESSAGE_BYTES, MAX_UI_RESULT_MESSAGE_BYTES, MAX_UI_RESULT_REFRESH,
-    MAX_UI_TITLE_BYTES, PANEL_SOURCE_STATIC, PANEL_SOURCE_TOOL, PLUGIN_PROTOCOL_VERSION,
-    UI_HIDEABLE, UI_KIND_HIDE,
+    PluginToolResult, PluginUiActionResult, PluginUiContribution, ToolCallContext,
+    MAX_UI_BADGE_BYTES, MAX_UI_CONTRIBUTIONS, MAX_UI_LABEL_BYTES, MAX_UI_MESSAGE_BYTES,
+    MAX_UI_RESULT_MESSAGE_BYTES, MAX_UI_RESULT_REFRESH, MAX_UI_TITLE_BYTES, PANEL_SOURCE_STATIC,
+    PANEL_SOURCE_TOOL, PLUGIN_PROTOCOL_VERSION, UI_HIDEABLE, UI_KIND_HIDE, UI_KIND_REPLACE,
+    UI_REPLACEABLE,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -360,10 +360,7 @@ impl PluginShared {
     /// The server installs the backend after `discover`, when the slots already
     /// exist, so this is how an already-built plugin learns where its data lives.
     /// Idempotent: calling it again with the same store changes nothing.
-    pub(crate) fn set_state_backend(
-        &self,
-        backend: Arc<dyn kc_core::plugin::PluginStateBackend>,
-    ) {
+    pub(crate) fn set_state_backend(&self, backend: Arc<dyn kc_core::plugin::PluginStateBackend>) {
         if let Ok(mut slot) = self.state_backend.lock() {
             *slot = Some(backend);
         }
@@ -1472,7 +1469,9 @@ impl PluginShared {
             // with a response to one of the host's requests.
             let reply_id = id;
             let frame = match answer {
-                Ok(result) => serde_json::json!({"jsonrpc": "2.0", "id": reply_id, "result": result}),
+                Ok(result) => {
+                    serde_json::json!({"jsonrpc": "2.0", "id": reply_id, "result": result})
+                }
                 Err(message) => serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": reply_id,

@@ -414,6 +414,18 @@ export function ProjectRail(): JSX.Element {
     menu.openAtPointer(event);
   };
 
+  const startNewSession = (project: Project): void => {
+    controlPlaneOpen.value = false;
+    railPeek.closePeek();
+    void (async () => {
+      if (store.currentProjectId.value !== project.id) {
+        await actions.switchProject(project.id, { openLatest: false });
+        if (store.currentProjectId.value !== project.id) return;
+      }
+      actions.startDraftSession();
+    })();
+  };
+
   // A deleted project must not leave its menu or dialog pointing at nothing.
   useEffect(() => {
     if (menuFor && !projects.some((project) => project.id === menuFor)) menu.close();
@@ -597,6 +609,13 @@ export function ProjectRail(): JSX.Element {
                   : 'No sessions'}
               </span>
             </div>
+            <MenuItem
+              menu={menu}
+              action={{
+                label: 'New session',
+                onSelect: () => startNewSession(menuProject),
+              }}
+            />
             <MenuItem
               menu={menu}
               action={{

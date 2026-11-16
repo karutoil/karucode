@@ -63,7 +63,11 @@ fn main() -> std::io::Result<()> {
         let read = read.clone();
         move |session_id: &str| -> bool {
             read(session_id)
-                .and_then(|v| v.get("status").and_then(Value::as_str).map(|s| s == "completed"))
+                .and_then(|v| {
+                    v.get("status")
+                        .and_then(Value::as_str)
+                        .map(|s| s == "completed")
+                })
                 .unwrap_or(false)
         }
     };
@@ -125,7 +129,7 @@ fn main() -> std::io::Result<()> {
                 Ok(()) => UiActionResult::ok(format!(
                     "Reopened this session. `/{COMPLETE_COMMAND}` marks it done again."
                 ))
-                    .refresh("session-status"),
+                .refresh("session-status"),
                 Err(e) => UiActionResult::err(e),
             }
         }

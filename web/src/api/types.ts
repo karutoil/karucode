@@ -896,6 +896,21 @@ export interface SessionSummary extends Session {
  * cross-project overview needs and a session detail cannot carry — how many of
  * its subagents are live right now, and the model it is pinned to.
  */
+/**
+ * How a plugin asked the rail to draw one session (§R4 of the extensibility ADR).
+ *
+ * Display only: the server merges these by id from `before_session_list` answers
+ * and drops ids it did not list, so an annotation can never hide or invent a row.
+ * A lower `group` sorts first and `sort_key` breaks ties within it — which is how
+ * a workflow plugin keeps open work above finished work.
+ */
+export interface SessionAnnotation {
+  id: string;
+  group?: number;
+  sort_key?: number;
+  badges?: { text: string; tone: string }[];
+}
+
 export interface ControlChatSummary extends SessionSummary {
   agents: { live: number; total: number };
   /**

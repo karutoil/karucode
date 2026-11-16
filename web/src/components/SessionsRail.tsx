@@ -161,6 +161,15 @@ function SessionRow({
   // the same helper the control plane reads: a failed run must not be spelled one
   // way here and another way there.
   const { label: statusLabel, tone: statusTone } = sessionStatusView(session);
+  // A plugin's chips for this row, if any (`before_session_list`). The server
+  // already capped and sanitised them; an unknown tone falls back here too, so a
+  // plugin cannot paint a colour this build does not have.
+  const chips = store.sessionAnnotations.value.find((a) => a.id === session.id)?.badges ?? [];
+  // The tones a chip may use, exactly as `uiContributions.UI_TONES` names them. An
+  // unknown tone is drawn neutral rather than as the empty class `session-chip-`,
+  // which would silently drop the chip's only visual signal.
+  const toneClass = (tone: string): string =>
+    ['neutral', 'accent', 'success', 'warn', 'danger', 'muted'].includes(tone) ? tone : 'neutral';
   // The mock's row classes drive the status rail: a run in flight, a failure,
   // and a session waiting on the reader (unread news) each paint it differently.
   const rowState = [
@@ -235,6 +244,17 @@ function SessionRow({
               </span>
             ) : null}
             {statusTone ? <span class={`status-dot status-${statusTone}`} aria-hidden="true" /> : null}
+            {/* Chips a plugin asked for (§R4). Display only: the state lives in the
+              * plugin, and a click goes through the contributed control rather
+              * than anything here - this row is not a plugin's to control. */}
+            {chips.map((chip) => (
+              <span
+                key={`${session.id}-${chip.text}`}
+                class={`session-chip session-chip-${toneClass(chip.tone)}`}
+              >
+                {chip.text}
+              </span>
+            ))}
           </span>
           <span class="session-meta">
             {session.running ? <span class="sr-only">Running. </span> : null}

@@ -70,6 +70,7 @@ import type {
   SessionInfo,
   SessionModelSelection,
   SendMessageResponse,
+  SessionAnnotation,
   SessionSummary,
   SkillCreateRequest,
   SkillDetail,
@@ -676,6 +677,23 @@ export function listSessions(
     withQuery('/api/sessions', { project: projectId ?? undefined }),
     options,
   ).then((r) => r.sessions);
+}
+
+/**
+ * The rail's list **and** the plugin annotations that shape it.
+ *
+ * Separate from {@link listSessions} so the many callers that only need the
+ * sessions keep their existing shape: the annotations are a display concern and a
+ * plugin's answer must never be able to change what those callers see.
+ */
+export function listSessionsWithAnnotations(
+  projectId?: string | null,
+  options: CallOptions = {},
+): Promise<{ sessions: SessionSummary[]; annotations: SessionAnnotation[] }> {
+  return apiRequest<{ sessions: SessionSummary[]; annotations?: SessionAnnotation[] }>(
+    withQuery('/api/sessions', { project: projectId ?? undefined }),
+    options,
+  ).then((r) => ({ sessions: r.sessions, annotations: r.annotations ?? [] }));
 }
 
 export function createSession(
