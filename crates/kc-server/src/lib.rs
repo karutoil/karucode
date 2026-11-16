@@ -1052,6 +1052,7 @@ pub mod metrics;
 mod mission_coordinator;
 pub mod plugin_install;
 pub mod plugin_notifications;
+pub mod plugin_state;
 pub mod plugin_tool_output;
 pub mod plugins_watch;
 pub mod proxy;

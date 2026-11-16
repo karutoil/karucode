@@ -710,6 +710,13 @@ pub const MAX_STATE_KEY_BYTES: usize = 120;
 pub const MAX_STATE_VALUE_BYTES: usize = 64 * 1024;
 /// Rows one plugin may hold per scope, so a leak is bounded even under the byte cap.
 pub const MAX_STATE_KEYS_PER_SCOPE: usize = 4_096;
+/// Total bytes one plugin may hold in one scope, across every key.
+///
+/// Per scope rather than per plugin so a workflow plugin keeping a little state
+/// per session is not punished for having many sessions, while a single runaway
+/// scope still has a ceiling. The write that would cross it is refused before it
+/// lands, with a message naming the limit.
+pub const MAX_STATE_BYTES_PER_PLUGIN: i64 = 8 * 1024 * 1024;
 /// Rows a `plugin/state/list` answer returns at most.
 pub const MAX_STATE_LIST: usize = 512;
 
@@ -815,6 +822,54 @@ pub mod permissions {
 /// a grant. Values are rejected outside [`MIN_BYTES`]`..=`[`MAX_BYTES`] at
 /// request time and clamped again when read, so lowering
 /// `limits.max_plugin_tool_output_bytes` retires an older, larger grant.
+/// The durable backend behind `plugin/state/*` (§R2).
+///
+/// The plugin host only needs somewhere to read and write a JSON string under
+/// `(plugin, scope, owner, key)`; the server implements this over `kc-store`, so
+/// `kc-plugin-host` never depends on the store and a test can pass an in-memory
+/// map instead. The trait speaks plain strings and counts; every bound (value
+/// size, row count, byte budget) is enforced by the caller, which is what keeps
+/// one hostile plugin from growing the database without limit.
+#[async_trait::async_trait]
+pub trait PluginStateBackend: Send + Sync {
+    /// Read one value.
+    async fn get(
+        &self,
+        plugin: &str,
+        scope: &str,
+        owner: &str,
+        key: &str,
+    ) -> crate::Result<Option<String>>;
+    /// Write one value, returning the row count in that scope after the write.
+    async fn set(
+        &self,
+        plugin: &str,
+        scope: &str,
+        owner: &str,
+        key: &str,
+        value: &str,
+    ) -> crate::Result<i64>;
+    /// Delete one value, reporting whether it existed.
+    async fn delete(
+        &self,
+        plugin: &str,
+        scope: &str,
+        owner: &str,
+        key: &str,
+    ) -> crate::Result<bool>;
+    /// List `(key, value)` pairs for one scope, ordered by key, capped by `limit`.
+    async fn list(
+        &self,
+        plugin: &str,
+        scope: &str,
+        owner: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> crate::Result<Vec<(String, String)>>;
+    /// Total stored bytes for one plugin in one scope (the budget check).
+    async fn bytes(&self, plugin: &str, scope: &str, owner: &str) -> crate::Result<i64>;
+}
+
 pub mod tool_output {
     use super::*;
     use std::collections::BTreeMap;

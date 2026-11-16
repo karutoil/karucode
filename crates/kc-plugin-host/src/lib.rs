@@ -407,6 +407,10 @@ pub struct PluginHost {
     /// Shared by every handle ever returned, including one created before reload.
     live_plugins: LivePlugins,
     timeouts: Arc<TimeoutRefs>,
+    /// Where `plugin/state/*` reads and writes (§R2). Set by the server once the
+    /// store exists; a host built without one (most unit tests) answers a clear
+    /// "not available" error instead of failing the plugin.
+    state_backend: Option<Arc<dyn kc_core::plugin::PluginStateBackend>>,
     /// Where the manifest-only plugins live, kept so a rescan can look again.
     data_dir: PathBuf,
     /// The operator's per-plugin tool-output grants, shared with every slot (and
@@ -433,7 +437,15 @@ impl PluginHost {
             .into_iter()
             // Nothing is listening yet: `listen_notifications` is called after
             // `discover`.
-            .map(|entry| entry.into_slot(Arc::clone(&timeouts), None, None, Arc::clone(&grants)))
+            .map(|entry| {
+                entry.into_slot(
+                    Arc::clone(&timeouts),
+                    None,
+                    None,
+                    Arc::clone(&grants),
+                    None,
+                )
+            })
             .collect();
         let live_plugins = LivePlugins::default();
         live_plugins.replace(&plugins);
@@ -441,9 +453,25 @@ impl PluginHost {
             plugins,
             live_plugins,
             timeouts,
+            state_backend: None,
             data_dir: data_dir.to_path_buf(),
             grants,
             notify_tx: None,
+        }
+    }
+
+    /// Give the host somewhere to keep `plugin/state/*` data (§R2).
+    ///
+    /// Called by the server right after `discover`, once the store exists. It has
+    /// to reach plugins that are *already* built, so every slot's existing
+    /// `PluginShared` has its backend replaced; a slot rebuilt later by a rescan
+    /// picks the host's value up at construction.
+    pub fn set_state_backend(&mut self, backend: Arc<dyn kc_core::plugin::PluginStateBackend>) {
+        self.state_backend = Some(Arc::clone(&backend));
+        for slot in &self.plugins {
+            if let Some(shared) = &slot.shared {
+                shared.set_state_backend(Arc::clone(&backend));
+            }
         }
     }
 
@@ -844,6 +872,7 @@ impl PluginHost {
                     None,
                     self.notify_tx.as_ref(),
                     Arc::clone(&self.grants),
+                    self.state_backend.clone(),
                 );
                 if let Some(shared) = started_slot(&slot) {
                     starts.push(shared);
@@ -871,6 +900,7 @@ impl PluginHost {
                 Some(&old.config),
                 self.notify_tx.as_ref(),
                 Arc::clone(&self.grants),
+                self.state_backend.clone(),
             );
             if let Some(shared) = started_slot(&slot) {
                 starts.push(shared);
@@ -941,6 +971,7 @@ impl PluginHost {
             Some(&old.config),
             self.notify_tx.as_ref(),
             Arc::clone(&self.grants),
+            self.state_backend.clone(),
         );
         let shared = slot.shared.clone();
         let enabled = slot.config.enabled;
@@ -1017,6 +1048,7 @@ impl DiscoveredEntry {
         previous: Option<&PluginConfig>,
         notify_tx: Option<&mpsc::UnboundedSender<PluginNotice>>,
         grants: Arc<Grants>,
+        state_backend: Option<Arc<dyn kc_core::plugin::PluginStateBackend>>,
     ) -> PluginSlot {
         let DiscoveredEntry {
             mut config,
@@ -1035,7 +1067,13 @@ impl DiscoveredEntry {
             PluginStatus::Disabled
         };
         let shared = if setup_error.is_none() {
-            let shared = PluginShared::new(config.clone(), timeouts, grants, status);
+            let shared = PluginShared::new(
+                config.clone(),
+                timeouts,
+                grants,
+                status,
+                state_backend,
+            );
             // A rebuilt slot is a brand-new `PluginShared`. Without this, a
             // plugin that is loaded or reloaded after `listen_notifications` was
             // called would be built with no listener and its `notify` frames

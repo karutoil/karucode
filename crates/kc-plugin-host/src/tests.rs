@@ -660,6 +660,7 @@ async fn a_grant_reaches_the_plugin_tool_and_a_refusal_falls_back() {
         Arc::new(TimeoutRefs::default()),
         Arc::clone(&grants),
         PluginStatus::Ready,
+        None,
     );
     assert_eq!(
         shared.tool_output_budget(),

@@ -276,6 +276,16 @@ pub(crate) struct PluginShared {
     config: PluginConfig,
     timeouts: Arc<TimeoutRefs>,
     inner: Mutex<Inner>,
+    /// Where `plugin/state/*` reads and writes (§R2). Shared by every plugin;
+    /// the host passes the plugin's own name, so one plugin can never reach
+    /// another's rows. `None` on a host built without a store (most unit tests):
+    /// a `plugin/state/*` request then answers a clear "not available" error
+    /// instead of failing the plugin.
+    ///
+    /// Behind a lock because the server installs the backend after `discover`,
+    /// when the slots already exist: `PluginHost::set_state_backend` has to reach
+    /// them, and a reload/rebuild must not lose it either.
+    state_backend: std::sync::Mutex<Option<Arc<dyn kc_core::plugin::PluginStateBackend>>>,
     /// Serialises (re)starts so two concurrent calls cannot spawn two processes.
     start_lock: tokio::sync::Mutex<()>,
     next_id: AtomicU64,
@@ -345,11 +355,26 @@ const NOTIFY_REFILL_PER_MS: f64 = 0.001;
 const NOTIFY_COST_MS: f64 = 1_000.0;
 
 impl PluginShared {
+    /// Replace the state backend on a live plugin (§R2).
+    ///
+    /// The server installs the backend after `discover`, when the slots already
+    /// exist, so this is how an already-built plugin learns where its data lives.
+    /// Idempotent: calling it again with the same store changes nothing.
+    pub(crate) fn set_state_backend(
+        &self,
+        backend: Arc<dyn kc_core::plugin::PluginStateBackend>,
+    ) {
+        if let Ok(mut slot) = self.state_backend.lock() {
+            *slot = Some(backend);
+        }
+    }
+
     pub(crate) fn new(
         config: PluginConfig,
         timeouts: Arc<TimeoutRefs>,
         grants: Arc<Grants>,
         status: PluginStatus,
+        state_backend: Option<Arc<dyn kc_core::plugin::PluginStateBackend>>,
     ) -> Arc<Self> {
         let name = config.name.clone();
         Arc::new(Self {
@@ -357,6 +382,7 @@ impl PluginShared {
             config,
             timeouts,
             grants,
+            state_backend: std::sync::Mutex::new(state_backend),
             inner: Mutex::new(Inner {
                 status,
                 manifest: None,
@@ -1230,7 +1256,7 @@ impl PluginShared {
         })
     }
 
-    fn handle_line(&self, line: &str) {
+    fn handle_line(self: &Arc<Self>, line: &str) {
         let line = line.trim();
         if line.is_empty() {
             return;
@@ -1275,6 +1301,18 @@ impl PluginShared {
             // look like a protocol curiosity in the log.
             if method == kc_core::plugin::methods::NOTIFY {
                 self.handle_notify(params);
+                return;
+            }
+            // `plugin/state/*` is how a plugin keeps durable data (§R2). It is a
+            // REQUEST the plugin sends to the host, so it needs an answer on
+            // stdout - and the answer must not block the reader, which routes
+            // every other frame. Hence the spawned task.
+            if method.starts_with("plugin/state/") {
+                let Some(id) = msg.get("id").and_then(|v| v.as_u64()) else {
+                    debug!(plugin = %self.name, "ignoring a state call with no id");
+                    return;
+                };
+                self.spawn_state_request(id, method, params);
                 return;
             }
             debug!(
@@ -1387,6 +1425,175 @@ impl PluginShared {
             );
         }
         false
+    }
+
+    /// Answer one `plugin/state/*` request from the plugin (§R2).
+    ///
+    /// Runs on its own task so a slow database never stalls the stdout reader,
+    /// and answers on stdout with the JSON-RPC reply the plugin is waiting for.
+    /// Every bound lives here rather than in the store: the key must be a
+    /// [`kc_core::plugin::valid_state_key`], the value may not exceed
+    /// [`kc_core::plugin::MAX_STATE_VALUE_BYTES`], the scope may not exceed its
+    /// row or byte budget, and an unknown scope or method is a JSON-RPC error the
+    /// plugin can read rather than a dropped frame.
+    fn spawn_state_request(self: &Arc<Self>, id: u64, method: &str, params: Value) {
+        let method = method.to_string();
+        let out = self.lock().out.clone();
+        let shared = Arc::clone(self);
+        tokio::spawn(async move {
+            let answer = shared.state_call(&method, &params).await;
+            let frame = match answer {
+                Ok(result) => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                Err(message) => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {"code": -32602, "message": message},
+                }),
+            };
+            if let Some(out) = out {
+                let _ = out.try_send(frame.to_string());
+            }
+        });
+    }
+
+    /// The body of [`PluginShared::spawn_state_request`].
+    async fn state_call(&self, method: &str, params: &Value) -> Result<Value, String> {
+        use kc_core::plugin::{state_scope, valid_state_key, valid_state_scope};
+        let backend = self
+            .state_backend
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .ok_or_else(|| "plugin state is not available on this host".to_string())?;
+        let name = self.name.clone();
+        let scope = params
+            .get("scope")
+            .and_then(Value::as_str)
+            .unwrap_or(state_scope::SESSION);
+        if !valid_state_scope(scope) {
+            return Err(format!(
+                "unknown state scope `{scope}`; use one of: {}",
+                state_scope::ALL.join(", ")
+            ));
+        }
+        let key = params.get("key").and_then(Value::as_str).unwrap_or("");
+        if !valid_state_key(key) {
+            return Err(format!(
+                "invalid state key `{key}`: keys are `[a-z0-9._-]` and at most {} bytes",
+                kc_core::plugin::MAX_STATE_KEY_BYTES
+            ));
+        }
+        // The owner is supplied by the host, never by the plugin: a session-scoped
+        // key belongs to the session the host was told about, so a plugin cannot
+        // read another conversation's rows.
+        let owner = match scope {
+            state_scope::SESSION => params
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            state_scope::PROJECT => params
+                .get("project_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            _ => String::new(),
+        };
+        if scope != state_scope::INSTALL && owner.is_empty() {
+            return Err(format!(
+                "a `{scope}`-scoped state call needs its id; the host did not supply one"
+            ));
+        }
+        match method {
+            kc_core::plugin::methods::STATE_GET => backend
+                .get(&name, scope, &owner, key)
+                .await
+                .map(|value| serde_json::json!({"value": value}))
+                .map_err(|e| e.to_string()),
+            kc_core::plugin::methods::STATE_SET => {
+                let value = params.get("value").ok_or_else(|| {
+                    "plugin/state/set needs a `value` (any JSON); use plugin/state/delete to \
+                     remove one"
+                        .to_string()
+                })?;
+                let encoded = value.to_string();
+                if encoded.len() > kc_core::plugin::MAX_STATE_VALUE_BYTES {
+                    return Err(format!(
+                        "the value is {} bytes; the limit is {} - store a reference instead \
+                         of the whole document",
+                        encoded.len(),
+                        kc_core::plugin::MAX_STATE_VALUE_BYTES
+                    ));
+                }
+                let used = backend
+                    .bytes(&name, scope, &owner)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                // The write is refused *before* it lands, so the budget is a
+                // ceiling rather than a detection: overwriting a large value is
+                // still allowed, because the row count would not grow.
+                let replacing = backend
+                    .get(&name, scope, &owner, key)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map(|old| old.len())
+                    .unwrap_or(0);
+                let after = used - replacing as i64 + encoded.len() as i64;
+                if after > kc_core::plugin::MAX_STATE_BYTES_PER_PLUGIN {
+                    return Err(format!(
+                        "this plugin holds {used} bytes of `{scope}` state; the limit is {} - \
+                         delete keys you no longer need",
+                        kc_core::plugin::MAX_STATE_BYTES_PER_PLUGIN
+                    ));
+                }
+                let rows = backend
+                    .set(&name, scope, &owner, key, encoded.as_str())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if rows > kc_core::plugin::MAX_STATE_KEYS_PER_SCOPE as i64 {
+                    let _ = backend.delete(&name, scope, &owner, key).await;
+                    return Err(format!(
+                        "this plugin already holds {} keys in `{scope}` state; the limit is \
+                         {} - delete keys you no longer need",
+                        rows,
+                        kc_core::plugin::MAX_STATE_KEYS_PER_SCOPE
+                    ));
+                }
+                Ok(serde_json::json!({"ok": true, "keys": rows}))
+            }
+            kc_core::plugin::methods::STATE_DELETE => backend
+                .delete(&name, scope, &owner, key)
+                .await
+                .map(|existed| serde_json::json!({"deleted": existed}))
+                .map_err(|e| e.to_string()),
+            kc_core::plugin::methods::STATE_LIST => {
+                let prefix = params.get("prefix").and_then(Value::as_str).unwrap_or("");
+                let limit = params
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .map(|n| (n as usize).min(kc_core::plugin::MAX_STATE_LIST))
+                    .unwrap_or(kc_core::plugin::MAX_STATE_LIST);
+                backend
+                    .list(&name, scope, &owner, prefix, limit)
+                    .await
+                    .map(|rows| {
+                        serde_json::json!({
+                            "entries": rows
+                                .into_iter()
+                                .map(|(key, value)| serde_json::json!({
+                                    "key": key,
+                                    // The value is the JSON the plugin stored, never a
+                                    // string of it: a caller round-trips what it set.
+                                    "value": serde_json::from_str::<Value>(&value)
+                                        .unwrap_or(Value::String(value)),
+                                }))
+                                .collect::<Vec<_>>(),
+                        })
+                    })
+                    .map_err(|e| e.to_string())
+            }
+            other => Err(format!("unknown plugin state method `{other}`")),
+        }
     }
 
     /// stdout closed: no future response can arrive, even if the child keeps
@@ -2354,6 +2561,7 @@ mod tests {
             Arc::new(TimeoutRefs::default()),
             Arc::new(Grants::new()),
             PluginStatus::Ready,
+            None,
         );
         let (tx, rx) = mpsc::channel(OUT_QUEUE_DEPTH);
         shared.lock().out = Some(tx);
@@ -2554,6 +2762,7 @@ mod notify_tests {
             Arc::new(TimeoutRefs::default()),
             Arc::new(Grants::new()),
             PluginStatus::Ready,
+            None,
         )
     }
 

@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 28;
+const SCHEMA_VERSION: i64 = 29;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -462,6 +462,26 @@ const MIGRATION_27: &str = "";
 /// rebuilt from the transcript, which is what a session with no checkpoint does.
 const MIGRATION_28: &str = r#"
 DELETE FROM session_compaction_state;
+"#;
+
+/// Plugin-owned durable state (§R2 of the extensibility ADR).
+///
+/// One row per `(plugin, scope, owner_id, key)`. A plugin cannot define a table,
+/// a column or a route, so this is the one place its data can live. The owner id
+/// is a session id for `scope = 'session'`, a project id for `'project'` and the
+/// empty string for `'install'` — filled in by the host, never by the plugin, so
+/// one plugin can never read another conversation's rows.
+const MIGRATION_29: &str = r#"
+CREATE TABLE IF NOT EXISTS plugin_state (
+ plugin     TEXT NOT NULL,
+ scope      TEXT NOT NULL CHECK (scope IN ('session','project','install')),
+ owner_id   TEXT NOT NULL,
+ key        TEXT NOT NULL,
+ value      TEXT NOT NULL,
+ updated_at INTEGER NOT NULL,
+ PRIMARY KEY (plugin, scope, owner_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_plugin_state_owner ON plugin_state(plugin, scope, owner_id);
 "#;
 
 const MIGRATION_12: &str = r#"
@@ -1673,6 +1693,189 @@ impl SqliteStore {
         Ok(Some((watermark.max(0) as usize, messages)))
     }
 
+    /// Read one plugin state value (§R2).
+    ///
+    /// `owner_id` is filled in by the caller: a session id for `scope = "session"`,
+    /// a project id for `"project"`, the empty string for `"install"`. The plugin
+    /// never chooses it, which is what keeps one plugin out of another
+    /// conversation's rows.
+    pub async fn plugin_state_get(
+        &self,
+        plugin: &str,
+        scope: &str,
+        owner_id: &str,
+        key: &str,
+    ) -> Result<Option<String>> {
+        let (plugin, scope, owner_id, key) = (
+            plugin.to_string(),
+            scope.to_string(),
+            owner_id.to_string(),
+            key.to_string(),
+        );
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT value FROM plugin_state WHERE plugin = ?1 AND scope = ?2 \
+                     AND owner_id = ?3 AND key = ?4",
+                )
+                .map_err(|e| db_err("plugin_state_get prepare", e))?;
+            let mut rows = stmt
+                .query_map(params![plugin, scope, owner_id, key], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|e| db_err("plugin_state_get query", e))?;
+            match rows.next() {
+                Some(row) => row.map(Some).map_err(|e| db_err("plugin_state_get row", e)),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    /// Write one plugin state value, returning the row count for the scope.
+    pub async fn plugin_state_set(
+        &self,
+        plugin: &str,
+        scope: &str,
+        owner_id: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<i64> {
+        let (plugin, scope, owner_id, key, value) = (
+            plugin.to_string(),
+            scope.to_string(),
+            owner_id.to_string(),
+            key.to_string(),
+            value.to_string(),
+        );
+        self.with(move |conn| {
+            let now = now_ms();
+            conn.execute(
+                "INSERT INTO plugin_state (plugin, scope, owner_id, key, value, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT(plugin, scope, owner_id, key) DO UPDATE SET \
+                 value = excluded.value, updated_at = excluded.updated_at",
+                params![plugin, scope, owner_id, key, value, now],
+            )
+            .map_err(|e| db_err("plugin_state_set", e))?;
+            conn.query_row(
+                "SELECT COUNT(*) FROM plugin_state WHERE plugin = ?1 AND scope = ?2 \
+                 AND owner_id = ?3",
+                params![plugin, scope, owner_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| db_err("plugin_state_set count", e))
+        })
+        .await
+    }
+
+    /// Delete one plugin state value. Returns whether a row existed.
+    pub async fn plugin_state_delete(
+        &self,
+        plugin: &str,
+        scope: &str,
+        owner_id: &str,
+        key: &str,
+    ) -> Result<bool> {
+        let (plugin, scope, owner_id, key) = (
+            plugin.to_string(),
+            scope.to_string(),
+            owner_id.to_string(),
+            key.to_string(),
+        );
+        self.with(move |conn| {
+            let changed = conn
+                .execute(
+                    "DELETE FROM plugin_state WHERE plugin = ?1 AND scope = ?2 \
+                     AND owner_id = ?3 AND key = ?4",
+                    params![plugin, scope, owner_id, key],
+                )
+                .map_err(|e| db_err("plugin_state_delete", e))?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    /// List `(key, value)` pairs for one scope, ordered by key.
+    ///
+    /// `prefix` is a **literal** prefix: `%` and `_` inside it are escaped, so a
+    /// plugin listing `a_` gets keys starting with `a_` rather than every key
+    /// whose second character is anything.
+    pub async fn plugin_state_list(
+        &self,
+        plugin: &str,
+        scope: &str,
+        owner_id: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let (plugin, scope, owner_id, prefix) = (
+            plugin.to_string(),
+            scope.to_string(),
+            owner_id.to_string(),
+            prefix.to_string(),
+        );
+        let limit = limit as i64;
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT key, value FROM plugin_state WHERE plugin = ?1 AND scope = ?2 \
+                     AND owner_id = ?3 AND key LIKE ?4 ESCAPE '\\' ORDER BY key ASC LIMIT ?5",
+                )
+                .map_err(|e| db_err("plugin_state_list prepare", e))?;
+            let escaped = prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let rows = stmt
+                .query_map(
+                    params![plugin, scope, owner_id, format!("{escaped}%"), limit],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .map_err(|e| db_err("plugin_state_list query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("plugin_state_list rows", e))
+        })
+        .await
+    }
+
+    /// Total stored bytes for one plugin in one scope (the budget check).
+    pub async fn plugin_state_bytes(
+        &self,
+        plugin: &str,
+        scope: &str,
+        owner_id: &str,
+    ) -> Result<i64> {
+        let (plugin, scope, owner_id) = (
+            plugin.to_string(),
+            scope.to_string(),
+            owner_id.to_string(),
+        );
+        self.read(move |conn| {
+            conn.query_row(
+                "SELECT COALESCE(SUM(LENGTH(value)), 0) FROM plugin_state \
+                 WHERE plugin = ?1 AND scope = ?2 AND owner_id = ?3",
+                params![plugin, scope, owner_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| db_err("plugin_state_bytes", e))
+        })
+        .await
+    }
+
+    /// Drop every row a plugin owns (uninstalling it). Reports how many went.
+    pub async fn plugin_state_clear(&self, plugin: &str) -> Result<usize> {
+        let plugin = plugin.to_string();
+        self.with(move |conn| {
+            conn.execute(
+                "DELETE FROM plugin_state WHERE plugin = ?1",
+                params![plugin],
+            )
+            .map_err(|e| db_err("plugin_state_clear", e))
+        })
+        .await
+    }
+
     /// Forget this session's compaction snapshot.
     ///
     /// Called whenever the transcript is rewound or truncated: the snapshot
@@ -1853,6 +2056,7 @@ impl SqliteStore {
                     26 => MIGRATION_26,
                     27 => MIGRATION_27,
                     28 => MIGRATION_28,
+                    29 => MIGRATION_29,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }

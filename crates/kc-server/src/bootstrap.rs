@@ -708,6 +708,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     // only writer of it. Hand the same handle to both, so an operator's answer
     // reaches the next tool call without a reload.
     let tool_output_grants = plugin_host.tool_output_grants();
+    // Where a plugin keeps its own durable state (§R2). Installed before
+    // `start_all` so a plugin that reads its state during its own handshake
+    // already finds it.
+    plugin_host.set_state_backend(Arc::new(crate::plugin_state::StoreStateBackend::new(
+        Arc::clone(&sqlite_store),
+    )));
     // Subscribe *before* `start_all`: a plugin that raises a notification during
     // its own startup would otherwise have it dropped on the floor.
     let plugin_notices = plugin_host.listen_notifications();
