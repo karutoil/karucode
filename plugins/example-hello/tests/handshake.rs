@@ -58,6 +58,26 @@ fn the_plugin_answers_initialize_while_stdin_stays_open() {
     // stdin stays open through the handshake above; closing it must end the
     // process (the host relies on that when it stops a plugin).
     drop(stdin);
-    let status = child.wait().expect("wait for the plugin");
-    assert!(status.success(), "the plugin exited with {status}");
+    // Wait with a deadline, not `child.wait()`. A plugin that ignores EOF hangs
+    // here for ever, which is how this failed once in CI: the job sat until its
+    // 30-minute timeout and every other target in the run looked hung too. The
+    // cause was a `Sender` clone parked in the SDK's global host client that the
+    // shutdown never dropped, so the writer thread's channel never closed.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match child.try_wait().expect("poll the plugin") {
+            Some(status) => {
+                assert!(status.success(), "the plugin exited with {status}");
+                break;
+            }
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                panic!(
+                    "the plugin did not exit within 10s of its stdin closing: it hung on \
+                     shutdown instead of ending with EOF"
+                );
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
 }

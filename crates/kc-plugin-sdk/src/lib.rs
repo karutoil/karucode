@@ -1830,6 +1830,16 @@ impl Plugin {
         }
         pump_stop.store(true, Ordering::SeqCst);
         let _ = pump.join();
+        // The writer thread ends when *every* sender of `write_rx` is gone, and
+        // there are two: this one, and the clone parked in `HostClient::global()`
+        // so a handler can call back into the host. Dropping only `write_tx` left
+        // the global's clone alive, so `write_rx.recv()` never returned and
+        // `writer.join()` blocked for ever: the plugin answered `initialize`,
+        // ignored EOF, and had to be killed by its host. Clearing the slot first
+        // is what lets the process exit.
+        if let Ok(mut slot) = HostClient::global().inner.writer.lock() {
+            slot.take();
+        }
         drop(write_tx);
         let wrote_everything = writer.join().unwrap_or(false);
         if !wrote_everything {
