@@ -24,7 +24,7 @@
  */
 
 import { signal } from '@preact/signals';
-import type { SessionSummary } from '../api/types';
+import type { SessionAnnotation, SessionSummary } from '../api/types';
 import * as api from '../api/endpoints';
 import { controlPlaneOpen } from './controlPlane';
 import * as store from './store';
@@ -33,6 +33,14 @@ import * as store from './store';
 export const peekProjectId = signal<string | null>(null);
 /** Session lists read for other projects, keyed by project id. */
 export const peekSessions = signal<Record<string, SessionSummary[]>>({});
+/**
+ * The plugin annotations for each peeked project (§R4).
+ *
+ * Cached beside the rows, not read from `store.sessionAnnotations`: that signal
+ * holds the *open* project's answer, so borrowing it would paint one project's
+ * chips onto another project's rows the moment the two disagree.
+ */
+export const peekAnnotations = signal<Record<string, SessionAnnotation[]>>({});
 export const peekLoading = signal<Record<string, boolean>>({});
 export const peekError = signal<Record<string, string | null>>({});
 
@@ -122,8 +130,9 @@ export function loadPeekSessions(projectId: string, force = false): Promise<void
   peekError.value = { ...peekError.value, [projectId]: null };
   const run = (async () => {
     try {
-      const list = await api.listSessions(projectId);
+      const { sessions: list, annotations } = await api.listSessionsWithAnnotations(projectId);
       peekSessions.value = { ...peekSessions.value, [projectId]: list };
+      peekAnnotations.value = { ...peekAnnotations.value, [projectId]: annotations };
       fetchedAt[projectId] = now();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not read those sessions.';

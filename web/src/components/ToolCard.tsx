@@ -244,6 +244,7 @@ export function ToolCard({
           {summary !== '' ? <span class="tool-row-args">{summary}</span> : null}
           {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
           <span class="tool-row-meta">
+            <ToolRewind item={item} onRewind={onRewind} />
             {duration ? <span class="tool-row-duration">{duration}</span> : null}
             {/* The call's own output is the only text it produces while it
                 runs, so that is what its throughput measures. */}
@@ -257,10 +258,6 @@ export function ToolCard({
             </span>
           </span>
         </button>
-
-        {/* Outside the disclosure button: a rewind inside the header's click
-            target would toggle the row as well as open the dialog. */}
-        <ToolRewind item={item} onRewind={onRewind} />
 
         {item.images && item.images.length > 0 ? (
           <ToolImages images={item.images} tool={item.name} />
@@ -298,6 +295,7 @@ export function ToolCard({
           {summary !== '' ? <span class="tool-args">{summary}</span> : null}
         </span>
         {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
+        <ToolRewind item={item} onRewind={onRewind} />
         {/* Live output throughput for the call itself: a tool's result is the
             text it produces, so that is what the badge counts while it runs.
             It goes the moment the call settles, with the running state. */}
@@ -307,12 +305,6 @@ export function ToolCard({
           {toolStatusLabel(item.status)}
         </span>
       </header>
-
-      {/* Outside the header, like the row variant: every rewind rule in chat.css is
-          `.tool-card > .rewind-tool` (absolute, revealed on hover of the card), so a
-          button inside the flex header stayed at `opacity: 0` and competed with the
-          status for header width - invisible except by keyboard focus. */}
-      <ToolRewind item={item} onRewind={onRewind} />
 
       {item.images && item.images.length > 0 ? (
         <ToolImages images={item.images} tool={item.name} />

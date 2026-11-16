@@ -141,6 +141,63 @@ def main() -> int:
         check("the chip carries a tone class", "session-chip-" in str(toned), str(toned))
 
         session.screenshot(out / "rail.png")
+
+        # ---- collapsed rail (CTRL+B) ----
+        # Collapsing does not hide the sessions: it turns the rail into a strip of
+        # project icons whose fly-out lists that project's rows. A chip that only
+        # exists in the expanded rail is a chip a person loses by pressing the
+        # shortcut they press all day, so both states are checked.
+        session._send("Page.bringToFront")
+        for kind in ("rawKeyDown", "keyUp"):
+            session._send("Input.dispatchKeyEvent", {
+                "type": kind, "key": "b", "code": "KeyB",
+                "windowsVirtualKeyCode": 66, "nativeVirtualKeyCode": 66,
+                "modifiers": 2,  # ctrl
+            })
+        time.sleep(0.6)
+        # What "collapsed" means: the app swaps the sessions rail for the project
+        # strip (`app.tsx` renders `<ProjectRail />` instead of `<SessionsRail />`
+        # when `railCollapsed` is set), so the marker is the app's own attribute.
+        collapsed = session.evaluate("""
+            return {
+              railCollapsed: document.querySelector('.app').getAttribute('data-rail-collapsed'),
+              projectStrip: document.querySelectorAll('[data-project-id]').length,
+              sessionsRail: document.querySelector('.rail-peek') ? 'peek' : 'none',
+            };
+        """)
+        check("CTRL+B collapses the rail",
+              collapsed["railCollapsed"] == "true" and collapsed["projectStrip"] >= 1,
+              json.dumps(collapsed))
+        session.screenshot(out / "rail-collapsed.png")
+
+        # Hover the current project's icon, which opens the fly-out.
+        hovered = session.evaluate("""
+            const button = document.querySelector('[data-project-id]');
+            if (!button) return 0;
+            button.dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}));
+            button.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+            return 1;
+        """)
+        time.sleep(0.8)
+        peek = session.evaluate("""
+            const rail = document.querySelector('.rail-peek');
+            if (!rail) return {open: false};
+            return {
+              open: true,
+              rows: [...rail.querySelectorAll('.session-row')].map(row => ({
+                title: (row.querySelector('.session-title')||{}).textContent || '',
+                chips: [...row.querySelectorAll('.session-chip')].map(c => c.textContent.trim()),
+              })),
+            };
+        """)
+        check("the fly-out opens from the collapsed rail", hovered == 1 and peek.get("open"),
+              json.dumps(peek)[:300])
+        peek_by_title = {row["title"]: row["chips"] for row in peek.get("rows", [])}
+        check("the fly-out keeps the chips of the open project",
+              peek_by_title.get("open work") == ["open"]
+              and peek_by_title.get("finished work") == ["completed"],
+              json.dumps(peek_by_title)[:300])
+        session.screenshot(out / "rail-collapsed-peek.png")
     finally:
         if chrome is not None:
             chrome.terminate()

@@ -2978,11 +2978,10 @@
  * quiet until the message is hovered or the control is focused, so a transcript
  * full of turns does not read as a page of buttons.
  *
- * A stored tool call carries the same control in its own header, floated over the
- * header's trailing edge: the header is a fixed-height flex row that already
- * spends its width on the call and its outcome, and a button in the flow either
- * pushed the outcome off a narrow card or changed the header's height as it faded
- * in. Floating it means revealing it on hover cannot lay the card out again.
+ * A stored tool or command call carries the same control in its own header,
+ * positioned neatly before the outcome metadata so it never overlaps text, exit
+ * codes, durations or disclosure chevrons. It is quiet until the specific call
+ * is hovered or focused, keeping the transcript clean.
  */
 .rewind-button {
   display: inline-flex;
@@ -2999,49 +2998,42 @@
   line-height: 1.6;
   cursor: pointer;
   opacity: 0;
-  transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
+  transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease, background 120ms ease;
 }
 
-/* The call's own button: the header is already a row of controls, so it overlays
- * rather than joins - no re-layout when it appears, and the outcome keeps its
- * place. It is centred on the head rather than stretching to its height, because
- * a stretched pill grew into the output well beneath. The surface is painted
- * while it is visible so the arguments under it cannot show through. */
-.tool-card > .rewind-tool,
-.command-card > .rewind-tool,
-.tool-row > .rewind-tool,
-.command-row > .rewind-tool {
-  position: absolute;
-  top: 11px;
-  right: var(--space-5);
+/* Call-level rewind: sits inline in the header metadata before outcome/status,
+ * so it never overlaps or obscures any outcome, duration or disclosure icon.
+ * Hidden by default, only appearing when that specific call is hovered or focused. */
+.rewind-tool {
+  display: none;
   margin-left: 0;
+  margin-right: var(--space-2);
+  padding: 1px var(--space-3);
+  font-size: var(--fs-micro);
+  line-height: 1.4;
+  flex: 0 0 auto;
 }
 
-.tool-row > .rewind-tool,
-.command-row > .rewind-tool {
-  /* Their heads are 26px, not the card header's 44px. */
-  top: 3px;
-}
-
-.tool-card,
-.command-card {
-  /* Positioned for the rewind above; they already clip their corners. */
-  position: relative;
-}
-
-.tool-card:hover > .rewind-tool,
-.tool-row:hover > .rewind-tool,
-.command-card:hover > .rewind-tool,
-.command-row:hover > .rewind-tool {
+.tool-card:hover .rewind-tool,
+.tool-row:hover .rewind-tool,
+.command-card:hover .rewind-tool,
+.command-row:hover .rewind-tool,
+.tool-card:focus-within .rewind-tool,
+.tool-row:focus-within .rewind-tool,
+.command-card:focus-within .rewind-tool,
+.command-row:focus-within .rewind-tool {
+  display: inline-flex;
   opacity: 1;
   background: var(--surface-raised);
 }
 
-.tool-card > .rewind-tool:hover,
-.tool-row > .rewind-tool:hover,
-.command-card > .rewind-tool:hover,
-.command-row > .rewind-tool:hover {
+.tool-card .rewind-tool:hover,
+.tool-row .rewind-tool:hover,
+.command-card .rewind-tool:hover,
+.command-row .rewind-tool:hover {
   background: var(--surface-hover);
+  color: var(--text);
+  border-color: var(--line);
 }
 
 .msg:hover .rewind-button,
@@ -3060,22 +3052,17 @@
   outline-offset: 1px;
 }
 
-/* Touch and narrow layouts have no hover, so the control has to be visible. */
+/* Touch and narrow layouts have no hover, so the control has to be reachable. */
 @media (hover: none) {
   .rewind-button {
     opacity: 1;
     border-color: var(--line);
   }
 
-  /* A visible pill over the head would sit on the call's own text, so on a touch
-   * device it takes its own row under the card's header instead of floating. */
-  .tool-card > .rewind-tool,
-  .command-card > .rewind-tool,
-  .tool-row > .rewind-tool,
-  .command-row > .rewind-tool {
-    position: static;
-    justify-content: center;
-    margin: var(--space-2) var(--space-5) var(--space-3);
+  /* Revealed inline in metadata without stacking or overlapping */
+  .rewind-tool {
+    display: inline-flex;
+    opacity: 0.85;
     background: var(--surface-raised);
   }
 }

@@ -4,7 +4,7 @@ import { useFocusTrap } from '../lib/dom';
 import { contextMenuProps, Menu, MenuItem, useMenu } from '../lib/menu';
 import { copyText } from '../lib/clipboard';
 import { modKey } from '../lib/platform';
-import type { SessionSummary } from '../api/types';
+import type { SessionAnnotation, SessionSummary } from '../api/types';
 import { formatCount, relativeTime } from '../lib/format';
 import { contextUsage, sessionStatusView } from '../state/selectors';
 import * as store from '../state/store';
@@ -92,6 +92,13 @@ interface SessionRowProps {
   facts: SessionFacts | null;
   /** Unread notifications for this session. */
   unreadCount: number;
+  /**
+   * Chips a plugin asked for this row (§R4), already resolved for the project
+   * being drawn. A prop rather than a store read: the fly-out shows *another*
+   * project's sessions, and reading the open project's annotations there would
+   * paint one project's chips onto a different project's rows.
+   */
+  badges?: { text: string; tone: string }[];
   onSelect: (id: string) => void;
   onRename: (id: string, title: string) => void | Promise<boolean>;
   onRequestDelete: (session: SessionSummary, trigger: HTMLElement | null) => void;
@@ -103,6 +110,7 @@ function SessionRow({
   now,
   facts,
   unreadCount,
+  badges = [],
   onSelect,
   onRename,
   onRequestDelete,
@@ -164,7 +172,7 @@ function SessionRow({
   // A plugin's chips for this row, if any (`before_session_list`). The server
   // already capped and sanitised them; an unknown tone falls back here too, so a
   // plugin cannot paint a colour this build does not have.
-  const chips = store.sessionAnnotations.value.find((a) => a.id === session.id)?.badges ?? [];
+  const chips = badges;
   // The tones a chip may use, exactly as `uiContributions.UI_TONES` names them. An
   // unknown tone is drawn neutral rather than as the empty class `session-chip-`,
   // which would silently drop the chip's only visual signal.
@@ -319,6 +327,13 @@ export interface SessionListProps {
   query?: string;
   /** The chip filter in force; `all` shows everything. */
   filter?: SessionFilter;
+  /**
+   * Plugin annotations for **these** sessions (§R4). Optional: a caller with no
+   * answer draws no chips, which is what the expanded rail wants while the plugin
+   * is down. Resolved by the caller, never from the store, because the fly-out
+   * draws a project that is not the open one.
+   */
+  annotations?: SessionAnnotation[];
   onCreate: () => void;
   onSelect: (id: string) => void;
   onRename: (id: string, title: string) => void | Promise<boolean>;
@@ -334,6 +349,7 @@ export function SessionList({
   workspace,
   query = '',
   filter = 'all',
+  annotations,
   onCreate,
   onSelect,
   onRename,
@@ -347,6 +363,16 @@ export function SessionList({
   // `state/sessionFacts.ts`): the rail still renders from the list endpoint, so
   // a slow or refused read only costs the second line.
   const facts = sessionFacts.value;
+  // Chips by session id, built once per annotations change rather than searched
+  // per row: a long rail would otherwise scan the array for every row.
+  const chips = useMemo(() => {
+    const byId = new Map<string, { text: string; tone: string }[]>();
+    for (const annotation of annotations ?? []) {
+      if (annotation.badges?.length) byId.set(annotation.id, annotation.badges);
+    }
+    return byId;
+  }, [annotations]);
+  const badgesFor = (id: string) => chips.get(id) ?? [];
 
   const closeDelete = (): void => {
     const trigger = pendingDelete?.trigger;
@@ -445,6 +471,7 @@ export function SessionList({
                   unreadCount={store.unread.value[session.id] ?? 0}
                   onSelect={onSelect}
                   onRename={onRename}
+                  badges={badgesFor(session.id)}
                   onRequestDelete={(session, trigger) => setPendingDelete({ session, trigger })}
                 />
               ))}
@@ -1044,6 +1071,11 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
               now={store.clock.value}
               loading={loading}
               workspace={project?.path}
+              annotations={
+                isCurrent
+                  ? store.sessionAnnotations.value
+                  : railPeek.peekAnnotations.value[projectId] ?? []
+              }
               onCreate={startDraft}
               onSelect={openSession}
               onRename={async (id, title) => {
@@ -1290,6 +1322,7 @@ export function SessionsRail(): JSX.Element {
             }
             query={query}
             filter={sessionFilter}
+            annotations={store.sessionAnnotations.value}
             onCreate={() => actions.startDraftSession()}
             onSelect={actions.switchSession}
             onRename={actions.renameSessionById}

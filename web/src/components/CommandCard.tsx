@@ -169,6 +169,7 @@ export function CommandCard({
           ) : null}
           {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
           <span class="command-row-meta">
+            <ToolRewind item={item} onRewind={onRewind} />
             {/* A command's stdio is what arrives while it runs, so its own
                 throughput is measured on that - not on the model, which is
                 idle until the command returns. */}
@@ -184,10 +185,6 @@ export function CommandCard({
             </span>
           </span>
         </button>
-
-        {/* Outside the summary button: a rewind inside the disclosure's click
-            target would open the dialog and toggle the output. */}
-        <ToolRewind item={item} onRewind={onRewind} />
 
         {open ? (
           <div class="cmd-output" id={bodyId}>
@@ -224,6 +221,7 @@ export function CommandCard({
           </span>
         ) : null}
         {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
+        <ToolRewind item={item} onRewind={onRewind} />
         <TpsBadge
           chars={item.stdout.length + item.stderr.length}
           working={item.status === 'running'}
@@ -235,8 +233,6 @@ export function CommandCard({
           <ChevronDownIcon size={12} />
         </span>
       </button>
-
-      <ToolRewind item={item} onRewind={onRewind} />
 
       <div class="cmd-output" id={bodyId} hidden={!open}>
         {open ? <CommandOutput item={item} /> : null}

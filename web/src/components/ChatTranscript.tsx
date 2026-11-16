@@ -587,7 +587,10 @@ function RewindButton({
       aria-label={
         isAssistant ? 'Rewind to the request that produced this answer' : 'Rewind to this message'
       }
-      onClick={() => onRewind({ messageId: id, preview: item.content, isAssistant })}
+      onClick={(e) => {
+        e.stopPropagation();
+        onRewind({ messageId: id, preview: item.content, isAssistant });
+      }}
     >
       <RewindIcon size={13} />
       <span>Rewind</span>

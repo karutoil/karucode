@@ -7,13 +7,17 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { listSessions } from '../api/endpoints';
+import { listSessionsWithAnnotations } from '../api/endpoints';
 import { secondSummaryFixture, summaryFixture } from '../test/fixtures';
 import { controlPlaneOpen } from './controlPlane';
 import * as railPeek from './railPeek';
 import * as store from './store';
 
-vi.mock('../api/endpoints', () => ({ listSessions: vi.fn() }));
+vi.mock('../api/endpoints', () => ({ listSessionsWithAnnotations: vi.fn() }));
+
+/** What the fly-out reads now: rows plus the plugin annotations for them. */
+const listed = (sessions: unknown[], annotations: unknown[] = []) =>
+  ({ sessions, annotations }) as never;
 
 const PEEK_CLOSE_MS = railPeek.PEEK_CLOSE_MS;
 
@@ -34,8 +38,8 @@ beforeEach(() => {
   store.fileViewerPath.value = null;
   store.currentProjectId.value = 'p_karucode';
   store.sessions.value = [summaryFixture, secondSummaryFixture];
-  vi.mocked(listSessions).mockReset();
-  vi.mocked(listSessions).mockResolvedValue([]);
+  vi.mocked(listSessionsWithAnnotations).mockReset();
+  vi.mocked(listSessionsWithAnnotations).mockResolvedValue(listed([]));
 });
 
 describe('when a hover may peek', () => {
@@ -79,7 +83,7 @@ describe('when a hover may peek', () => {
     setWindow({ collapsed: false });
     railPeek.openPeek('p_docs');
     expect(railPeek.peekProjectId.value).toBeNull();
-    expect(listSessions).not.toHaveBeenCalled();
+    expect(listSessionsWithAnnotations).not.toHaveBeenCalled();
   });
 });
 
@@ -87,36 +91,58 @@ describe('what a hover shows', () => {
   it('shows the open project from the store, without reading anything', () => {
     railPeek.openPeek('p_karucode');
     expect(railPeek.peekProjectId.value).toBe('p_karucode');
-    expect(listSessions).not.toHaveBeenCalled();
+    expect(listSessionsWithAnnotations).not.toHaveBeenCalled();
   });
 
   it('reads another project exactly once, then serves it from the cache', async () => {
-    vi.mocked(listSessions).mockResolvedValue([summaryFixture]);
+    vi.mocked(listSessionsWithAnnotations).mockResolvedValue(listed([summaryFixture]));
     railPeek.openPeek('p_docs');
     await vi.waitFor(() => expect(railPeek.peekSessions.value.p_docs).toHaveLength(1));
-    expect(listSessions).toHaveBeenCalledWith('p_docs');
+    expect(listSessionsWithAnnotations).toHaveBeenCalledWith('p_docs');
     expect(railPeek.peekLoading.value.p_docs).toBe(false);
 
     railPeek.closePeek();
     railPeek.openPeek('p_docs');
-    expect(listSessions).toHaveBeenCalledTimes(1);
+    expect(listSessionsWithAnnotations).toHaveBeenCalledTimes(1);
   });
 
   it('re-reads on demand, so a rename or a delete is reflected', async () => {
-    vi.mocked(listSessions).mockResolvedValue([summaryFixture]);
+    vi.mocked(listSessionsWithAnnotations).mockResolvedValue(listed([summaryFixture]));
     railPeek.openPeek('p_docs');
     await vi.waitFor(() => expect(railPeek.peekSessions.value.p_docs).toHaveLength(1));
 
-    vi.mocked(listSessions).mockResolvedValue([secondSummaryFixture]);
+    vi.mocked(listSessionsWithAnnotations).mockResolvedValue(listed([secondSummaryFixture]));
     railPeek.invalidatePeekSessions('p_docs');
     await railPeek.loadPeekSessions('p_docs', true);
     expect(railPeek.peekSessions.value.p_docs?.map((session) => session.id)).toEqual(['s_cd34']);
   });
 
+  it('keeps the chips of each project apart, never borrowing the open one', async () => {
+    // The fly-out draws a project that is not the open one. Reading the open
+    // project's annotation signal here would paint its chips onto these rows, so
+    // the peek caches its own answer (this is what the SSR of `RailPeek` reads).
+    vi.mocked(listSessionsWithAnnotations).mockResolvedValue(
+      listed([summaryFixture], [{ id: summaryFixture.id, badges: [{ text: 'open', tone: 'accent' }] }]),
+    );
+    railPeek.openPeek('p_docs');
+    await vi.waitFor(() => expect(railPeek.peekSessions.value.p_docs).toHaveLength(1));
+    expect(railPeek.peekAnnotations.value.p_docs).toEqual([
+      { id: summaryFixture.id, badges: [{ text: 'open', tone: 'accent' }] },
+    ]);
+
+    // A second project with no plugin opinion keeps its own empty answer rather
+    // than inheriting the first project's chips.
+    vi.mocked(listSessionsWithAnnotations).mockResolvedValue(listed([secondSummaryFixture]));
+    railPeek.openPeek('p_other');
+    await vi.waitFor(() => expect(railPeek.peekSessions.value.p_other).toHaveLength(1));
+    expect(railPeek.peekAnnotations.value.p_other).toEqual([]);
+    expect(railPeek.peekAnnotations.value.p_docs).toHaveLength(1);
+  });
+
   it('keeps a failed read as an error instead of an empty list', async () => {
     // An empty list would read as "this project has no sessions", a different and
     // wrong answer.
-    vi.mocked(listSessions).mockRejectedValue(new Error('the server said no'));
+    vi.mocked(listSessionsWithAnnotations).mockRejectedValue(new Error('the server said no'));
     railPeek.openPeek('p_docs');
     await vi.waitFor(() => expect(railPeek.peekError.value.p_docs).toBe('the server said no'));
     expect(railPeek.peekSessions.value.p_docs).toBeUndefined();
