@@ -660,13 +660,6 @@ pub async fn send_message(
     // while a run is in flight, and a command must never be queued behind the
     // work it is trying to change. See `crate::slash`.
     if let Some(invocation) = slash::parse(&content) {
-        // The invocation's args are the task ("bump to 1.2"); the command name is
-        // not part of it. With no args the typed text is all there is.
-        title_source = if invocation.args_trimmed().is_empty() {
-            content.clone()
-        } else {
-            invocation.args_trimmed().to_string()
-        };
         let workspace = state
             .workspace_for_session(session.project_id.as_deref(), &session.workspace)
             .ok();
@@ -678,7 +671,19 @@ pub async fn send_message(
                 // expanded prompt is what runs, and it travels through this same
                 // request - including into a steer or a follow-up, which is why the
                 // rewrite happens before the queue below is built.
-                Some(prompt) => content = prompt,
+                Some(prompt) => {
+                    // The invocation's args are the task ("bump to 1.2"); with none,
+                    // the typed text is all there is. Set here - where the name is
+                    // known to be a command - and not where the text merely parses
+                    // as one: an unknown name with text after it is deliberate prose
+                    // (`/tmp file is stale`), and its title keeps the whole message.
+                    title_source = if invocation.args_trimmed().is_empty() {
+                        content.clone()
+                    } else {
+                        invocation.args_trimmed().to_string()
+                    };
+                    content = prompt;
+                }
                 None => {
                     let message_id =
                         slash::record(&state, &session.id, &invocation.name, &reply).await?;

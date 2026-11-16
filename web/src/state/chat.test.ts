@@ -424,6 +424,78 @@ describe('withStoredMessageIds', () => {
     expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([10, 20]);
   });
 
+  it('does not let a reasoning-only turn steal the answer below it', () => {
+    // The turn's first assistant part is reasoning only, so its content is empty and
+    // it can never match by text. Taking the newest free row gave it the answer's
+    // row, and the answer then fell back to the reasoning row - so the answer's
+    // Rewind pointed one turn too early.
+    const items = [
+      live({ id: 'reason:r_x', role: 'assistant', content: '', reasoning: 'thinking' }),
+      live({ id: 'stream:r_x:2', role: 'assistant', content: 'Done.' }),
+    ];
+    const detail = sessionWith([
+      storedMessage({ id: 10, role: 'assistant', content: '' }),
+      storedMessage({ id: 30, role: 'assistant', content: 'Done.' }),
+    ]);
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([10, 30]);
+  });
+
+  it('follows conversation order when an item matches no stored row', () => {
+    // A `/skill` prompt is stored as its expansion, so the live item never matches.
+    // Claiming the newest free row took the steer's row, and the steer then fell
+    // back to the prompt's row: rewinding the steer dropped the steer itself.
+    const items = [
+      live({ id: 'skill:r_x', content: 'Use the `release` skill. bump to 1.2' }),
+      live({ id: 'steer:r_x:2', content: 'bump to 1.3' }),
+    ];
+    const detail = sessionWith([
+      storedMessage({ id: 40, role: 'user', content: 'Use the `release` skill. Read it with ...' }),
+      storedMessage({ id: 41, role: 'user', content: 'bump to 1.3' }),
+    ]);
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([40, 41]);
+  });
+
+  it('refuses an ambiguous match in a truncated window', () => {
+    // The detail is a *tail*, so only the newer of two identical prompts is loaded.
+    // Row 20 could belong to either item, so neither gets it.
+    const items = [
+      live({ id: 'a', content: 'continue' }),
+      live({ id: 'b', content: 'continue' }),
+    ];
+    const detail = {
+      ...sessionWith([storedMessage({ id: 20, role: 'user', content: 'continue' })]),
+      messages_truncated: true,
+    };
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([undefined, undefined]);
+  });
+
+  it('still matches an unmistakable text in a truncated window', () => {
+    // Distinct texts need no ordering to be safe, so Rewind keeps working on a long
+    // session until the full window is loaded.
+    const items = [live({ id: 'a', content: 'fix the parser' })];
+    const detail = {
+      ...sessionWith([storedMessage({ id: 20, role: 'user', content: 'fix the parser' })]),
+      messages_truncated: true,
+    };
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([20]);
+  });
+
+  it('takes no fallback at all in a truncated window', () => {
+    // No row matches, and the tail may be missing the one that would: guessing is
+    // how the wrong turn gets rewound.
+    const items = [live({ id: 'a', content: 'expanded skill prompt' })];
+    const detail = {
+      ...sessionWith([storedMessage({ id: 20, role: 'user', content: 'something else' })]),
+      messages_truncated: true,
+    };
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([undefined]);
+  });
+
   it('refuses to guess when there are more live items than stored rows', () => {
     // Three prompts, two rows: the two that match take a row each, and the third
     // gets none - no rewind beats a rewind to somebody else's turn.

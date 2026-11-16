@@ -710,12 +710,16 @@ async fn load_compaction_snapshot(
     //
     // `messages_model`, not `messages_main`: the repaired window drops command
     // receipts (`repair_history`), and a count that includes them would claim one
-    // more newer message per receipt. The snapshot's own tail would then be
-    // appended again - and with two receipts in between, the appended window can
-    // start on a `tool` row whose `assistant` is already inside the digest, which
-    // the provider rejects. A snapshot written before this field existed carries a
-    // receipt-inclusive watermark, so it reads as "newer than the session has" and
-    // is dropped rather than misused.
+    // more newer message per receipt - appending the snapshot's own tail again, or
+    // starting the tail on a `tool` row whose `assistant` is inside the digest,
+    // which the provider rejects.
+    //
+    // A watermark written before that count existed cannot be recognised from this
+    // row: it is receipt-inclusive, which is *smaller* than the model count once
+    // rows are stored after it, so the guard below lets it through and the tail
+    // would silently start that many messages late. That is why migration 28
+    // deletes every checkpoint from before the change instead of trying to repair
+    // one here - a session with no snapshot rebuilds from the transcript.
     let total = match store.session_stats(session_id).await {
         Ok(stats) => stats.messages_model as usize,
         Err(_) => return None,
@@ -2438,6 +2442,7 @@ pub(crate) async fn compact_session(
         chars_before,
         chars_after: history.iter().map(context::message_chars).sum(),
         target_chars,
+        ceiling_chars: ceiling,
         compacted: messages_before > history.len(),
         semantic,
     };

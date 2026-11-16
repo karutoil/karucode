@@ -3349,8 +3349,11 @@ impl Config {
             );
             return;
         };
-        // Declared - possibly with no levels at all, which sends no reasoning body
-        // rather than the bare string the endpoint was said not to take.
+        // Declared: the level's own entry supplies the body, and an undeclared level
+        // degrades to the model's "off" entry. A map declared with no levels at all
+        // therefore contributes no body keys - but `reasoning_effort` is still sent
+        // below, because a declared map that only sets e.g. `thinking_budget` must
+        // still say which level the operator chose.
         if let Some(body) = variants.get(level) {
             for (key, value) in body {
                 model.extra_body.insert(key.clone(), value.clone());

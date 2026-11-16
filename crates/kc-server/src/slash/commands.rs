@@ -143,10 +143,11 @@ pub(super) async fn compact(
         }
         Ok(report) => Ok(Reply::ok(format!(
             "### Nothing to compact\n\n\
-             This conversation is already {} characters, inside the {} character target a \
-             compaction would fold down to. Compacting now would rewrite the digest for no \
-             saving and cost a cache miss.",
+             This conversation is already {} characters, inside the {} character ceiling a \
+             forced compaction would fold against (it keeps about {} of that). Compacting \
+             now would rewrite the digest for no saving and cost a cache miss.",
             thousands(report.chars_before),
+            thousands(report.ceiling_chars),
             thousands(report.target_chars),
         ))),
         Err(kc_core::Error::BadRequest(message)) => Ok(Reply::fail(message)),

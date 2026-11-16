@@ -83,6 +83,22 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Fixed
 
+- **Compaction checkpoints are rebuilt once, on upgrade.** The checkpoint's
+  watermark is a count of model-visible messages, so it has to exclude the
+  command receipts (`/compact` replies and friends) that the repaired window drops
+  - a receipt-inclusive count made the next request re-append a message the digest
+  already carried, and could start the appended tail on a `tool` row whose
+  `assistant` sat inside the digest, which providers reject. Checkpoints written
+  before that count existed cannot be told apart from correct ones on their row
+  (their watermark is *smaller* than the model count once anything is stored after
+  them), so schema v28 deletes them: the first run of each affected session
+  compacts from the transcript again, which costs one cache miss and nothing else.
+  `/compact` also refuses while a cancelled run is still unwinding (it would
+  overwrite that loop's own checkpoint), starts from the checkpoint a session
+  already has instead of rebuilding and losing its digest, and the number it
+  reports is what the fold aims to *keep* - it used to advertise a quarter of the
+  budget while keeping a fifth of it.
+
 - **A streaming transcript no longer writes its scroll twice a frame.** A real
   Firefox profile of a long session (1 ms sampling, Windows, a rotated monitor)
   showed the scroller being written twice and force-relaid-out five times per

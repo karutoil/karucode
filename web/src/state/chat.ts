@@ -522,20 +522,55 @@ export function withStoredMessageIds(items: ChatItem[], detail: SessionDetail): 
    * A run writes one assistant row per iteration and one user row per steer, so
    * `run|role` alone can name several. The item's own text picks between them -
    * the live text of a settled row is exactly the stored content - and only when
-   * no row agrees does the newest one stand in, which still rewinds to the same
+   * no row agrees does the oldest free one stand in, which still rewinds to the
    * turn the reader clicked.
    *
-   * Rows are claimed one-to-one, in conversation order. Two identical prompts in
-   * one run (a prompt and a steer that repeats it, "continue" being the common
-   * one) otherwise both matched the *newest* row, so clicking the first one sent
-   * the second one's id and rewound to the wrong turn.
+   * Rows are claimed one-to-one, oldest first, in conversation order. Two
+   * identical prompts in one run (a prompt and a steer that repeats it, "continue"
+   * being the common one) otherwise both matched the *newest* row, so clicking the
+   * first one sent the second one's id and rewound to the wrong turn. The
+   * fallback is the *oldest* free row for the same reason: an item that matches
+   * nothing (a `/skill` prompt, whose stored text is the expansion) must not take
+   * the row a later item matches.
+   *
+   * A truncated window is a *tail*, so its candidate list can be missing the older
+   * row an item belongs to. There the fallback is not taken at all, and an exact
+   * match has to be unique: with two identical prompts and only the newer one
+   * loaded, either id could rewind to the wrong turn - no button is better than
+   * the wrong turn.
    */
   const claimed = new Set<number>();
+  /**
+   * A truncated detail is the *tail* of a session: the older row an item belongs to
+   * may simply not be loaded. There only an unambiguous text can be trusted - one
+   * that appears once among the loaded rows for its run and once among the live
+   * items - because a text two items share is exactly the case where the loaded
+   * row could belong to either, and a wrong turn is worse than no button.
+   */
+  const truncated = detail.messages_truncated === true;
+  const sharedText = new Set<string>();
+  if (truncated) {
+    const seen = new Set<string>();
+    for (const item of items) {
+      if (item.kind !== 'message' || !item.runId || item.content === '') continue;
+      const key = `${item.runId}|${item.role}|${item.content}`;
+      if (seen.has(key)) sharedText.add(key);
+      seen.add(key);
+    }
+  }
   const proseSource = (item: MessageItem): number | undefined => {
     if (!item.runId) return undefined;
     const candidates = rows.get(`${item.runId}|${item.role}`);
     if (candidates === undefined || candidates.length === 0) return undefined;
     const free = candidates.filter((candidate) => !claimed.has(candidate.id));
+    if (truncated) {
+      if (item.content === '') return undefined;
+      if (sharedText.has(`${item.runId}|${item.role}|${item.content}`)) return undefined;
+      const exact = free.filter((candidate) => candidate.content === item.content);
+      if (exact.length !== 1) return undefined;
+      claimed.add(exact[0]!.id);
+      return exact[0]!.id;
+    }
     if (item.content !== '') {
       // Oldest unclaimed match: the items are walked in conversation order, so the
       // n-th item with a given text takes the n-th row with that text.
@@ -545,7 +580,7 @@ export function withStoredMessageIds(items: ChatItem[], detail: SessionDetail): 
         return match.id;
       }
     }
-    const fallback = free[free.length - 1];
+    const fallback = free[0];
     if (fallback !== undefined) claimed.add(fallback.id);
     return fallback?.id;
   };

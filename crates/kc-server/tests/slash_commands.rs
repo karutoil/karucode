@@ -295,6 +295,36 @@ async fn a_skill_invocation_titles_the_session_from_what_was_typed() {
 }
 
 #[tokio::test]
+async fn prose_that_merely_looks_like_a_command_keeps_its_whole_title() {
+    // `/tmp file is stale` parses as an invocation with args, but the catalog knows
+    // no `tmp`: it is prose, and it is sent as written. Its title must be the whole
+    // message, not just the part that looked like arguments.
+    let h = HarnessBuilder::new(vec![text("ok")])
+        .no_ai_titles()
+        .build()
+        .await;
+    let session = h.create_session(None).await;
+
+    let response = post_message(&h, &session, "/tmp file is stale").await;
+    assert_eq!(response.status, StatusCode::ACCEPTED, "{}", response.text());
+    h.wait_until_idle(&session).await;
+
+    let sent = h.factory.prompts().last().expect("one request").join("\n");
+    assert!(sent.contains("/tmp file is stale"), "sent as prose: {sent}");
+    let row = store_of(&h)
+        .get_session(&session)
+        .await
+        .expect("read the session")
+        .expect("the session exists");
+    // `derive_title` strips the leading `/` sigil, so the whole message minus that
+    // sigil is the title - and crucially not just the part that parsed as arguments.
+    assert_eq!(
+        row.title, "tmp file is stale",
+        "titled from the whole message, not its would-be arguments"
+    );
+}
+
+#[tokio::test]
 async fn an_unknown_skill_is_a_refusal_in_the_transcript() {
     let h = HarnessBuilder::new(Vec::new()).no_ai_titles().build().await;
     let session = h.create_session(Some("skills")).await;

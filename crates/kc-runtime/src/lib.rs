@@ -230,8 +230,15 @@ pub struct CompactionReport {
     /// Characters in those messages, so the saving is a number and not a promise.
     pub chars_before: usize,
     pub chars_after: usize,
-    /// The character budget the compaction aimed for (a quarter of the model's).
+    /// What the fold aimed to *keep*: a share of `ceiling_chars`, not the ceiling
+    /// itself (see `context::forced_compaction_target`). This is the number that is
+    /// worth printing - "already X, inside Y" compares like with like only when the
+    /// gate is `ceiling_chars`.
     pub target_chars: usize,
+    /// The ceiling the fold was gated on: a quarter of the request budget. A window
+    /// under this is left untouched and the forced compaction reports "nothing to
+    /// compact", so that sentence must name *this* number.
+    pub ceiling_chars: usize,
     /// False when the window was already under the target and nothing changed.
     pub compacted: bool,
     /// True when a model wrote the digest's prose block.
