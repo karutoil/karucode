@@ -6067,6 +6067,7 @@ mod tests {
                 26 => MIGRATION_26,
                 27 => MIGRATION_27,
                 28 => MIGRATION_28,
+                29 => MIGRATION_29,
                 other => panic!("no batch for v{other}"),
             };
             for (_, table, column, decl) in ADDED_COLUMNS

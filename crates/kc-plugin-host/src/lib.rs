@@ -768,6 +768,21 @@ impl PluginHost {
         commands_of(&self.ready_plugins())
     }
 
+    /// Ask ready plugins to shape how a session list is shown (§R4).
+    ///
+    /// **Display only.** The answer cannot hide a session from the operator, from
+    /// the API, or from `control_list_sessions`: the server merges it by id and
+    /// drops unknown ids, so the worst a plugin can do is sort oddly or draw a
+    /// badge. That is the whole point — a rail that a plugin can delete rows from
+    /// is a rail the operator cannot trust.
+    pub async fn session_list_annotations(
+        &self,
+        project_id: Option<&str>,
+        sessions: Vec<kc_core::plugin::SessionListEntry>,
+    ) -> Vec<kc_core::plugin::SessionListAnnotation> {
+        session_list_annotations(self.ready_plugins(), project_id, sessions).await
+    }
+
     /// A live handle for reading contributions and running actions without the
     /// host mutex — the counterpart of [`panels_handle`](Self::panels_handle).
     pub fn ui_handle(&self) -> PluginUiHandle {
@@ -2019,8 +2034,9 @@ pub fn hosted_command_name(plugin: &str, id: &str) -> String {
     let slug = |s: &str| -> String {
         s.chars()
             .map(|c| {
-                if c.is_ascii_lowercase() || c.is_ascii_digit() {
-                    c
+                let lower = c.to_ascii_lowercase();
+                if lower.is_ascii_lowercase() || lower.is_ascii_digit() {
+                    lower
                 } else {
                     '-'
                 }
@@ -2374,6 +2390,68 @@ pub(crate) const MAX_GATE_REPLACEMENT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_PROMPT_APPEND_BYTES: usize = 4 * 1024;
 /// Largest `reason` a `on_stop` may carry into the next turn.
 pub(crate) const MAX_STOP_REASON_BYTES: usize = 2 * 1024;
+
+/// Ask ready plugins how to draw a session list (§R4).
+///
+/// Merged by id, capped, and sanitised here rather than in the frontend: an
+/// answer naming an unknown session is dropped, badges are trimmed to
+/// [`kc_core::plugin::MAX_SESSION_BADGES`] with their text cut to
+/// [`kc_core::plugin::MAX_UI_BADGE_BYTES`], and an unknown tone becomes
+/// `neutral`. A plugin can shape the rail; it cannot invent a row or crash it.
+async fn session_list_annotations(
+    plugins: Vec<Arc<PluginShared>>,
+    project_id: Option<&str>,
+    sessions: Vec<kc_core::plugin::SessionListEntry>,
+) -> Vec<kc_core::plugin::SessionListAnnotation> {
+    use kc_core::plugin::{
+        SessionListAnnotation, MAX_SESSION_ANNOTATIONS, MAX_SESSION_BADGES, MAX_UI_BADGE_BYTES,
+    };
+    let known: Vec<String> = sessions.iter().map(|s| s.id.clone()).collect();
+    let payload = serde_json::json!({
+        "project_id": project_id,
+        "sessions": sessions,
+    });
+    let mut merged: Vec<SessionListAnnotation> = Vec::new();
+    for value in fan_out(&plugins, hooks::BEFORE_SESSION_LIST, &payload).await {
+        // Accept either `{sessions: [...]}` (the documented shape) or a bare array,
+        // so a plugin that returns the list directly is understood rather than
+        // silently dropped.
+        let rows = value
+            .get("sessions")
+            .cloned()
+            .unwrap_or(value.clone());
+        let Ok(rows) = serde_json::from_value::<Vec<SessionListAnnotation>>(rows) else {
+            warn!(
+                hook = hooks::BEFORE_SESSION_LIST,
+                "ignored a before_session_list answer that was not a list of annotations"
+            );
+            continue;
+        };
+        for mut row in rows {
+            if row.id.is_empty() || !known.contains(&row.id) {
+                continue;
+            }
+            row.badges.truncate(MAX_SESSION_BADGES);
+            for badge in &mut row.badges {
+                let (text, _) = cap_text(badge.text.trim(), MAX_UI_BADGE_BYTES);
+                badge.text = text;
+                badge.tone = kc_core::plugin::ui_tone_or_default(Some(badge.tone.as_str()))
+                    .to_string();
+            }
+            row.badges.retain(|b| !b.text.is_empty());
+            // The first plugin to annotate a row wins it: two plugins disagreeing
+            // about the same session's place is not something the rail can show
+            // both of, and plugin order is the same order the prompt uses.
+            if !merged.iter().any(|existing| existing.id == row.id) {
+                merged.push(row);
+            }
+            if merged.len() >= MAX_SESSION_ANNOTATIONS {
+                return merged;
+            }
+        }
+    }
+    merged
+}
 
 /// Ask every ready plugin whether a tool call may run, and how.
 async fn gate_tool_call(

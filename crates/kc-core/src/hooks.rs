@@ -237,8 +237,33 @@ mod tests {
     /// The gate defaults are what keep the new hooks additive: a source that
     /// implements none of them must behave exactly like every source written
     /// before they existed.
-    #[tokio::test]
-    async fn the_default_gates_change_nothing() {
+    ///
+    /// `kc-core` deliberately has no async runtime as a dependency, so the
+    /// futures are polled once here: every default body returns immediately, and a
+    /// `Pending` would itself be the bug this test exists to catch.
+    #[test]
+    fn the_default_gates_change_nothing() {
+        use std::future::Future;
+        use std::pin::pin;
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+        fn now<F: Future>(fut: F) -> F::Output {
+            fn noop(_: *const ()) {}
+            fn clone(_: *const ()) -> RawWaker {
+                RawWaker::new(std::ptr::null(), &VTABLE)
+            }
+            static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+            // SAFETY: the vtable's functions never dereference the null data
+            // pointer, which is the whole contract of a no-op waker.
+            let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+            let mut cx = Context::from_waker(&waker);
+            let mut fut = pin!(fut);
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(value) => value,
+                Poll::Pending => panic!("a default gate hook must not wait on anything"),
+            }
+        }
+
         let call = ToolCallGate {
             session_id: "s".into(),
             run_id: "r".into(),
@@ -247,7 +272,7 @@ mod tests {
             origin: "builtin".into(),
             arguments: serde_json::json!({"command": "rm -rf /"}),
         };
-        assert_eq!(NoHooks.on_tool_call(&call).await, GateDecision::Allow);
+        assert_eq!(now(NoHooks.on_tool_call(&call)), GateDecision::Allow);
 
         let result = ToolResultGate {
             session_id: "s".into(),
@@ -257,7 +282,7 @@ mod tests {
             output: "text".into(),
             truncated: false,
         };
-        assert!(NoHooks.on_tool_result_gate(&result).await.is_none());
+        assert!(now(NoHooks.on_tool_result_gate(&result)).is_none());
 
         let request = ModelRequestGate {
             session_id: "s".into(),
@@ -266,7 +291,7 @@ mod tests {
             messages: 2,
             tools: vec!["read_file".into()],
         };
-        assert!(NoHooks.on_model_request(&request).await.is_none());
+        assert!(now(NoHooks.on_model_request(&request)).is_none());
 
         let stop = StopGate {
             session_id: "s".into(),
@@ -275,6 +300,6 @@ mod tests {
             continuations: 0,
             max_continuations: 3,
         };
-        assert!(NoHooks.on_stop(&stop).await.is_none());
+        assert!(now(NoHooks.on_stop(&stop)).is_none());
     }
 }

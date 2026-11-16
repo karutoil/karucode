@@ -316,7 +316,8 @@ pub async fn list_sessions(
     State(state): State<AppState>,
     Query(query): Query<QueryMap>,
 ) -> ApiResult<Json<Value>> {
-    let sessions = match query_str(&query, "project") {
+    let project_id = query_str(&query, "project");
+    let sessions = match project_id {
         Some(project_id) => {
             if state.store().get_project(project_id).await?.is_none() {
                 return Err(ApiError::not_found(format!(
@@ -327,7 +328,24 @@ pub async fn list_sessions(
         }
         None => state.store().list_sessions().await?,
     };
-    Ok(Json(json!({ "sessions": sessions })))
+    // §R4: a plugin may say how each row should be drawn (a group, a sort key, a
+    // badge). Display only — the list itself is what the store returned, and the
+    // annotations are merged by id here, so nothing a plugin says can hide a
+    // session from the operator or from any other client.
+    let annotations = {
+        let summaries: Vec<kc_core::plugin::SessionListEntry> = sessions
+            .iter()
+            .map(|s| kc_core::plugin::SessionListEntry {
+                id: s.id.clone(),
+                title: s.title.clone(),
+                updated_at: s.updated_at,
+                status: s.last_run_status.clone().unwrap_or_default(),
+            })
+            .collect();
+        let host = state.plugins().lock().await;
+        host.session_list_annotations(project_id, summaries).await
+    };
+    Ok(Json(json!({ "sessions": sessions, "annotations": annotations })))
 }
 
 pub async fn create_session(State(state): State<AppState>, body: Bytes) -> ApiResult<Json<Value>> {

@@ -600,11 +600,12 @@ pub use kc_core::plugin::PluginUiActionResult as UiActionResult;
 pub use kc_core::plugin::PluginUiContribution as UiContribution;
 
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 /// One `tools/call` invocation handed to a tool handler.
 pub struct ToolRequest {
@@ -949,6 +950,245 @@ pub fn notify_with(frame: NotifyFrame) -> std::io::Result<()> {
     stdout.flush()
 }
 
+/// A request/response channel back to the host (§R2).
+///
+/// The plugin normally only *answers*; this is how it *asks*. `plugin/state/*` is
+/// the first such call: a plugin keeps durable data without a database of its
+/// own. The host answers on the same stdout the plugin writes to, so the client
+/// installs a router that hands a frame with an `id` to its waiter instead of a
+/// worker.
+///
+/// One global client, because there is one stdout. Cheap to clone and safe to
+/// call from any handler thread; a call from inside a tool handler is the normal
+/// case.
+#[derive(Clone, Default)]
+pub struct HostClient {
+    inner: Arc<HostClientInner>,
+}
+
+#[derive(Default)]
+struct HostClientInner {
+    next_id: AtomicU64,
+    pending: Mutex<HashMap<u64, mpsc::Sender<Value>>>,
+    /// Set once the plugin has started serving, so a client created inside a
+    /// handler can still reach the installed router.
+    started: AtomicBool,
+}
+
+impl std::fmt::Debug for HostClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostClient").finish()
+    }
+}
+
+impl HostClient {
+    /// The process-wide client.
+    pub fn global() -> Self {
+        static CLIENT: OnceLock<HostClient> = OnceLock::new();
+        CLIENT.get_or_init(HostClient::default).clone()
+    }
+
+    /// Whether the host is reachable (i.e. this plugin is being served).
+    pub fn is_live(&self) -> bool {
+        self.inner.started.load(Ordering::SeqCst)
+    }
+
+    /// Send one request and wait for its answer, up to `timeout`.
+    ///
+    /// Returns the JSON-RPC `result` on success, and the error *message* on a
+    /// JSON-RPC error - so a caller can put it in a tool result verbatim instead
+    /// of guessing what went wrong.
+    pub fn call(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let (tx, rx) = mpsc::channel();
+        if let Ok(mut pending) = self.inner.pending.lock() {
+            pending.insert(id, tx);
+        }
+        let frame = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        // A write failure means the host closed the pipe: the plugin is being
+        // stopped, and the caller should hear that rather than wait for a timeout.
+        if let Err(e) = write_frame(&frame) {
+            if let Ok(mut pending) = self.inner.pending.lock() {
+                pending.remove(&id);
+            }
+            return Err(format!("could not reach the host: {e}"));
+        }
+        let answer = rx.recv_timeout(timeout);
+        if let Ok(mut pending) = self.inner.pending.lock() {
+            pending.remove(&id);
+        }
+        match answer {
+            Ok(value) => {
+                if let Some(error) = value.get("error") {
+                    let message = error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("the host refused the request");
+                    Err(message.to_string())
+                } else {
+                    Ok(value.get("result").cloned().unwrap_or(Value::Null))
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err(format!("the host did not answer `{method}` in time"))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err("the host went away before answering".to_string())
+            }
+        }
+    }
+}
+
+/// Typed `plugin/state/*` helpers (§R2).
+///
+/// Thin over [`HostClient::call`]: the shape and the bounds are the host's, and a
+/// plugin should not re-invent them. Every method takes the **scope** explicitly
+/// because "who can see this value" is a design decision, not a default.
+impl HostClient {
+    /// Read one value. `Ok(None)` when nothing is stored.
+    pub fn state_get(
+        &self,
+        scope: &str,
+        session_id: &str,
+        project_id: &str,
+        key: &str,
+    ) -> Result<Option<Value>, String> {
+        let answer = self.call(
+            methods::STATE_GET,
+            state_params(scope, session_id, project_id, key),
+            Duration::from_secs(10),
+        )?;
+        Ok(answer.get("value").cloned().filter(|v| !v.is_null()))
+    }
+
+    /// Write one value (any JSON up to the host's 64 KiB cap).
+    pub fn state_set(
+        &self,
+        scope: &str,
+        session_id: &str,
+        project_id: &str,
+        key: &str,
+        value: Value,
+    ) -> Result<(), String> {
+        let mut params = state_params(scope, session_id, project_id, key);
+        params["value"] = value;
+        self.call(methods::STATE_SET, params, Duration::from_secs(10))?;
+        Ok(())
+    }
+
+    /// Delete one value. `Ok(false)` when there was nothing to delete.
+    pub fn state_delete(
+        &self,
+        scope: &str,
+        session_id: &str,
+        project_id: &str,
+        key: &str,
+    ) -> Result<bool, String> {
+        let answer = self.call(
+            methods::STATE_DELETE,
+            state_params(scope, session_id, project_id, key),
+            Duration::from_secs(10),
+        )?;
+        Ok(answer
+            .get("deleted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
+    }
+
+    /// Every `(key, value)` in one scope, optionally narrowed by a key prefix.
+    pub fn state_list(
+        &self,
+        scope: &str,
+        session_id: &str,
+        project_id: &str,
+        prefix: &str,
+    ) -> Result<Vec<(String, Value)>, String> {
+        let mut params = json!({"scope": scope});
+        let object = params.as_object_mut().expect("json object");
+        if !session_id.is_empty() {
+            object.insert("session_id".into(), json!(session_id));
+        }
+        if !project_id.is_empty() {
+            object.insert("project_id".into(), json!(project_id));
+        }
+        if !prefix.is_empty() {
+            object.insert("prefix".into(), json!(prefix));
+        }
+        let answer = self.call(methods::STATE_LIST, params, Duration::from_secs(10))?;
+        let entries = answer
+            .get("entries")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(entries
+            .into_iter()
+            .filter_map(|entry| {
+                let key = entry.get("key")?.as_str()?.to_string();
+                Some((key, entry.get("value").cloned().unwrap_or(Value::Null)))
+            })
+            .collect())
+    }
+}
+
+/// The common `plugin/state/*` params, with the ids the host expects.
+fn state_params(scope: &str, session_id: &str, project_id: &str, key: &str) -> Value {
+    let mut params = json!({"scope": scope, "key": key});
+    let object = params.as_object_mut().expect("json object");
+    if !session_id.is_empty() {
+        object.insert("session_id".into(), json!(session_id));
+    }
+    if !project_id.is_empty() {
+        object.insert("project_id".into(), json!(project_id));
+    }
+    params
+}
+
+/// Write one frame on the protocol channel, under the process-wide write lock.
+///
+/// The SDK's own replies go through its writer thread; this path is for frames a
+/// plugin *sends*. Both end on stdout, so both take the same lock: two threads
+/// interleaving half a line each is protocol corruption, not a cosmetic bug.
+fn write_frame(frame: &Value) -> std::io::Result<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let lock = LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut stdout = std::io::stdout();
+    writeln!(stdout, "{frame}")?;
+    stdout.flush()
+}
+
+/// Route one inbound frame: `true` when it was a response to this plugin's own
+/// request, `false` when it is a job for a worker.
+fn route_inbound(client: &HostClient, value: &Value) -> bool {
+    let Some(id) = value.get("id").and_then(Value::as_u64) else {
+        return false;
+    };
+    // A request from the host also carries an `id`; only a frame with no `method`
+    // is a response to us.
+    if value.get("method").is_some() {
+        return false;
+    }
+    let waiter = client
+        .inner
+        .pending
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.remove(&id));
+    match waiter {
+        Some(tx) => {
+            let _ = tx.send(value.clone());
+            true
+        }
+        None => false,
+    }
+}
+
+
 struct ToolEntry {
     def: PluginToolDef,
     handler: ToolHandler,
@@ -1225,6 +1465,12 @@ impl Plugin {
         // every `initialize` handshake time out after ten seconds.
         let pump_finished = Arc::new(AtomicBool::new(false));
         let pump_stop = Arc::new(AtomicBool::new(false));
+        // From here on the host is reachable: a handler may call back into it
+        // (`plugin/state/*`, §R2) and the reader loop routes the answer.
+        HostClient::global()
+            .inner
+            .started
+            .store(true, Ordering::SeqCst);
         let pump = {
             let out = write_tx.clone();
             let finished = Arc::clone(&pump_finished);
@@ -1302,6 +1548,13 @@ impl Plugin {
                     continue;
                 }
             };
+            // A frame with an `id` and no `method` is the host answering a
+            // request THIS plugin made (`plugin/state/*`, §R2). Route it to its
+            // waiter instead of queueing it as a job; a job would have no reply
+            // table entry and the caller would sit until its timeout.
+            if route_inbound(&HostClient::global(), &request) {
+                continue;
+            }
             job_tx
                 .send(Job { request })
                 .map_err(std::io::Error::other)?;
@@ -1715,6 +1968,73 @@ impl PluginBuilder {
             sets: Vec::new(),
             replace: None,
         })
+    }
+
+    /// Gate every tool call: block it, or rewrite its arguments (§R1).
+    ///
+    /// The handler receives `{session_id, run_id, tool, class, origin, arguments}`.
+    /// Return:
+    ///
+    /// * `json!({"block": true, "reason": "…"})` — the tool never runs, and the
+    ///   reason becomes the result the model reads;
+    /// * `json!({"arguments": {…}})` — run the call with different arguments,
+    ///   which the harness re-validates against the tool's own schema;
+    /// * anything else, or `null` — run the call as written.
+    ///
+    /// A gate can never approve a call the approval policy would have asked
+    /// about: it narrows, it does not permit. A handler that panics or hangs is
+    /// treated as "allow", so a broken gate cannot brick a session.
+    pub fn on_tool_call(self, handler: impl Fn(Value) -> Value + Send + Sync + 'static) -> Self {
+        self.capability("hooks").hook("on_tool_call", handler)
+    }
+
+    /// Rewrite a tool result before the model sees it (§R1).
+    ///
+    /// Receive `{session_id, run_id, tool, ok, output, truncated}` and return
+    /// `json!({"output": "…"})` to replace the text, or `null` to keep it. The
+    /// replacement is truncated to the tool's own output budget, so this hook can
+    /// summarise or redact but never enlarge the context.
+    pub fn on_tool_result_gate(
+        self,
+        handler: impl Fn(Value) -> Value + Send + Sync + 'static,
+    ) -> Self {
+        self.capability("hooks").hook("on_tool_result", handler)
+    }
+
+    /// Append text to the system prompt for one request (§R1).
+    ///
+    /// Receive `{session_id, run_id, system, messages, tools}` and return a
+    /// string (or `json!({"text": "…"})`). The assembled prompt cannot be
+    /// replaced, only added to, and the addition is capped at 4 KiB in total
+    /// across plugins.
+    pub fn on_model_request(
+        self,
+        handler: impl Fn(Value) -> Value + Send + Sync + 'static,
+    ) -> Self {
+        self.capability("hooks").hook("on_model_request", handler)
+    }
+
+    /// Asked when a run is about to end: may it stop? (§R1)
+    ///
+    /// Receive `{session_id, run_id, status, continuations, max_continuations}`
+    /// and return
+    /// `json!({"continue": true, "reason": "this session is still open"})` to keep
+    /// going for one more turn. `limits.max_stop_continuations` (3 by default)
+    /// bounds how many times any plugin may do this per run.
+    pub fn on_stop(self, handler: impl Fn(Value) -> Value + Send + Sync + 'static) -> Self {
+        self.capability("hooks").hook("on_stop", handler)
+    }
+
+    /// Shape how the session rail draws its rows (§R4).
+    ///
+    /// Receive `{project_id, sessions: [{id, title, updated_at, status}]}` and
+    /// return `{"sessions": [{id, group?, sort_key?, badges?}]}`. Display only: an
+    /// id the host did not list is dropped, and nothing can hide a session.
+    pub fn on_session_list(
+        self,
+        handler: impl Fn(Value) -> Value + Send + Sync + 'static,
+    ) -> Self {
+        self.capability("hooks").hook("before_session_list", handler)
     }
 
     /// Contribute a command-palette entry that sends a user turn.

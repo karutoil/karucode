@@ -283,11 +283,25 @@ fn hooks_module_lists_implemented_hooks() {
     // to plugins that advertise it, which is how a plugin bridges karucode to an
     // external notifier.
     assert!(hooks::IMPLEMENTED.contains(&hooks::ON_NOTIFY));
-    // The reserved ones must stay reserved: advertising them does nothing.
-    for reserved in [
-        hooks::ON_RUN_START,
+    // §R1/R4 of the extensibility ADR: the four gates and the session-list shaper
+    // are called by the runtime/server. These are the hooks a third-party plugin
+    // needs to veto a call, rewrite a result, append to the request or keep a run
+    // going, so they must never drift back to "documented but never called".
+    for implemented in [
         hooks::ON_TOOL_CALL,
         hooks::ON_MODEL_REQUEST,
+        hooks::ON_STOP,
+        hooks::BEFORE_SESSION_LIST,
+    ] {
+        assert!(
+            hooks::IMPLEMENTED.contains(&implemented),
+            "{implemented} must stay implemented: the runtime calls it"
+        );
+    }
+    // The ones with no runtime call site must stay reserved: advertising them
+    // does nothing, and claiming otherwise in the docs would be a lie.
+    for reserved in [
+        hooks::ON_RUN_START,
         hooks::ON_MODEL_RESPONSE,
         hooks::ON_SESSION_CREATE,
     ] {
@@ -296,6 +310,81 @@ fn hooks_module_lists_implemented_hooks() {
             "{reserved} is documented as reserved"
         );
     }
+}
+
+#[test]
+fn a_badge_contribution_needs_text_not_a_label() {
+    let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+        "name": "wf", "version": "1", "protocol": "1",
+        "ui": [
+            {"kind": "button", "id": "open", "slot": "session.row.badge",
+             "text": "open", "tone": "accent",
+             "action": "toggle"}
+        ]
+    }))
+    .expect("manifest");
+    let (contributions, skipped) = crate::rpc::parse_ui("wf", &manifest).expect("accepted");
+    assert!(skipped.is_empty(), "{skipped:?}");
+    let badge = &contributions[0];
+    assert_eq!(badge.slot.as_deref(), Some("session.row.badge"));
+    assert_eq!(badge.text.as_deref(), Some("open"));
+    // The label falls back to the chip's own text, so the control still has an
+    // accessible name without the author having to repeat it.
+    assert_eq!(badge.label, "open");
+    assert_eq!(badge.tone.as_deref(), Some("accent"));
+}
+
+#[test]
+fn an_unknown_tone_falls_back_rather_than_failing() {
+    let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+        "name": "wf", "version": "1", "protocol": "1",
+        "ui": [
+            {"kind": "button", "id": "done", "slot": "session.row.badge",
+             "text": "done", "tone": "chartreuse", "action": "toggle"}
+        ]
+    }))
+    .expect("manifest");
+    let (contributions, _) = crate::rpc::parse_ui("wf", &manifest).expect("accepted");
+    assert_eq!(contributions[0].tone.as_deref(), Some("neutral"));
+}
+
+#[test]
+fn a_replace_contribution_renames_text_and_refuses_safety_controls() {
+    let ok: PluginManifest = serde_json::from_value(serde_json::json!({
+        "name": "wf", "version": "1", "protocol": "1",
+        "ui": [{"kind": "replace", "target": "label.project", "replace": "Workspace"}]
+    }))
+    .expect("manifest");
+    let (contributions, skipped) = crate::rpc::parse_ui("wf", &ok).expect("accepted");
+    assert!(skipped.is_empty());
+    assert_eq!(contributions[0].target.as_deref(), Some("label.project"));
+    assert_eq!(contributions[0].replace.as_deref(), Some("Workspace"));
+
+    // A target outside the catalogue is skipped with a reason, never applied:
+    // relabelling approval controls is exactly what this must refuse.
+    let refused: PluginManifest = serde_json::from_value(serde_json::json!({
+        "name": "wf", "version": "1", "protocol": "1",
+        "ui": [{"kind": "replace", "target": "approval.allow", "replace": "Ship it"}]
+    }))
+    .expect("manifest");
+    let (contributions, skipped) = crate::rpc::parse_ui("wf", &refused).expect("accepted");
+    assert!(contributions.is_empty());
+    assert!(skipped[0].contains("approval.allow"));
+}
+
+#[test]
+fn a_hosted_command_name_cannot_shadow_a_builtin() {
+    // The prefix is the whole guarantee: `/help` and a skill id stay reachable.
+    let name = crate::hosted_command_name("session-status", "mark-done");
+    assert_eq!(name, "plugin-session-status-mark-done");
+    assert!(name.starts_with("plugin-"));
+    // Punctuation and case are slugged, never passed through, so the result is
+    // always a legal command token (`[a-z][a-z0-9_-]*`).
+    let slugged = crate::hosted_command_name("My.Plugin", "Do_Thing!");
+    assert_eq!(slugged, "plugin-my-plugin-do-thing");
+    assert!(slugged
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
 }
 
 #[test]

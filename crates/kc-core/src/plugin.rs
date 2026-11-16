@@ -870,6 +870,52 @@ pub trait PluginStateBackend: Send + Sync {
     async fn bytes(&self, plugin: &str, scope: &str, owner: &str) -> crate::Result<i64>;
 }
 
+/// One session, as a `before_session_list` hook sees it (§R4).
+///
+/// A compact summary, never a transcript: enough to decide "this is open, that is
+/// done" without handing a plugin the conversation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionListEntry {
+    pub id: String,
+    pub title: String,
+    pub updated_at: i64,
+    /// The session's latest run status (`completed`, `failed`, …), or empty.
+    pub status: String,
+}
+
+/// How a plugin wants one session drawn in the rail (§R4).
+///
+/// Every field is a hint the app validates: `sort_key` reorders within a group,
+/// `group` is a small integer bucket (0 first — a workflow plugin puts open work
+/// there), and `badges` are short chips. `None` means "draw it as usual".
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SessionListAnnotation {
+    pub id: String,
+    /// Lower sorts first within its group. `None` keeps `updated_at` ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_key: Option<i64>,
+    /// The bucket this row belongs to; `None` keeps it in the default bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<i32>,
+    /// Chips drawn on the row. Each is `{text, tone}`; the app caps the count.
+    #[serde(default)]
+    pub badges: Vec<SessionBadge>,
+}
+
+/// One chip a plugin asks the app to draw beside a session (§R4/R5).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SessionBadge {
+    pub text: String,
+    /// One of [`UI_TONES`]; an unknown tone draws `neutral`.
+    #[serde(default)]
+    pub tone: String,
+}
+
+/// Rows one `before_session_list` answer may carry.
+pub const MAX_SESSION_ANNOTATIONS: usize = 512;
+/// Chips drawn per row: three is already a busy row.
+pub const MAX_SESSION_BADGES: usize = 3;
+
 pub mod tool_output {
     use super::*;
     use std::collections::BTreeMap;
