@@ -111,3 +111,36 @@ describe('rewind requests after overlay replacement', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('a silent re-read of the same session', () => {
+  it('does not throw away a preview the server already answered', async () => {
+    // A stream reconnect re-reads the open session (`openSession(..., {silent:
+    // true})`) while the preview request is in flight. That read bumps the
+    // session generation, and treating it as "the target is gone" made the
+    // dialog report that the preview could not be loaded for a message the
+    // server had answered - while a second look loaded it.
+    const pending = deferred<Response>();
+    globalThis.fetch = vi.fn(async () => pending.promise) as unknown as typeof fetch;
+    actions.openRewind(firstTarget);
+    const loading = actions.loadRewindPreview();
+
+    // The reconnect: the same session is read again, nothing else changes.
+    const detail = { session: { id: 's_one' }, messages: [], runs: [], agents: [], approvals: [], claims: [], running: false };
+    globalThis.fetch = vi.fn(async () => jsonResponse(detail)) as unknown as typeof fetch;
+    await actions.openSession('s_one', { silent: true });
+
+    pending.resolve(jsonResponse({ preview: preview(1) }));
+    expect(await loading).toEqual(preview(1));
+  });
+
+  it('still drops a preview for a target the reader has left', async () => {
+    const pending = deferred<Response>();
+    globalThis.fetch = vi.fn(async () => pending.promise) as unknown as typeof fetch;
+    actions.openRewind(firstTarget);
+    const loading = actions.loadRewindPreview();
+    actions.openRewind(secondTarget);
+
+    pending.resolve(jsonResponse({ preview: preview(1) }));
+    expect(await loading).toBeNull();
+  });
+});

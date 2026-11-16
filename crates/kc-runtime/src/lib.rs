@@ -58,6 +58,15 @@ mod tests_support;
 /// exceeds it still keeps its newest turns and the trim notice names the cut.
 pub const HISTORY_LIMIT: usize = 20_000;
 
+/// The smallest window a forced compaction will aim for, in characters.
+///
+/// `/compact` targets a quarter of the model's budget, but a model with a tiny
+/// declared window would make a quarter of it smaller than a single tool result -
+/// and compacting down to nothing is not a compaction, it is amnesia. Below this
+/// floor the digest keeps the task, the newest exchange and the ledger, and the
+/// caller is told the window is already as small as it goes.
+pub const MIN_COMPACTION_TARGET_CHARS: usize = 2_000;
+
 /// How old (in days) a session may be and still be repaired at startup.
 ///
 /// Startup repair is not the only repair: `begin_run` calls `repair_history`
@@ -210,6 +219,23 @@ pub struct RewindOutcome {
     /// show the rewind as done instead of rolling it back or silently retrying.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CompactionReport {
+    /// Messages the rebuilt window held before compaction.
+    pub messages_before: usize,
+    /// Messages the compacted window holds. The digest counts as one.
+    pub messages_after: usize,
+    /// Characters in those messages, so the saving is a number and not a promise.
+    pub chars_before: usize,
+    pub chars_after: usize,
+    /// The character budget the compaction aimed for (a quarter of the model's).
+    pub target_chars: usize,
+    /// False when the window was already under the target and nothing changed.
+    pub compacted: bool,
+    /// True when a model wrote the digest's prose block.
+    pub semantic: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -848,6 +874,22 @@ impl Runtime {
     /// model loop itself runs in a background task.
     pub async fn submit(self: &Arc<Self>, session_id: &str, prompt: String) -> Result<RunHandle> {
         agent::start_run(self, session_id, prompt).await
+    }
+
+    /// Compact this session's conversation now, instead of waiting for the
+    /// budget to run out.
+    ///
+    /// The same compaction a run performs when the transcript no longer fits,
+    /// applied on demand: the window is rebuilt, compacted to a quarter of the
+    /// model's budget, given a model-written digest when `limits.model_compaction`
+    /// is on, and saved as the session's compaction snapshot so the next run
+    /// starts from it instead of re-reading the transcript. Nothing is deleted -
+    /// the transcript keeps every message - and the report says what it cost.
+    ///
+    /// Refused while a run is in flight, because that run holds its own copy of
+    /// the window and would write it back over this one.
+    pub async fn compact_session(self: &Arc<Self>, session_id: &str) -> Result<CompactionReport> {
+        agent::compact_session(self, session_id).await
     }
 
     /// Hide everything after `message_id` and (optionally) undo the file changes

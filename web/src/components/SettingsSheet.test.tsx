@@ -738,6 +738,9 @@ describe('SettingsSheet providers', () => {
       cost_input: null,
       cost_output: 0.9,
       catalog_provider: null,
+      // Carried through, not dropped: an edit that has nothing to do with
+      // reasoning levels must still round-trip the map the model had.
+      variants: null,
     });
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit qwen3-32b' })).toBeNull());
   });
@@ -773,6 +776,101 @@ describe('SettingsSheet providers', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save model' }));
 
     await within(dialog).findByRole('alert');
+    expect(patches).toHaveLength(0);
+  });
+
+  /**
+   * The regression this dialog caused: `variants` was not in the object the
+   * dialog handed back, so editing an unrelated field replaced the whole entry
+   * and deleted a map written in config.toml - silently reverting the model to
+   * the bare `reasoning_effort` string.
+   */
+  it('keeps a model’s configured reasoning variants when an unrelated field is edited', async () => {
+    const base = twoProfileConfig();
+    base.providers[1]!.models[0] = {
+      ...base.providers[1]!.models[0]!,
+      variants: {
+        none: { thinking: { type: 'disabled' } },
+        high: { thinking: { type: 'enabled', budget_tokens: 32000 } },
+      },
+    };
+    const { patches } = installFetch(base);
+    renderSheet(base);
+    await openTab('Models & providers');
+
+    const gateway = await profileCard('Gateway');
+    fireEvent.click(within(gateway).getByRole('button', { name: 'Edit Qwen3 32B on Gateway' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Edit qwen3-32b' });
+    // Change something that has nothing to do with reasoning levels.
+    fireEvent.input(within(dialog).getByLabelText('Display name'), { target: { value: 'Renamed' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save model' }));
+
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.providers?.upsert?.[0]?.models?.[0]?.variants).toEqual({
+      none: { thinking: { type: 'disabled' } },
+      high: { thinking: { type: 'enabled', budget_tokens: 32000 } },
+    });
+  });
+
+  it('edits a model’s reasoning variants through the dialog, 1:1 with config', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+    await openTab('Models & providers');
+
+    const gateway = await profileCard('Gateway');
+    fireEvent.click(within(gateway).getByRole('button', { name: 'Edit Qwen3 32B on Gateway' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Edit qwen3-32b' });
+    // Not declared today: no level rows at all.
+    expect(within(dialog).queryByRole('group', { name: 'Declared reasoning levels' })).toBeNull();
+    fireEvent.click(within(dialog).getByRole('switch', { name: /Declare reasoning levels/ }));
+    // Declaring with no levels is `{}`, which the server reads as "offers none".
+    expect(
+      await within(dialog).findByRole('group', { name: 'Declared reasoning levels' }),
+    ).not.toBeNull();
+
+    // Add two levels and give them the bodies the doc example uses.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add level' }));
+    fireEvent.input(within(dialog).getByLabelText('Request body for level 1'), {
+      target: { value: '{"thinking": {"type": "disabled"}}' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add level' }));
+    fireEvent.change(within(dialog).getByLabelText('Level 2'), { target: { value: 'high' } });
+    fireEvent.input(within(dialog).getByLabelText('Request body for level 2'), {
+      target: { value: '{"thinking": {"type": "enabled", "budget_tokens": 32000}}' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save model' }));
+
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.providers?.upsert?.[0]?.models?.[0]?.variants).toEqual({
+      none: { thinking: { type: 'disabled' } },
+      high: { thinking: { type: 'enabled', budget_tokens: 32000 } },
+    });
+  });
+
+  it('refuses to save a variant whose body is not valid JSON', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+    await openTab('Models & providers');
+
+    const gateway = await profileCard('Gateway');
+    fireEvent.click(within(gateway).getByRole('button', { name: 'Edit Qwen3 32B on Gateway' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Edit qwen3-32b' });
+    fireEvent.click(within(dialog).getByRole('switch', { name: /Declare reasoning levels/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add level' }));
+    fireEvent.input(within(dialog).getByLabelText('Request body for level 1'), {
+      target: { value: '{ not json' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save model' }));
+
+    // The body is not a JSON object, so the save is blocked and nothing is sent.
+    await waitFor(() =>
+      expect(dialog.textContent).toContain('has a body that is not a JSON object'),
+    );
+    // The reader is also told which row is wrong, in the row itself.
+    expect(within(dialog).getByText(/Not valid JSON/)).not.toBeNull();
     expect(patches).toHaveLength(0);
   });
 

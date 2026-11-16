@@ -147,6 +147,7 @@ pub const REQUIRED_SLUGS: &[&str] = &[
     "run-server",
     "security",
     "skills",
+    "slash-commands",
     "subagents",
     "system-prompt",
     "themes",

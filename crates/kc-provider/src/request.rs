@@ -156,27 +156,66 @@ fn float_json(value: f32) -> Value {
         .unwrap_or_else(|| Value::from(0))
 }
 
-/// Merge static `ModelConfig::extra_body` keys into a request body. Keys already
-/// present (from `ChatRequest::extra_body`) win, and framing keys are ignored.
-pub(crate) fn apply_config_extra_body(
-    body: &mut Value,
-    extra: &std::collections::BTreeMap<String, Value>,
-) {
-    let Some(map) = body.as_object_mut() else {
-        return;
-    };
-    for (key, value) in extra {
-        if RESERVED_BODY_KEYS.contains(&key.as_str()) {
-            continue;
+/// Merge static `ModelConfig::extra_body` keys into a request body.
+///
+/// A separate module so the production merge and the unit tests below cannot
+/// shadow each other: this file's `#[cfg(test)] mod tests` used to bring a
+/// test-only `apply_config_extra_body` into scope at module level, which made
+/// every production caller compile against the test helper. Keeping the real
+/// function in `support` means `request::support::apply_config_extra_body`,
+/// `apply_config_extra_body` and the test imports can never collide again.
+pub(crate) mod support {
+
+    use super::{output_limit_counterpart, RESERVED_BODY_KEYS};
+    use serde_json::Value;
+
+    /// Merge static `ModelConfig::extra_body` keys into a request body. A key the
+    /// request already set (from `ChatRequest::extra_body`) wins, and framing keys
+    /// are ignored.
+    ///
+    /// `request_is_authoritative` says the request's `extra_body` was built for
+    /// *this run* from a session's pinned reasoning level, so it must supersede any
+    /// stale entry the profile still carries. Concretely: the body may hold
+    /// `reasoning_effort: "high"` because the operator pinned that level while
+    /// `[model.extra_body]` still says `reasoning_effort = "low"`, and the run must
+    /// send `high`. It also lets a declared key be *removed* by sending `null`,
+    /// which is how "thinking disabled" is expressed on endpoints that take the
+    /// field but not a budget.
+    ///
+    /// With the flag unset the merge is the historical one: fill in gaps, never
+    /// override, so a plain `[model.extra_body]` cannot silently replace something
+    /// the provider built.
+    pub(crate) fn apply_config_extra_body(
+        body: &mut Value,
+        extra: &std::collections::BTreeMap<String, Value>,
+        request_is_authoritative: bool,
+    ) {
+        let Some(map) = body.as_object_mut() else {
+            return;
+        };
+        for (key, value) in extra {
+            if RESERVED_BODY_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            // `max_tokens` and `max_completion_tokens` are two spellings of one
+            // limit. Newer OpenAI models reject the former, so an operator who sets
+            // the latter through `extra_body` must get exactly that key on the wire,
+            // not both.
+            if let Some(other) = output_limit_counterpart(key) {
+                map.remove(other);
+            }
+            if request_is_authoritative {
+                if map.contains_key(key) {
+                    // The run already decided this key; the profile's entry is stale.
+                    continue;
+                }
+                map.insert(key.clone(), value.clone());
+            } else {
+                // The historical merge: fill gaps, never override, so a plain
+                // `[model.extra_body]` cannot replace what the provider built.
+                map.entry(key.clone()).or_insert_with(|| value.clone());
+            }
         }
-        // `max_tokens` and `max_completion_tokens` are two spellings of one
-        // limit. Newer OpenAI models reject the former, so an operator who sets
-        // the latter through `extra_body` must get exactly that key on the wire,
-        // not both.
-        if let Some(other) = output_limit_counterpart(key) {
-            map.remove(other);
-        }
-        map.entry(key.clone()).or_insert_with(|| value.clone());
     }
 }
 
@@ -397,6 +436,18 @@ pub(crate) fn sensitive_values(headers: &HeaderMap) -> Vec<String> {
 mod tests {
     use super::*;
     use kc_core::message::{ImageAttachment, ToolCall};
+
+    /// The production merge, named explicitly: `use super::*` above does not
+    /// re-export `support`'s private items (and shadowing this name is precisely
+    /// how the request tests once asserted against a helper instead of the real
+    /// function).
+    fn merge(
+        body: &mut Value,
+        extra: &std::collections::BTreeMap<String, Value>,
+        request_is_authoritative: bool,
+    ) {
+        super::support::apply_config_extra_body(body, extra, request_is_authoritative);
+    }
 
     fn request() -> ChatRequest {
         ChatRequest {
@@ -632,11 +683,37 @@ mod tests {
         config_extra.insert("reasoning_effort".to_string(), Value::String("low".into()));
         config_extra.insert("prompt_cache".to_string(), Value::Bool(true));
         config_extra.insert("stream".to_string(), Value::Bool(false));
-        apply_config_extra_body(&mut body, &config_extra);
+        merge(&mut body, &config_extra, false);
         assert_eq!(body["seed"], 7);
         assert_eq!(body["reasoning_effort"], "high");
         assert_eq!(body["prompt_cache"], true);
         assert_eq!(body["stream"], true);
+    }
+
+    /// A declared reasoning variant is a promise about the wire: the request's
+    /// own keys must beat the profile's inherited `extra_body`, or a `high`
+    /// variant would silently keep sending the profile's `low` string.
+    #[test]
+    fn a_declared_reasoning_level_overrides_the_profiles_extra_body() {
+        let mut req = request();
+        req.extra_body.insert(
+            "thinking".into(),
+            serde_json::json!({ "type": "enabled", "budget_tokens": 32000 }),
+        );
+        req.extra_body
+            .insert("reasoning_effort".into(), Value::String("high".into()));
+        let mut body = build_chat_body(&req);
+        let mut config_extra = std::collections::BTreeMap::new();
+        config_extra.insert("reasoning_effort".to_string(), Value::String("low".into()));
+        config_extra.insert(
+            "thinking".to_string(),
+            serde_json::json!({ "type": "disabled" }),
+        );
+        merge(&mut body, &config_extra, true);
+
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["thinking"]["budget_tokens"], 32000);
+        assert_eq!(body["thinking"]["type"], "enabled");
     }
 
     #[test]

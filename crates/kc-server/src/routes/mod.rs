@@ -4,6 +4,7 @@ pub mod agents;
 pub mod approvals;
 pub mod artifacts;
 pub mod auth;
+pub mod commands;
 pub mod config;
 pub mod events;
 pub mod git;
@@ -117,6 +118,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/models/catalog", get(models::catalog))
         .route("/models/lookup", get(models::lookup))
         .route("/stats", get(config::stats))
+        .route("/commands", get(commands::list_commands))
         .route(
             "/sessions",
             get(sessions::list_sessions)

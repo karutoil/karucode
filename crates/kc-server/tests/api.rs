@@ -3833,6 +3833,28 @@ async fn git_client_init_remotes_and_sync() {
         .await;
     assert_eq!(pulled.status, StatusCode::OK, "{}", pulled.text());
 
+    // ---- set-url + remove round out the remote verbs ----
+    // (`remove` shared the `--` argv bug with `rename`: git < 2.42 counts the
+    // separator as a real argument for `remote rename`/`remove` and exits 129,
+    // turning a legal request into a 400 - see the comment in manage_remote.)
+    let set_url = h
+        .post(
+            "/api/git/remotes",
+            json!({ "action": "set_url", "name": "origin", "url": bare_url }),
+        )
+        .await;
+    assert_eq!(set_url.status, StatusCode::OK, "{}", set_url.text());
+    assert_eq!(set_url.json()["remotes"][0]["name"], "origin");
+
+    let removed = h
+        .post(
+            "/api/git/remotes",
+            json!({ "action": "remove", "name": "origin" }),
+        )
+        .await;
+    assert_eq!(removed.status, StatusCode::OK, "{}", removed.text());
+    assert_eq!(removed.json()["remotes"].as_array().map(Vec::len), Some(0));
+
     // ---- github status & validation ----
     let gh_status = h.get("/api/git/github/status").await;
     assert_eq!(gh_status.status, StatusCode::OK, "{}", gh_status.text());

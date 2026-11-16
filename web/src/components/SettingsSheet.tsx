@@ -44,6 +44,8 @@ import {
 } from './NotificationsSettings';
 import { TabPanel } from './Tabs';
 import { Toggle } from './Toggle';
+import { ModelVariantsEditor } from './ModelVariantsEditor';
+import type { VariantsMap } from './ModelVariantsEditor';
 import { PluginControls } from './PluginControls';
 import {
   SETTINGS_SECTIONS,
@@ -668,6 +670,13 @@ function ModelEditDialog({ profile, model, onSave, onClose }: ModelEditDialogPro
   const [toolCall, setToolCall] = useState<TriState>(triStateOf(model.tool_call));
   const [reasoning, setReasoning] = useState<TriState>(triStateOf(model.reasoning));
   const [vision, setVision] = useState<TriState>(triStateOf(model.vision));
+  // `null` is the server's "not declared" and `{}` is "declared, offers none".
+  // They are different answers (`variant_levels()` returns `None` for one and
+  // `Some([])` for the other), so this state keeps them apart.
+  const [variants, setVariants] = useState<VariantsMap | null>(model.variants ?? null);
+  // Reported by the editor: text on screen it could not parse. The map cannot
+  // carry that (it only ever holds valid bodies), so it has to travel beside it.
+  const [variantsValid, setVariantsValid] = useState(true);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
@@ -688,6 +697,11 @@ function ModelEditDialog({ profile, model, onSave, onClose }: ModelEditDialogPro
     }
     if (inputCost === undefined) next.costInput = 'A non-negative number (USD per million), or empty.';
     if (outputCost === undefined) next.costOutput = 'A non-negative number (USD per million), or empty.';
+    // A reasoning level whose body is still not valid JSON blocks the save.
+    // Saving anyway would persist `{}` and silently throw away what was typed.
+    if (!variantsValid) {
+      next.variants = 'One of the reasoning levels has a body that is not a JSON object.';
+    }
     setErrors(next);
     if (Object.keys(next).length > 0) return;
     setSaving(true);
@@ -702,6 +716,10 @@ function ModelEditDialog({ profile, model, onSave, onClose }: ModelEditDialogPro
       cost_input: inputCost ?? null,
       cost_output: outputCost ?? null,
       catalog_provider: model.catalog_provider ?? null,
+      // Carried through explicitly. Without this a saved edit would drop a map
+      // written in config.toml, silently reverting the model to the bare
+      // `reasoning_effort` string - the one thing this dialog must never do.
+      variants: variants ?? null,
     });
     setSaving(false);
     if (ok) onClose();
@@ -816,6 +834,13 @@ function ModelEditDialog({ profile, model, onSave, onClose }: ModelEditDialogPro
             <option value="false">Text only</option>
           </select>
         </Field>
+        <ModelVariantsEditor
+          value={variants}
+          onChange={setVariants}
+          onValidityChange={setVariantsValid}
+          error={errors.variants}
+          disabled={saving}
+        />
       </div>
       <footer class="dialog-actions">
         <button type="button" class="button button-small" onClick={onClose} disabled={saving}>

@@ -9,7 +9,7 @@ import type {
 } from '../../api/types';
 import * as store from '../../state/store';
 import { absoluteTime, relativeTime, truncate } from '../../lib/format';
-import { REASONING_OPTIONS } from '../ModelSwitcher';
+import { effortOptions } from '../ModelSwitcher';
 import { AgentsIcon, ArrowRightIcon, SparkIcon } from '../icons';
 import { agentStatusWord, type ModelChoice, initials, sessionStatus, tone } from './controlModel';
 import type { SessionStatus } from './controlModel';
@@ -28,6 +28,9 @@ export function modelChoices(config: Config | null): ModelChoice[] {
     // stays selectable and the endpoint decides at run time (same rule as
     // `ReasoningSelector`).
     canReason: model.reasoning !== false,
+    // A model that declares variants offers exactly those levels, so the launch
+    // box cannot offer a level the endpoint does not implement either.
+    reasoningLevels: model.variants ? Object.keys(model.variants) : null,
   })));
 }
 
@@ -76,7 +79,7 @@ function LaunchModelPicker({ value, effort, onModel, onEffort }: {
         value={effort}
         onChange={(event) => onEffort(event.currentTarget.value)}
       >
-        {REASONING_OPTIONS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
+        {effortOptions(chosen?.reasoningLevels ?? null).map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
       </select>
     </label>}
   </>;

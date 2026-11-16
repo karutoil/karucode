@@ -136,8 +136,7 @@ body
 }
 
 /* Small dialogs sit at the mock's overlay cap (17vh), like the palette. */
-.dialog-confirm,
-.dialog-model-edit {
+.dialog-confirm {
   align-self: start;
   width: min(460px, calc(100vw - 32px));
   margin-top: min(17vh, 150px);

@@ -89,6 +89,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::routes::{
     message_before, parse_required, query_str, query_usize, QueryMap, TRANSCRIPT_PAGE_BYTES,
 };
+use crate::slash;
 use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -105,7 +106,9 @@ use serde_json::{json, Value};
 /// Bounded prompt size: the UI sends text, not files. 1 MiB is far above any
 /// real prompt and keeps a single request from exhausting memory.
 const MAX_PROMPT_BYTES: usize = 1024 * 1024;
-const MAX_TITLE_CHARS: usize = 200;
+/// Longest title a session may carry. Shared with `/rename` so the command and
+/// `PATCH /api/sessions/:id` cannot disagree about what a title is.
+pub(crate) const MAX_TITLE_CHARS: usize = 200;
 /// Title `POST /api/sessions` assigns when the caller supplies no title. A
 /// session still carrying it is treated as untitled.
 pub const DEFAULT_SESSION_TITLE: &str = "New session";
@@ -641,11 +644,55 @@ pub async fn send_message(
     let session = session_or_404(&state, &id).await?;
     let mode = MessageMode::parse(query_str(&query, "mode"))?;
     let body: MessageBody = parse_required(&body, "POST /api/sessions/:id/messages")?;
-    let content = body
+    let mut content = body
         .content
         .clone()
         .ok_or_else(|| ApiError::bad_request("content is required"))?;
     validate_prompt(&content)?;
+
+    // A message that is a slash command is answered here rather than sent to the
+    // model. This runs before the mode match on purpose: `/stop` is most useful
+    // while a run is in flight, and a command must never be queued behind the
+    // work it is trying to change. See `crate::slash`.
+    if let Some(invocation) = slash::parse(&content) {
+        let workspace = state
+            .workspace_for_session(session.project_id.as_deref(), &session.workspace)
+            .ok();
+        let catalog = slash::catalog(&state, workspace.as_deref()).await;
+        if slash::find(&catalog, &invocation.name).is_some() {
+            let reply = slash::run(&state, &session, &catalog, &invocation).await?;
+            match reply.prompt {
+                // A skill invocation rewrites the message instead of answering: the
+                // expanded prompt is what runs, and it travels through this same
+                // request - including into a steer or a follow-up, which is why the
+                // rewrite happens before the queue below is built.
+                Some(prompt) => content = prompt,
+                None => {
+                    let message_id =
+                        slash::record(&state, &session.id, &invocation.name, &reply).await?;
+                    return Ok((
+                        StatusCode::OK,
+                        Json(json!({
+                            "mode": "command",
+                            "session_id": session.id,
+                            "command": invocation.name,
+                            "message_id": message_id,
+                            "state": if reply.ok { "ok" } else { "error" },
+                        })),
+                    )
+                        .into_response());
+                }
+            }
+        } else if invocation.args_trimmed().is_empty() {
+            // `/compcat` on its own is a typo, not a prompt. Anything longer is
+            // treated as prose: a message may legitimately begin with a path.
+            return Err(ApiError::bad_request(slash::unknown_command_message(
+                &catalog,
+                &invocation.name,
+            )));
+        }
+    }
+
     // A queued message keeps the chips the composer drew, so a recall puts the
     // form back exactly as it was. `mode=send` has nowhere to put them (the
     // transcript shows the rendered content), so they are accepted and ignored

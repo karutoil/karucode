@@ -1113,9 +1113,11 @@
 
 .dialog-model-edit {
   width: min(620px, calc(100vw - 32px));
+  max-height: calc(100dvh - 64px);
 }
 
 .dialog-model-edit > .field-hint {
+  flex: 0 0 auto;
   margin: 0;
   padding: var(--space-7) var(--space-9) 0;
 }
@@ -1124,14 +1126,89 @@
  * padding on the grid, or the grid's own `--line` background would paint a
  * frame around its cells. */
 .dialog-model-edit > .field-grid {
+  flex: 1 1 auto;
   min-height: 0;
   margin: var(--space-7) var(--space-9) 0;
+  padding-right: var(--space-2);
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .dialog-model-edit > .dialog-actions {
+  flex: 0 0 auto;
   margin: 0;
   padding: var(--space-7) var(--space-9) var(--space-8);
+}
+
+/* ---------- per-model reasoning variants ------------------------------- */
+
+/* The variants section is a full-width cell of the dialog's field grid, so it
+ * sits in the same rhythm as the fields above it rather than pretending to be
+ * one of them (it is a list, and a list has its own header and footer). */
+.model-variants {
+  gap: var(--space-4);
+}
+
+.model-variants-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+}
+
+.model-variants-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.model-variants-empty {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-tiny);
+}
+
+.model-variant-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  /* A hairline and a tinted surface: a row is a thing you edit, and the body
+   * textarea inside it needs a boundary that is not the dialog's own edge. */
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+}
+
+.model-variant-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.model-variant-level {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.model-variant-remove {
+  flex: 0 0 auto;
+}
+
+/* A JSON body is code: monospace, no wrapping, and tall enough to show a nested
+ * object without scrolling on the first line. */
+.model-variant-body {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+.model-variants-add {
+  align-self: flex-start;
 }
 
 .dialog-catalog {
@@ -1450,10 +1527,20 @@
  * block would refill that screen for everyone to spare a click for a few.
  *
  * It is a card like a section (same rung, same radius), with the summary as its
- * title bar, so opening it does not change the shape of the pane. */
+ * title bar, so opening it does not change the shape of the pane.
+ *
+ * The overflow is `clip`, never `hidden`. `hidden` would make this card a scroll
+ * container, and a scroll container does not report the body's overflow to its
+ * own ancestors: the panel stopped at its own height, `scrollHeight` equalled
+ * `clientHeight`, and the fields at the end of the fold were painted past the
+ * bottom edge with no wheel to reach them. `clip` keeps the same corner rounding
+ * without creating a scroll box, so the panel sees the real height and scrolls.
+ * The 1px margin lets the summary's inset focus ring draw inside the card
+ * instead of being clipped off. */
 .settings-advanced {
   margin: 0;
-  overflow: hidden;
+  overflow: clip;
+  overflow-clip-margin: 1px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
@@ -1514,12 +1601,22 @@
 
 /* The fold's own body is the card's interior, so the sections inside it are not
  * cards themselves: a box inside a box of the same fill is noise. They keep
- * their head rule and their field table, which is what separates the options. */
+ * their head rule and their field table, which is what separates the options.
+ *
+ * `min-width: 0` down the column: a fold holds the values that are least likely
+ * to wrap (base URLs, key ids, `mono` numbers), and a flex item's automatic
+ * minimum would let one of them push the fold wider than the pane and take the
+ * right-hand column of every row with it. */
 .settings-advanced-body {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   gap: var(--space-6);
   padding: var(--space-6) var(--space-7);
+}
+
+.settings-advanced-body > * {
+  min-width: 0;
 }
 
 .settings-advanced-body > .settings-section {

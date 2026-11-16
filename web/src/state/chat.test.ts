@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { ImageAttachment, RunRecord, RunStatus, SessionDetail, StoredMessage, ToolCall } from '../api/types';
 import { NOW, detailFixture, omitFields, queuedFixture, storedMessage, wireAgentSummary } from '../test/fixtures';
-import { mergeTranscriptRows, seedChatState } from './chat';
+import { mergeTranscriptRows, seedChatState, withStoredMessageIds } from './chat';
+import type { ChatItem } from './chat';
 
 const shot: ImageAttachment = {
   media_type: 'image/png',
@@ -359,5 +360,118 @@ describe('mergeTranscriptRows', () => {
   it('keeps the loaded rows when the snapshot has no messages yet', () => {
     const loaded = { messages: rows([1, 2]), before: 1, truncated: true };
     expect(mergeTranscriptRows(loaded, { messages: [] })).toEqual({ ...loaded, overlap: true });
+  });
+});
+
+/*
+ * The ids a live transcript lacks.
+ *
+ * A run's rows are built from events, which carry run ids and call ids but no
+ * stored message id - so the rewind control had nothing to resolve and only
+ * appeared after a reload re-read the session. These tests pin the join between
+ * the two views: what it attaches, what it refuses to guess at, and - the reason
+ * it exists at all - that it keeps every item's own id, because the transcript
+ * keys its rows, measured heights and entry animation on those.
+ */
+describe('withStoredMessageIds', () => {
+  /** The stored id a row learned, whatever kind of row it is. */
+  const storedId = (item: ChatItem): number | undefined =>
+    'messageId' in item ? item.messageId : undefined;
+
+  function live(
+    overrides: Partial<import('./chat').MessageItem> = {},
+  ): import('./chat').MessageItem {
+    return {
+      kind: 'message',
+      id: 'user:r_x',
+      at: NOW,
+      role: 'user',
+      content: 'fix the login page',
+      reasoning: '',
+      streaming: false,
+      runId: 'r_x',
+      agentId: null,
+      ...overrides,
+    };
+  }
+
+  it('names the stored row behind a live prompt and answer', () => {
+    const items = [
+      live(),
+      live({ id: 'stream:r_x:1', role: 'assistant', content: 'Done.' }),
+    ];
+    const detail = sessionWith([
+      storedMessage({ id: 10, role: 'user', content: 'fix the login page' }),
+      storedMessage({ id: 11, role: 'assistant', content: 'Done.' }),
+    ]);
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([10, 11]);
+  });
+
+  it('keeps every item id, which is what the transcript keys its rows on', () => {
+    const items = [live()];
+    const next = withStoredMessageIds(items, sessionWith([storedMessage({ id: 10, role: 'user' })]));
+
+    expect(next[0]!.id).toBe('user:r_x');
+    expect(storedId(next[0]!)).toBe(10);
+  });
+
+  it('places a tool call by its call id, not by position', () => {
+    const items: ChatItem[] = [
+      live(),
+      {
+        kind: 'tool',
+        id: 'tool:call_9',
+        at: NOW,
+        callId: 'call_9',
+        name: 'read_file',
+        args: { path: 'a.txt' },
+        status: 'ok',
+        output: '',
+        truncated: false,
+        durationMs: null,
+        runId: 'r_x',
+      },
+    ];
+    const detail = sessionWith([
+      storedMessage({ id: 4, role: 'user' }),
+      storedMessage({ id: 5, role: 'assistant', tool_calls: [{ id: 'call_9', name: 'read_file', arguments: '{}' }] }),
+      storedMessage({ id: 6, role: 'tool', tool_call_id: 'call_9', content: 'ok', name: 'read_file' }),
+    ]);
+
+    expect(storedId(withStoredMessageIds(items, detail)[1]!)).toBe(5);
+  });
+
+  it('picks the prose row the reader means when a run wrote several', () => {
+    // A turn that called a tool wrote an assistant row per iteration; the prose
+    // the reader clicked is the one whose text this row carries.
+    const items = [live({ id: 'stream:r_x:2', role: 'assistant', content: 'the answer' })];
+    const detail = sessionWith([
+      storedMessage({ id: 1, role: 'assistant', content: '', reasoning_content: 'thinking' }),
+      storedMessage({ id: 2, role: 'assistant', content: 'the answer' }),
+    ]);
+
+    expect(storedId(withStoredMessageIds(items, detail)[0]!)).toBe(2);
+  });
+
+  it('leaves a row it cannot place without an id rather than guessing', () => {
+    const items = [live({ runId: 'r_other' })];
+    const detail = sessionWith([storedMessage({ id: 10, role: 'user' })]);
+
+    expect(storedId(withStoredMessageIds(items, detail)[0]!)).toBeUndefined();
+  });
+
+  it('returns the same array when nothing changed, so no row re-renders', () => {
+    const items = [live({ messageId: 10 })];
+    const detail = sessionWith([storedMessage({ id: 10, role: 'user' })]);
+
+    expect(withStoredMessageIds(items, detail)).toBe(items);
+  });
+
+  it('ignores a subagent row, whose ids are not this transcript', () => {
+    const items = [live()];
+    const detail = sessionWith([storedMessage({ id: 10, role: 'user', agent_id: 'a_1' })]);
+
+    expect(storedId(withStoredMessageIds(items, detail)[0]!)).toBeUndefined();
   });
 });

@@ -20,6 +20,8 @@ import type {
   ApiKeySummary,
   CatalogLookupResponse,
   CatalogResponse,
+  CommandSpec,
+  CommandsResponse,
   Config,
   ConfigPatch,
   ControlChatSummary,
@@ -67,6 +69,7 @@ import type {
   SessionDetail,
   SessionInfo,
   SessionModelSelection,
+  SendMessageResponse,
   SessionSummary,
   SkillCreateRequest,
   SkillDetail,
@@ -245,6 +248,24 @@ function readSkillList(raw: unknown): SkillListResponse {
     roots: roots.map(readSkillRoot).filter((root): root is SkillRoot => root !== null),
     skills: skills.map(readSkill).filter((skill): skill is SkillSummary => skill !== null),
   };
+}
+
+/**
+ * `GET /api/commands?project=<id>` — the slash-command catalog.
+ *
+ * Built-ins plus every skill that can be typed as `/<id>`. The server resolves the
+ * command from the message itself, so this list is the menu's content and nothing
+ * more: a client that never calls it still gets the same commands.
+ */
+export async function listCommands(
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<CommandSpec[]> {
+  const response = await apiRequest<CommandsResponse>(
+    withQuery('/api/commands', { project: project ?? undefined }),
+    options,
+  );
+  return Array.isArray(response.commands) ? response.commands : [];
 }
 
 /**
@@ -855,8 +876,8 @@ export function sendMessage(
   sessionId: string,
   content: string,
   options: CallOptions = {},
-): Promise<{ run_id: string; session_id: string }> {
-  return apiRequest<{ run_id: string; session_id: string }>(
+): Promise<SendMessageResponse> {
+  return apiRequest<SendMessageResponse>(
     `/api/sessions/${encodeURIComponent(sessionId)}/messages`,
     { ...options, method: 'POST', body: { content } },
   );

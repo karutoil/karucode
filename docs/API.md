@@ -922,6 +922,53 @@ bytes are at `path`). A queued message carries at most 16 attachments, an inline
 body is capped at 128 KiB, and a nameless or pathless attachment is
 `400 bad_request`.
 
+#### Slash commands
+
+A message whose first token is `/name` may be a command rather than a prompt. The
+server resolves it from the message itself - a client that never fetched the
+catalog gets the same commands - and answers **in place**:
+
+```bash
+curl -s -X POST localhost:8787/api/sessions/s_ab12/messages \
+  -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+  -d '{"content": "/compact"}'
+# → 200 { "mode": "command", "session_id": "s_ab12", "command": "compact",
+#         "message_id": 481, "state": "ok" }
+```
+
+No run starts. The answer is written to the transcript as a row of its own:
+`role: "assistant"`, `name: "slash:compact"` (`"slash:compact:error"` for a
+refusal), `content` = the rendered markdown. A `command_result` event with the
+same `message_id`, `command`, `content` and `state` is published on the event
+stream, so a live tab and a reloaded one converge. The runtime keeps those rows
+out of the model's request: a command's output is an answer for the reader, not a
+turn in the conversation.
+
+Commands are answered in **every** mode, so `?mode=steer` and `?mode=follow_up`
+with `/stop` run the command instead of queueing it. A single-token message that
+matches no command (`/compcat`) is `400 bad_request` naming the closest commands;
+anything with more text after the token is an ordinary prompt, because that is
+what a pasted path looks like.
+
+`GET /api/commands[?project=p_...]` → the catalog the composer's `/` menu draws:
+the built-in commands plus every skill whose id is a valid command name.
+
+```json
+{ "commands": [
+  { "name": "compact", "title": "Compact the conversation",
+    "summary": "Fold the older turns into one digest now",
+    "args": "", "category": "context", "source": "builtin",
+    "insert": "/compact" },
+  { "name": "model", "title": "Show or pin the model", "summary": "…",
+    "args": "[provider/model]", "category": "session", "source": "builtin",
+    "insert": "/model " } ] }
+```
+
+`insert` is exactly what the composer writes into the box (a command that takes
+arguments brings its trailing space). `source` is `builtin` or `skill`. An unknown
+project id is `404`. The command set, and the rules above, are the
+`slash-commands` topic.
+
 `GET /api/sessions/:id/queues` → both queues without the transcript:
 ```json
 { "session_id": "s_ab12", "running": true,

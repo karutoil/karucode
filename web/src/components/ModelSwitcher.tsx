@@ -48,19 +48,58 @@ export interface ReasoningOption {
  * keeping a copy, so a new effort cannot be added to one picker and not the
  * other. `REASONING_OPTIONS[0]` is the "no preference" entry.
  *
- * The server validates the value at run time — an endpoint that does not offer
- * `max` refuses it — so the list is deliberately the full set the server
- * accepts, not a per-model subset.
+ * These are the **names** of the levels, not a promise about the request body:
+ * a model that declares `variants` sends that level's declared payload
+ * (`thinking`, `thinking_budget`, whatever the endpoint wants) and only carries
+ * `reasoning_effort` alongside as the level's name, which is why the
+ * descriptions say "level" rather than "sends this field". A model with no
+ * variants is the case where the name *is* the wire value.
+ *
+ * The server validates the level at run time - a model that declares variants
+ * accepts exactly those - so {@link effortOptions} trims this list per model.
  */
 export const REASONING_OPTIONS: readonly ReasoningOption[] = [
   { value: 'default', label: 'Default', description: 'Send nothing; the endpoint decides.' },
-  { value: 'none', label: 'Off', description: 'reasoning_effort: none — skip reasoning.' },
-  { value: 'minimal', label: 'Minimal', description: 'reasoning_effort: minimal.' },
-  { value: 'low', label: 'Low', description: 'reasoning_effort: low.' },
-  { value: 'medium', label: 'Medium', description: 'reasoning_effort: medium.' },
-  { value: 'high', label: 'High', description: 'reasoning_effort: high.' },
-  { value: 'max', label: 'Max', description: 'reasoning_effort: max — only some endpoints offer it.' },
+  { value: 'none', label: 'Off', description: 'Reasoning off, as this model declares it.' },
+  { value: 'minimal', label: 'Minimal', description: 'The lowest reasoning level.' },
+  { value: 'low', label: 'Low', description: 'Light reasoning.' },
+  { value: 'medium', label: 'Medium', description: 'Balanced reasoning.' },
+  { value: 'high', label: 'High', description: 'Heavy reasoning.' },
+  { value: 'max', label: 'Max', description: 'The largest budget the model offers.' },
 ];
+
+/** The "no preference" entry: always first, always available. */
+export const DEFAULT_REASONING_OPTION: ReasoningOption = REASONING_OPTIONS[0] as ReasoningOption;
+
+/**
+ * The entries a given model may be offered, given the levels it declares.
+ *
+ * `declared` is `null` for a model that declares no variants (the full built-in
+ * set stays, and each level goes on the wire as `reasoning_effort: "<level>"`).
+ * A model *with* variants offers `Default` plus exactly the levels it declares -
+ * so a level its endpoint does not implement is not offered at all, and a model
+ * whose `variants` is `{}` offers nothing but `Default`. The server enforces the
+ * same rule on save, because a picker that hides a level is not a promise the
+ * request body keeps.
+ *
+ * A level the server sends that this build has no label for (a newer server, an
+ * older UI) still appears, labelled with its wire value, rather than locking the
+ * reader out of the choice they already made.
+ */
+export function effortOptions(declared: readonly string[] | null): readonly ReasoningOption[] {
+  if (declared === null) return REASONING_OPTIONS;
+  const known = REASONING_OPTIONS.filter(
+    (option) => option.value === 'default' || declared.includes(option.value),
+  );
+  const extra = declared
+    .filter((value) => !REASONING_OPTIONS.some((option) => option.value === value))
+    .map<ReasoningOption>((value) => ({
+      value,
+      label: value,
+      description: `reasoning level \`${value}\` — declared by this model's own variants.`,
+    }));
+  return [...known, ...extra];
+}
 
 /**
  * The selection a run of the current session would use right now.
@@ -377,8 +416,9 @@ export function ModelSwitcher(): JSX.Element | null {
   // bottom of the model list. Two 24px pills with truncated labels - "Claud…",
   // "Def…" - told the reader nothing and gave them two targets to hit.
   const reasoningAvailable = entry?.reasoning !== false;
+  const effortChoices = effortOptions(store.offeredReasoningLevels.value);
   const currentEffort =
-    REASONING_OPTIONS.find((option) => option.value === (effort ?? 'default')) ?? REASONING_OPTIONS[0]!;
+    effortChoices.find((option) => option.value === (effort ?? 'default')) ?? effortChoices[0]!;
   const accessibleName = phone
     ? `Model and reasoning for this session: ${label} on ${providerLabel}, reasoning ${currentEffort.label}. Open the picker`
     : `Model for this session: ${label} on ${providerLabel}. Switch model`;
@@ -678,7 +718,7 @@ export function ModelSwitcher(): JSX.Element | null {
                 {dangling ? <span class="model-switcher-warn">unavailable</span> : null}
               </p>
               <div class="reasoning-choices">
-                {REASONING_OPTIONS.map((option) => {
+                {effortChoices.map((option) => {
                   const active = option.value === (effort ?? 'default');
                   return (
                     <button
@@ -739,9 +779,10 @@ export function ReasoningSelector(): JSX.Element | null {
   const listbox = useRef<HTMLDivElement>(null);
   const mutationPending = sessionId !== null && store.sessionModelMutationPending.value === sessionId;
   const { providerId, modelId, pinned, effort } = effectiveSelection();
-  const DEFAULT_OPTION = REASONING_OPTIONS[0] as ReasoningOption;
-  const current = REASONING_OPTIONS.find((option) => option.value === (effort ?? 'default')) ?? DEFAULT_OPTION;
-  const roving = useRovingOptions(open, current.value, REASONING_OPTIONS.map((option) => option.value), listbox);
+  const options = effortOptions(store.offeredReasoningLevels.value);
+  const DEFAULT_OPTION = options[0] as ReasoningOption;
+  const current = options.find((option) => option.value === (effort ?? 'default')) ?? DEFAULT_OPTION;
+  const roving = useRovingOptions(open, current.value, options.map((option) => option.value), listbox);
   usePopover(open, () => setOpen(false), root, trigger);
 
   // Same gate as the model picker: a session (or a draft) is open, so the picker
@@ -816,7 +857,7 @@ export function ReasoningSelector(): JSX.Element | null {
           aria-label="Choose a reasoning effort"
           onKeyDown={roving.onKeyDown}
         >
-          {REASONING_OPTIONS.map((option) => {
+          {options.map((option) => {
             const active = option.value === current.value;
             return (
               <button

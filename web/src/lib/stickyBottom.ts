@@ -3,6 +3,75 @@ import type { RefObject } from 'preact';
 import { prefersReducedMotion } from './dom';
 import { clearOwnScroll, ownScrollNote } from './ownScroll';
 
+/**
+ * Where the last follow left the view, per scroller.
+ *
+ * `anchorRef` inside the hook is private to it, but the question it answers -
+ * "is this gap ours, or did the reader leave?" - is asked by the other component
+ * that writes the scroll (`ChatTranscript`'s measurement correction). Two
+ * components answering it separately is how a transcript ends up writing two
+ * scroll positions per frame: the follow sees growth it has not caught up with
+ * and scrolls down, while the correction sees a viewport that is not at the
+ * bottom and holds an anchor, and scrolls back up. Same geometry, opposite
+ * decisions, every frame.
+ */
+const lastFollow = new WeakMap<HTMLElement, FollowAnchor>();
+
+/** Record where a follow left the view; `null` forgets it. */
+function rememberFollow(element: HTMLElement, anchor: FollowAnchor | null): void {
+  if (anchor === null) lastFollow.delete(element);
+  else lastFollow.set(element, anchor);
+}
+
+/**
+ * Record that the app just followed `element` to its newest content.
+ *
+ * Every writer that moves this view for the reader calls it, so the next
+ * "should I follow?" question is answered against the position the app left
+ * behind rather than against a reader's.
+ */
+export function noteFollow(element: HTMLElement): FollowAnchor {
+  const anchor = readFollowAnchor(element);
+  rememberFollow(element, anchor);
+  return anchor;
+}
+
+/** Forget the last follow: the reader has taken the view somewhere themselves. */
+export function forgetFollow(element: HTMLElement | null): void {
+  if (element) rememberFollow(element, null);
+}
+
+/**
+ * Elements with a smooth scroll the app started still in flight.
+ *
+ * While one is running the view is on its way to the newest content, so nothing
+ * else may move it: a correction that "held an anchor" mid-animation drags the
+ * reader back the way they came, and one that jumped to the bottom would fight
+ * the animation it is watching.
+ */
+const settling = new WeakSet<HTMLElement>();
+
+/** Mark a smooth scroll the app started as running (or finished). */
+export function noteSettling(element: HTMLElement | null, active: boolean): void {
+  if (!element) return;
+  if (active) settling.add(element);
+  else settling.delete(element);
+}
+
+/**
+ * True while this scroller is following its newest content.
+ *
+ * The follow decision itself, not an approximation of it: everything that
+ * decides whether the view "should follow" consults this, so the correction and
+ * the follow cannot disagree about the reader.
+ */
+export function followingNewest(element: HTMLElement): boolean {
+  if (settling.has(element)) return true;
+  const metrics = readMetrics(element);
+  if (isPinnedToBottom(metrics)) return true;
+  return shouldFollow(metrics, lastFollow.get(element) ?? null, false);
+}
+
 /** Distance from the bottom (px) that still counts as "following the newest content". */
 export const PIN_THRESHOLD_PX = 48;
 
@@ -242,6 +311,18 @@ export interface StickyBottom {
    * translucent halfway through an automatic scroll to the bottom.
    */
   scrolledAway: boolean;
+  /**
+   * Ask whether the view should follow again, after something changed the
+   * transcript's geometry that no resize would report.
+   *
+   * The window measures the rows it mounts (`components/ChatTranscript`), and a
+   * row that turns out not to be the height its estimate claimed shifts
+   * everything below it — while the document's *total* height can stay exactly
+   * the same, because the bottom padding absorbed the difference. Nothing then
+   * fires, so a reader following the newest content is left standing 27px short
+   * of it with no event to correct them. This is the missing event.
+   */
+  recheck: () => void;
   /** Scrolls to the newest content, re-pins and moves focus into the transcript. */
   jumpToLatest: () => void;
 }
@@ -269,14 +350,34 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
    * mistaken for the reader scrolling away (see `syncPinnedState`).
    */
   const anchorRef = useRef<FollowAnchor | null>(null);
+  /** The element a smooth scroll is running on, so its settle flag can be cleared. */
+  const settleElRef = useRef<HTMLElement | null>(null);
+  /** The follow, for the settle timer that runs after it is defined. */
+  const reconcileRef = useRef<(() => void) | null>(null);
   const [showJump, setShowJump] = useState(false);
 
   const endSettle = useCallback(() => {
     settlingRef.current = false;
+    noteSettling(settleElRef.current, false);
+    settleElRef.current = null;
     if (settleTimerRef.current !== 0) {
       window.clearTimeout(settleTimerRef.current);
       settleTimerRef.current = 0;
     }
+  }, []);
+
+  /**
+   * Record where the view stands as "the last follow" - inside the hook, and for
+   * the other components that ask the same question (`followingNewest`).
+   */
+  const markFollow = useCallback((element: HTMLElement) => {
+    anchorRef.current = noteFollow(element);
+  }, []);
+
+  /** The reader has left: forget the follow, inside the hook and outside it. */
+  const dropFollow = useCallback((element: HTMLElement | null) => {
+    anchorRef.current = null;
+    forgetFollow(element);
   }, []);
 
   const pinToBottom = useCallback(
@@ -286,10 +387,25 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
       setShowJump(false);
       if (behavior === 'smooth' && canSmoothScroll(element)) {
         settlingRef.current = true;
+        settleElRef.current = element;
+        noteSettling(element, true);
         if (settleTimerRef.current !== 0) window.clearTimeout(settleTimerRef.current);
         settleTimerRef.current = window.setTimeout(() => {
           settlingRef.current = false;
+          const element = settleElRef.current;
+          noteSettling(element, false);
+          settleElRef.current = null;
           settleTimerRef.current = 0;
+          // A native smooth scroll can land a few pixels short, and content that
+          // arrived while it ran was not followed (nothing may move the view
+          // mid-animation). Close whatever is left *here*, once: this is a jump
+          // the app started, so no gesture can be mid-flight - the same write on
+          // every frame would drag a reader who is scrolling.
+          if (element && isPinnedToBottom(readMetrics(element))) {
+            scrollToBottom(element, 'auto');
+            markFollow(element);
+          }
+          reconcileRef.current?.();
         }, SETTLE_MS);
       } else {
         endSettle();
@@ -305,10 +421,10 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
       // the transcript never catches up with its own first measurement. No anchor
       // means "nothing to compare against", which is the truth.
       if (!settlingRef.current && element.clientHeight > 0) {
-        anchorRef.current = readFollowAnchor(element);
+        markFollow(element);
       }
     },
-    [endSettle],
+    [endSettle, markFollow],
   );
 
   const jumpToLatest = useCallback(() => {
@@ -347,7 +463,7 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
       // so it must not leave them short of it: re-pin. The note recorded that
       // position before the write, which no flag on the hook can supply.
       scrollToBottom(element, 'auto');
-      anchorRef.current = readFollowAnchor(element);
+      markFollow(element);
       setShowJump(false);
     } else {
       // Reading history: a correction may not pull them back, but it must not
@@ -355,7 +471,7 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
       // gap that is the reader's is exactly the gap "Jump to latest" exists for,
       // and a correction that lands on the same frame as their scroll used to
       // leave the button unmounted with the view at the top of a long history.
-      anchorRef.current = null;
+      dropFollow(element);
       if (!isPinnedToBottom(readMetrics(element))) setShowJump(true);
     }
     return true;
@@ -385,12 +501,13 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
       return;
     }
     if (isPinnedToBottom(metrics)) {
-      anchorRef.current = readFollowAnchor(element);
+      markFollow(element);
       return;
     }
     scrollToBottom(element, 'auto');
-    anchorRef.current = readFollowAnchor(element);
-  }, [handleOwnScroll]);
+    markFollow(element);
+  }, [handleOwnScroll, markFollow]);
+  reconcileRef.current = reconcile;
 
   // Scroll tracking plus layout observation for reflow that produces no text delta.
   useEffect(() => {
@@ -402,7 +519,7 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
       frameRef.current = 0;
       const metrics = readMetrics(element);
       if (isPinnedToBottom(metrics)) {
-        anchorRef.current = readFollowAnchor(element);
+        markFollow(element);
         endSettle();
         setShowJump(false);
         return;
@@ -420,7 +537,7 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
       // observer and stream paths take.
       if (shouldFollow(metrics, anchorRef.current, settlingRef.current)) {
         scrollToBottom(element, 'auto');
-        anchorRef.current = readFollowAnchor(element);
+        markFollow(element);
         setShowJump(false);
         return;
       }
@@ -443,7 +560,7 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
     // gesture is a licence to snap back to the tail under the reader's hand.
     const onUserScrollIntent = () => {
       endSettle();
-      anchorRef.current = null;
+      dropFollow(element);
       // A gesture also ends the app's own write: a correction the reader has
       // already scrolled away from is history, and it may not re-pin them.
       clearOwnScroll(element);
@@ -480,7 +597,7 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
       frameRef.current = 0;
       endSettle();
     };
-  }, [endSettle, reconcile]);
+  }, [endSettle, reconcile, dropFollow]);
 
   // A different conversation always starts at the newest message, instantly.
   //
@@ -498,7 +615,16 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
   // Streamed deltas and appended items. Same decision as the observer path: a
   // gap caused by content that arrived after the last follow is caught up with,
   // a gap caused by the reader is left alone.
-  useEffect(() => {
+  //
+  // A *layout* effect, not an effect: this write has to land in the frame that
+  // added the content, before the browser paints it. As a passive effect it ran
+  // after the paint, and the `ResizeObserver` below - which sees the same growth
+  // a moment later - wrote again for it. A profile of a real Firefox session
+  // caught exactly that: two `scrollTop` writes ~16ms apart per frame with
+  // nobody at the wheel, a `scrollend` between them, and 170 forced reflows a
+  // second as each scroll event re-measured the window. One follow per frame,
+  // before the paint, is the whole budget.
+  useLayoutEffect(() => {
     reconcile();
   }, [contentKey, reconcile]);
 
@@ -509,5 +635,5 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
     pinToBottom('smooth');
   }, [sentMessageTick, pinToBottom]);
 
-  return { scrollRef, showJump, scrolledAway: showJump, jumpToLatest };
+  return { scrollRef, showJump, scrolledAway: showJump, recheck: reconcile, jumpToLatest };
 }

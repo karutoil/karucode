@@ -9,7 +9,7 @@
 // @kc-title: Configure a model provider
 // @kc-summary: Point karucode at any OpenAI-compatible endpoint, by environment or as named profiles, and choose the active model.
 // @kc-tags: provider, model, config, setup, gateway, llm
-// @kc-applies-to: env:KARUCODE_BASE_URL, env:KARUCODE_API_KEY, env:KARUCODE_MODEL, env:OPENAI_BASE_URL, env:OPENAI_API_KEY, env:KARUCODE_TEMPERATURE, env:KARUCODE_MAX_TOKENS, env:KARUCODE_REQUEST_TIMEOUT_SECS, env:KARUCODE_MODELS_DEV_URL, env:KARUCODE_RETRY_MAX_RETRIES, env:KARUCODE_RETRY_BASE_DELAY_MS, env:KARUCODE_RETRY_MAX_DELAY_MS, env:KARUCODE_RETRY_MAX_STREAM_RESTARTS, env:KARUCODE_MODEL_SUPPORTS_IMAGES, config:[[providers]], config:active_provider, config:active_model, config:[model], config:model.supports_images, config:vision, config:retry_max_retries, config:retry_base_delay_ms, config:retry_max_delay_ms, config:retry_max_stream_restarts, config:aggregator, config:limits.max_turn_retries, config:limits.turn_retry_delay_ms, event:stream_retry, event:text_replaced, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, request:messages[].name, internal:kc-runtime:context-digest, internal:kc-runtime:startup-recovery, ui:Settings
+// @kc-applies-to: env:KARUCODE_BASE_URL, env:KARUCODE_API_KEY, env:KARUCODE_MODEL, env:OPENAI_BASE_URL, env:OPENAI_API_KEY, env:KARUCODE_TEMPERATURE, env:KARUCODE_MAX_TOKENS, env:KARUCODE_REQUEST_TIMEOUT_SECS, env:KARUCODE_MODELS_DEV_URL, env:KARUCODE_RETRY_MAX_RETRIES, env:KARUCODE_RETRY_BASE_DELAY_MS, env:KARUCODE_RETRY_MAX_DELAY_MS, env:KARUCODE_RETRY_MAX_STREAM_RESTARTS, env:KARUCODE_MODEL_SUPPORTS_IMAGES, config:[[providers]], config:active_provider, config:active_model, config:[model], config:model.supports_images, config:vision, config:retry_max_retries, config:retry_base_delay_ms, config:retry_max_delay_ms, config:retry_max_stream_restarts, config:aggregator, config:variants, config:providers.models.variants, config:limits.max_turn_retries, config:limits.turn_retry_delay_ms, event:stream_retry, event:text_replaced, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:PATCH /api/sessions/:id/model, request:reasoning_effort, request:thinking, request:thinking_budget, request:thinking.budget_tokens, ui:ModelSwitcher, request:messages[].name, internal:kc-runtime:context-digest, internal:kc-runtime:startup-recovery, ui:Settings
 //
 // # Fastest path: three environment variables
 //
@@ -121,6 +121,73 @@
 //   `base_url` must be `http(s)://` without embedded credentials, model ids at
 //   most 200 characters. `PATCH /api/config` enforces the same rules and returns
 //   `400` naming the offending field.
+//
+// # Reasoning levels: one model, its own thinking payloads
+//
+// Every endpoint spells "think harder" differently. OpenAI takes
+// `reasoning_effort: "high"`, Anthropic-compatible proxies take
+// `thinking: {type: "enabled", budget_tokens: 32000}`, Gemini-style ones take
+// `thinking_budget`. By default karucode sends the OpenAI spelling and offers
+// every level (`none`, `minimal`, `low`, `medium`, `high`, `max`) on every
+// model, which means a level the endpoint does not implement is offered and
+// then fails at run time. A model entry's `variants` map fixes both: it decides
+// which levels exist for that model **and** what each one sends.
+//
+// ```toml
+// [[providers]]
+// id = "claude"
+// base_url = "https://api.example/v1"
+// api_key = "sk-..."
+//
+//   [[providers.models]]
+//   id = "claude-sonnet"
+//   context_window = 200000
+//   reasoning = true
+//
+//     # Only these levels appear in the picker, and only these are accepted.
+//     [providers.models.variants.none]
+//     thinking = { type = "disabled" }
+//
+//     [providers.models.variants.low]
+//     thinking = { type = "enabled", budget_tokens = 4000 }
+//
+//     [providers.models.variants.high]
+//     thinking = { type = "enabled", budget_tokens = 32000 }
+// ```
+//
+// Picking "High" for a session on that model sends
+// `{"thinking": {"type": "enabled", "budget_tokens": 32000}}`; picking "Off"
+// sends `{"thinking": {"type": "disabled"}}`. `reasoning_effort` is still sent
+// alongside as the level's name, so a turn's transcript says which level ran.
+//
+// What the map controls:
+//
+// * **Which levels exist.** Present (even as `{}`) means *only* the levels it
+//   declares are offered in the composer and accepted by
+//   `PATCH /api/sessions/:id/model`; anything else is a `400` naming what is
+//   offered. Absent means "not declared": the full built-in set stays and each
+//   level is sent as `reasoning_effort: "<level>"`, which is what every install
+//   did before variants existed. A model whose map is `{}` offers only
+//   "Default".
+// * **What each level sends.** The level's keys are merged into the request
+//   body over the profile's `[model.extra_body]` / `providers.extra_body`, and
+//   the declared keys win: a stale `reasoning_effort = "low"` left in
+//   `[model.extra_body]` cannot contradict a `high` pin.
+// * **Both states written out.** Writing `none` explicitly as
+//   `thinking = { type = "disabled" }` is what makes "no thinking" a request
+//   the endpoint actually receives, instead of a field simply left out.
+//
+// A pinned level the model no longer declares (the map changed after the pin
+// was saved) does not fail the run: it degrades to the map's `none` payload
+// when one is declared, else to the endpoint default, and `reasoning_effort`
+// records the level that was asked for.
+//
+// Validation on `PATCH /api/config`: variant names must be one of the six
+// levels, a variant may not set `model`, `messages`, `stream` or `tools` (the
+// provider owns the framing), and at most six variants are accepted. Values are
+// otherwise passed through verbatim - that is the point. Settings -> Models &
+// providers edits the same map; the JSON shape under a model entry is
+// `"variants": {"high": {"thinking": {"type": "enabled", "budget_tokens": 32000}}}`.
 //
 // # Which layer wins
 //
@@ -630,7 +697,10 @@ impl Provider for OpenAiProvider {
     ) -> Result<ProviderStream> {
         let url = self.endpoint()?;
         let mut body = request::build_chat_body_for(&self.config, &request);
-        request::apply_config_extra_body(&mut body, &self.config.extra_body);
+        // The request's own `extra_body` is where a session's pinned reasoning
+        // level lands, and a declared level is a promise: its keys win over the
+        // profile's inherited `extra_body` rather than losing to it.
+        request::support::apply_config_extra_body(&mut body, &self.config.extra_body, true);
         let headers = request::build_headers(&self.config, &request)?;
         let secrets = self.secrets(&headers);
         let timeout = timeout_for(&self.config);

@@ -1794,11 +1794,16 @@ impl Settings for FakeSettings {
         let mut model = self.model.clone();
         if let Some(selection) = selection {
             model.model = selection.model.clone();
-            if let Some(effort) = &selection.reasoning_effort {
-                model.extra_body.insert(
-                    "reasoning_effort".to_string(),
-                    serde_json::Value::String(effort.clone()),
-                );
+            if let Some(effort) = selection
+                .reasoning_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+            {
+                // Same rule as the server: a declared-level map wins, otherwise
+                // the bare `reasoning_effort` string.
+                let variants = model.variants.clone();
+                kc_core::config::Config::apply_reasoning_level(&mut model, effort, &variants);
             }
         }
         model
@@ -1846,17 +1851,17 @@ impl Settings for FakeSettings {
                 let mut model = self.model.clone();
                 model.model = requested.to_string();
                 model.base_url = base_url.clone();
-                return ModelOverrideJudgement::Resolved(model);
+                return ModelOverrideJudgement::Resolved(Box::new(model));
             }
         }
         // The base model's own id is always valid.
         if requested == self.model.model.trim() {
-            return ModelOverrideJudgement::Resolved(self.model.clone());
+            return ModelOverrideJudgement::Resolved(Box::new(self.model.clone()));
         }
         if let Some(id) = self.known_models.iter().find(|m| m.as_str() == requested) {
             let mut model = self.model.clone();
             model.model = id.clone();
-            return ModelOverrideJudgement::Resolved(model);
+            return ModelOverrideJudgement::Resolved(Box::new(model));
         }
         let mut known = self.known_models.clone();
         if !self.model.model.trim().is_empty() && !known.contains(&self.model.model) {

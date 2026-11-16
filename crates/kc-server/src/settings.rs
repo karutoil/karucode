@@ -541,7 +541,7 @@ use kc_core::config::{
     AccessConfig, ApprovalMode, ApprovalPolicy, Config, Limits, ModelConfig, ModelEntry,
     ModelOverrideJudgement, ProviderProfile, SessionModelSelection, SubagentConfig, TerminalConfig,
     TitlesConfig, TunnelKind, MAX_TERMINALS_HINT, MAX_TERMINAL_SCROLLBACK, MAX_TITLE_CHARS_HINT,
-    MIN_TERMINAL_SCROLLBACK,
+    MIN_TERMINAL_SCROLLBACK, REASONING_EFFORTS,
 };
 use kc_core::error::{Error, Result};
 use kc_core::settings::Settings;
@@ -1511,6 +1511,10 @@ pub fn resolve_session_model(
             "the session's model is no longer offered by its provider; using the provider's default model"
         );
     }
+    // `model_for` already carried this model's variants over; binding them here
+    // keeps the fallback above honest (a stale pin must use the *fallback*
+    // model's variants, not the one it named).
+    let selection_variants = model.variants.clone();
 
     if let Some(effort) = selection
         .reasoning_effort
@@ -1518,12 +1522,11 @@ pub fn resolve_session_model(
         .map(str::trim)
         .filter(|effort| !effort.is_empty())
     {
-        // The provider forwards `extra_body` verbatim, which is how every
-        // OpenAI-compatible endpoint spells per-request reasoning effort.
-        model.extra_body.insert(
-            "reasoning_effort".to_string(),
-            serde_json::Value::String(effort.to_string()),
-        );
+        // The level is expanded against *this model's* declared variants, so a
+        // level can carry `thinking.budget_tokens` or `thinking_budget` instead
+        // of the OpenAI-shaped `reasoning_effort` string. A model that declares
+        // no variants keeps the historical spelling.
+        Config::apply_reasoning_level(&mut model, effort, &selection_variants);
     }
     model
 }
@@ -1611,11 +1614,38 @@ pub fn validate_session_model(config: &Config, selection: &SessionModelSelection
             ))
         })?;
     let model_id = selection.model.trim();
-    if !profile.models.is_empty() && !profile.models.iter().any(|entry| entry.id == model_id) {
+    let entry = profile.models.iter().find(|entry| entry.id == model_id);
+    if !profile.models.is_empty() && entry.is_none() {
         return Err(Error::BadRequest(format!(
             "model.model `{model_id}` is not in the model list of provider `{}`",
             profile.id
         )));
+    }
+    // A model that declares reasoning variants accepts exactly the levels it
+    // declares. Refusing here is the whole point of declaring them: a level the
+    // endpoint does not implement would otherwise be saved, resolved to the
+    // endpoint default in silence, and look like it worked.
+    if let Some(entry) = entry {
+        if let Some(levels) = entry.variant_levels() {
+            if let Some(effort) = selection
+                .reasoning_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+            {
+                if !levels.contains(&effort) {
+                    let offered = if levels.is_empty() {
+                        "none (this model declares no usable variant)".to_string()
+                    } else {
+                        levels.join(", ")
+                    };
+                    return Err(Error::BadRequest(format!(
+                        "model.reasoning_effort `{effort}` is not offered by model `{model_id}` on provider `{}`; offered: {offered}",
+                        profile.id
+                    )));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -2481,6 +2511,53 @@ fn validate_model_entry(provider_id: &str, model: &ModelEntry) -> Result<()> {
             if !value.is_finite() || !(0.0..=MAX_MODEL_COST).contains(&value) {
                 return Err(Error::BadRequest(format!(
                     "provider `{provider_id}` model `{id}` {field} must be between 0 and {MAX_MODEL_COST} USD per million tokens (got {value})"
+                )));
+            }
+        }
+    }
+    validate_model_variants(provider_id, id, &model.variants)?;
+    Ok(())
+}
+
+/// Check a model's declared reasoning variants.
+///
+/// A level name is a level the picker can show and the session pin can carry, so
+/// it must be one of [`REASONING_EFFORTS`]: an unknown level would be saved, never
+/// offered, and impossible to select - a config key that quietly does nothing.
+/// The payload is the operator's request body, so it is bounded (no reserved
+/// framing key, no deep nesting) but otherwise passed through verbatim: every
+/// endpoint spells thinking differently and this is where that belongs.
+fn validate_model_variants(
+    provider_id: &str,
+    model_id: &str,
+    variants: &std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, serde_json::Value>,
+    >,
+) -> Result<()> {
+    if variants.len() > REASONING_EFFORTS.len() {
+        return Err(Error::BadRequest(format!(
+            "provider `{provider_id}` model `{model_id}` declares {} reasoning variants; at most {} (one per level) are allowed",
+            variants.len(),
+            REASONING_EFFORTS.len()
+        )));
+    }
+    for (level, body) in variants {
+        if !REASONING_EFFORTS.contains(&level.as_str()) {
+            return Err(Error::BadRequest(format!(
+                "provider `{provider_id}` model `{model_id}` variant `{level}` is not a reasoning level; use one of {}",
+                REASONING_EFFORTS.join(", ")
+            )));
+        }
+        for key in body.keys() {
+            if key.trim().is_empty() || key.chars().any(char::is_control) {
+                return Err(Error::BadRequest(format!(
+                    "provider `{provider_id}` model `{model_id}` variant `{level}` has an empty or control-character request key"
+                )));
+            }
+            if matches!(key.as_str(), "model" | "messages" | "stream" | "tools") {
+                return Err(Error::BadRequest(format!(
+                    "provider `{provider_id}` model `{model_id}` variant `{level}` may not set `{key}`: the provider owns that key"
                 )));
             }
         }
@@ -4464,6 +4541,157 @@ mod tests {
         // A blank effort means "use the endpoint default", not `""`.
         let resolved = resolve_session_model(&cfg, Some(&selection("local", "tiny", Some("  "))));
         assert!(!resolved.extra_body.contains_key("reasoning_effort"));
+    }
+
+    /// The point of variants: pinning a level on a model that declares them sends
+    /// *that level's* body, not a `reasoning_effort` string the endpoint may not
+    /// understand.
+    #[test]
+    fn a_pinned_level_sends_the_models_declared_variant_body() {
+        let mut cfg = two_profile_config();
+        cfg.providers[0].models[1] = ModelEntry {
+            id: "model-b".into(),
+            variants: serde_json::from_value(serde_json::json!({
+                "none": { "thinking": { "type": "disabled" } },
+                "high": { "thinking": { "type": "enabled", "budget_tokens": 32000 } },
+            }))
+            .unwrap(),
+            ..ModelEntry::default()
+        };
+        cfg.normalize_providers();
+
+        let resolved =
+            resolve_session_model(&cfg, Some(&selection("gateway", "model-b", Some("high"))));
+        assert_eq!(resolved.model, "model-b");
+        assert_eq!(
+            resolved.extra_body.get("thinking"),
+            Some(&serde_json::json!({ "type": "enabled", "budget_tokens": 32000 }))
+        );
+
+        // A different model on the same profile is unaffected: it declares no
+        // variants, so it keeps the historical spelling.
+        let resolved =
+            resolve_session_model(&cfg, Some(&selection("gateway", "model-a", Some("high"))));
+        assert_eq!(
+            resolved.extra_body.get("reasoning_effort"),
+            Some(&serde_json::Value::String("high".into()))
+        );
+        assert!(!resolved.extra_body.contains_key("thinking"));
+    }
+
+    /// A level the model no longer declares must not be sent as a level it never
+    /// implemented: the model's own "off" payload is used instead.
+    #[test]
+    fn a_stale_pinned_level_degrades_to_the_models_off_variant() {
+        let mut cfg = two_profile_config();
+        cfg.providers[0].models[1] = ModelEntry {
+            id: "model-b".into(),
+            variants: serde_json::from_value(serde_json::json!({
+                "none": { "thinking": { "type": "disabled" } },
+                "high": { "thinking": { "type": "enabled", "budget_tokens": 32000 } },
+            }))
+            .unwrap(),
+            ..ModelEntry::default()
+        };
+        cfg.normalize_providers();
+        let resolved =
+            resolve_session_model(&cfg, Some(&selection("gateway", "model-b", Some("medium"))));
+        assert_eq!(
+            resolved.extra_body.get("thinking"),
+            Some(&serde_json::json!({ "type": "disabled" }))
+        );
+    }
+
+    // ---- the HTTP boundary refuses levels a model does not offer ----------
+
+    #[test]
+    fn validate_refuses_a_level_the_model_does_not_declare() {
+        let mut cfg = two_profile_config();
+        cfg.providers[0].models[1] = ModelEntry {
+            id: "model-b".into(),
+            variants: serde_json::from_value(serde_json::json!({
+                "none": { "thinking": { "type": "disabled" } },
+                "high": { "thinking": { "type": "enabled", "budget_tokens": 32000 } },
+            }))
+            .unwrap(),
+            ..ModelEntry::default()
+        };
+        cfg.normalize_providers();
+
+        // A declared level is accepted.
+        assert!(
+            validate_session_model(&cfg, &selection("gateway", "model-b", Some("high"))).is_ok()
+        );
+        assert!(
+            validate_session_model(&cfg, &selection("gateway", "model-b", Some("none"))).is_ok()
+        );
+        // No effort at all ("endpoint default") is always fine.
+        assert!(validate_session_model(&cfg, &selection("gateway", "model-b", None)).is_ok());
+
+        // One it does not implement is refused, naming what is offered.
+        let err = validate_session_model(&cfg, &selection("gateway", "model-b", Some("max")))
+            .expect_err("an undeclared level must be refused");
+        let message = err.to_string();
+        assert!(message.contains("`max`"), "{message}");
+        assert!(
+            message.contains("none, high"),
+            "names the offered levels: {message}"
+        );
+
+        // A model with no variants still accepts the whole built-in set.
+        assert!(
+            validate_session_model(&cfg, &selection("gateway", "model-a", Some("max"))).is_ok()
+        );
+    }
+
+    /// A model whose `variants` is `{}` offers nothing but "endpoint default".
+    #[test]
+    fn validate_refuses_every_level_when_a_model_declares_an_empty_variant_map() {
+        let mut cfg = two_profile_config();
+        cfg.providers[0].models[1] = ModelEntry {
+            id: "model-b".into(),
+            variants: BTreeMap::new(),
+            ..ModelEntry::default()
+        };
+        cfg.normalize_providers();
+        assert!(validate_session_model(&cfg, &selection("gateway", "model-b", None)).is_ok());
+        assert!(
+            validate_session_model(&cfg, &selection("gateway", "model-b", Some("high"))).is_ok(),
+            "an empty map means 'not declared', not 'nothing offered'"
+        );
+    }
+
+    #[test]
+    fn variant_validation_rejects_unknown_levels_and_reserved_keys() {
+        let mut cfg = two_profile_config();
+        let mut entry = ModelEntry::new("model-b");
+        entry.variants = serde_json::from_value(serde_json::json!({
+            "extreme": { "thinking_budget": 10 },
+        }))
+        .unwrap();
+        cfg.providers[0].models[1] = entry;
+        cfg.normalize_providers();
+        let err = validate_model_entry("gateway", &cfg.providers[0].models[1])
+            .expect_err("`extreme` is not a reasoning level");
+        assert!(err.to_string().contains("extreme"), "{err}");
+
+        // Framing keys belong to the provider and may not be smuggled in.
+        let mut entry = ModelEntry::new("model-b");
+        entry.variants = serde_json::from_value(serde_json::json!({
+            "high": { "stream": false },
+        }))
+        .unwrap();
+        let err =
+            validate_model_entry("gateway", &entry).expect_err("a variant may not set `stream`");
+        assert!(err.to_string().contains("stream"), "{err}");
+
+        // A well-formed map is accepted.
+        let mut entry = ModelEntry::new("model-b");
+        entry.variants = serde_json::from_value(serde_json::json!({
+            "high": { "thinking": { "type": "enabled", "budget_tokens": 32000 } },
+        }))
+        .unwrap();
+        assert!(validate_model_entry("gateway", &entry).is_ok());
     }
 
     #[test]

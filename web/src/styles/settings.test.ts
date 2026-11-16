@@ -178,11 +178,43 @@ describe('settings sheet: the Advanced disclosure', () => {
   it('is a bordered block whose summary hides the native marker', () => {
     const block = declarations('.settings-advanced');
     expect(block['border']).toBeDefined();
-    expect(block['overflow']).toBe('hidden');
 
     const summary = declarations('.settings-advanced summary');
     expect(summary['list-style']).toBe('none');
     expect(summary['cursor']).toBe('pointer');
+  });
+
+  it('clips its corners without becoming a scroll container', () => {
+    // `overflow: hidden` here was the "Advanced cuts off and will not scroll"
+    // bug. `hidden` makes this card a scroll container, and a scroll container
+    // does not pass its overflowing content's height up to the panel that
+    // actually scrolls: the panel's `scrollHeight` equalled its `clientHeight`,
+    // so the panel never became scrollable and the last fields of the fold were
+    // painted past the bottom edge with no wheel able to reach them.
+    //
+    // `clip` rounds the corners the same way without creating a scroll box, so
+    // the panel sees the real height. The clip margin leaves room for the
+    // summary's inset focus ring, which would otherwise be cut off.
+    const block = declarations('.settings-advanced');
+    expect(block['overflow']).toBe('clip');
+    expect(block['overflow']).not.toBe('hidden');
+    expect(block['overflow-clip-margin']).toBe('1px');
+
+    // Belt and braces: nothing in this sheet may reintroduce the trap on the
+    // fold, wherever it is written.
+    const fold = /\.settings-advanced(?![\w-])[^{]*\{([^}]*)\}/g;
+    for (const match of css.matchAll(fold)) {
+      expect(match[1]).not.toMatch(/overflow:\s*hidden/);
+    }
+  });
+
+  it('lets a long value inside the fold wrap instead of widening it', () => {
+    // The fold holds the values least likely to wrap (base URLs, key ids,
+    // `mono` numbers). A flex item's automatic minimum width would let one of
+    // them push the fold past the pane and take the second column with it.
+    const body = declarations('.settings-advanced-body');
+    expect(body['min-width']).toBe('0');
+    expect(css).toMatch(/\.settings-advanced-body > \* \{[^}]*min-width: 0/);
   });
 
   it('is the same card as a section, with the body flattened inside it', () => {

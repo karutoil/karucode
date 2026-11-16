@@ -774,6 +774,7 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
                         onRewind={actions.openRewind}
                         viewportRef={scroller.scrollRef}
                         contentRef={transcriptRef}
+                        onMeasured={scroller.recheck}
                         sessionKey={chat.sessionId}
                       />
                     </ErrorBoundary>
@@ -801,6 +802,7 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
                 stopping={store.stopping.value}
                 status={store.activity.value}
                 onSend={actions.sendChatMessage}
+                onCommand={actions.runSlashCommand}
                 onQueue={actions.queueChatMessage}
                 queued={chat.queued}
                 onRecall={actions.recallQueuedMessage}

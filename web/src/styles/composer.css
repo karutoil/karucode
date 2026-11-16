@@ -1280,6 +1280,52 @@
   font-size: var(--fs-micro);
 }
 
+/* ---------- slash-command menu ---------- */
+
+/* The `/` menu is the `@` menu with a different left column: a command usage
+ * instead of a path. Sharing `.mention-*` is deliberate - one popover, one set of
+ * keyboard rules, one animation - so only the three classes below are new. */
+.slash-popover .mention-item {
+  gap: var(--space-3);
+}
+
+/* Fixed width so the titles line up: a menu whose descriptions start at a
+ * different x on every row is harder to scan than one that wraps. */
+.slash-usage {
+  flex: 0 0 auto;
+  min-width: 7.5rem;
+  max-width: 14rem;
+  overflow: hidden;
+  color: var(--accent-text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-args {
+  color: var(--muted);
+}
+
+.mention-item.is-active .slash-usage,
+.mention-item.is-active .slash-args {
+  color: inherit;
+}
+
+.mention-item.is-active .slash-args {
+  opacity: 0.72;
+}
+
+.slash-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: inherit;
+  font-size: var(--fs-tiny);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- responsive ---------- */
 
 /* The mock only changes *gap and wrap* below 800px; its paddings stay put, so

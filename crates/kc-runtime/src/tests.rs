@@ -156,6 +156,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::Notice { .. } => "notice",
         Event::Notification { .. } => "notification",
         Event::StreamLagged { .. } => "stream_lagged",
+        Event::CommandResult { .. } => "command_result",
         Event::Error { .. } => "error",
     }
 }

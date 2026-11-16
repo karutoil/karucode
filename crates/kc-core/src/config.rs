@@ -187,6 +187,14 @@ pub struct ModelConfig {
     /// [`Config::model_for_profile`] so the retry layer can see it.
     #[serde(default)]
     pub aggregator: bool,
+    /// The reasoning variants the model this config resolved to declares.
+    ///
+    /// Copied from its [`ModelEntry`] by [`Config::model_for`] so a session pin
+    /// can be turned into the right request body without looking the profile up
+    /// again at run time; see [`Config::apply_reasoning_level`]. Empty means "not
+    /// declared", which keeps the bare `reasoning_effort` spelling.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variants: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
 }
 
 fn default_provider() -> String {
@@ -247,6 +255,7 @@ impl Default for ModelConfig {
             parallel_tool_calls: default_parallel_tool_calls(),
             supports_images: false,
             aggregator: false,
+            variants: BTreeMap::new(),
         }
     }
 }
@@ -314,6 +323,22 @@ pub struct ModelEntry {
     /// models.dev provider id the metadata was prefilled from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_provider: Option<String>,
+    /// The reasoning variants this model accepts, keyed by the level a session
+    /// can pin (`low`, `high`, ...).
+    ///
+    /// Each value is a map of request-body keys merged on top of the profile's
+    /// `extra_body` for a run pinned to that level. That is the whole point:
+    /// every endpoint spells "think harder" differently - OpenAI takes
+    /// `reasoning_effort: "high"`, Anthropic-compatible proxies take
+    /// `thinking: {type: "enabled", budget_tokens: 32000}`, Gemini-style ones
+    /// take `thinking_budget` - and a level that is not in this map cannot be
+    /// chosen for this model, so the picker only offers what the endpoint really
+    /// implements.
+    ///
+    /// Empty (the default) keeps the historical behaviour: every built-in level
+    /// is offered and sent as the bare `reasoning_effort` string.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variants: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
 }
 
 impl ModelEntry {
@@ -331,6 +356,27 @@ impl ModelEntry {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .unwrap_or(&self.id)
+    }
+
+    /// The levels this model's declared variants make choosable, in
+    /// [`REASONING_EFFORTS`] order, or `None` when the model declares none.
+    ///
+    /// `None` and `Some(empty)` are different answers: `None` means "not
+    /// declared, offer the built-in set", while a model that declares variants
+    /// offering no usable level offers none at all - a picker with only
+    /// "Default" and labels the endpoint does not implement is exactly what
+    /// declaring variants is for avoiding.
+    pub fn variant_levels(&self) -> Option<Vec<&'static str>> {
+        if self.variants.is_empty() {
+            return None;
+        }
+        Some(
+            REASONING_EFFORTS
+                .iter()
+                .copied()
+                .filter(|level| self.variants.contains_key(*level))
+                .collect(),
+        )
     }
 }
 
@@ -466,7 +512,12 @@ pub struct SessionModelSelection {
 pub enum ModelOverrideJudgement {
     /// The id is a model this install offers: the fully resolved
     /// [`ModelConfig`] to run the child on, on the profile that declares it.
-    Resolved(ModelConfig),
+    ///
+    /// Boxed because `ModelConfig` is by far the largest variant here (it
+    /// carries the whole connection plus a model's declared `variants`), and
+    /// this value is built once per spawn and then handed on - moving it onto
+    /// the heap costs nothing and keeps the enum small.
+    Resolved(Box<ModelConfig>),
     /// No profile offers the id, and the install declares a catalog. Refuse
     /// before the slot, the claim and the transcript are spent; `known` holds
     /// real ids to choose from.
@@ -3092,14 +3143,16 @@ impl Config {
         // capabilities instead of the session's.
         for profile in &self.providers {
             if self.model_entry_for(profile, requested).is_some() {
-                return ModelOverrideJudgement::Resolved(self.model_for(profile, requested));
+                return ModelOverrideJudgement::Resolved(Box::new(
+                    self.model_for(profile, requested),
+                ));
             }
         }
         // The id the active profile actually sends is always a valid request;
         // it may be newer than the catalog.
         let active = self.effective_model();
         if active.model.trim() == requested {
-            return ModelOverrideJudgement::Resolved(active);
+            return ModelOverrideJudgement::Resolved(Box::new(active));
         }
         // So is the id a pinned session's profile sends.
         if let Some(profile) = selection.and_then(|selection| {
@@ -3109,7 +3162,7 @@ impl Config {
         }) {
             let sent = self.model_for_profile(profile);
             if sent.model.trim() == requested {
-                return ModelOverrideJudgement::Resolved(sent);
+                return ModelOverrideJudgement::Resolved(Box::new(sent));
             }
         }
         let known = self.known_models(selection);
@@ -3154,6 +3207,22 @@ impl Config {
             .unwrap_or(self.model.supports_images)
     }
 
+    /// The reasoning levels a session pinned to `profile` + `model_id` may
+    /// choose: the levels its model entry declares variants for, or `None` when
+    /// the entry declares none (then every built-in level is offered and sent as
+    /// a bare `reasoning_effort`).
+    ///
+    /// This is the one place that rule lives, so the picker's list, the HTTP
+    /// validator and the wire body cannot disagree about which levels exist.
+    pub fn reasoning_levels_for(
+        &self,
+        profile: &ProviderProfile,
+        model_id: &str,
+    ) -> Option<Vec<&'static str>> {
+        self.model_entry_for(profile, model_id)
+            .and_then(|entry| entry.variant_levels())
+    }
+
     /// Resolve one profile into the live [`ModelConfig`] the runtime reads.
     /// The active profile uses the active model; any other profile uses its
     /// first model (used by provider probes on a profile that is not selected).
@@ -3192,6 +3261,12 @@ impl Config {
             None if legacy_flat_model => (self.model.context_window, self.model.max_output_tokens),
             None => (None, None),
         };
+        // The model's declared reasoning variants travel with the resolved
+        // model: a session pin is applied later, against the model the run
+        // actually calls (see [`Config::apply_reasoning_level`]).
+        let variants = entry
+            .map(|entry| entry.variants.clone())
+            .unwrap_or_default();
         ModelConfig {
             provider: profile.provider.clone(),
             base_url: profile.base_url.clone(),
@@ -3216,6 +3291,7 @@ impl Config {
             parallel_tool_calls: self.model.parallel_tool_calls,
             aggregator: profile.aggregator,
             supports_images: self.supports_images_for(profile, model_id),
+            variants,
         }
     }
 
@@ -3227,6 +3303,64 @@ impl Config {
             Some(profile) => self.model_for_profile(profile),
             None => self.model.clone(),
         }
+    }
+
+    /// Apply a session-pinned reasoning level to an already-resolved model.
+    ///
+    /// The level is resolved against the *model the session will actually call*,
+    /// which is why this takes the resolved [`ModelConfig`]: a session pinned to
+    /// `model-b` must get `model-b`'s variants even when the install-wide active
+    /// model is `model-a`. [`Config::model_for`] hands this function that model's
+    /// variant map, so the lookup happens once, at resolution time.
+    ///
+    /// All three outcomes end with a `reasoning_effort` in the body, so a level
+    /// can never be lost in the merge below:
+    ///
+    /// 1. the model declares variants and this level is one of them: its body is
+    ///    merged over the profile's `extra_body` (the declared keys win), which
+    ///    is how a level becomes `thinking.budget_tokens` or `thinking_budget`
+    ///    instead of an OpenAI-shaped string;
+    /// 2. the model declares variants and this level is not one of them: nothing
+    ///    is sent that pretends otherwise. A stale pin from before the variants
+    ///    changed degrades to the payload the variants label `none` ("reasoning
+    ///    off") when they declare one, else to the endpoint default, and
+    ///    `reasoning_effort` names the level that was asked for so the turn is
+    ///    still observable in the transcript;
+    /// 3. the model declares no variants: the historical bare
+    ///    `reasoning_effort: "<level>"` string, which is what every
+    ///    OpenAI-compatible gateway understands.
+    pub fn apply_reasoning_level(
+        model: &mut ModelConfig,
+        level: &str,
+        variants: &BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    ) {
+        let level = level.trim();
+        if level.is_empty() {
+            return;
+        }
+        if variants.is_empty() {
+            model.extra_body.insert(
+                "reasoning_effort".to_string(),
+                serde_json::Value::String(level.to_string()),
+            );
+            return;
+        }
+        if let Some(body) = variants.get(level) {
+            for (key, value) in body {
+                model.extra_body.insert(key.clone(), value.clone());
+            }
+        } else {
+            for (key, value) in variants.get("none").into_iter().flatten() {
+                model.extra_body.insert(key.clone(), value.clone());
+            }
+        }
+        // Always present, so a declared map that only sets e.g. `thinking_budget`
+        // still says which level the operator chose when the transcript is read
+        // back. It is ordinary body data, not a second spelling of the level.
+        model.extra_body.insert(
+            "reasoning_effort".to_string(),
+            serde_json::Value::String(level.to_string()),
+        );
     }
 
     pub fn is_local_bind(&self) -> bool {
@@ -3244,6 +3378,157 @@ mod tests {
             max_output_tokens: output,
             ..Default::default()
         }
+    }
+
+    // ---- reasoning variants ------------------------------------------------
+
+    /// A model that declares variants offers exactly those levels, and a level
+    /// can carry an arbitrary body instead of the OpenAI-shaped string - which is
+    /// the whole reason variants exist.
+    #[test]
+    fn declared_variants_decide_which_levels_a_model_offers() {
+        let variants: BTreeMap<String, BTreeMap<String, serde_json::Value>> =
+            serde_json::from_value(serde_json::json!({
+                "none": { "thinking": { "type": "disabled" } },
+                "low": { "thinking": { "type": "enabled", "budget_tokens": 2000 } },
+                "high": { "thinking": { "type": "enabled", "budget_tokens": 32000 } },
+            }))
+            .unwrap();
+        let entry = ModelEntry {
+            id: "claude".into(),
+            variants,
+            ..ModelEntry::default()
+        };
+
+        // Offered in the canonical order, not the key order: `minimal` and
+        // `medium` are absent because this model does not implement them.
+        assert_eq!(
+            entry.variant_levels(),
+            Some(vec!["none", "low", "high"]),
+            "only the declared levels are choosable"
+        );
+
+        // A declared level replaces the spelling entirely.
+        let mut model = ModelConfig {
+            model: "claude".into(),
+            ..Default::default()
+        };
+        Config::apply_reasoning_level(&mut model, "high", &entry.variants);
+        assert_eq!(
+            model.extra_body.get("thinking"),
+            Some(&serde_json::json!({ "type": "enabled", "budget_tokens": 32000 }))
+        );
+        assert_eq!(
+            model.extra_body.get("reasoning_effort"),
+            Some(&serde_json::Value::String("high".into())),
+            "the chosen level is still recorded for the transcript"
+        );
+    }
+
+    /// A model with no variants keeps the historical bare `reasoning_effort`
+    /// string, so an install configured before variants existed is unchanged.
+    #[test]
+    fn a_model_without_variants_sends_the_bare_reasoning_effort() {
+        let entry = ModelEntry::new("gpt-4o");
+        assert_eq!(
+            entry.variant_levels(),
+            None,
+            "not declared is not the same as empty"
+        );
+
+        let mut model = ModelConfig {
+            model: "gpt-4o".into(),
+            ..Default::default()
+        };
+        Config::apply_reasoning_level(&mut model, "high", &entry.variants);
+        assert_eq!(
+            model.extra_body.get("reasoning_effort"),
+            Some(&serde_json::Value::String("high".into()))
+        );
+        assert!(!model.extra_body.contains_key("thinking"));
+    }
+
+    /// A stale pin - a level the model no longer declares - sends the model's
+    /// "off" payload when it has one, rather than a level the endpoint cannot
+    /// implement, and still records which level was asked for.
+    #[test]
+    fn a_level_the_variants_do_not_declare_falls_back_to_off() {
+        let variants: BTreeMap<String, BTreeMap<String, serde_json::Value>> =
+            serde_json::from_value(serde_json::json!({
+                "none": { "thinking": { "type": "disabled" } },
+                "high": { "thinking": { "type": "enabled", "budget_tokens": 32000 } },
+            }))
+            .unwrap();
+        let mut model = ModelConfig::default();
+        Config::apply_reasoning_level(&mut model, "medium", &variants);
+        assert_eq!(
+            model.extra_body.get("thinking"),
+            Some(&serde_json::json!({ "type": "disabled" })),
+            "an undeclared level degrades to the model's off payload"
+        );
+        assert_eq!(
+            model.extra_body.get("reasoning_effort"),
+            Some(&serde_json::Value::String("medium".into()))
+        );
+    }
+
+    /// A model whose variants declare no "off" entry simply sends nothing extra.
+    #[test]
+    fn a_stale_level_without_an_off_variant_sends_only_the_level_name() {
+        let variants: BTreeMap<String, BTreeMap<String, serde_json::Value>> =
+            serde_json::from_value(serde_json::json!({
+                "high": { "thinking_budget": 32000 },
+            }))
+            .unwrap();
+        let mut model = ModelConfig::default();
+        Config::apply_reasoning_level(&mut model, "max", &variants);
+        assert!(!model.extra_body.contains_key("thinking_budget"));
+        assert_eq!(
+            model.extra_body.get("reasoning_effort"),
+            Some(&serde_json::Value::String("max".into()))
+        );
+    }
+
+    /// The variants travel on the resolved model, per model *id* - a session
+    /// pinned to one model must not inherit the active model's variants.
+    #[test]
+    fn variants_resolve_per_model_id_not_per_profile() {
+        let variant_map: BTreeMap<String, BTreeMap<String, serde_json::Value>> =
+            serde_json::from_value(serde_json::json!({
+                "high": { "thinking_budget": 4096 },
+            }))
+            .unwrap();
+        let mut cfg = Config {
+            providers: vec![ProviderProfile {
+                id: "gw".into(),
+                base_url: "https://gw.example/v1".into(),
+                models: vec![
+                    ModelEntry::new("plain"),
+                    ModelEntry {
+                        id: "thinky".into(),
+                        variants: variant_map,
+                        ..ModelEntry::default()
+                    },
+                ],
+                ..ProviderProfile::default()
+            }],
+            ..Config::default()
+        };
+        cfg.active_provider = Some("gw".into());
+        cfg.active_model = Some("plain".into());
+
+        let profile = cfg.active_profile().unwrap();
+        assert!(cfg.model_for(profile, "plain").variants.is_empty());
+        assert_eq!(
+            cfg.reasoning_levels_for(profile, "thinky"),
+            Some(vec!["high"])
+        );
+        assert_eq!(cfg.reasoning_levels_for(profile, "plain"), None);
+        assert_eq!(
+            cfg.model_for(profile, "thinky").variants.len(),
+            1,
+            "the map follows the resolved model"
+        );
     }
 
     // ---- [access] ---------------------------------------------------------
@@ -3417,6 +3702,60 @@ mod tests {
         assert_eq!(access.session_days, 7);
         assert_eq!(access.tunnel, TunnelKind::Cloudflare);
         assert_eq!(access.trusted_proxies, vec!["10.0.0.0/8".to_string()]);
+    }
+
+    /// The documented TOML spelling has to be the one the loader accepts:
+    /// `[providers.models.variants.<level>]` tables under a model entry, with
+    /// arbitrary request keys inside.
+    #[test]
+    fn model_variants_round_trip_through_toml() {
+        let file: ConfigFile = toml::from_str(
+            r#"
+            active_provider = "claude"
+            active_model = "claude-sonnet"
+
+            [[providers]]
+            id = "claude"
+            base_url = "http://127.0.0.1:9999/v1"
+
+              [[providers.models]]
+              id = "claude-sonnet"
+              context_window = 200000
+              reasoning = true
+
+                [providers.models.variants.none]
+                thinking = { type = "disabled" }
+
+                [providers.models.variants.high]
+                thinking = { type = "enabled", budget_tokens = 32000 }
+            "#,
+        )
+        .unwrap();
+        let profile = file.providers.expect("providers should parse").remove(0);
+        let entry = &profile.models[0];
+        assert_eq!(entry.id, "claude-sonnet");
+        assert_eq!(entry.variant_levels(), Some(vec!["none", "high"]));
+        assert_eq!(
+            entry
+                .variants
+                .get("high")
+                .and_then(|body| body.get("thinking")),
+            Some(&serde_json::json!({ "type": "enabled", "budget_tokens": 32000 }))
+        );
+
+        // A model with no variants table keeps the historical behaviour.
+        let plain: ConfigFile = toml::from_str(
+            r#"
+            [[providers]]
+            id = "gw"
+            base_url = "http://127.0.0.1:9999/v1"
+              [[providers.models]]
+              id = "m"
+            "#,
+        )
+        .unwrap();
+        let profile = plain.providers.expect("providers should parse").remove(0);
+        assert_eq!(profile.models[0].variant_levels(), None);
     }
 
     #[test]

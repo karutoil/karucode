@@ -2,6 +2,8 @@ import type { JSX } from 'preact';
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { formatDuration } from '../lib/format';
 import type { CommandItem } from '../state/chat';
+import type { ChatTranscriptProps } from './ChatTranscript';
+import { ToolRewind } from './ChatTranscript';
 import { toolStatusLabel } from '../state/selectors';
 import { AlertIcon, CheckIcon, ChevronDownIcon } from './icons';
 import { TpsBadge } from './TpsBadge';
@@ -21,6 +23,8 @@ export interface CommandCardProps {
    * are one disclosure away - never dropped for being "compact".
    */
   variant?: 'card' | 'row';
+  /** Rewind this command, when it is part of the stored transcript. */
+  onRewind?: ChatTranscriptProps['onRewind'];
 }
 
 /** The outcome glyph: a running dot, a tick, a stop dot, or a failure alert. */
@@ -118,6 +122,7 @@ export function CommandCard({
   item,
   defaultOpen = false,
   variant = 'card',
+  onRewind,
 }: CommandCardProps): JSX.Element {
   const [open, setOpen] = useState(defaultOpen);
   const bodyId = useId();
@@ -180,6 +185,10 @@ export function CommandCard({
           </span>
         </button>
 
+        {/* Outside the summary button: a rewind inside the disclosure's click
+            target would open the dialog and toggle the output. */}
+        <ToolRewind item={item} onRewind={onRewind} />
+
         {open ? (
           <div class="cmd-output" id={bodyId}>
             <CommandOutput item={item} />
@@ -226,6 +235,8 @@ export function CommandCard({
           <ChevronDownIcon size={12} />
         </span>
       </button>
+
+      <ToolRewind item={item} onRewind={onRewind} />
 
       <div class="cmd-output" id={bodyId} hidden={!open}>
         {open ? <CommandOutput item={item} /> : null}

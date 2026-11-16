@@ -115,4 +115,33 @@ describe('phone and density contract', () => {
     // right-biased prompt uses the same control rather than removing it.
     expect(css).toMatch(/@media \(hover: none\)[\s\S]*?\.rewind-button \{[^}]*opacity: 1;/);
   });
+
+  it('floats a call’s rewind over its head in every transcript style', () => {
+    // Rewind rides each stored row, including every tool call and command. A
+    // call's head is a fixed-height flex row that already spends its width on
+    // the call and its outcome, so the button is positioned over it: joining the
+    // flow pushed the outcome off a narrow card and changed the head's height as
+    // it faded in. The vertical offset has to match the head it overlays.
+    const floated = css.match(
+      /\.tool-card > \.rewind-tool,[\s\S]*?\.command-row > \.rewind-tool \{([^}]*)\}/,
+    );
+    expect(floated, 'the call rewind rule exists').not.toBeNull();
+    expect(floated![1]).toContain('position: absolute;');
+    expect(floated![1]).toContain('right: var(--space-5);');
+    // The compact rows' head is 26px, the cards' is 44px: one offset cannot fit
+    // both, or the pill straddles the border.
+    expect(css).toMatch(
+      /\.tool-row > \.rewind-tool,\s*\.command-row > \.rewind-tool \{[^}]*top: 3px;/,
+    );
+    expect(floated![1]).toContain('top: 11px;');
+    // It is revealed by hovering the call, and the row is its containing block.
+    expect(css).toMatch(/\.tool-card:hover > \.rewind-tool,[\s\S]*?opacity: 1;/);
+    expect(rule('.tool-row')).toContain('position: relative;');
+    expect(rule('.command-row')).toContain('position: relative;');
+    // On a touch screen the pill would cover the call's own text, so it takes a
+    // row of its own under the head instead of floating over it.
+    expect(css).toMatch(
+      /@media \(hover: none\)[\s\S]*?\.tool-card > \.rewind-tool,[\s\S]*?position: static;/,
+    );
+  });
 });

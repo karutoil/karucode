@@ -70,6 +70,57 @@ async fn drain(mut stream: kc_core::provider::ProviderStream) {
     }
 }
 
+/// A session's pinned reasoning level reaches the endpoint as the level's
+/// declared body - `thinking.budget_tokens`, not an OpenAI-shaped
+/// `reasoning_effort` string - and it beats a stale entry the profile still
+/// carries. This is the whole feature, asserted on the bytes that go out.
+#[tokio::test]
+async fn a_pinned_reasoning_level_sends_its_declared_thinking_budget() {
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, OK_SSE).await }).await;
+    let mut config = base_config(&server);
+    // The profile was configured before the levels were declared and still says
+    // "low"; the run below is pinned to "high" and must win.
+    config.extra_body =
+        BTreeMap::from_iter([("reasoning_effort".to_string(), serde_json::json!("low"))]);
+
+    // What the server resolver produces for a session pinned to `high` on a
+    // model whose `variants.high` declares this body.
+    let variants: BTreeMap<String, BTreeMap<String, serde_json::Value>> =
+        serde_json::from_value(serde_json::json!({
+            "high": { "thinking": { "type": "enabled", "budget_tokens": 32000 } },
+        }))
+        .unwrap();
+    let mut model = config.clone();
+    kc_core::config::Config::apply_reasoning_level(&mut model, "high", &variants);
+
+    let mut request = full_request();
+    request.extra_body = model
+        .extra_body
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let provider = OpenAiProvider::new(model).unwrap();
+    drain(
+        provider
+            .stream_chat(request, CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    let body = server.wait_for_request().await.json();
+    assert_eq!(
+        body["thinking"]["budget_tokens"], 32000,
+        "the declared variant body is what the endpoint receives: {body}"
+    );
+    assert_eq!(body["thinking"]["type"], "enabled");
+    assert_eq!(
+        body["reasoning_effort"], "high",
+        "the stale profile entry must not override the pinned level: {body}"
+    );
+}
+
 #[tokio::test]
 async fn request_body_and_headers_match_the_wire_contract() {
     let server =

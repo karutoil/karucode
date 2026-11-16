@@ -1,5 +1,5 @@
 {
-  "count": 35,
+  "count": 36,
   "generated_by": "cargo run -p kc-docs -- --write",
   "topics": [
     {
@@ -950,6 +950,8 @@
         "config:retry_max_delay_ms",
         "config:retry_max_stream_restarts",
         "config:aggregator",
+        "config:variants",
+        "config:providers.models.variants",
         "config:limits.max_turn_retries",
         "config:limits.turn_retry_delay_ms",
         "event:stream_retry",
@@ -958,6 +960,12 @@
         "route:PATCH /api/config",
         "route:POST /api/provider/test",
         "route:GET /api/models/catalog",
+        "route:PATCH /api/sessions/:id/model",
+        "request:reasoning_effort",
+        "request:thinking",
+        "request:thinking_budget",
+        "request:thinking.budget_tokens",
+        "ui:ModelSwitcher",
         "request:messages[].name",
         "internal:kc-runtime:context-digest",
         "internal:kc-runtime:startup-recovery",
@@ -1204,6 +1212,33 @@
         "register"
       ],
       "title": "Give the agent skills it loads on demand"
+    },
+    {
+      "applies_to": [
+        "route:GET /api/commands",
+        "route:POST /api/sessions/:id/messages",
+        "field:content",
+        "event:command_result",
+        "tool:skill",
+        "tool:karucode_docs",
+        "config:[skills]",
+        "config:[[mcp_servers]]"
+      ],
+      "path": "slash-commands.md",
+      "slug": "slash-commands",
+      "source": "crates/kc-server/src/slash/mod.rs:3",
+      "summary": "A message that starts with `/` runs a command - compact the conversation, pin a model, run a skill, list the MCP tools - instead of prompting the model.",
+      "tags": [
+        "slash",
+        "commands",
+        "composer",
+        "compact",
+        "skills",
+        "mcp",
+        "tools",
+        "web-ui"
+      ],
+      "title": "Type a slash command in a session"
     },
     {
       "applies_to": [
@@ -1766,7 +1801,20 @@
         "storage:karucode.composerSendKey",
         "ui:composer-send-key",
         "file:scripts/verify_send_key.py",
-        "cmd:python3 scripts/verify_send_key.py"
+        "cmd:python3 scripts/verify_send_key.py",
+        "ui:SlashMenu",
+        "ui:slash-menu",
+        "ui:slash-card",
+        "ui:Composer-slash-command",
+        "route:GET /api/commands",
+        "event:command_result",
+        "file:web/src/components/SlashMenu.tsx",
+        "file:web/src/components/SlashCard.tsx",
+        "file:web/src/lib/slash.ts",
+        "file:web/src/lib/slash.test.ts",
+        "file:web/src/components/Composer.slash.test.tsx",
+        "file:web/src/state/slashCommand.test.ts",
+        "doc:slash-commands"
       ],
       "path": "web-ui.md",
       "slug": "web-ui",
