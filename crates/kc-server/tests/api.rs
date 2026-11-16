@@ -2022,10 +2022,7 @@ async fn a_running_session_blocks_deleting_its_project() {
         "the refusal must name the reason the retry keys on: {message}"
     );
     // The project survives, because nothing was deleted.
-    assert_eq!(
-        h.get(&format!("/api/projects")).await.status,
-        StatusCode::OK
-    );
+    assert_eq!(h.get("/api/projects").await.status, StatusCode::OK);
     assert!(h.get("/api/projects").await.json()["projects"]
         .as_array()
         .unwrap()
