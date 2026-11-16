@@ -1737,10 +1737,38 @@ async fn projects_scope_sessions_workspace_and_runs() {
         .as_str()
         .unwrap()
         .contains("force=true"));
-    let deleted = h
-        .delete(&format!("/api/projects/{second_id}?force=true"))
-        .await;
-    assert_eq!(deleted.status, StatusCode::OK);
+    let deleted = {
+        // `run_finished` is emitted before the runtime has finished unwinding the
+        // run, and a force-delete inside that window is *correctly* refused with
+        // "session is running" rather than pulling a live run out from under
+        // itself. Locally the gap closes in microseconds; on a loaded CI runner it
+        // does not, and this assert failed there with a bare 400 that said nothing
+        // about which of the two refusals it was.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let attempt = h
+                .delete(&format!("/api/projects/{second_id}?force=true"))
+                .await;
+            if attempt.status == StatusCode::OK {
+                break attempt;
+            }
+            let message = attempt.json()["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            // Only "still unwinding" is worth retrying. Anything else is a real
+            // failure, and a loop must not paper over it.
+            assert!(
+                message.contains("is running"),
+                "the force-delete failed for a reason a retry cannot fix: {message}"
+            );
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the session never stopped running, so the project could not be deleted: {message}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
     assert_eq!(deleted.json()["deleted_sessions"], 1);
     assert!(h.get(&format!("/api/sessions/{session_id}")).await.status == StatusCode::NOT_FOUND);
     assert_eq!(
@@ -1933,6 +1961,81 @@ async fn sse_stream_can_be_filtered_to_one_session() {
         events_b.is_empty(),
         "session-filtered stream leaked events: {events_b:?}"
     );
+}
+
+/// A project whose session is **running** must refuse `?force=true`.
+///
+/// This pins the branch that made `projects_scope_sessions_workspace_and_runs`
+/// flaky: force-delete is allowed to remove stored sessions, but never a live
+/// run, and `running` stays true for a moment after `run_finished` because the
+/// runtime unwinds asynchronously (see `wait_until_idle_ignored`). Without this
+/// test the retry in that test would be trusting a refusal nothing exercised.
+#[tokio::test]
+async fn a_running_session_blocks_deleting_its_project() {
+    let h = HarnessBuilder::new(vec![Script::Hang]).build().await;
+    let workspace = h.workspace_path();
+    let dir = workspace.join("busy-project");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.canonicalize().unwrap().to_string_lossy().to_string();
+    let created = h
+        .post("/api/projects", json!({ "name": "Busy", "path": path }))
+        .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.text());
+    let project_id = created.json()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let session = h
+        .post(
+            "/api/sessions",
+            json!({ "title": "busy", "project": project_id }),
+        )
+        .await;
+    assert_eq!(session.status, StatusCode::OK, "{}", session.text());
+    let session_id = session.json()["id"].as_str().unwrap().to_string();
+    let started = h
+        .post(
+            &format!("/api/sessions/{session_id}/messages"),
+            json!({ "content": "work" }),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::ACCEPTED);
+    wait_for_running(&h, &session_id).await;
+
+    // Even with force=, a live run is not deleted out from under itself.
+    let refused = h
+        .delete(&format!("/api/projects/{project_id}?force=true"))
+        .await;
+    assert_eq!(
+        refused.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        refused.text()
+    );
+    let message = refused.json()["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        message.contains("is running"),
+        "the refusal must name the reason the retry keys on: {message}"
+    );
+    // The project survives, because nothing was deleted.
+    assert_eq!(
+        h.get(&format!("/api/projects")).await.status,
+        StatusCode::OK
+    );
+    assert!(h.get("/api/projects").await.json()["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["id"] == json!(project_id)));
+
+    h.post(&format!("/api/sessions/{session_id}/cancel"), json!({}))
+        .await;
+    wait_until_idle_ignored(&h, &session_id).await;
+    h.state.shutdown_token().cancel();
 }
 
 #[tokio::test]
