@@ -171,6 +171,10 @@ pub enum Source {
     /// A skill found in `.karucode/skills`, `.claude/skills`, a configured
     /// folder or the settings table.
     Skill,
+    /// A `command` contribution from a ready plugin (§R3). It runs that plugin's
+    /// `ui/action` (or posts its `message`), costs no tokens and needs no
+    /// approval: it is typed by the person, not proposed by the model.
+    Plugin,
 }
 
 /// The menu group a command belongs to.
@@ -369,30 +373,58 @@ pub fn is_command_token(name: &str) -> bool {
 /// must always mean help; the skill stays reachable as `/skill <id>`.
 pub async fn catalog(state: &AppState, workspace: Option<&Workspace>) -> Vec<Entry> {
     let mut entries = BUILTINS.iter().map(Builtin::entry).collect::<Vec<_>>();
-    let Some(workspace) = workspace else {
-        return entries;
-    };
-    let config = state.settings().skills().await;
-    let Ok(registry) = discover_skills(&config, workspace).await else {
-        // A skills folder on a dead mount must not take the whole menu with it.
-        return entries;
-    };
-    for skill in registry.skills.iter().filter(|skill| skill.enabled) {
-        if !is_command_token(&skill.id) || is_builtin(&skill.id) {
+    // Plugin commands are appended last and never depend on a workspace: they are
+    // manifest data from a ready process, not files, so a deployment with no
+    // project still gets them (§R3).
+    let plugin_commands = state.plugin_commands().await;
+    if let Some(workspace) = workspace {
+        let config = state.settings().skills().await;
+        if let Ok(registry) = discover_skills(&config, workspace).await {
+            for skill in registry.skills.iter().filter(|skill| skill.enabled) {
+                if !is_command_token(&skill.id) || is_builtin(&skill.id) {
+                    continue;
+                }
+                if plugin_commands.iter().any(|c| c.0 == skill.id) {
+                    // A plugin command is namespaced by the host, so this cannot
+                    // happen today; keeping the check makes the menu's "one name,
+                    // one command" rule true whatever the namespacing becomes.
+                    continue;
+                }
+                entries.push(Entry {
+                    name: skill.id.clone(),
+                    title: if skill.name.trim().is_empty() {
+                        skill.id.clone()
+                    } else {
+                        skill.name.clone()
+                    },
+                    summary: skill.description.clone(),
+                    args: "[task]".to_string(),
+                    category: Category::Extend,
+                    source: Source::Skill,
+                    insert: format!("/{} ", skill.id),
+                });
+            }
+        }
+        // `discover_skills` failing (a skills folder on a dead mount) must not
+        // take the whole menu with it, so plugin commands are added below
+        // regardless.
+    }
+    for (name, title, summary, args) in plugin_commands {
+        if is_builtin(&name) {
             continue;
         }
         entries.push(Entry {
-            name: skill.id.clone(),
-            title: if skill.name.trim().is_empty() {
-                skill.id.clone()
-            } else {
-                skill.name.clone()
-            },
-            summary: skill.description.clone(),
-            args: "[task]".to_string(),
+            name: name.clone(),
+            title,
+            summary,
+            args,
             category: Category::Extend,
-            source: Source::Skill,
-            insert: format!("/{} ", skill.id),
+            source: Source::Plugin,
+            insert: if name.is_empty() {
+                format!("/{name}")
+            } else {
+                format!("/{name} ")
+            },
         });
     }
     entries
@@ -535,9 +567,16 @@ pub async fn run(
         "docs" => commands::docs(invocation).await,
         // Everything else that resolved in the catalog is a skill invoked by its
         // own id: `/release` is `/skill release` with nothing before the task.
-        _ => {
-            commands::skill_named(state, session, &invocation.name, invocation.args_trimmed()).await
-        }
+        _ => match find(catalog, &invocation.name).map(|entry| entry.source) {
+            // A plugin command runs the plugin's own `ui/action` (§R3). It is a
+            // person typing, exactly like a click, so it takes the same path the
+            // button does - and never reaches the model.
+            Some(Source::Plugin) => commands::plugin(state, session, invocation).await,
+            _ => {
+                commands::skill_named(state, session, &invocation.name, invocation.args_trimmed())
+                    .await
+            }
+        },
     }
 }
 

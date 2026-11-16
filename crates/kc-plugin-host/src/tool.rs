@@ -100,6 +100,9 @@ pub fn call_context(ctx: &ToolCtx) -> ToolCallContext {
         workspace: ctx.workspace.root().to_string_lossy().into_owned(),
         project: None,
         depth: ctx.depth,
+        // A tool call has no slash-command argument: `args` is only set when the
+        // action was run from the composer (§R3).
+        args: String::new(),
     }
 }
 

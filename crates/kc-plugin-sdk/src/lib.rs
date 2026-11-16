@@ -1637,6 +1637,11 @@ impl PluginBuilder {
             message: None,
             keys: None,
             target: None,
+            text: None,
+            tone: None,
+            summary: None,
+            sets: Vec::new(),
+            replace: None,
         })
     }
 
@@ -1657,6 +1662,11 @@ impl PluginBuilder {
             message: Some(message.to_string()),
             keys: None,
             target: None,
+            text: None,
+            tone: None,
+            summary: None,
+            sets: Vec::new(),
+            replace: None,
         })
     }
 
@@ -1699,6 +1709,11 @@ impl PluginBuilder {
             message: None,
             keys: None,
             target: None,
+            text: None,
+            tone: None,
+            summary: None,
+            sets: Vec::new(),
+            replace: None,
         })
     }
 
@@ -1715,6 +1730,11 @@ impl PluginBuilder {
             message: Some(message.to_string()),
             keys: None,
             target: None,
+            text: None,
+            tone: None,
+            summary: None,
+            sets: Vec::new(),
+            replace: None,
         })
     }
 
@@ -1758,6 +1778,11 @@ impl PluginBuilder {
             message: None,
             keys: Some(keys.to_string()),
             target: None,
+            text: None,
+            tone: None,
+            summary: None,
+            sets: Vec::new(),
+            replace: None,
         })
     }
 
@@ -1775,6 +1800,11 @@ impl PluginBuilder {
             message: Some(message.to_string()),
             keys: Some(keys.to_string()),
             target: None,
+            text: None,
+            tone: None,
+            summary: None,
+            sets: Vec::new(),
+            replace: None,
         })
     }
 

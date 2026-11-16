@@ -1026,6 +1026,14 @@ pub struct ToolCallContext {
     /// Subagent nesting depth; 0 for the main agent.
     #[serde(default)]
     pub depth: u8,
+    /// The text a person typed after a slash command, when the action was run
+    /// from the composer (§R3) rather than from a clicked control.
+    ///
+    /// It is the command's argument, so a plugin can implement `/todo add the
+    /// release note` without a second round trip. Empty for a button click, and
+    /// always empty for a tool call.
+    #[serde(default)]
+    pub args: String,
 }
 
 #[cfg(test)]

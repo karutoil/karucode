@@ -614,6 +614,21 @@ impl AppState {
         &self.inner.plugins
     }
 
+    /// Every `command` contribution from a ready plugin, as
+    /// `(name, title, summary, args)` (§R3).
+    ///
+    /// Names are hosted as `plugin-<plugin>-<id>` by the host, so a plugin can
+    /// never shadow `/help`, a skill or another plugin's command. Returned in
+    /// discovery order for a stable menu; the mutex is dropped before the caller
+    /// does anything with the result.
+    pub async fn plugin_commands(&self) -> Vec<(String, String, String, String)> {
+        let host = self.inner.plugins.lock().await;
+        host.commands()
+            .into_iter()
+            .map(|c| (c.name, c.label, c.summary, c.args))
+            .collect()
+    }
+
     /// The plugin-install job registry (`POST /api/plugins/install`).
     pub fn installs(&self) -> &crate::routes::plugin_install::InstallJobRegistry {
         &self.inner.installs

@@ -66,6 +66,7 @@ pub(super) async fn help(catalog: &[Entry], invocation: &Invocation) -> ApiResul
             match entry.source {
                 Source::Builtin => "built in",
                 Source::Skill => "a skill in this workspace",
+                Source::Plugin => "a plugin",
             }
         ));
         return Ok(Reply::ok(text));
@@ -526,6 +527,105 @@ pub(super) async fn skill(
     };
     let (name, task) = split_skill_arg(arg);
     skill_named(state, session, name, task).await
+}
+
+/// One plugin's `command` contribution, run from the composer (§R3).
+///
+/// A slash command is a person typing, so it takes exactly the path a click on
+/// the same contribution takes: it calls the plugin's `ui/action` with the typed
+/// remainder as the action's `args`, and answers in place with whatever the
+/// plugin returned (its toast `message`). Nothing reaches the model, nothing is
+/// approved, and no tokens are spent - that is the whole point of a command
+/// being a command rather than a turn.
+///
+/// A contribution that declared `message` instead of `action` rewrites the
+/// message into that text plus the typed remainder and runs it, exactly like
+/// `/skill`.
+pub(super) async fn plugin(
+    state: &AppState,
+    session: &Session,
+    invocation: &Invocation,
+) -> ApiResult<Reply> {
+    let Some(command) = state
+        .plugin_commands()
+        .await
+        .into_iter()
+        .find(|(name, ..)| name.eq_ignore_ascii_case(&invocation.name))
+    else {
+        return Ok(Reply::fail(format!(
+            "`/{}` is a plugin command that is no longer available - the plugin that \
+             contributed it is not running. See Settings → Plugins & MCP.",
+            invocation.name
+        )));
+    };
+    let (name, _label, _summary, _args) = command;
+    let args = invocation.args_trimmed();
+
+    let ui = {
+        let host = state.plugins().lock().await;
+        host.ui_handle()
+    };
+    // The contribution and its plugin, so the typed remainder travels with the
+    // call and the host still refuses an action no contribution declares.
+    let contribution = {
+        let ui_model = ui.ui();
+        ui_model
+            .contributions
+            .into_iter()
+            .find(|c| {
+                c.kind == kc_core::plugin::UI_KIND_COMMAND
+                    && kc_plugin_host::hosted_command_name(&c.plugin, &c.id) == name
+            })
+    };
+    let Some(contribution) = contribution else {
+        return Ok(Reply::fail(format!(
+            "`/{name}` is listed but its plugin no longer contributes it; reload the plugin \
+             in Settings → Plugins & MCP."
+        )));
+    };
+
+    if let Some(message) = contribution.message.as_deref() {
+        let prompt = if args.is_empty() {
+            message.to_string()
+        } else {
+            format!("{message}\n\n{args}")
+        };
+        return Ok(Reply::run(prompt));
+    }
+    let Some(action) = contribution.action.clone() else {
+        return Ok(Reply::fail(format!(
+            "`/{name}` has neither an action nor a message; reinstall the plugin."
+        )));
+    };
+
+    let workspace = state.workspace_for_project(session.project_id.as_deref())?;
+    let ctx = kc_core::plugin::ToolCallContext {
+        session_id: session.id.clone(),
+        project: session.project_id.clone(),
+        workspace: workspace.root().to_string_lossy().into_owned(),
+        args: args.to_string(),
+        ..Default::default()
+    };
+    let outcome = ui.action(&contribution.plugin, &action, &ctx).await;
+    match outcome {
+        Ok(result) => {
+            let text = if result.message.trim().is_empty() {
+                format!("`/{name}` ran in `{}`.", contribution.plugin)
+            } else {
+                result.message.clone()
+            };
+            if result.ok {
+                Ok(Reply::ok(text))
+            } else {
+                Ok(Reply::fail(text))
+            }
+        }
+        Err(e) => Ok(Reply::fail(format!(
+            "`/{name}` failed: {e}. The plugin (`{}`) is still installed; see Settings → \
+             Plugins & MCP for its diagnostics.",
+            contribution.plugin
+        ))),
+    }
 }
 
 /// The `/skill` body, also used when a skill is invoked by its own name.

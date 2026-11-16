@@ -729,6 +729,17 @@ impl PluginHost {
         ui_of(&self.ready_plugins())
     }
 
+    /// Every `command` contribution from a ready plugin (§R3).
+    ///
+    /// The name is **hosted**: `plugin-<plugin>-<id>`. That is what makes a menu
+    /// honest — a plugin can never shadow `/help`, a skill id, or another
+    /// plugin's command, and the reader can see which plugin a `/plugin-todo-add`
+    /// came from. `action` names the `ui/action` the slash command runs; `message`
+    /// is set instead when the contribution posts a user turn.
+    pub fn commands(&self) -> Vec<PluginCommand> {
+        commands_of(&self.ready_plugins())
+    }
+
     /// A live handle for reading contributions and running actions without the
     /// host mutex — the counterpart of [`panels_handle`](Self::panels_handle).
     pub fn ui_handle(&self) -> PluginUiHandle {
@@ -1937,6 +1948,104 @@ fn panels_of(plugins: &[Arc<PluginShared>]) -> Vec<PluginPanels> {
 ///
 /// Output order is deterministic: discovery order, then manifest order, then
 /// hidden targets sorted by name. Nothing here depends on a HashMap iteration.
+/// One slash command a plugin contributes (§R3).
+///
+/// Only `command` contributions become rows, and only from a **ready** plugin:
+/// a plugin that failed to start must not put a row in the menu that cannot run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginCommand {
+    /// The plugin that declared it.
+    pub plugin: String,
+    /// The hosted slash name: `plugin-<plugin>-<id>`.
+    pub name: String,
+    /// What the menu shows.
+    pub label: String,
+    /// The summary line under the label.
+    pub summary: String,
+    /// The argument placeholder, e.g. `[note]`.
+    pub args: String,
+    /// The `ui/action` to run, if this command runs one.
+    pub action: Option<String>,
+    /// The user turn to post instead, if this command posts a message.
+    pub message: Option<String>,
+    /// Session-state keys the action writes, for a targeted UI refresh.
+    pub sets: Vec<String>,
+}
+
+/// The hosted slash name for a plugin command: `plugin-<plugin>-<id>`.
+///
+/// Slugged to the command-token rule (`[a-z][a-z0-9_-]*`) so the composer's `/`
+/// matcher and the server's parser agree, and prefixed so it can never collide
+/// with a built-in command or a skill id.
+pub fn hosted_command_name(plugin: &str, id: &str) -> String {
+    let slug = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    };
+    let mut name = format!("plugin-{}-{}", slug(plugin), slug(id));
+    // Collapse a run of dashes so `a..b` does not become `a--b` twice over, and
+    // bound the length: a command token is a menu row, not a paragraph.
+    while name.contains("--") {
+        name = name.replace("--", "-");
+    }
+    name.truncate(64);
+    name.trim_matches('-').to_string()
+}
+
+/// Every `command` contribution of every ready plugin, in discovery order.
+fn commands_of(plugins: &[Arc<PluginShared>]) -> Vec<PluginCommand> {
+    let mut out = Vec::new();
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for shared in plugins {
+        if shared.status() != PluginStatus::Ready {
+            continue;
+        }
+        for contribution in shared.ui_defs() {
+            if contribution.kind != kc_core::plugin::UI_KIND_COMMAND {
+                continue;
+            }
+            let name = hosted_command_name(&shared.name, &contribution.id);
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(owner) = seen.get(&name) {
+                warn!(
+                    plugin = %shared.name,
+                    command = %name,
+                    claimed_by = %owner,
+                    "not exposing plugin command: the hosted name is already taken"
+                );
+                continue;
+            }
+            seen.insert(name.clone(), shared.name.clone());
+            out.push(PluginCommand {
+                plugin: shared.name.clone(),
+                name,
+                label: contribution.label.clone(),
+                summary: contribution
+                    .summary
+                    .clone()
+                    .or_else(|| contribution.title.clone())
+                    .unwrap_or_default(),
+                // A plugin command takes the typed remainder as its argument, so
+                // the menu shows it as optional rather than inventing a shape.
+                args: "[arguments]".to_string(),
+                action: contribution.action.clone(),
+                message: contribution.message.clone(),
+                sets: contribution.sets.clone(),
+            });
+        }
+    }
+    out
+}
+
 fn ui_of(plugins: &[Arc<PluginShared>]) -> PluginUi {
     let mut out = PluginUi::empty();
     let mut hidden: BTreeMap<String, Vec<String>> = BTreeMap::new();
