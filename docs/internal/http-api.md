@@ -61,7 +61,8 @@ curl -s -X POST localhost:8787/api/sessions/abc/messages \
 | `GET /api/sessions/:id/info` | the session's counts and token totals: messages, turns, tool calls, working time, per-agent usage, window fill |
 | `PATCH /api/sessions/:id`, `PATCH /api/sessions/:id/model` | rename, pin or clear this session's model, and set or clear this session's worktree override (`{"worktrees": true/false/null}`) |
 | `POST /api/sessions/:id/expire` | retire a temporary session now (same teardown as an automatic expiry) |
-| `POST /api/sessions/:id/messages` | start a run (SSE progress arrives on `/api/events`); `?mode=steer` folds the message into the run in flight, `?mode=follow_up` starts one after it |
+| `POST /api/sessions/:id/messages` | start a run (SSE progress arrives on `/api/events`); `?mode=steer` folds the message into the run in flight, `?mode=follow_up` starts one after it. A message that is a slash command is answered in place instead (see below) |
+| `GET /api/commands` | the slash-command catalog the composer's `/` menu draws: built-ins plus every skill that can be typed as one |
 | `GET /api/sessions/:id/queues`, `DELETE /api/sessions/:id/queues/:queued_id` | the messages waiting for the run, and recall one (it never reaches the model) |
 | `POST /api/sessions/:id/cancel` | cancel the active run |
 | `GET`/`POST /api/sessions/:id/rewind` | preview, then hide the transcript after a message (optionally reverting its file changes, retrying it, or replacing it with a note) |
@@ -1017,6 +1018,10 @@ missing thing; secrets are never echoed.
   `KARUCODE_ALLOWED_HOSTS` for a proxy.
 * Long-running work is asynchronous: `POST .../messages` returns immediately and
   progress comes over `/api/events`.
+* A slash command is the one message that is answered synchronously and starts
+  no run: the response is `{"mode":"command","command":"compact","message_id":7,
+  "state":"ok"}`, the answer is a transcript row of its own, and `command_result`
+  arrives on the stream. See the `slash-commands` topic.
 * A session model pin is not a settings change: `PATCH /api/config` cannot set
   it, and rotating the default in settings leaves pinned sessions where they
   are until you clear the pin.

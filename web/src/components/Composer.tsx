@@ -32,7 +32,16 @@ import {
   type TreeLoader,
 } from '../lib/mentions';
 import { formatBytes } from '../lib/format';
+import {
+  insertCommand,
+  knownCommand,
+  rankCommands,
+  slashQuery,
+  SLASH_MENU_LIMIT,
+} from '../lib/slash';
+import type { CommandSpec } from '../api/types';
 import { FileMentionMenu, mentionOptionId } from './FileMentionMenu';
+import { SlashMenu, slashOptionId } from './SlashMenu';
 import { ModelControls } from './ModelSwitcher';
 import { PluginSlot } from './PluginSlot';
 import { isUiHidden, UI_HIDE_COMPOSER_ATTACH, UI_SLOT_COMPOSER_TOOLBAR } from './uiContributions';
@@ -293,6 +302,15 @@ export interface ComposerProps {
   /** Receives the final message text (draft + inlined/referenced attachments). */
   onSend: (text: string) => Promise<boolean>;
   /**
+   * Send one slash command.
+   *
+   * Separate from `onSend` because a command is not a prompt: it is answered in
+   * place, it never starts a run, and it is allowed while one is in flight (that
+   * is when `/stop` matters). Defaults to `onSend`, which is correct for any
+   * caller whose server answers commands through the same route.
+   */
+  onCommand?: (text: string) => Promise<boolean>;
+  /**
    * Queue a message against the run that is already working.
    *
    * `mode` is what the toggle asked for: a steer joins the turn in flight, a
@@ -317,6 +335,8 @@ export interface ComposerProps {
   usageLabel?: string;
   /** Override the workspace tree fetch behind `@` suggestions (tests). */
   loadMentionTree?: TreeLoader;
+  /** Override the command catalog fetch behind the `/` menu (tests). */
+  loadCommands?: (project: string | null) => Promise<CommandSpec[]>;
   /** What `@` lists, for the hint line. The control chat mentions projects. */
   mentionLabel?: string;
   /** Override the attachment upload call (tests). */
@@ -331,6 +351,7 @@ const CHAR_COUNTER_THRESHOLD = 4000;
 /** Suggestion index lifetime; the workspace changes under us all the time. */
 const INDEX_TTL_MS = 60_000;
 const MENTION_MENU_ID = 'composer-mention-menu';
+const SLASH_MENU_ID = 'composer-slash-menu';
 
 const defaultLoadTree: TreeLoader = (depth = MENTION_INDEX_DEPTH) =>
   api.getWorkspaceTree('.', depth, store.currentProjectId.value);
@@ -364,6 +385,7 @@ export function Composer({
   stopping,
   status,
   onSend,
+  onCommand,
   onQueue,
   queued,
   onRecall,
@@ -374,6 +396,7 @@ export function Composer({
   focusTick,
   usageLabel,
   loadMentionTree,
+  loadCommands,
   mentionLabel,
   uploadFile,
 }: ComposerProps): JSX.Element {
@@ -616,6 +639,76 @@ export function Composer({
     }, 0);
   };
 
+  // ---- slash commands ---------------------------------------------------
+  //
+  // The menu is a *hint*: the server resolves the command from the message, so a
+  // stale or failed catalog costs a missing suggestion, never a wrong action. That
+  // is why the fetch is lazy (on the first `/`), cached per project, and why a
+  // failure still leaves the box usable.
+  const catalog = store.commandCatalog.value;
+  const catalogProject = store.commandCatalogProject.value;
+  const catalogError = store.commandCatalogError.value;
+  const catalogTick = store.commandCatalogTick.value;
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashDismissed, setSlashDismissed] = useState(false);
+  const loadedCatalogKey = useRef<string | null>(null);
+  const loadCatalog =
+    loadCommands ?? ((project: string | null) => api.listCommands(project));
+
+  const slashQueryText = slashQuery(draft, caret);
+  const slashOpen = slashQueryText !== null && !slashDismissed;
+  // Skills are discovered inside the project's workspace, so another project's
+  // list would offer a command the agent cannot read.
+  const projectCatalog = catalogProject === projectId ? (catalog ?? []) : [];
+  const rankedCommands = slashOpen ? rankCommands(projectCatalog, slashQueryText ?? '', SLASH_MENU_LIMIT) : [];
+  const slashActiveIndex =
+    rankedCommands.length === 0 ? 0 : Math.min(slashIndex, rankedCommands.length - 1);
+
+  useEffect(() => {
+    if (slashQueryText === null) return;
+    const key = `${projectId ?? ''}#${catalogTick}`;
+    if (loadedCatalogKey.current === key) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await loadCatalog(projectId);
+        // A response can outlive a project switch; never seed the next project's
+        // menu with another workspace's skills.
+        if (cancelled || store.currentProjectId.value !== projectId) return;
+        store.commandCatalog.value = list;
+        store.commandCatalogProject.value = projectId;
+        store.commandCatalogError.value = null;
+        loadedCatalogKey.current = key;
+      } catch (error) {
+        if (cancelled) return;
+        store.commandCatalogError.value = `Could not load the commands: ${toErrorMessage(error)}`;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [slashQueryText === null, projectId, catalogTick]);
+
+  // A new query always starts at the best match.
+  useEffect(() => {
+    setSlashIndex(0);
+  }, [slashQueryText]);
+
+  const chooseCommand = (command: CommandSpec): void => {
+    const text = insertCommand(command);
+    setDraft(text);
+    setCaret(text.length);
+    // Picking closes the menu: the next Enter is a send, not another pick of the
+    // row that is now the whole draft. Typing re-opens it (`onInput` below).
+    setSlashDismissed(true);
+    window.setTimeout(() => {
+      const element = textarea.current;
+      if (!element) return;
+      element.focus();
+      element.setSelectionRange(text.length, text.length);
+    }, 0);
+  };
+
   // ---- attachments ------------------------------------------------------
   const updateAttachment = (id: string, patch: Partial<Attachment>): void => {
     setAttachments((current) =>
@@ -778,6 +871,12 @@ export function Composer({
   const canQueue =
     canType && running && !stopping && !sending && attachmentReady && hasContent && onQueue !== undefined;
   const canSend = canType && !running && !sending && attachmentReady && hasContent;
+  // A slash command is not a prompt: the server answers it in place, it never
+  // starts a run, and it has to work while one is in flight (`/stop` is the case
+  // the whole feature exists for). It also carries no attachments - the text after
+  // the command would become its arguments.
+  const slashCommand = knownCommand(projectCatalog, draft);
+  const canCommand = canType && !sending && slashCommand !== null && attachments.length === 0;
 
   const clearComposer = (
     message: string,
@@ -800,6 +899,31 @@ export function Composer({
   };
 
   const submit = async (): Promise<void> => {
+    // A command carries no attachments: the text after the command is its
+    // arguments, so an attachment would be read as arguments and never reach the
+    // model. The command's reply clears the composer, so the reader would simply
+    // lose the file. Refuse, and keep both the draft and the attachments.
+    if (slashCommand !== null && attachments.length > 0) {
+      setAnnouncement(
+        `/${slashCommand.name} cannot carry attachments. Remove them to run the command, or send them with a message.`,
+      );
+      return;
+    }
+    // A command is answered by the server and is never queued: queueing it behind
+    // the run it is trying to change is exactly the wrong behaviour. This branch
+    // comes first for that reason.
+    if (slashCommand !== null) {
+      if (!canType || sending) return;
+      const submitted = { draft, attachments };
+      setSending(true);
+      try {
+        const accepted = await (onCommand ?? onSend)(draft.trim());
+        if (accepted) clearComposer(`Ran /${slashCommand.name}.`, submitted);
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
     // While the agent works, the same box queues: a steer joins the turn in
     // flight, a follow-up starts the next one.
     if (running) {
@@ -975,6 +1099,19 @@ export function Composer({
           />
         ) : null}
 
+        {slashOpen ? (
+          <SlashMenu
+            id={SLASH_MENU_ID}
+            items={rankedCommands}
+            activeIndex={slashActiveIndex}
+            query={slashQueryText ?? ''}
+            loading={projectCatalog.length === 0 && catalogError === null}
+            error={projectCatalog.length === 0 ? catalogError : null}
+            onPick={chooseCommand}
+            onHover={setSlashIndex}
+          />
+        ) : null}
+
         <div class="compose-field">
           <label class="sr-only" for="composer-input">
             Message karucode
@@ -987,11 +1124,19 @@ export function Composer({
             value={draft}
             placeholder={placeholder}
             disabled={!canType}
-            aria-expanded={menuOpen}
-            aria-controls={menuOpen ? MENTION_MENU_ID : undefined}
+            aria-expanded={menuOpen || slashOpen}
+            aria-controls={
+              slashOpen ? SLASH_MENU_ID : menuOpen ? MENTION_MENU_ID : undefined
+            }
             aria-autocomplete="list"
             aria-activedescendant={
-              menuOpen && ranked[activeIndex] ? mentionOptionId(MENTION_MENU_ID, activeIndex) : undefined
+              slashOpen
+                ? rankedCommands[slashActiveIndex]
+                  ? slashOptionId(SLASH_MENU_ID, slashActiveIndex)
+                  : undefined
+                : menuOpen && ranked[activeIndex]
+                  ? mentionOptionId(MENTION_MENU_ID, activeIndex)
+                  : undefined
             }
             aria-describedby="composer-status"
             onInput={(event) => {
@@ -999,6 +1144,7 @@ export function Composer({
               setDraft(element.value);
               syncCaret(element);
               setDismissed(false);
+              setSlashDismissed(false);
             }}
             onClick={(event) => syncCaret(event.currentTarget)}
             onKeyUp={(event) => {
@@ -1013,6 +1159,41 @@ export function Composer({
               }
             }}
             onKeyDown={(event) => {
+              // The `/` menu owns the arrows and Enter while it is open. Enter only
+              // completes when a row is highlighted: with no match the key must
+              // fall through and send the message, which is what a path or a
+              // sentence that happens to start with `/` is.
+              if (slashOpen) {
+                if (event.key === 'ArrowDown' && rankedCommands.length > 0) {
+                  event.preventDefault();
+                  setSlashIndex((current) => (current + 1) % rankedCommands.length);
+                  return;
+                }
+                if (event.key === 'ArrowUp' && rankedCommands.length > 0) {
+                  event.preventDefault();
+                  setSlashIndex(
+                    (current) => (current - 1 + rankedCommands.length) % rankedCommands.length,
+                  );
+                  return;
+                }
+                if (
+                  (event.key === 'Enter' || event.key === 'Tab') &&
+                  !event.metaKey &&
+                  !event.ctrlKey &&
+                  rankedCommands.length > 0
+                ) {
+                  event.preventDefault();
+                  const chosen = rankedCommands[slashActiveIndex];
+                  if (chosen) chooseCommand(chosen);
+                  return;
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setSlashDismissed(true);
+                  return;
+                }
+              }
               if (menuOpen && mention) {
                 if (event.key === 'ArrowDown' && ranked.length > 0) {
                   event.preventDefault();
@@ -1062,7 +1243,7 @@ export function Composer({
                     insertLineBreak(event.currentTarget);
                     return;
                   }
-                  if (!(running ? canQueue : canSend)) return;
+                  if (!(canCommand || (running ? canQueue : canSend))) return;
                   event.preventDefault();
                   void submit();
                   return;
@@ -1150,20 +1331,24 @@ export function Composer({
                 {/* Stop ends the run; this group submits into its explicit queue.
                  * Both stay visible with an empty draft. The mode choice appears
                  * only once there is a message for it to describe. */}
-                {hasContent ? <QueueModeToggle mode={queueMode} onChange={setQueueMode} /> : null}
+                {hasContent && slashCommand === null ? (
+                  <QueueModeToggle mode={queueMode} onChange={setQueueMode} />
+                ) : null}
                 <button
                   type="submit"
                   class="button button-primary button-queue"
-                  disabled={!canQueue}
+                  disabled={!canQueue && !canCommand}
                   aria-label={
-                    queueMode === 'steer'
-                      ? `Queue this message and steer the running turn (${sendChordLong})`
-                      : `Queue this follow-up for the next turn (${sendChordLong})`
+                    slashCommand !== null
+                      ? `Run /${slashCommand.name}`
+                      : queueMode === 'steer'
+                        ? `Queue this message and steer the running turn (${sendChordLong})`
+                        : `Queue this follow-up for the next turn (${sendChordLong})`
                   }
-                  title={QUEUE_TITLE[queueMode]}
+                  title={slashCommand !== null ? `Run /${slashCommand.name}` : QUEUE_TITLE[queueMode]}
                 >
                   <ArrowUpIcon size={13} />
-                  {queueMode === 'steer' ? 'Steer' : 'Queue'}
+                  {slashCommand !== null ? 'Run' : queueMode === 'steer' ? 'Steer' : 'Queue'}
                 </button>
               </div>
               <button
@@ -1182,9 +1367,17 @@ export function Composer({
             <button
               type="submit"
               class="button button-primary button-send"
-              disabled={!canSend}
-              aria-label={`Send message (${sendChordLong})`}
-              title={`Send (${sendChordLong})`}
+              disabled={!canSend && !canCommand}
+              aria-label={
+                slashCommand !== null
+                  ? `Run /${slashCommand.name} (${sendChordLong})`
+                  : `Send message (${sendChordLong})`
+              }
+              title={
+                slashCommand !== null
+                  ? `Run /${slashCommand.name} (${sendChordLong})`
+                  : `Send (${sendChordLong})`
+              }
             >
               <ArrowUpIcon size={14} />
             </button>

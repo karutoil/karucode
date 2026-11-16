@@ -16,6 +16,7 @@ embed-ui = ["dep:rust-embed"]
 
 [dependencies]
 kc-core.workspace = true
+kc-docs.workspace = true
 kc-store.workspace = true
 kc-provider.workspace = true
 kc-tools.workspace = true

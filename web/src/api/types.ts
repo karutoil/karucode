@@ -97,6 +97,17 @@ export interface ModelEntry {
   cost_output?: number | null;
   /** models.dev provider the metadata came from, when prefilled. */
   catalog_provider?: string | null;
+  /**
+   * The reasoning levels this model accepts, each one a map of request-body keys
+   * sent for a run pinned to that level.
+   *
+   * Declaring variants is what lets a level mean "32k thinking tokens" instead of
+   * a bare OpenAI-shaped `reasoning_effort` string, and what removes the levels
+   * the endpoint does not implement: present (even as `{}`) means *only* these
+   * levels are offered and accepted. Absent means "not declared", and every
+   * built-in level stays available and is sent as `reasoning_effort: "<level>"`.
+   */
+  variants?: Record<string, Record<string, unknown>> | null;
 }
 
 /** A named OpenAI-compatible endpoint plus its curated model list. */
@@ -979,6 +990,53 @@ export interface ImageAttachment {
   bytes: number;
   name?: string | null;
 }
+
+/** The menu group a slash command belongs to (`GET /api/commands`). */
+export type CommandCategory = 'session' | 'context' | 'extend' | 'inspect' | 'meta';
+
+/**
+ * One row of `GET /api/commands`: a slash command the session understands.
+ *
+ * The catalog is built-ins plus every skill that can be typed as `/<id>`, so the
+ * same shape covers both. `insert` is exactly what the composer writes into the
+ * box when the row is picked (a command that takes arguments brings its trailing
+ * space), which keeps the client from re-deriving the usage string from `args`.
+ */
+export interface CommandSpec {
+  /** Without the slash. */
+  name: string;
+  title: string;
+  summary: string;
+  /** The argument placeholder, or `''` for a command that takes none. */
+  args: string;
+  category: CommandCategory;
+  source: 'builtin' | 'skill';
+  insert: string;
+}
+
+export interface CommandsResponse {
+  commands: CommandSpec[];
+}
+
+/**
+ * What `POST /api/sessions/:id/messages` answered.
+ *
+ * A message that is a slash command is answered in place (`mode: "command"`): no
+ * run starts, and the result is written to the transcript as its own row. Every
+ * other message starts a run, which is the historical shape and stays the
+ * default so an older client keeps working unchanged.
+ */
+export type SendMessageResponse =
+  | { mode?: 'send'; run_id: string; session_id: string }
+  | {
+      mode: 'command';
+      session_id: string;
+      /** The command without its slash. */
+      command: string;
+      /** The transcript row the answer was written to. */
+      message_id: number;
+      state: 'ok' | 'error' | string;
+    };
 
 export interface RunRecord {
   id: string;
@@ -1984,6 +2042,18 @@ export type KnownEvent = EventEnvelope &
         messages_removed: number;
       }
     | { type: 'steer_applied'; steer_id: string; content: string }
+    | {
+        /**
+         * A slash command answered. `message_id` is the transcript row the result
+         * was written to, so a client that already has the row can replace it
+         * instead of appending a second copy.
+         */
+        type: 'command_result';
+        command: string;
+        message_id: number;
+        content: string;
+        state: 'ok' | 'error' | string;
+      }
     | {
         /**
          * A session's queues changed. Carries both lists in full: the newest frame

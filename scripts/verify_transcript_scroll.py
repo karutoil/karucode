@@ -19,15 +19,17 @@ CDP against a real kc-server, samples the scroller *every frame* while a real
     rewritten - per frame, which is what "sizing layout event flip-flopping"
     describes;
   * the same during a live run that streams reasoning, with the theme's thinking
-    mode set to `expanded` (the setting the report blamed).
+    mode controlling whether the thought stays open (`expanded`) or closes when
+    it stops (`preview`, `collapsed` — see `--thinking`).
 
 Run: cargo build -p kc-server --bin karucode && (cd web && npm run build)
-     python3 scripts/verify_transcript_scroll.py [--keep] [--quiet]
+     python3 scripts/verify_transcript_scroll.py [--thinking preview] [--keep] [--quiet]
 """
 
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import os
 import shutil
@@ -154,13 +156,23 @@ TOOL_OUTPUT = "\n".join(
     f"test result line {index}: ok. 200 passed; 0 failed" for index in range(40)
 )
 
-TOOL_CALL = [
-    {
-        "id": "call_seed_{index}",
-        "type": "function",
-        "function": {"name": "run_command", "arguments": json.dumps({"command": "cargo test -p kc-store"})},
-    }
-]
+def tool_call(index: int) -> list[dict]:
+    """One function call, with an id that is unique to its turn.
+
+    The id has to be unique: it is the entry key the transcript measures a row by
+    (`measured` in `ChatTranscript`), so a seed that repeated one id across every
+    tool turn gave a dozen rows a single height, and the window's arithmetic was
+    wrong by a screenful wherever they landed. That is what a *fixture* bug looks
+    like from the outside - a correction of exactly one row height, over and over
+    - so it must not be mistaken for the app's.
+    """
+    return [
+        {
+            "id": f"call_seed_{index}",
+            "type": "function",
+            "function": {"name": "run_command", "arguments": json.dumps({"command": "cargo test -p kc-store"})},
+        }
+    ]
 
 
 def seed_message(conn: sqlite3.Connection, values: dict) -> None:
@@ -252,7 +264,7 @@ def seed_transcript(db: Path, session_id: str) -> None:
                         "session_id": session_id,
                         "role": "assistant",
                         "content": marker,
-                        "tool_calls": TOOL_CALL,
+                        "tool_calls": tool_call(index),
                         "created_at": at,
                     },
                 )
@@ -261,7 +273,7 @@ def seed_transcript(db: Path, session_id: str) -> None:
                     {
                         "session_id": session_id,
                         "role": "tool",
-                        "tool_call_id": "call_seed_0",
+                        "tool_call_id": f"call_seed_{index}",
                         "name": "run_command",
                         "content": TOOL_OUTPUT,
                         "created_at": at + 1,
@@ -459,6 +471,15 @@ def analyse(recording: dict, direction: str = "down") -> dict:
     for previous, current in zip(samples, samples[1:]):
         delta = (current["top"] - previous["top"]) * sign
         if delta < -6:
+            # A document that shrank above a reader who is *at the bottom* is not
+            # the view being thrown: the browser clamped the scroll to the new
+            # height, and the newest content is still flush with the bottom of the
+            # screen, so nothing they are watching moved. The test is that the view
+            # fell no further than the document shrank (plus the follow's own
+            # threshold of rounding), which is exactly a clamp and nothing more.
+            shrink = previous["h"] - current["h"]
+            if shrink > 0 and -delta <= shrink + 48:
+                continue
             backsteps.append(
                 {
                     "t": current["t"],
@@ -492,6 +513,9 @@ def analyse(recording: dict, direction: str = "down") -> dict:
         "max": max(tops),
         "backsteps": backsteps,
         "against": against,
+        # Every write in the window, biggest first: a backstep says the view moved,
+        # this says who moved it.
+        "biggest": sorted(writes, key=lambda write: -abs(float(write.get("delta") or 0)))[:6],
         "worstBackstep": min((step["delta"] for step in backsteps), default=0),
         "churn": churn,
         "endDistance": round(samples[-1]["h"] - samples[-1]["top"] - samples[-1]["ch"]),
@@ -505,6 +529,87 @@ def dump(summary: dict, limit: int = 6) -> None:
               f"h {step['h']} pad {step['pad']} rows {step['rows']} first {step['first']}", flush=True)
     for write in summary["against"][:limit]:
         print(f"       write {write['delta']:+.0f}px ({write['from']}→{write['to']}) {write['stack'][:300]}", flush=True)
+    for write in summary.get("biggest", [])[:limit]:
+        print(f"       biggest {write['delta']:+.0f}px @t{write['t']} ({write['from']}→{write['to']}) "
+              f"{write['stack'][:260]}", flush=True)
+
+
+def chase(recording: dict, reverse_px: float = 4.0, reverse_ms: float = 250.0) -> dict:
+    """How hard the app drives its *own* scroll, with nobody touching the wheel.
+
+    A transcript that follows a stream writes `scrollTop` at most once per frame:
+    one follow, one position. More than that is the loop that reads as a flicker,
+    because every write fires a `scroll` event, and the handler that answers it
+    renders, re-measures the window and writes again - the cycle a real Firefox
+    profile showed running at ~30 Hz with no input at all (two writes and five
+    forced reflows per frame, `scrollend` between them).
+
+    Two numbers matter:
+
+    * `maxPerFrame` - the most writes that landed inside one animation frame.
+      Two means the frame painted a position and then moved it again.
+    * `reversals` - a write that undoes the direction of the previous one within
+      a quarter second, which is the "flips back and forth" a reader sees even
+      when each individual write is small.
+    """
+    samples = recording.get("samples") or []
+    writes = recording.get("writes") or []
+    if not samples:
+        return {"frames": 0, "writes": 0, "maxPerFrame": 0, "reversals": 0, "top": []}
+    first = samples[0]["t"]
+    last = samples[-1]["t"]
+    writes = [write for write in writes if first <= write["t"] <= last]
+    times = [sample["t"] for sample in samples]
+    per_frame: dict[int, int] = {}
+    for write in writes:
+        index = bisect.bisect_left(times, write["t"])
+        index = min(index, len(times) - 1)
+        per_frame[index] = per_frame.get(index, 0) + 1
+    # A frame that wrote twice: name both writers, because "two writes" is only
+    # actionable once it says which two paths made them.
+    pairs = []
+    seen: dict[int, list[dict]] = {}
+    for write in writes:
+        index = bisect.bisect_left(times, write["t"])
+        index = min(index, len(times) - 1)
+        seen.setdefault(index, []).append(write)
+    for index in sorted(seen):
+        group = seen[index]
+        if len(group) < 2:
+            continue
+        pairs.append(
+            [
+                {"t": write["t"], "delta": write.get("delta"), "stack": str(write.get("stack") or "")[:170]}
+                for write in group
+            ]
+        )
+        if len(pairs) >= 3:
+            break
+    reversals = 0
+    culprits: dict[str, int] = {}
+    previous: dict | None = None
+    for write in writes:
+        delta = float(write.get("delta") or 0)
+        if abs(delta) < reverse_px:
+            previous = write
+            continue
+        if previous is not None:
+            back = float(previous.get("delta") or 0)
+            if abs(back) >= reverse_px and (delta > 0) != (back > 0) and write["t"] - previous["t"] <= reverse_ms:
+                reversals += 1
+                signature = str(write.get("stack") or "")[:160]
+                culprits[signature] = culprits.get(signature, 0) + 1
+        previous = write
+    return {
+        "frames": len(samples),
+        "writes": len(writes),
+        "maxPerFrame": max(per_frame.values(), default=0),
+        "reversals": reversals,
+        "busiest": sorted(per_frame.values(), reverse=True)[:5],
+        "pairs": pairs,
+        "top": sorted(culprits.items(), key=lambda item: -item[1])[:4],
+    }
+
 
 
 POINT = r"""
@@ -537,6 +642,45 @@ def transcript_point(session: Session) -> dict:
     return session.evaluate(POINT)
 
 
+def wait_settled(session: Session, quiet_ms: int = 250, timeout_ms: int = 3000) -> dict:
+    """Wait until the transcript stops changing height, then report its geometry.
+
+    A streaming answer adds height on almost every frame, so a distance read at a
+    fixed moment after a click measures where the last token happened to leave
+    the view - not where the jump landed. That made two checks flap between runs
+    on identical code (a 27-30px "shortfall" that came and went with the model's
+    token timing). The camera has to stop moving before the photograph means
+    anything: poll until `scrollHeight` has been still for `quiet_ms`.
+    """
+    return session.evaluate(
+        f"""
+        const node = document.querySelector('.chat-scroll');
+        const quiet = {quiet_ms};
+        const deadline = performance.now() + {timeout_ms};
+        let last = -1;
+        let stable = 0;
+        while (performance.now() < deadline) {{
+          await new Promise((r) => setTimeout(r, 50));
+          const height = node.scrollHeight;
+          if (height === last) {{
+            stable += 50;
+            if (stable >= quiet) break;
+          }} else {{
+            stable = 0;
+            last = height;
+          }}
+        }}
+        return {{
+          distance: Math.round(node.scrollHeight - node.scrollTop - node.clientHeight),
+          height: node.scrollHeight,
+          viewport: node.clientHeight,
+          rows: document.querySelectorAll('.transcript > *').length,
+          total: {SEED_ROWS},
+        }};
+        """
+    )
+
+
 def gesture(session: Session, direction: str, distance: int, x: int | None = None, y: int | None = None, speed: int = 1200) -> None:
     """A real smooth wheel scroll, which is what the report used.
 
@@ -561,6 +705,28 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep", action="store_true", help="leave the server and browser running")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--thinking",
+        default="expanded",
+        choices=("collapsed", "preview", "expanded"),
+        help=(
+            "theme reasoning-block mode under test. `expanded` keeps every thought "
+            "open, so nothing ever collapses; `preview`/`collapsed` close the block "
+            "the moment the thought stops, which is the transition that moves a row "
+            "by its whole 280px body while the run is still streaming."
+        ),
+    )
+    parser.add_argument(
+        "--viewport",
+        default="1280x900",
+        metavar="WxH",
+        help=(
+            "browser viewport for the run. A tall, narrow one (e.g. 1000x1900, a "
+            "rotated monitor) changes the window's arithmetic: the overscan equals "
+            "the viewport height, so a tall window mounts several screens of rows "
+            "and narrower text makes each of them taller."
+        ),
+    )
     args = parser.parse_args()
 
     binary = ROOT / "target/debug/karucode"
@@ -654,7 +820,7 @@ def main() -> int:
             "--disable-dev-shm-usage",
             f"--remote-debugging-port={cdp_port}",
             f"--user-data-dir={profile}",
-            "--window-size=1280,900",
+            f"--window-size={args.viewport.replace('x', ',')}",
             "about:blank",
         ],
         env=chrome_env,
@@ -762,7 +928,7 @@ def main() -> int:
             }
             const select = await find('#settings-thinking', 15000);
             if (!select) return 'no-thinking-select';
-            select.value = 'expanded';
+            select.value = '__THINKING__';
             select.dispatchEvent(new Event('input', { bubbles: true }));
             select.dispatchEvent(new Event('change', { bubbles: true }));
             await new Promise((r) => setTimeout(r, 300));
@@ -771,9 +937,9 @@ def main() -> int:
             if (close) close.click();
             await new Promise((r) => setTimeout(r, 300));
             return document.documentElement.dataset.thinking;
-            """
+            """.replace("__THINKING__", args.thinking)
         )
-        check("the reasoning blocks setting takes", theme_set == "expanded", str(theme_set)[:400])
+        check("the reasoning blocks setting takes", theme_set == args.thinking, str(theme_set)[:400])
 
         trace_state = session.evaluate("return window.__probe.traceWhenReady();")
         if trace_state != 'tracing':
@@ -907,23 +1073,45 @@ def main() -> int:
             )
 
         thinking = session.evaluate("return document.documentElement.dataset.thinking;")
-        check("thinking renders open", thinking == "expanded", str(thinking))
+        check(f"thinking mode is {args.thinking}", thinking == args.thinking, str(thinking))
 
-        geometry = session.evaluate(
-            """
-            const node = document.querySelector('.chat-scroll');
-            return {
-              distance: Math.round(node.scrollHeight - node.scrollTop - node.clientHeight),
-              height: node.scrollHeight,
-              viewport: node.clientHeight,
-              rows: document.querySelectorAll('.transcript > *').length,
-              total: {SEED_ROWS},
-            };
-            """.replace("{SEED_ROWS}", str(SEED_ROWS))
-        )
+        geometry = wait_settled(session)
         print(f"       geometry {geometry}", flush=True)
         check("opening lands on the newest content", geometry["distance"] <= 2, json.dumps(geometry))
         check("the transcript is windowed", 0 < geometry["rows"] < SEED_ROWS, str(geometry["rows"]))
+
+        # ---- 0. idle: nothing running, nobody touching it ------------------
+        # Reported from a screen recording of a *still* conversation: the
+        # transcript "flickers between two scroll positions every ~1 second" with
+        # no run, no subagent and no streaming. Nothing here can grow or arrive,
+        # so every write in the next four seconds is the app moving a view that
+        # nobody asked it to move - and every distinct (rows, padding, height)
+        # triple is a re-layout of rows nobody changed.
+        session.evaluate("return window.__probe.start();")
+        session.evaluate("return window.__probe.dump();")
+        session.evaluate("await new Promise((r) => setTimeout(r, 4000)); return 1;")
+        idle = session.evaluate("return window.__probe.stop();")
+        idle_writes = [write for write in idle["writes"] if abs(write.get("delta") or 0) > 0.5]
+        idle_tops = [sample["top"] for sample in idle["samples"]]
+        idle_spread = round(max(idle_tops) - min(idle_tops)) if idle_tops else 0
+        furniture = {(sample["rows"], sample["padTop"], sample["h"]) for sample in idle["samples"]}
+        print(
+            f"       idle: {len(idle_writes)} writes, top spread {idle_spread}px, "
+            f"{len(furniture)} distinct (rows,pad,height) over {len(idle_tops)} frames",
+            flush=True,
+        )
+        for write in idle_writes[:6]:
+            print(f"         idle write {write['delta']:+.1f}px {write['stack'][:190]}", flush=True)
+        check(
+            "an idle transcript does not move",
+            not idle_writes and idle_spread == 0,
+            f"{len(idle_writes)} writes, {idle_spread}px of movement with nothing running",
+        )
+        check(
+            "an idle transcript does not re-lay itself out",
+            len(furniture) <= 2,
+            f"{len(furniture)} distinct (rows,padTop,height) states over {len(idle_tops)} frames",
+        )
 
         # ---- 1. a downward gesture in the middle of history -----------------
         session.evaluate(
@@ -978,6 +1166,8 @@ def main() -> int:
             session.evaluate("await new Promise((r) => setTimeout(r, 800)); return 1;")
             recording = session.evaluate("return window.__probe.stop();")
             summerised = analyse(recording, "down")
+            if summerised.get("backsteps"):
+                dump(summerised, limit=4)
             reaches.append(
                 {
                     "attempt": attempt,
@@ -1051,6 +1241,9 @@ def main() -> int:
 
         # ---- 4. a live run that streams reasoning ---------------------------
         STATE["tall_reasoning"] = True
+        # The write log is running since the page loaded; start this phase clean so
+        # a write from the open cannot be blamed on the follow.
+        session.evaluate("return window.__probe.dump();")
         session.evaluate(
             """
             const box = document.querySelector('#composer-input');
@@ -1104,6 +1297,33 @@ def main() -> int:
             flips <= 2,
             f"{flips} flips",
         )
+        # The profile of a real Firefox session showed this loop running at ~30 Hz
+        # with nobody at the wheel: two `scrollTop` writes and five forced reflows
+        # per frame, a `scrollend` between them. Each write fires a scroll event,
+        # the handler answers it by re-measuring the window, and the measurement
+        # writes again. A follow needs exactly one write per frame, and it never
+        # needs to undo itself.
+        auto = chase(live_recording)
+        print(
+            f"       follow drives the scroll: {json.dumps({k: auto[k] for k in ('frames', 'writes', 'maxPerFrame', 'reversals', 'busiest')})}",
+            flush=True,
+        )
+        for pair in auto["pairs"]:
+            print(f"       frame with {len(pair)} writes:", flush=True)
+            for write in pair:
+                print(f"         t{write['t']} {write['delta']:+.1f}px {write['stack'][:190]}", flush=True)
+        for signature, count in auto["top"]:
+            print(f"       reversal {count}x {signature[:200]}", flush=True)
+        check(
+            "following a stream writes the scroll once a frame",
+            auto["maxPerFrame"] <= 1,
+            f"{auto['maxPerFrame']} writes in one frame ({auto['writes']} over {auto['frames']} frames)",
+        )
+        check(
+            "the follow never reverses itself",
+            auto["reversals"] == 0,
+            f"{auto['reversals']} reversals",
+        )
 
         # ---- 5. gestures while the answer streams --------------------------
         # This is the case the report describes: the run is producing text, the
@@ -1156,6 +1376,34 @@ def main() -> int:
             + json.dumps([entry[:4] for entry in fought]),
         )
 
+        # ---- 5b. a reader who scrolls away is left alone -------------------
+        # Reported from real use: scrolling up while the current turn streams
+        # "flickers and takes a few seconds to work itself out". A reader who has
+        # chosen history is not following, so the stream owes them nothing - not
+        # one write, and not one pixel of drift. Watch for a second and a half
+        # with the wheel at rest, while the answer keeps arriving underneath.
+        gesture(session, "up", 700)
+        session.evaluate("await new Promise((r) => setTimeout(r, 250)); return 1;")
+        resting = session.evaluate("return window.__probe.geometry();")
+        session.evaluate("return window.__probe.dump();")
+        session.evaluate("await new Promise((r) => setTimeout(r, 1500)); return 1;")
+        settled = session.evaluate("return window.__probe.dump();")
+        after = settled["geometry"]
+        idle_writes = [write for write in settled["writes"] if abs(write.get("delta") or 0) > 0.5]
+        drift = abs(after["top"] - resting["top"])
+        print(
+            f"       at rest: {len(idle_writes)} writes, moved {drift}px "
+            f"(top {resting['top']} -> {after['top']}, h {resting['h']} -> {after['h']})",
+            flush=True,
+        )
+        for write in idle_writes[:6]:
+            print(f"         idle write {write['delta']:+.1f}px {write['stack'][:190]}", flush=True)
+        check(
+            "a stream leaves a reader who scrolled away alone",
+            not idle_writes and drift <= 2,
+            f"{len(idle_writes)} writes, moved {drift}px while the wheel was at rest",
+        )
+
         # ---- 6. Jump to latest in the middle of a stream -------------------
         STATE["tall_reasoning"] = True
         session.evaluate(
@@ -1181,15 +1429,20 @@ def main() -> int:
             if (!button) return 'no-button';
             await window.__probe.start();
             button.click();
-            await new Promise((r) => setTimeout(r, 1200));
-            const recording = await window.__probe.stop();
-            const node = document.querySelector('.chat-scroll');
-            return {
-              distance: Math.round(node.scrollHeight - node.scrollTop - node.clientHeight),
-              recording,
-            };
+            return 'clicked';
             """
         )
+        if landed == 'clicked':
+            # Let the animation *and* the stream come to rest before judging where
+            # the jump landed; see `wait_settled`.
+            where = wait_settled(session)
+            recording = session.evaluate("return window.__probe.stop();")
+            landed = {
+                "distance": where["distance"],
+                "recording": recording,
+            }
+        else:
+            session.evaluate("return window.__probe.stop();")
         if isinstance(landed, dict):
             landed_summary = analyse(landed["recording"], "down")
             print(

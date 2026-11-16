@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { ImageAttachment, RunRecord, RunStatus, SessionDetail, StoredMessage, ToolCall } from '../api/types';
 import { NOW, detailFixture, omitFields, queuedFixture, storedMessage, wireAgentSummary } from '../test/fixtures';
-import { mergeTranscriptRows, seedChatState } from './chat';
+import { mergeTranscriptRows, seedChatState, withStoredMessageIds } from './chat';
+import type { ChatItem } from './chat';
 
 const shot: ImageAttachment = {
   media_type: 'image/png',
@@ -359,5 +360,222 @@ describe('mergeTranscriptRows', () => {
   it('keeps the loaded rows when the snapshot has no messages yet', () => {
     const loaded = { messages: rows([1, 2]), before: 1, truncated: true };
     expect(mergeTranscriptRows(loaded, { messages: [] })).toEqual({ ...loaded, overlap: true });
+  });
+});
+
+/*
+ * The ids a live transcript lacks.
+ *
+ * A run's rows are built from events, which carry run ids and call ids but no
+ * stored message id - so the rewind control had nothing to resolve and only
+ * appeared after a reload re-read the session. These tests pin the join between
+ * the two views: what it attaches, what it refuses to guess at, and - the reason
+ * it exists at all - that it keeps every item's own id, because the transcript
+ * keys its rows, measured heights and entry animation on those.
+ */
+describe('withStoredMessageIds', () => {
+  /** The stored id a row learned, whatever kind of row it is. */
+  const storedId = (item: ChatItem): number | undefined =>
+    'messageId' in item ? item.messageId : undefined;
+
+  function live(
+    overrides: Partial<import('./chat').MessageItem> = {},
+  ): import('./chat').MessageItem {
+    return {
+      kind: 'message',
+      id: 'user:r_x',
+      at: NOW,
+      role: 'user',
+      content: 'fix the login page',
+      reasoning: '',
+      streaming: false,
+      runId: 'r_x',
+      agentId: null,
+      ...overrides,
+    };
+  }
+
+  it('names the stored row behind a live prompt and answer', () => {
+    const items = [
+      live(),
+      live({ id: 'stream:r_x:1', role: 'assistant', content: 'Done.' }),
+    ];
+    const detail = sessionWith([
+      storedMessage({ id: 10, role: 'user', content: 'fix the login page' }),
+      storedMessage({ id: 11, role: 'assistant', content: 'Done.' }),
+    ]);
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([10, 11]);
+  });
+
+  it('gives repeated prompts their own rows, in the order they were sent', () => {
+    // A prompt and a steer that repeats it. Both live items carry the same text,
+    // so matching on content alone sent *both* to the newest row - and clicking
+    // the first one rewound to the second one's turn.
+    const items = [
+      live({ id: 'user:r_x', content: 'continue' }),
+      live({ id: 'steer:r_x:2', content: 'continue' }),
+    ];
+    const detail = sessionWith([
+      storedMessage({ id: 10, role: 'user', content: 'continue' }),
+      storedMessage({ id: 20, role: 'user', content: 'continue' }),
+    ]);
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([10, 20]);
+  });
+
+  it('does not let a reasoning-only turn steal the answer below it', () => {
+    // The turn's first assistant part is reasoning only, so its content is empty and
+    // it can never match by text. Taking the newest free row gave it the answer's
+    // row, and the answer then fell back to the reasoning row - so the answer's
+    // Rewind pointed one turn too early.
+    const items = [
+      live({ id: 'reason:r_x', role: 'assistant', content: '', reasoning: 'thinking' }),
+      live({ id: 'stream:r_x:2', role: 'assistant', content: 'Done.' }),
+    ];
+    const detail = sessionWith([
+      storedMessage({ id: 10, role: 'assistant', content: '' }),
+      storedMessage({ id: 30, role: 'assistant', content: 'Done.' }),
+    ]);
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([10, 30]);
+  });
+
+  it('follows conversation order when an item matches no stored row', () => {
+    // A `/skill` prompt is stored as its expansion, so the live item never matches.
+    // Claiming the newest free row took the steer's row, and the steer then fell
+    // back to the prompt's row: rewinding the steer dropped the steer itself.
+    const items = [
+      live({ id: 'skill:r_x', content: 'Use the `release` skill. bump to 1.2' }),
+      live({ id: 'steer:r_x:2', content: 'bump to 1.3' }),
+    ];
+    const detail = sessionWith([
+      storedMessage({ id: 40, role: 'user', content: 'Use the `release` skill. Read it with ...' }),
+      storedMessage({ id: 41, role: 'user', content: 'bump to 1.3' }),
+    ]);
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([40, 41]);
+  });
+
+  it('refuses an ambiguous match in a truncated window', () => {
+    // The detail is a *tail*, so only the newer of two identical prompts is loaded.
+    // Row 20 could belong to either item, so neither gets it.
+    const items = [
+      live({ id: 'a', content: 'continue' }),
+      live({ id: 'b', content: 'continue' }),
+    ];
+    const detail = {
+      ...sessionWith([storedMessage({ id: 20, role: 'user', content: 'continue' })]),
+      messages_truncated: true,
+    };
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([undefined, undefined]);
+  });
+
+  it('still matches an unmistakable text in a truncated window', () => {
+    // Distinct texts need no ordering to be safe, so Rewind keeps working on a long
+    // session until the full window is loaded.
+    const items = [live({ id: 'a', content: 'fix the parser' })];
+    const detail = {
+      ...sessionWith([storedMessage({ id: 20, role: 'user', content: 'fix the parser' })]),
+      messages_truncated: true,
+    };
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([20]);
+  });
+
+  it('takes no fallback at all in a truncated window', () => {
+    // No row matches, and the tail may be missing the one that would: guessing is
+    // how the wrong turn gets rewound.
+    const items = [live({ id: 'a', content: 'expanded skill prompt' })];
+    const detail = {
+      ...sessionWith([storedMessage({ id: 20, role: 'user', content: 'something else' })]),
+      messages_truncated: true,
+    };
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([undefined]);
+  });
+
+  it('refuses to guess when there are more live items than stored rows', () => {
+    // Three prompts, two rows: the two that match take a row each, and the third
+    // gets none - no rewind beats a rewind to somebody else's turn.
+    const items = [
+      live({ id: 'a', content: 'continue' }),
+      live({ id: 'b', content: 'continue' }),
+      live({ id: 'c', content: 'continue' }),
+    ];
+    const detail = sessionWith([
+      storedMessage({ id: 10, role: 'user', content: 'continue' }),
+      storedMessage({ id: 20, role: 'user', content: 'continue' }),
+    ]);
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([10, 20, undefined]);
+  });
+
+  it('keeps every item id, which is what the transcript keys its rows on', () => {
+    const items = [live()];
+    const next = withStoredMessageIds(items, sessionWith([storedMessage({ id: 10, role: 'user' })]));
+
+    expect(next[0]!.id).toBe('user:r_x');
+    expect(storedId(next[0]!)).toBe(10);
+  });
+
+  it('places a tool call by its call id, not by position', () => {
+    const items: ChatItem[] = [
+      live(),
+      {
+        kind: 'tool',
+        id: 'tool:call_9',
+        at: NOW,
+        callId: 'call_9',
+        name: 'read_file',
+        args: { path: 'a.txt' },
+        status: 'ok',
+        output: '',
+        truncated: false,
+        durationMs: null,
+        runId: 'r_x',
+      },
+    ];
+    const detail = sessionWith([
+      storedMessage({ id: 4, role: 'user' }),
+      storedMessage({ id: 5, role: 'assistant', tool_calls: [{ id: 'call_9', name: 'read_file', arguments: '{}' }] }),
+      storedMessage({ id: 6, role: 'tool', tool_call_id: 'call_9', content: 'ok', name: 'read_file' }),
+    ]);
+
+    expect(storedId(withStoredMessageIds(items, detail)[1]!)).toBe(5);
+  });
+
+  it('picks the prose row the reader means when a run wrote several', () => {
+    // A turn that called a tool wrote an assistant row per iteration; the prose
+    // the reader clicked is the one whose text this row carries.
+    const items = [live({ id: 'stream:r_x:2', role: 'assistant', content: 'the answer' })];
+    const detail = sessionWith([
+      storedMessage({ id: 1, role: 'assistant', content: '', reasoning_content: 'thinking' }),
+      storedMessage({ id: 2, role: 'assistant', content: 'the answer' }),
+    ]);
+
+    expect(storedId(withStoredMessageIds(items, detail)[0]!)).toBe(2);
+  });
+
+  it('leaves a row it cannot place without an id rather than guessing', () => {
+    const items = [live({ runId: 'r_other' })];
+    const detail = sessionWith([storedMessage({ id: 10, role: 'user' })]);
+
+    expect(storedId(withStoredMessageIds(items, detail)[0]!)).toBeUndefined();
+  });
+
+  it('returns the same array when nothing changed, so no row re-renders', () => {
+    const items = [live({ messageId: 10 })];
+    const detail = sessionWith([storedMessage({ id: 10, role: 'user' })]);
+
+    expect(withStoredMessageIds(items, detail)).toBe(items);
+  });
+
+  it('ignores a subagent row, whose ids are not this transcript', () => {
+    const items = [live()];
+    const detail = sessionWith([storedMessage({ id: 10, role: 'user', agent_id: 'a_1' })]);
+
+    expect(storedId(withStoredMessageIds(items, detail)[0]!)).toBeUndefined();
   });
 });

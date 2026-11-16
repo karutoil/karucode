@@ -1992,16 +1992,17 @@ pub async fn manage_remote(
             .await?;
             format!("updated URL for remote `{name}`")
         }
+        // No `--` separator here: `rename` and `remove` are dispatched by
+        // builtin/remote.c on raw argv (older git, e.g. 2.34, counts it as a
+        // real argument and exits 129 with "usage: git remote ..."), while
+        // `add`/`set-url` go through parse-options, which accepts it. The name
+        // is already validated by checked_remote_name to never start with `-`,
+        // so git cannot mistake it for an option.
         "remove" => {
             run_mutation(
                 &state,
                 &root,
-                &[
-                    "remote".to_string(),
-                    "remove".to_string(),
-                    "--".to_string(),
-                    name.clone(),
-                ],
+                &["remote".to_string(), "remove".to_string(), name.clone()],
                 "remote remove",
             )
             .await?;
@@ -2015,7 +2016,6 @@ pub async fn manage_remote(
                 &[
                     "remote".to_string(),
                     "rename".to_string(),
-                    "--".to_string(),
                     name.clone(),
                     new_name.clone(),
                 ],

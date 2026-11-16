@@ -305,6 +305,9 @@ export function foldTurn(rows: readonly TurnRow[]): FoldedTurn | null {
     (row.part.kind === 'approval' ||
       row.part.kind === 'error' ||
       row.part.kind === 'notice' ||
+      // A command's answer is what the user asked for a second ago; folding it
+      // into "ran 3 calls" would hide the thing they just typed `/help` to read.
+      row.part.kind === 'slash' ||
       row.part.kind === 'interrupted');
 
   const hidden = before.filter((row) => !isPinned(row));

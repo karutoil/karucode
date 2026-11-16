@@ -1136,6 +1136,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.2.17",
  "kc-core",
+ "kc-docs",
  "kc-mcp",
  "kc-plugin-host",
  "kc-plugin-sdk",

@@ -842,14 +842,72 @@ describe('ChatTranscript rewind affordance', () => {
     expect(screen.queryByRole('button', { name: /Rewind/ })).toBeNull();
   });
 
-  it('hides the affordance while the agent is still writing', () => {
+  it('keeps the affordance while the agent is still writing, and leaves the refusal to the dialog', () => {
+    // The button is a notice of a feature, not a permission slip: hiding it for
+    // the length of a run made it appear only after a reload, because nothing in
+    // the row re-renders when `running` settles. The click is what refuses.
     store.chat.value = { ...store.chat.value, running: true };
     renderTranscript([user('go', { id: 'msg:1' })], vi.fn(), vi.fn());
-    expect(screen.queryByRole('button', { name: /Rewind/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Rewind to this message' })).toBeTruthy();
+  });
+
+  it('offers a rewind on every stored answer, not only the newest turn', () => {
+    const onRewind = vi.fn();
+    renderTranscript(
+      [
+        user('first', { id: 'msg:1' }),
+        message({ id: 'msg:2', content: 'first answer' }),
+        user('second', { id: 'msg:3' }),
+        message({ id: 'msg:4', content: 'second answer' }),
+      ],
+      vi.fn(),
+      onRewind,
+    );
+
+    const answers = screen.getAllByRole('button', { name: 'Rewind to the request that produced this answer' });
+    expect(answers).toHaveLength(2);
+    // The older turn's button names the older answer, so a turn made only of
+    // calls still has a rewind point above it.
+    fireEvent.click(answers[0]!);
+    expect(onRewind).toHaveBeenCalledWith({ messageId: 2, preview: 'first answer', isAssistant: true });
+  });
+
+  it('offers a rewind on a stored tool call, using that call’s own message', () => {
+    const onRewind = vi.fn();
+    renderTranscript(
+      [user('go', { id: 'msg:1' }), tool({ id: 'tool:call_1', messageId: 2 })],
+      vi.fn(),
+      onRewind,
+    );
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Rewind to the request that produced this answer' })[0]!);
+    expect(onRewind).toHaveBeenCalledWith({ messageId: 2, preview: '', isAssistant: true });
+  });
+
+  it('offers a rewind on a stored command too', () => {
+    const onRewind = vi.fn();
+    renderTranscript(
+      [user('go', { id: 'msg:1' }), command({ id: 'cmd:call_2', messageId: 3 })],
+      vi.fn(),
+      onRewind,
+    );
+
+    const buttons = screen.getAllByRole('button', { name: 'Rewind to the request that produced this answer' });
+    // One for the command; the turn's header has no prose to hang a button on.
+    expect(buttons).toHaveLength(1);
+    fireEvent.click(buttons[0]!);
+    expect(onRewind).toHaveBeenCalledWith({ messageId: 3, preview: '', isAssistant: true });
+  });
+
+  it('offers nothing on a call that has no stored row yet', () => {
+    // A live call (`stream:` ids, no `messageId`) has nothing the rewind endpoint
+    // could resolve; the button appears when the call is part of the transcript.
+    renderTranscript([user('go', { id: 'msg:1' }), tool({ id: 'tool:call_1' })], vi.fn(), vi.fn());
+    expect(screen.queryAllByRole('button', { name: /Rewind to the request/ })).toHaveLength(0);
   });
 
   it('offers nothing when the transcript is read-only', () => {
-    renderTranscript([user('go', { id: 'msg:1' })]);
+    renderTranscript([user('go', { id: 'msg:1' }), tool({ id: 'tool:call_1', messageId: 2 })]);
     expect(screen.queryByRole('button', { name: /Rewind/ })).toBeNull();
   });
 });

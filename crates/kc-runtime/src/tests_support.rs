@@ -622,6 +622,16 @@ impl Store for FakeStore {
                 .filter(|m| m.session_id == session_id)
                 .count() as u64,
             messages_main: main.len() as u64,
+            // The same rule as the real store: a command receipt is a row the
+            // model never reads, so it is not part of the model-visible count.
+            messages_model: main
+                .iter()
+                .filter(|message| {
+                    !message.name.as_deref().is_some_and(|name| {
+                        name.starts_with(kc_core::store::COMMAND_MESSAGE_PREFIX)
+                    })
+                })
+                .count() as u64,
             messages_subagent: db
                 .messages
                 .iter()
@@ -1794,10 +1804,19 @@ impl Settings for FakeSettings {
         let mut model = self.model.clone();
         if let Some(selection) = selection {
             model.model = selection.model.clone();
-            if let Some(effort) = &selection.reasoning_effort {
-                model.extra_body.insert(
-                    "reasoning_effort".to_string(),
-                    serde_json::Value::String(effort.clone()),
+            if let Some(effort) = selection
+                .reasoning_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+            {
+                // Same rule as the server: a declared-level map wins, otherwise
+                // the bare `reasoning_effort` string.
+                let variants = model.variants.clone();
+                kc_core::config::Config::apply_reasoning_level(
+                    &mut model,
+                    effort,
+                    variants.as_ref(),
                 );
             }
         }
@@ -1846,17 +1865,17 @@ impl Settings for FakeSettings {
                 let mut model = self.model.clone();
                 model.model = requested.to_string();
                 model.base_url = base_url.clone();
-                return ModelOverrideJudgement::Resolved(model);
+                return ModelOverrideJudgement::Resolved(Box::new(model));
             }
         }
         // The base model's own id is always valid.
         if requested == self.model.model.trim() {
-            return ModelOverrideJudgement::Resolved(self.model.clone());
+            return ModelOverrideJudgement::Resolved(Box::new(self.model.clone()));
         }
         if let Some(id) = self.known_models.iter().find(|m| m.as_str() == requested) {
             let mut model = self.model.clone();
             model.model = id.clone();
-            return ModelOverrideJudgement::Resolved(model);
+            return ModelOverrideJudgement::Resolved(Box::new(model));
         }
         let mut known = self.known_models.clone();
         if !self.model.model.trim().is_empty() && !known.contains(&self.model.model) {

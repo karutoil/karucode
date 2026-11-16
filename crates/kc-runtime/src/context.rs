@@ -112,9 +112,11 @@ use std::sync::{Arc, Mutex};
 // * Compaction is **quantised**: it runs only when the window passes one of its
 //   two budgets - `limits.context_max_chars` (how much text) or
 //   `limits.max_context_messages` (how many messages) - and then cuts the oldest
-//   exchanges until the remaining window leaves room for about 50 more turns
-//   (never below 15% of either budget). One cache miss per compaction instead of
-//   one per turn.
+//   exchanges until what is left is about **a fifth of the character budget**
+//   (never below 15% of it), or until about 50 more turns fit under the item
+//   ceiling. One cache miss per compaction instead of one per turn, and most of a
+//   window handed back to work in rather than the few turns a nearly-full window
+//   left.
 // * The original user turn and the exchange in flight are never compacted, so a
 //   long run keeps its goal and the results it is currently reasoning about.
 // * **Written findings are sticky.** An assistant turn with at least 200
@@ -563,10 +565,28 @@ const MUTATION_TOOLS: &[&str] = &[
     "remove_file",
 ];
 
-/// Compact down to this share of the budget rather than to the budget itself.
-/// The difference is headroom for the next turns, and headroom is cache hits:
-/// as long as the window stays under the budget nothing at the front changes.
+/// Compact down to this share of the budget at the least, rather than to the
+/// budget itself. The difference is headroom for the next turns, and headroom is
+/// cache hits: as long as the window stays under the budget nothing at the front
+/// changes. It is a **floor on how little is kept** - the drop loop never aims
+/// below it, even when the turn in flight is so large that the turn-sized
+/// headroom alone would empty the window.
 const MIN_WINDOW_PERCENT: usize = 15;
+
+/// The share of the budget a compaction aims to leave behind.
+///
+/// Before this existed the target was only [`TURNS_OF_HEADROOM`] turns below the
+/// budget, and it was sized from the **newest** exchange - which says nothing
+/// about how big the next one will be. Measured on a real session: a compaction
+/// left 87% of the budget (371k of 425k characters), because the exchange in
+/// flight was ~1k and 50 of those is 1% of a 425k window. The next tool result
+/// then fired another compaction, for another cache miss and another digest.
+///
+/// A compaction now aims at a fifth of the budget, so it hands back most of a
+/// window to work in instead of a few turns - and because the turn-sized reserve
+/// is still taken into account (see [`target_chars`]), a huge exchange still
+/// buys a huge reserve.
+const COMPACT_TARGET_PERCENT: usize = 20;
 
 /// How many turns of headroom a compaction tries to buy. A compaction rewrites
 /// the front of the window, which costs exactly one cache miss, so the hit rate
@@ -2988,15 +3008,43 @@ fn warn_elided(messages: &[Message], max_chars: usize) {
 
 /// Budget the window is compacted *down to* on a compaction.
 ///
-/// Two goals pull against each other: leave enough headroom that the next
-/// [`TURNS_OF_HEADROOM`] turns fit without another compaction (cache hits), and
-/// do not throw away more of the conversation than the budget forces. The rule
-/// is therefore "keep the newest turns, reserve 50 turns of room, never shrink
-/// below [`MIN_WINDOW_PERCENT`] of the budget".
-fn target_chars(messages: &[Message], max_chars: usize) -> usize {
+/// Three goals pull against each other: leave enough headroom that the next
+/// [`TURNS_OF_HEADROOM`] turns fit without another compaction (cache hits), hand
+/// back a useful amount of the window rather than a few turns' worth, and do not
+/// throw away more of the conversation than the budget forces.
+///
+/// The rule is: take whichever of the two is **smaller** - the budget minus 50
+/// turns of the exchange in flight, or [`COMPACT_TARGET_PERCENT`] of the budget -
+/// and never aim below [`MIN_WINDOW_PERCENT`] of it. The turn-sized term is what
+/// makes a huge exchange buy a huge reserve; the percentage term is what stops a
+/// *small* exchange from leaving the window almost full, which is what a
+/// compaction sized by turns alone did.
+/// The character ceiling a forced `/compact` folds against.
+///
+/// A **quarter** of the request budget, never below a floor so a tiny window still
+/// leaves a conversation behind. A run only compacts once the window is over the
+/// whole ceiling; taking a quarter is what makes `/compact` a force - a
+/// conversation at 60% of the budget is folded too.
+pub fn forced_compaction_ceiling(budget: usize) -> usize {
+    (budget / 4).max(crate::MIN_COMPACTION_TARGET_CHARS)
+}
+
+/// What a forced `/compact` actually aims to *keep*, for a window of `history`.
+///
+/// This is the number the report carries and the one a reader is shown. It is not
+/// the ceiling: the shared [`target_chars`] rule keeps a share of whatever ceiling
+/// it is given (a fifth, with headroom for the turns in flight), so reporting the
+/// ceiling would advertise 25% of the budget while the fold kept 5%.
+pub fn forced_compaction_target(messages: &[Message], budget: usize) -> usize {
+    target_chars(messages, forced_compaction_ceiling(budget))
+}
+
+pub(crate) fn target_chars(messages: &[Message], max_chars: usize) -> usize {
     let turn = recent_exchange_chars(messages);
-    let desired = max_chars.saturating_sub(turn.saturating_mul(TURNS_OF_HEADROOM));
-    desired.max(max_chars / 100 * MIN_WINDOW_PERCENT)
+    let by_turn = max_chars.saturating_sub(turn.saturating_mul(TURNS_OF_HEADROOM));
+    by_turn
+        .min(max_chars / 100 * COMPACT_TARGET_PERCENT)
+        .max(max_chars / 100 * MIN_WINDOW_PERCENT)
 }
 
 /// The same rule as [`target_chars`], in messages instead of characters: how
@@ -4645,6 +4693,40 @@ mod run_window_tests {
         assert!(history
             .iter()
             .any(|m| m.content == "TASK: audit the runtime"));
+    }
+
+    /// A compaction must hand back most of the window, not the few turns a
+    /// turn-sized headroom bought.
+    ///
+    /// This is the measured regression: the target used to be "50 turns of the
+    /// newest exchange", and a cheap turn is a tiny share of a big budget - on a
+    /// 425k-character budget a ~1k exchange bought 1% of headroom, so a compaction
+    /// that fired at the budget settled at 87% of it. The next tool result fired
+    /// another one, and every one of them cost a cache miss for almost nothing.
+    #[test]
+    fn a_compaction_hands_back_most_of_the_window() {
+        let budget = 425_000;
+        let mut history = vec![Message::user("TASK: keep going")];
+        for i in 0..500 {
+            history.extend(exchange(i, 900));
+        }
+        let before: usize = history.iter().map(message_chars).sum();
+        assert!(before > budget, "fixture should be over budget: {before}");
+
+        compact_run_window(&mut history, budget);
+
+        let after: usize = history.iter().map(message_chars).sum();
+        assert!(
+            after * 4 <= budget,
+            "a compaction must leave at most a quarter of the budget, not \
+             {after} of {budget} ({}%)",
+            after * 100 / budget
+        );
+        // ... and it is still a usable window: the task, the digest that replaced
+        // the dropped turns, and the turn in flight all survive.
+        assert!(history.iter().any(|m| m.content == "TASK: keep going"));
+        assert!(history.iter().any(|m| m.content.contains("step 499")));
+        assert!(is_digest(&history[1]), "{}", history[1].content);
     }
 
     #[test]
@@ -7864,6 +7946,44 @@ mod two_tier_tests {
             batch.state_ledger.contains("src/parser.rs"),
             "the ledger is the deterministic half: {}",
             batch.state_ledger
+        );
+    }
+}
+
+#[cfg(test)]
+mod forced_compaction_target_tests {
+    use super::*;
+
+    /// `/compact` reports what it aims to keep, not the ceiling it folds against.
+    ///
+    /// The bug this pins: the caller passed a quarter of the budget as the
+    /// *ceiling*, and the shared rule keeps a share of whatever ceiling it is
+    /// given, so the fold kept ~5% of the budget while `/context` and the report
+    /// both said 25%. A reader was told far more history survived than did.
+    #[test]
+    fn reports_the_share_it_keeps_not_the_ceiling() {
+        let budget = 320_000;
+        let ceiling = forced_compaction_ceiling(budget);
+        assert_eq!(ceiling, 80_000, "a quarter of the budget is the ceiling");
+
+        let history = vec![Message::user("x".repeat(200_000))];
+        let target = forced_compaction_target(&history, budget);
+        assert!(
+            target <= ceiling,
+            "the target sits inside the ceiling: {target} > {ceiling}"
+        );
+        assert!(
+            target < ceiling / 2,
+            "and is a share of it, not the ceiling itself: {target} of {ceiling}"
+        );
+    }
+
+    #[test]
+    fn a_tiny_budget_still_leaves_a_conversation_behind() {
+        assert_eq!(
+            forced_compaction_ceiling(1_000),
+            crate::MIN_COMPACTION_TARGET_CHARS,
+            "the floor keeps a message or two"
         );
     }
 }

@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 27;
+const SCHEMA_VERSION: i64 = 28;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -445,6 +445,24 @@ CREATE INDEX IF NOT EXISTS idx_plugin_tool_output_events_plugin
 /// conversation can isolate its children (or stop isolating them) without
 /// changing the install default for every other session.
 const MIGRATION_27: &str = "";
+
+/// Drop every compaction checkpoint written before the watermark learned to count
+/// model-visible rows.
+///
+/// `session_stats().messages_model` (v28's runtime) excludes command receipts, but
+/// a checkpoint saved by an earlier build stored a receipt-inclusive watermark on a
+/// row that has no column saying which count it is. Such a watermark can be *too
+/// large* (the loader drops it, harmless) or, once more rows are stored than there
+/// were receipts, no larger than the model count - and then the loader appends too
+/// few messages and the model silently loses the ones in between, or starts the
+/// tail on a `tool` row whose `assistant` is outside it, which providers reject.
+///
+/// There is no way to tell the two apart from the row, so the checkpoints are
+/// deleted. The cost is one compaction per session that had one: the window is
+/// rebuilt from the transcript, which is what a session with no checkpoint does.
+const MIGRATION_28: &str = r#"
+DELETE FROM session_compaction_state;
+"#;
 
 const MIGRATION_12: &str = r#"
 CREATE TABLE IF NOT EXISTS missions (
@@ -1834,6 +1852,7 @@ impl SqliteStore {
                     25 => MIGRATION_25,
                     26 => MIGRATION_26,
                     27 => MIGRATION_27,
+                    28 => MIGRATION_28,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -4689,29 +4708,39 @@ impl Store for SqliteStore {
             // snapshots and could disagree.
             let mut counts = conn
                 .prepare(
-                    "SELECT role, (agent_id IS NOT NULL) AS sub, COUNT(*) AS n
+                    "SELECT role, (agent_id IS NOT NULL) AS sub,
+                            (instr(coalesce(name, ''), ?2) = 1) AS cmd,
+                            COUNT(*) AS n
                        FROM messages
                       WHERE session_id = ?1 AND rewound_at IS NULL
-                      GROUP BY role, sub",
+                      GROUP BY role, sub, cmd",
                 )
                 .map_err(|e| db_err("session_stats messages prepare", e))?;
             let rows = counts
-                .query_map(params![session_id], |row| {
-                    Ok((
-                        row.get::<_, String>("role")?,
-                        row.get::<_, i64>("sub")? != 0,
-                        row.get::<_, i64>("n")?,
-                    ))
-                })
+                .query_map(
+                    params![session_id, kc_core::store::COMMAND_MESSAGE_PREFIX],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>("role")?,
+                            row.get::<_, i64>("sub")? != 0,
+                            row.get::<_, i64>("cmd")? != 0,
+                            row.get::<_, i64>("n")?,
+                        ))
+                    },
+                )
                 .map_err(|e| db_err("session_stats messages query", e))?;
             for row in rows {
-                let (role, subagent, n) = row.map_err(|e| db_err("session_stats messages", e))?;
+                let (role, subagent, command, n) =
+                    row.map_err(|e| db_err("session_stats messages", e))?;
                 let n = u64_of(n);
                 stats.messages_total += n;
                 if subagent {
                     stats.messages_subagent += n;
                 } else {
                     stats.messages_main += n;
+                    if !command {
+                        stats.messages_model += n;
+                    }
                     *stats.messages_main_by_role.entry(role.clone()).or_insert(0) += n;
                 }
                 *stats.messages_by_role.entry(role).or_insert(0) += n;
@@ -5833,6 +5862,7 @@ mod tests {
                 25 => MIGRATION_25,
                 26 => MIGRATION_26,
                 27 => MIGRATION_27,
+                28 => MIGRATION_28,
                 other => panic!("no batch for v{other}"),
             };
             for (_, table, column, decl) in ADDED_COLUMNS
@@ -6057,6 +6087,53 @@ mod tests {
 
     /// v19 held one control chat in a singleton table; v20 turns that row into a
     /// marked session and drops the table so more chats can exist.
+    /// A checkpoint from before the watermark counted model-visible rows cannot be
+    /// recognised from its row, and its receipt-inclusive count is *smaller* than
+    /// the model count once rows are stored after it - so the loader would silently
+    /// start the tail too late. The upgrade deletes them instead.
+    #[tokio::test]
+    async fn migration_v28_drops_checkpoints_with_a_legacy_watermark() {
+        let db = TempDb::new("compaction-watermark-migration");
+        let store = Arc::new(db.open().await);
+        store
+            .create_session("s_1", "t", "/w", None, false)
+            .await
+            .unwrap();
+        let snapshot = vec![kc_core::message::Message::user("[context digest]")];
+        store
+            .save_compaction_snapshot("s_1", 9, &snapshot)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .load_compaction_snapshot("s_1")
+                .await
+                .unwrap()
+                .is_some(),
+            "the checkpoint is there to begin with"
+        );
+
+        store
+            .with(|conn| {
+                conn.execute_batch("PRAGMA user_version = 27;")
+                    .map_err(|e| db_err("wind the schema back", e))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        drop(store);
+
+        let store = Arc::new(db.open().await);
+        assert!(
+            store
+                .load_compaction_snapshot("s_1")
+                .await
+                .unwrap()
+                .is_none(),
+            "a legacy watermark is dropped, and the session rebuilds from the transcript"
+        );
+    }
+
     #[tokio::test]
     async fn migration_v20_turns_the_singleton_into_a_control_session() {
         let db = TempDb::new("control-migration");

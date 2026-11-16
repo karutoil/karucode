@@ -738,6 +738,31 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
         };
       });
 
+    case 'command_result': {
+      // A command answered. The row is already persisted, so a client that has it
+      // (a reload between the POST and this frame) replaces it instead of drawing
+      // the same answer twice.
+      const item: ChatItem = {
+        kind: 'slash',
+        id: `msg:${event.message_id}`,
+        at,
+        command: event.command,
+        content: event.content,
+        ok: event.state !== 'error',
+        messageId: event.message_id,
+      };
+      const existing = state.items.findIndex(
+        (entry) => entry.kind === 'slash' && entry.messageId === event.message_id,
+      );
+      if (existing !== -1) {
+        return {
+          ...seen,
+          items: state.items.map((entry, index) => (index === existing ? item : entry)),
+        };
+      }
+      return { ...seen, items: [...closeStreaming(state.items), item] };
+    }
+
     case 'steer_applied': {
       // The steer joined the conversation, so it is no longer pending. Drop it
       // from the queue and remember the id before its possibly slower HTTP 202

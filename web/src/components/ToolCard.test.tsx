@@ -298,4 +298,22 @@ describe('ToolCard row variant', () => {
     );
     expect(row().querySelector('.tool-row-meta .tps-badge-count')?.textContent).toBe('1000');
   });
+
+  it('hangs the rewind off the card itself, where the hover rule can reach it', () => {
+    // Every rewind rule in chat.css is `.tool-card > .rewind-tool`: absolutely
+    // positioned, revealed by hovering the card. Rendered inside the flex header the
+    // button stayed at `opacity: 0` and competed with the status for header width, so
+    // a stored call's Rewind was invisible except by keyboard focus. The built-in
+    // themes default to the `rows` style, which is why nothing caught it.
+    render(<ToolCard item={tool({ messageId: 12 })} onRewind={() => undefined} />);
+    const element = card();
+    expect(element.querySelector(':scope > .rewind-tool')).not.toBeNull();
+    expect(element.querySelector('.tool-head .rewind-tool')).toBeNull();
+  });
+
+  it('keeps the row variant rewind as a direct child too', () => {
+    render(<ToolCard item={tool({ messageId: 12 })} variant="row" onRewind={() => undefined} />);
+    const element = document.querySelector('.tool-row');
+    expect(element?.querySelector(':scope > .rewind-tool')).not.toBeNull();
+  });
 });

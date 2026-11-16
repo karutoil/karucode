@@ -1415,6 +1415,8 @@
  */
 
 .tool-row {
+  /* Positioned for the call's rewind, which floats over the row's head. */
+  position: relative;
   margin: 0 0 var(--space-2);
   border-radius: var(--radius-sm);
 }
@@ -1563,6 +1565,8 @@
  */
 
 .command-row {
+  /* Positioned for the command's rewind, which floats over the row's head. */
+  position: relative;
   margin: 0 0 var(--space-2);
   border-radius: var(--radius-sm);
 }
@@ -2331,6 +2335,103 @@
   color: var(--warn);
 }
 
+/* ---------- slash command results ---------- */
+
+/* A command's answer is a receipt, not a message: the browser reads it above and
+ * below the conversation, so it is a quiet block with the command on its face
+ * rather than a bubble competing with the agent's prose. The tint is the accent
+ * at its faintest - enough to say "this is not what the model said", not enough
+ * to pull the eye off the answer underneath it. */
+.slash-card {
+  margin: 0 0 var(--space-7);
+  padding: var(--space-5) var(--space-6) var(--space-4);
+  border: 1px solid var(--line-soft);
+  border-left: 2px solid var(--accent-text);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--row-accent-bg) 46%, transparent);
+}
+
+/* A refusal is the one case where the reader must not skim: nothing happened, and
+ * the reason is the whole content of the card. */
+.slash-card.is-error {
+  border-left-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+}
+
+.slash-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.slash-card-command {
+  color: var(--accent-text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.slash-card.is-error .slash-card-command {
+  color: var(--danger);
+}
+
+.slash-card-state {
+  margin-left: auto;
+  color: var(--danger);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.slash-card-body {
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+}
+
+/* The body is markdown the server wrote, so it arrives with headings and tables.
+ * Inside a receipt they are one step down from the conversation's own. */
+.slash-card-body .markdown > :first-child {
+  margin-top: 0;
+}
+
+.slash-card-body .markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.slash-card-body .markdown h1,
+.slash-card-body .markdown h2,
+.slash-card-body .markdown h3 {
+  margin: var(--space-5) 0 var(--space-3);
+  color: var(--text);
+  font-size: var(--fs-small);
+  font-weight: 600;
+}
+
+.slash-card-body .markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin-bottom: var(--space-4);
+  -webkit-overflow-scrolling: touch;
+}
+
+/* The first column holds the command usage (`/name [args]`): keeping it from
+ * wrapping keeps the command readable and gives the remaining width to the
+ * description. */
+.slash-card-body .markdown th:first-child,
+.slash-card-body .markdown td:first-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.slash-card-body .markdown th:last-child,
+.slash-card-body .markdown td:last-child {
+  min-width: 14rem;
+}
+
 .run-error,
 .run-error-banner {
   margin: 0 0 var(--space-7);
@@ -2876,6 +2977,12 @@
  * belongs beside the author and the time, not in a menu somewhere else. It is
  * quiet until the message is hovered or the control is focused, so a transcript
  * full of turns does not read as a page of buttons.
+ *
+ * A stored tool call carries the same control in its own header, floated over the
+ * header's trailing edge: the header is a fixed-height flex row that already
+ * spends its width on the call and its outcome, and a button in the flow either
+ * pushed the outcome off a narrow card or changed the header's height as it faded
+ * in. Floating it means revealing it on hover cannot lay the card out again.
  */
 .rewind-button {
   display: inline-flex;
@@ -2893,6 +3000,48 @@
   cursor: pointer;
   opacity: 0;
   transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+/* The call's own button: the header is already a row of controls, so it overlays
+ * rather than joins - no re-layout when it appears, and the outcome keeps its
+ * place. It is centred on the head rather than stretching to its height, because
+ * a stretched pill grew into the output well beneath. The surface is painted
+ * while it is visible so the arguments under it cannot show through. */
+.tool-card > .rewind-tool,
+.command-card > .rewind-tool,
+.tool-row > .rewind-tool,
+.command-row > .rewind-tool {
+  position: absolute;
+  top: 11px;
+  right: var(--space-5);
+  margin-left: 0;
+}
+
+.tool-row > .rewind-tool,
+.command-row > .rewind-tool {
+  /* Their heads are 26px, not the card header's 44px. */
+  top: 3px;
+}
+
+.tool-card,
+.command-card {
+  /* Positioned for the rewind above; they already clip their corners. */
+  position: relative;
+}
+
+.tool-card:hover > .rewind-tool,
+.tool-row:hover > .rewind-tool,
+.command-card:hover > .rewind-tool,
+.command-row:hover > .rewind-tool {
+  opacity: 1;
+  background: var(--surface-raised);
+}
+
+.tool-card > .rewind-tool:hover,
+.tool-row > .rewind-tool:hover,
+.command-card > .rewind-tool:hover,
+.command-row > .rewind-tool:hover {
+  background: var(--surface-hover);
 }
 
 .msg:hover .rewind-button,
@@ -2916,5 +3065,17 @@
   .rewind-button {
     opacity: 1;
     border-color: var(--line);
+  }
+
+  /* A visible pill over the head would sit on the call's own text, so on a touch
+   * device it takes its own row under the card's header instead of floating. */
+  .tool-card > .rewind-tool,
+  .command-card > .rewind-tool,
+  .tool-row > .rewind-tool,
+  .command-row > .rewind-tool {
+    position: static;
+    justify-content: center;
+    margin: var(--space-2) var(--space-5) var(--space-3);
+    background: var(--surface-raised);
   }
 }

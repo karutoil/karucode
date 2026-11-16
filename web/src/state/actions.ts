@@ -37,6 +37,7 @@ import {
   mergeTranscriptRows,
   normalizeQueuedMessage,
   seedChatState,
+  withStoredMessageIds,
   type ChatState,
   type MessageItem,
   type TranscriptRows,
@@ -816,6 +817,17 @@ function handleRawEvent(raw: RawEvent): void {
     scheduleSessionsRefresh();
   }
 
+  // The rows of the run that just ended were built from events and carry no
+  // stored ids, so their rewind controls cannot resolve a message. Reading them
+  // back is what a page refresh used to be needed for.
+  if (
+    (event.type === 'run_finished' || event.type === 'run_cancelled') &&
+    !event.agent_id &&
+    event.session_id === store.currentSessionId.value
+  ) {
+    scheduleStoredMessageIds();
+  }
+
   if (event.session_id && event.session_id !== store.currentSessionId.value) return;
 
   if (refreshingSessionId !== null && event.session_id === refreshingSessionId) {
@@ -1411,12 +1423,29 @@ export async function sendChatMessage(content: string): Promise<boolean> {
     try {
       const result = await api.sendMessage(sessionId, trimmed);
       if (store.currentSessionId.value === sessionId) {
-        const current = store.chat.value;
-        store.chat.value = {
-          ...current,
-          runId: result.run_id,
-          items: markUserRun(current.items, result.run_id),
-        };
+        if (result.mode === 'command') {
+          // The server answered this message as a slash command: it stored the
+          // command's reply and *no* user row, and started no run. The answer
+          // arrives as a `command_result` frame, so the optimistic bubble is a
+          // message that does not exist and the run state it set is not a run -
+          // leaving either behind stuck the session "running" (every later send
+          // returned false at the guard) and left a bubble with nothing behind it.
+          const current = store.chat.value;
+          store.chat.value = {
+            ...current,
+            items: current.items.filter((item) => item.id !== localId),
+            running: false,
+            runStatus: null,
+            iteration: 0,
+          };
+        } else {
+          const current = store.chat.value;
+          store.chat.value = {
+            ...current,
+            runId: result.run_id,
+            items: markUserRun(current.items, result.run_id),
+          };
+        }
       }
       // The new row (a draft's first send included) belongs in the rail now: the
       // first message is also what titles an untitled session.
@@ -1454,6 +1483,53 @@ export async function sendChatMessage(content: string): Promise<boolean> {
     sendInFlight.delete(guard);
     // For a draft the guard is not the session id, so the id it just became is
     // released separately (for a normal send the two are the same key).
+    if (sessionId) sendInFlight.delete(sessionId);
+  }
+}
+
+/**
+ * Send one slash command and let the server answer it.
+ *
+ * Kept apart from {@link sendChatMessage} because a command is not a prompt: it
+ * does not start a run, it is allowed **while a run is working** (`/stop` exists
+ * for exactly that moment), and its answer arrives as a `command_result` frame
+ * rather than as streamed text. Nothing is added optimistically - the frame is
+ * what draws the card, and the row it names is already persisted by then, so a
+ * reload and a live tab converge.
+ *
+ * A stale catalog is harmless: if the server does not recognise the command it
+ * treats the message as an ordinary prompt, starts a run, and the `run_started`
+ * frame draws the turn exactly as a normal send would.
+ */
+export async function runSlashCommand(content: string): Promise<boolean> {
+  const trimmed = content.trim();
+  if (trimmed === '') return false;
+  const draft = store.draftSession.value;
+  const openId = store.currentSessionId.value;
+  if (!openId && !draft) return false;
+  const guard = openId ?? 'draft';
+  if (sendInFlight.has(guard)) return false;
+
+  sendInFlight.add(guard);
+  let sessionId: string | null = openId;
+  try {
+    if (sessionId === null) {
+      const created = draft ? await createDraftSession(draft) : null;
+      if (created === null) return false;
+      sessionId = created;
+      sendInFlight.add(sessionId);
+    }
+    await api.sendMessage(sessionId, trimmed);
+    // A command can change the session row itself (a rename, a model pin), so the
+    // rail is refreshed on the same schedule a message send uses.
+    scheduleSessionsRefresh();
+    return true;
+  } catch (error) {
+    if (isUnauthorized(error)) enterAuthState();
+    else store.pushToast(toErrorMessage(error));
+    return false;
+  } finally {
+    sendInFlight.delete(guard);
     if (sessionId) sendInFlight.delete(sessionId);
   }
 }
@@ -2524,6 +2600,60 @@ export function dismissRunError(): void {
   store.chat.value = { ...store.chat.value, runError: null };
 }
 
+// ---------------------------------------------------------------------------
+// Stored ids for live rows
+// ---------------------------------------------------------------------------
+
+let storedIdCoalesce: number | null = null;
+
+/**
+ * Attach the stored message ids to the rows this run built from events.
+ *
+ * A live row is identified by `user:<run>` or `tool:<call_id>`; the rewind
+ * endpoint speaks stored ids. Until the two are joined, every rewind control on
+ * a freshly finished turn has to stay hidden - which is exactly the "Rewind only
+ * shows up after I refresh" report: a reload re-reads the session and the rows
+ * arrive with their ids.
+ *
+ * One snapshot read per settled run is enough and is what a reload would do
+ * anyway, but cheaper: it only touches the ids (`withStoredMessageIds`) instead
+ * of re-seeding the transcript, so no row re-mounts, nothing fades, and the
+ * reader's scroll position is untouched. Coalesced, because a turn that ends and
+ * immediately starts a queued follow-up emits both events within milliseconds.
+ */
+export async function learnStoredMessageIds(): Promise<void> {
+  const sessionId = store.currentSessionId.value;
+  if (!sessionId) return;
+  const read = sessionGeneration;
+  try {
+    const detail = await api.getSession(sessionId);
+    // A snapshot for a session this tab has left (or re-read since) must not be
+    // grafted onto the transcript that replaced it.
+    if (read !== sessionGeneration || store.currentSessionId.value !== sessionId) return;
+    const chat = store.chat.value;
+    if (chat.sessionId !== sessionId) return;
+    const items = withStoredMessageIds(chat.items, detail);
+    if (items !== chat.items) store.chat.value = { ...chat, items };
+  } catch {
+    // Best effort: the rows simply stay unresolvable, and the next run (or a
+    // reload) tries again. A toast for this would interrupt the reader with a
+    // failure they cannot act on.
+  }
+}
+
+/** Coalesce `learnStoredMessageIds` across a run's terminal events. */
+export function scheduleStoredMessageIds(delayMs = 150): void {
+  if (typeof window === 'undefined') {
+    void learnStoredMessageIds();
+    return;
+  }
+  if (storedIdCoalesce !== null) window.clearTimeout(storedIdCoalesce);
+  storedIdCoalesce = window.setTimeout(() => {
+    storedIdCoalesce = null;
+    void learnStoredMessageIds();
+  }, delayMs);
+}
+
 export function toggleRail(): void {
   if (isNarrowViewport()) {
     store.mobileSheet.value = store.mobileSheet.value === 'sessions' ? null : 'sessions';
@@ -3028,20 +3158,45 @@ export function closeRewind(): void {
   store.rewindTarget.value = null;
 }
 
+/**
+ * Whether an answer that just arrived still belongs to the dialog on screen.
+ *
+ * Deliberately keyed on the target, the session and the project - not on
+ * `sessionGeneration`, which every *read* of the session bumps. That counter
+ * moves when the event stream reconnects and the open session is re-read
+ * silently, and a preview request that happened to be in flight then was thrown
+ * away: the dialog reported "the rewind preview could not be loaded" for a
+ * message whose preview the server had already answered, while a second look
+ * loaded it. A re-read of the same session does not change what a rewind of that
+ * message would do; a *different* session, project or target does, and those are
+ * still checked.
+ */
+function rewindStillCurrent(context: {
+  generation: number;
+  projectRead: number;
+  sessionId: string;
+  target: store.RewindTarget;
+}): boolean {
+  return (
+    context.generation === rewindGeneration &&
+    context.projectRead === projectGeneration &&
+    store.currentSessionId.value === context.sessionId &&
+    store.rewindTarget.value === context.target
+  );
+}
+
 /** What a rewind of the open target would do: the file list and the counts. */
 export async function loadRewindPreview(): Promise<RewindPreview | null> {
   const sessionId = store.currentSessionId.value;
   const target = store.rewindTarget.value;
   if (!sessionId || !target) return null;
-  const generation = rewindGeneration;
-  const sessionRead = sessionGeneration;
-  const projectRead = projectGeneration;
-  const current = () =>
-    generation === rewindGeneration &&
-    sessionRead === sessionGeneration &&
-    projectRead === projectGeneration &&
-    store.currentSessionId.value === sessionId &&
-    store.rewindTarget.value === target;
+  const context = {
+    generation: rewindGeneration,
+    projectRead: projectGeneration,
+    sessionId,
+    target,
+  };
+  const current = () => rewindStillCurrent(context);
   try {
     const response = await api.previewRewind(sessionId, target.messageId);
     return current() ? response.preview : null;
@@ -3069,15 +3224,13 @@ export async function applyRewind(options: {
   const sessionId = store.currentSessionId.value;
   const target = store.rewindTarget.value;
   if (!sessionId || !target) return false;
-  const generation = rewindGeneration;
-  const sessionRead = sessionGeneration;
-  const projectRead = projectGeneration;
-  const current = () =>
-    generation === rewindGeneration &&
-    sessionRead === sessionGeneration &&
-    projectRead === projectGeneration &&
-    store.currentSessionId.value === sessionId &&
-    store.rewindTarget.value === target;
+  const context = {
+    generation: rewindGeneration,
+    projectRead: projectGeneration,
+    sessionId,
+    target,
+  };
+  const current = () => rewindStillCurrent(context);
   const note = options.note?.trim() ?? '';
   if (options.mode === 'note' && note === '') {
     store.pushToast('Write the note you want the agent to act on.', 'info');
@@ -3211,6 +3364,10 @@ export function resetRuntimeForTests(): void {
   if (sessionInfoCoalesce !== null) {
     window.clearTimeout(sessionInfoCoalesce);
     sessionInfoCoalesce = null;
+  }
+  if (storedIdCoalesce !== null) {
+    window.clearTimeout(storedIdCoalesce);
+    storedIdCoalesce = null;
   }
   if (gapResyncTimer !== null) {
     window.clearTimeout(gapResyncTimer);

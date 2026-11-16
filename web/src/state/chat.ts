@@ -40,6 +40,16 @@ export interface MessageItem {
   streaming: boolean;
   runId: string | null;
   agentId: string | null;
+  /**
+   * The stored row behind this message, once it is known.
+   *
+   * `id` is the transcript's own key: `msg:12` for a row read from the server,
+   * `user:<run>` or `stream:<run>:…` for one built from live events. A live event
+   * carries no stored id, so the id arrives later (`withStoredMessageIds`) and
+   * lives here rather than in `id` - the transcript keys its rows, heights and
+   * entry animation on `id`, and rewriting it would re-mount the conversation.
+   */
+  messageId?: number;
 }
 
 export interface ToolItem {
@@ -56,6 +66,12 @@ export interface ToolItem {
   runId: string | null;
   /** Images the tool attached for the model; the chat shows them as previews. */
   images?: ImageAttachment[];
+  /**
+   * The stored message this call belongs to (the assistant row that made it, or
+   * the tool row that answered it), so the call can be a rewind point. Absent
+   * while the call is live: a running call has no stored row yet.
+   */
+  messageId?: number;
 }
 
 export interface CommandItem {
@@ -74,6 +90,8 @@ export interface CommandItem {
   truncated: boolean;
   durationMs: number | null;
   runId: string | null;
+  /** The stored message behind this command; see {@link ToolItem.messageId}. */
+  messageId?: number;
 }
 
 export interface ApprovalItem {
@@ -108,6 +126,27 @@ export interface InterruptedItem {
   message: string;
 }
 
+/**
+ * A slash command's answer, as it appears in the transcript.
+ *
+ * The server writes it as an assistant row named `slash:<command>` (or
+ * `slash:<command>:error` for a refusal) and deliberately keeps it out of the
+ * model's context: it is an answer for the person reading, not a turn in the
+ * conversation. That is why this is its own item kind rather than a message -
+ * drawn as the user's own action, with the command it came from on its face.
+ */
+export interface SlashItem {
+  kind: 'slash';
+  id: string;
+  at: number;
+  /** The command without its slash. */
+  command: string;
+  content: string;
+  /** False when the command refused; the card says so instead of looking like an answer. */
+  ok: boolean;
+  messageId?: number;
+}
+
 export type ChatItem =
   | MessageItem
   | ToolItem
@@ -115,7 +154,30 @@ export type ChatItem =
   | ApprovalItem
   | ErrorItem
   | NoticeItem
-  | InterruptedItem;
+  | InterruptedItem
+  | SlashItem;
+
+/** The `name` prefix a slash command's result row carries (`kc_core::store`). */
+export const SLASH_NAME_PREFIX = 'slash:';
+/** Suffix a refused command's row carries after the command name. */
+export const SLASH_ERROR_SUFFIX = ':error';
+
+/**
+ * Read a message's `name` as a slash-command result.
+ *
+ * `slash:compact` is an answer from `/compact`; `slash:compact:error` is a refusal.
+ * Anything else - a tool row's own name, a plain assistant turn - is `null`.
+ */
+export function slashResultFrom(
+  name: string | null | undefined,
+): { command: string; ok: boolean } | null {
+  if (typeof name !== 'string' || !name.startsWith(SLASH_NAME_PREFIX)) return null;
+  const rest = name.slice(SLASH_NAME_PREFIX.length);
+  const ok = !rest.endsWith(SLASH_ERROR_SUFFIX);
+  const command = ok ? rest : rest.slice(0, rest.length - SLASH_ERROR_SUFFIX.length);
+  if (command === '') return null;
+  return { command, ok };
+}
 
 export type AgentView = AgentRecord;
 
@@ -406,6 +468,142 @@ export function mergeTranscriptRows(
   return { messages, before, truncated: before !== null, overlap: true };
 }
 
+/**
+ * Fill in the stored message id behind each row of a live transcript.
+ *
+ * A run's rows are built from events (`text_delta`, `tool_call_started`, …),
+ * which carry run ids and call ids but **no stored message ids** - the ids only
+ * exist once the row is written and the session is read back. That is why the
+ * rewind control used to appear only after a reload: a live row could not name
+ * the message a rewind would cut at, so every affordance refused to render.
+ *
+ * This walks the rows that are already on screen and attaches the id from the
+ * snapshot, without touching item identity. Re-seeding the transcript instead
+ * would rebuild every item id (`user:<run>` → `msg:<id>`), and the transcript
+ * keys its rows, its measured heights and its entry animation on those ids: the
+ * whole visible window would re-mount and fade at the end of every run.
+ *
+ * Matching is by facts the two sides share, never by position:
+ * * a user/assistant prose row by its run and role - the *newest* stored row wins,
+ *   because a turn that called tools wrote an assistant row per iteration and the
+ *   prose the reader means is the last one;
+ * * a call by its `call_id`, which is globally unique, so a tool card finds the
+ *   row that made it (or the result row that answered it).
+ *
+ * Rows it cannot place are returned unchanged, which leaves them without a
+ * rewind rather than pointing at the wrong message.
+ */
+export function withStoredMessageIds(items: ChatItem[], detail: SessionDetail): ChatItem[] {
+  if (detail.messages.length === 0) return items;
+  /** Stored prose rows by `run|role`, oldest first: a run can write several. */
+  const rows = new Map<string, StoredMessage[]>();
+  const byCallId = new Map<string, number>();
+  for (const message of detail.messages) {
+    if (message.agent_id) continue; // a subagent's rows are not this transcript's
+    if (message.role === 'user' || message.role === 'assistant') {
+      if (message.run_id) {
+        const key = `${message.run_id}|${message.role}`;
+        const list = rows.get(key);
+        if (list) list.push(message);
+        else rows.set(key, [message]);
+      }
+    }
+    // The row that *made* the call places it in the turn the server will rewind
+    // to. A result row is equally valid, so either side of the pair is a hit.
+    for (const call of message.tool_calls ?? []) byCallId.set(call.id, message.id);
+    if (message.tool_call_id && !byCallId.has(message.tool_call_id)) {
+      byCallId.set(message.tool_call_id, message.id);
+    }
+  }
+
+  /**
+   * The stored row behind one prose item.
+   *
+   * A run writes one assistant row per iteration and one user row per steer, so
+   * `run|role` alone can name several. The item's own text picks between them -
+   * the live text of a settled row is exactly the stored content - and only when
+   * no row agrees does the oldest free one stand in, which still rewinds to the
+   * turn the reader clicked.
+   *
+   * Rows are claimed one-to-one, oldest first, in conversation order. Two
+   * identical prompts in one run (a prompt and a steer that repeats it, "continue"
+   * being the common one) otherwise both matched the *newest* row, so clicking the
+   * first one sent the second one's id and rewound to the wrong turn. The
+   * fallback is the *oldest* free row for the same reason: an item that matches
+   * nothing (a `/skill` prompt, whose stored text is the expansion) must not take
+   * the row a later item matches.
+   *
+   * A truncated window is a *tail*, so its candidate list can be missing the older
+   * row an item belongs to. There the fallback is not taken at all, and an exact
+   * match has to be unique: with two identical prompts and only the newer one
+   * loaded, either id could rewind to the wrong turn - no button is better than
+   * the wrong turn.
+   */
+  const claimed = new Set<number>();
+  /**
+   * A truncated detail is the *tail* of a session: the older row an item belongs to
+   * may simply not be loaded. There only an unambiguous text can be trusted - one
+   * that appears once among the loaded rows for its run and once among the live
+   * items - because a text two items share is exactly the case where the loaded
+   * row could belong to either, and a wrong turn is worse than no button.
+   */
+  const truncated = detail.messages_truncated === true;
+  const sharedText = new Set<string>();
+  if (truncated) {
+    const seen = new Set<string>();
+    for (const item of items) {
+      if (item.kind !== 'message' || !item.runId || item.content === '') continue;
+      const key = `${item.runId}|${item.role}|${item.content}`;
+      if (seen.has(key)) sharedText.add(key);
+      seen.add(key);
+    }
+  }
+  const proseSource = (item: MessageItem): number | undefined => {
+    if (!item.runId) return undefined;
+    const candidates = rows.get(`${item.runId}|${item.role}`);
+    if (candidates === undefined || candidates.length === 0) return undefined;
+    const free = candidates.filter((candidate) => !claimed.has(candidate.id));
+    if (truncated) {
+      if (item.content === '') return undefined;
+      if (sharedText.has(`${item.runId}|${item.role}|${item.content}`)) return undefined;
+      const exact = free.filter((candidate) => candidate.content === item.content);
+      if (exact.length !== 1) return undefined;
+      claimed.add(exact[0]!.id);
+      return exact[0]!.id;
+    }
+    if (item.content !== '') {
+      // Oldest unclaimed match: the items are walked in conversation order, so the
+      // n-th item with a given text takes the n-th row with that text.
+      const match = free.find((candidate) => candidate.content === item.content);
+      if (match !== undefined) {
+        claimed.add(match.id);
+        return match.id;
+      }
+    }
+    const fallback = free[0];
+    if (fallback !== undefined) claimed.add(fallback.id);
+    return fallback?.id;
+  };
+
+  let changed = false;
+  const next = items.map((item): ChatItem => {
+    if (item.kind === 'message') {
+      const id = proseSource(item);
+      if (id === undefined || id === item.messageId) return item;
+      changed = true;
+      return { ...item, messageId: id };
+    }
+    if (item.kind === 'tool' || item.kind === 'command') {
+      const id = byCallId.get(item.callId);
+      if (id === undefined || id === item.messageId) return item;
+      changed = true;
+      return { ...item, messageId: id };
+    }
+    return item;
+  });
+  return changed ? next : items;
+}
+
 /** Builds the transcript for a freshly loaded session. */
 export function seedChatState(detail: SessionDetail, previous?: ChatState): ChatState {
   const messages = [...detail.messages].sort((a, b) => a.created_at - b.created_at || a.id - b.id);
@@ -430,6 +628,7 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
         truncated: false,
         durationMs: null,
         runId: message.run_id ?? null,
+        messageId: message.id,
       };
       callItems.set(call.id, item);
       items.push(item);
@@ -447,6 +646,7 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
         durationMs: null,
         runId: message.run_id ?? null,
         images: [],
+        messageId: message.id,
       };
       callItems.set(call.id, item);
       items.push(item);
@@ -455,6 +655,21 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
 
   for (const message of messages) {
     if (message.agent_id) continue; // subagent transcripts are shown in the Agents tab
+    // A slash command's answer is a row of its own, tagged in `name`. It is drawn
+    // as the action the user took, not as something the model said.
+    const slash = slashResultFrom(message.name);
+    if (slash) {
+      items.push({
+        kind: 'slash',
+        id: `msg:${message.id}`,
+        at: message.created_at,
+        command: slash.command,
+        content: message.content,
+        ok: slash.ok,
+        messageId: message.id,
+      });
+      continue;
+    }
     if (message.role === 'user') {
       items.push({
         kind: 'message',
@@ -525,6 +740,7 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
           durationMs: null,
           runId: message.run_id ?? null,
           images: message.images ?? [],
+          messageId: message.id,
         });
       }
     }

@@ -167,6 +167,101 @@ describe('refreshSessionInfo', () => {
   });
 });
 
+describe('learnStoredMessageIds', () => {
+  /** The row a live run leaves behind: a run id, a call id, no stored message id. */
+  function liveChat() {
+    store.currentSessionId.value = 's_ab12';
+    store.chat.value = {
+      ...emptyChatState('s_ab12'),
+      items: [
+        {
+          kind: 'message',
+          id: 'user:r_x',
+          at: 1,
+          role: 'user',
+          content: 'read the fixture',
+          reasoning: '',
+          streaming: false,
+          runId: 'r_x',
+          agentId: null,
+        },
+        {
+          kind: 'tool',
+          id: 'tool:call_1',
+          at: 2,
+          callId: 'call_1',
+          name: 'read_file',
+          args: { path: 'README.md' },
+          status: 'ok',
+          output: 'ok',
+          truncated: false,
+          durationMs: 1,
+          runId: 'r_x',
+        },
+      ],
+    };
+  }
+
+  it('gives a settled run’s rows the ids the rewind endpoint speaks', async () => {
+    liveChat();
+    stubFetch(() =>
+      jsonResponse({
+        ...detailFixture,
+        running: false,
+        messages: [
+          { ...detailFixture.messages[0]!, id: 4, run_id: 'r_x', role: 'user', content: 'read the fixture' },
+          {
+            ...detailFixture.messages[0]!,
+            id: 5,
+            run_id: 'r_x',
+            role: 'assistant',
+            content: '',
+            tool_calls: [{ id: 'call_1', name: 'read_file', arguments: '{}' }],
+          },
+        ],
+      }),
+    );
+
+    await actions.learnStoredMessageIds();
+
+    // The row ids the transcript keys on are untouched; only the stored id is added.
+    expect(store.chat.value.items.map((item) => item.id)).toEqual(['user:r_x', 'tool:call_1']);
+    expect(store.chat.value.items[0]!.kind === 'message' && store.chat.value.items[0]!.messageId).toBe(4);
+    const call = store.chat.value.items[1]!;
+    expect(call.kind === 'tool' && call.messageId).toBe(5);
+  });
+
+  it('drops a snapshot that arrives after the reader moved to another session', async () => {
+    liveChat();
+    const read = deferred<Response>();
+    stubFetch(() => read.promise);
+
+    const call = actions.learnStoredMessageIds();
+    store.currentSessionId.value = 's_other';
+    read.resolve(
+      jsonResponse({
+        ...detailFixture,
+        running: false,
+        messages: [{ ...detailFixture.messages[0]!, id: 4, run_id: 'r_x', role: 'user' }],
+      }),
+    );
+    await call;
+
+    // Nothing was grafted on: the row still names no stored message.
+    expect(store.chat.value.items[0]!.kind === 'message' && store.chat.value.items[0]!.messageId).toBe(
+      undefined,
+    );
+  });
+
+  it('stays quiet when the read fails, because the next run tries again', async () => {
+    liveChat();
+    stubFetch(() => errorResponse('internal', 'nope', 500));
+
+    await expect(actions.learnStoredMessageIds()).resolves.toBeUndefined();
+    expect(store.toasts.value).toHaveLength(0);
+  });
+});
+
 describe('resolveApproval', () => {
   function pendingApproval() {
     store.currentSessionId.value = 's_ab12';

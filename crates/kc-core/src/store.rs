@@ -233,6 +233,23 @@ pub struct SessionSummary {
     pub ephemeral: bool,
 }
 
+/// Prefix a slash command's output carries in the message `name` column.
+///
+/// A command's result is written to the transcript for the **reader**: `/help`
+/// prints a table, `/compact` reports what it saved, `/skills` lists the skill
+/// library. None of it is something the model said, so the runtime leaves those
+/// rows out of the request it builds ([`crate::store`] rows with this prefix are
+/// skipped by transcript repair) while the browser still draws them as part of
+/// the conversation. The full name is `slash:<command>`, which is what lets the
+/// UI name the command a card came from.
+pub const COMMAND_MESSAGE_PREFIX: &str = "slash:";
+
+/// Suffix a **refused** command's name carries after the command name.
+///
+/// `slash:compact:error` reads as a refusal in a transcript reloaded a week
+/// later; the message text alone cannot be trusted to imply it.
+pub const COMMAND_ERROR_SUFFIX: &str = ":error";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
     pub id: i64,
@@ -622,6 +639,16 @@ pub struct SessionStats {
     pub messages_total: u64,
     /// Messages the main agent's conversation holds (`agent_id` is NULL).
     pub messages_main: u64,
+    /// Main-agent messages **the model reads**: [`Self::messages_main`] without the
+    /// command receipts (`name` starting with [`COMMAND_MESSAGE_PREFIX`]).
+    ///
+    /// The two differ because `repair_history` drops those rows before a request:
+    /// a `/compact` reply is written for the reader, not for the model. The
+    /// compaction snapshot's watermark is a count of model-visible messages, so it
+    /// has to use this one - a receipt written after a snapshot otherwise inflates
+    /// the tail the loader appends, and the next request re-sends a message the
+    /// digest already folded away.
+    pub messages_model: u64,
     /// Messages belonging to any subagent.
     pub messages_subagent: u64,
     /// Messages by role: `user`, `assistant`, `tool`, `system`.

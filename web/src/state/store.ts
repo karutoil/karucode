@@ -5,6 +5,7 @@ import type {
   AgentStatus,
   AgentSummary,
   AuthStatus,
+  CommandSpec,
   Config,
   ConnectionState,
   Health,
@@ -808,6 +809,19 @@ export const resolvingApprovals = signal<Record<string, boolean>>({});
 export const stopping = signal(false);
 export const clock = signal(Date.now());
 export const composerFocusTick = signal(0);
+/**
+ * The slash-command catalog (`GET /api/commands`), or `null` before it loads.
+ *
+ * Held per project because the skill half of the catalog is discovered inside the
+ * project's workspace: a menu built against another project's skills would offer a
+ * command the agent cannot read. `commandCatalogProject` names which project the
+ * value belongs to, so a stale list is never shown for a fresh project.
+ */
+export const commandCatalog = signal<CommandSpec[] | null>(null);
+export const commandCatalogProject = signal<string | null>(null);
+export const commandCatalogError = signal<string | null>(null);
+/** Bumped to ask the loader for a fresh catalog (a skill was added, say). */
+export const commandCatalogTick = signal(0);
 /** Bumped when the user sends a message, so the transcript re-pins to the newest content. */
 export const sentMessageTick = signal(0);
 export const streamEpoch = signal(0);
@@ -1065,6 +1079,20 @@ export const selectedModelEntry = computed(() => {
   const { providerId, modelId } = modelSelection.value;
   const provider = current?.providers.find((profile) => profile.id === providerId) ?? null;
   return provider?.models.find((model) => model.id === modelId) ?? null;
+});
+
+/**
+ * The reasoning levels the selected model accepts, or `null` for "not declared".
+ *
+ * `null` and `[]` are different answers, exactly as they are on the server: a
+ * model with no `variants` offers the full built-in set, while a model that
+ * declares variants offers only the levels it actually implements - and a model
+ * whose `variants` is `{}` offers none.
+ */
+export const offeredReasoningLevels = computed<string[] | null>(() => {
+  const variants = selectedModelEntry.value?.variants;
+  if (!variants) return null;
+  return Object.keys(variants);
 });
 
 /**

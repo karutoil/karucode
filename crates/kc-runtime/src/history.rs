@@ -164,6 +164,19 @@ fn repair_rows(stored: &[StoredMessage]) -> (Vec<Message>, Vec<Synthesized>) {
     let mut messages = Vec::with_capacity(stored.len());
     let mut synthesized = Vec::new();
     for row in stored {
+        // A slash command's output is written for the reader, not for the model:
+        // `/help` prints a table and `/compact` reports what it saved. Leaving
+        // those rows in would put words in the model's mouth - every later
+        // request would carry "you said: <command output>" - so they are dropped
+        // here, which is the only place that decides what the model reads. The
+        // browser reads the store directly and still shows them.
+        if row
+            .name
+            .as_deref()
+            .is_some_and(|name| name.starts_with(kc_core::store::COMMAND_MESSAGE_PREFIX))
+        {
+            continue;
+        }
         match row.role.as_str() {
             "assistant" => {
                 let message = row.to_message();

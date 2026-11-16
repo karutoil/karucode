@@ -30,6 +30,12 @@ export interface ModelChoice {
   modelId: string;
   label: string;
   canReason: boolean;
+  /**
+   * The levels this model's declared variants offer, or `null` when it declares
+   * none (then every built-in level is offered). `[]` is a model that declares
+   * variants with no usable level, so only "Default" applies.
+   */
+  reasoningLevels: string[] | null;
 }
 
 /**

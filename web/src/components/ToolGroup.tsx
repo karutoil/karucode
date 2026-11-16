@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import { formatDuration } from '../lib/format';
 import type { CommandItem, ToolItem } from '../state/chat';
 import { callTotals, callsSummary, type CallItem } from '../state/transcriptLayout';
+import type { ChatTranscriptProps } from './ChatTranscript';
 import { CommandCard } from './CommandCard';
 import { ToolCard } from './ToolCard';
 import { AlertIcon, CheckIcon, ChevronDownIcon } from './icons';
@@ -16,6 +17,8 @@ export interface ToolGroupProps {
    * its own disclosure either way: opening this run of calls never opens another.
    */
   defaultOpen?: boolean;
+  /** Rewind one stored call inside the group; see `ToolRewind`. */
+  onRewind?: ChatTranscriptProps['onRewind'];
 }
 
 /** The group's one-line verdict: outcome glyph plus "3 calls · 1.2s". */
@@ -51,7 +54,7 @@ function GroupGlyph({ totals }: { totals: ReturnType<typeof callTotals> }): JSX.
  * opened it for. Nothing runs on a shape the reader collapsed by hand while the
  * same call is still in flight - only a *new* running/failed member does.
  */
-export function ToolGroup({ calls, variant, defaultOpen = false }: ToolGroupProps): JSX.Element {
+export function ToolGroup({ calls, variant, defaultOpen = false, onRewind }: ToolGroupProps): JSX.Element {
   const totals = callTotals(calls);
   const urgent = totals.running > 0 || totals.failed > 0;
   // `choice` is what the reader clicked; `trouble` latches the automatic opening
@@ -127,9 +130,15 @@ export function ToolGroup({ calls, variant, defaultOpen = false }: ToolGroupProp
                   item={call as CommandItem}
                   defaultOpen={call.status === 'running'}
                   variant={variant}
+                  onRewind={onRewind}
                 />
               ) : (
-                <ToolCard key={call.id} item={call as ToolItem} variant={variant} />
+                <ToolCard
+                  key={call.id}
+                  item={call as ToolItem}
+                  variant={variant}
+                  onRewind={onRewind}
+                />
               ),
             )
           : null}

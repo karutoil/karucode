@@ -1186,7 +1186,7 @@ async fn spawn_batch(
                 .resolve_requested_model(session_selection.as_ref(), requested)
                 .await
             {
-                ModelOverrideJudgement::Resolved(resolved) => model = resolved,
+                ModelOverrideJudgement::Resolved(resolved) => model = *resolved,
                 ModelOverrideJudgement::Unjudged { .. } => {
                     // No catalog to judge against: keep the historical
                     // pass-through on the session's resolved endpoint.

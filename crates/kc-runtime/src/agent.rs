@@ -99,7 +99,7 @@ use crate::context;
 use crate::events::EmitCtx;
 use crate::history::repair_history;
 use crate::restart::{StreamRestarts, TurnRetries};
-use crate::{RunHandle, RunState, Runtime, RuntimeInner, HISTORY_LIMIT};
+use crate::{CompactionReport, RunHandle, RunState, Runtime, RuntimeInner, HISTORY_LIMIT};
 use futures_util::{FutureExt, StreamExt};
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, AutoDecision};
 use kc_core::config::{ApprovalMode, Limits, ModelConfig};
@@ -705,10 +705,23 @@ async fn load_compaction_snapshot(
     if snapshot.is_empty() || watermark == 0 {
         return None;
     }
-    // How many stored messages are newer than the snapshot. `repaired` is the
-    // newest bounded suffix of the transcript, so the tail is the end of it.
+    // How many model-visible messages are newer than the snapshot. `repaired` is
+    // the newest bounded suffix of the transcript, so the tail is the end of it.
+    //
+    // `messages_model`, not `messages_main`: the repaired window drops command
+    // receipts (`repair_history`), and a count that includes them would claim one
+    // more newer message per receipt - appending the snapshot's own tail again, or
+    // starting the tail on a `tool` row whose `assistant` is inside the digest,
+    // which the provider rejects.
+    //
+    // A watermark written before that count existed cannot be recognised from this
+    // row: it is receipt-inclusive, which is *smaller* than the model count once
+    // rows are stored after it, so the guard below lets it through and the tail
+    // would silently start that many messages late. That is why migration 28
+    // deletes every checkpoint from before the change instead of trying to repair
+    // one here - a session with no snapshot rebuilds from the transcript.
     let total = match store.session_stats(session_id).await {
-        Ok(stats) => stats.messages_main as usize,
+        Ok(stats) => stats.messages_model as usize,
         Err(_) => return None,
     };
     if watermark > total {
@@ -2224,7 +2237,7 @@ is {})",
             // Remember the window the turn is about to be answered from, so the
             // *next* run on this session appends its user turn to these exact
             // bytes instead of reloading the transcript and compacting again.
-            persist_compaction_snapshot(&inner, &spec, &history).await;
+            persist_compaction_snapshot(&inner, &spec.session_id.0, &history).await;
         }
     }
 }
@@ -2294,12 +2307,14 @@ async fn run_semantic_compaction(
 /// that cannot write it must not fail a run that is otherwise healthy.
 async fn persist_compaction_snapshot(
     inner: &Arc<RuntimeInner>,
-    spec: &LoopSpec,
+    session_id: &str,
     history: &[Message],
 ) {
     let store = &inner.deps.store;
-    let watermark = match store.session_stats(&spec.session_id.0).await {
-        Ok(stats) => stats.messages_main as usize,
+    // The same count the loader reads (`load_compaction_snapshot`): the repaired
+    // window the model sees, not every row in the session.
+    let watermark = match store.session_stats(session_id).await {
+        Ok(stats) => stats.messages_model as usize,
         Err(e) => {
             tracing::warn!(error = %e, "could not count stored messages for the compaction snapshot");
             return;
@@ -2309,11 +2324,175 @@ async fn persist_compaction_snapshot(
         return;
     }
     if let Err(e) = store
-        .save_compaction_snapshot(&spec.session_id.0, watermark, history)
+        .save_compaction_snapshot(session_id, watermark, history)
         .await
     {
         tracing::warn!(error = %e, "could not persist the compaction snapshot");
     }
+}
+
+/// The window a forced compaction folds: the checkpoint the session already has,
+/// plus the messages stored after it - exactly the window a run starts from.
+///
+/// Rebuilding from the raw transcript instead would fold the earlier digest and
+/// its semantic summary away and replace them with a fresh, slightly different
+/// one, so every `/compact` would lose the accumulated context (and the
+/// provider's cached prefix) it was supposed to keep.
+pub(crate) async fn compaction_window(
+    store: &Arc<dyn kc_core::store::Store>,
+    session_id: &str,
+    budget: usize,
+) -> Result<Vec<Message>> {
+    let mut history = repair_history(store, session_id, HISTORY_LIMIT, budget).await?;
+    if let Some(hydrated) = load_compaction_snapshot(store, session_id, &history).await {
+        history = hydrated;
+    }
+    Ok(history)
+}
+
+/// Force one compaction of a session's window, right now.
+///
+/// A run compacts when the conversation no longer fits ([`crate::context`]); this
+/// is the same operation on demand, and it exists because "I am about to paste a
+/// huge file" and "this session is getting slow" are things the person knows
+/// before the budget does.
+///
+/// What it does, in order:
+///
+/// 1. rebuilds the window exactly as a run would ([`repair_history`], bounded by
+///    the budget the *session's* model gets), so the saved window is a request the
+///    provider would accept;
+/// 2. compacts it against a **quarter** of that budget rather than the whole of
+///    it, which is what makes this a force rather than a no-op: an ordinary
+///    compaction only fires once the window is over the ceiling, and a conversation
+///    at 60% of the ceiling would otherwise be left byte-identical. The fold keeps
+///    a share of that quarter, and the report carries that share - the number a
+///    reader is shown must be the one the fold aims for;
+/// 3. asks the compaction model for the digest's prose block when
+///    `limits.model_compaction` is on, exactly like a run does (the deterministic
+///    state ledger is already in the window, so a failure here costs only prose);
+/// 4. saves the result as the session's compaction snapshot, which is the same
+///    checkpoint the next run hydrates instead of re-reading the transcript.
+///
+/// Nothing is deleted: the transcript keeps every message, and the snapshot is a
+/// cache in front of the model's view of it. Refused while a run holds its own
+/// copy of the window in memory.
+pub(crate) async fn compact_session(
+    runtime: &Arc<Runtime>,
+    session_id: &str,
+) -> Result<CompactionReport> {
+    let inner = Arc::clone(runtime.shared());
+    let store = inner.deps.store.clone();
+    // The lifecycle lock is what submit takes, so taking it here means a run can
+    // never load a window this compaction is halfway through replacing.
+    let _lifecycle = inner.lock_session_lifecycle(session_id).await;
+    // `has_active_run` deliberately does not count a run that was cancelled and is
+    // still unwinding (`/stop`), and that loop keeps writing its final tool results
+    // - and its own compaction snapshot - until it deregisters. Compacting there
+    // would save a checkpoint the unwinding loop then overwrites, and `repair_rows`
+    // could register a `MISSING_TOOL_RESULT` placeholder for a call whose real
+    // result lands a moment later. So ask the unfiltered question, as `start_run`
+    // does.
+    if runtime.has_registered_runs(session_id) {
+        return Err(Error::BadRequest(
+            "a run is in flight (or still unwinding); wait for it to finish before compacting"
+                .into(),
+        ));
+    }
+    let session = store
+        .get_session(session_id)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("session {session_id} not found")))?;
+    let model = inner
+        .deps
+        .settings
+        .resolve_model(session.model.as_ref())
+        .await;
+    let limits = inner.deps.settings.limits().await;
+    let budget = limits.context_chars_for(&model);
+    let mut history = compaction_window(&store, session_id, budget).await?;
+    let messages_before = history.len();
+    let chars_before: usize = history.iter().map(context::message_chars).sum();
+    // A quarter of the budget as the *ceiling*, which is what makes this a force:
+    // a window at 60% of the ceiling still gets folded, where an ordinary run would
+    // leave it alone. The roll keeps a share of that ceiling (see
+    // `context::target_chars`), so the number reported and printed by `/context` is
+    // that target, not the ceiling - otherwise `/compact` would advertise 25% of the
+    // budget while keeping a fifth of it.
+    let ceiling = context::forced_compaction_ceiling(budget);
+    let target_chars = context::forced_compaction_target(&history, budget);
+    let batch = context::compact_run_window_with_limits_detailed(
+        &mut history,
+        context::ContextLimits::chars_only(ceiling),
+        &[],
+    );
+    let mut semantic = false;
+    if let Some(batch) = batch {
+        if limits.model_compaction && !batch.scrubbed_transcript.trim().is_empty() {
+            let summary = summarize_for_compaction(&inner, &model, &limits, &batch).await;
+            if let Some(summary) = summary {
+                semantic = context::replace_digest_semantic_block(&mut history, &summary);
+            }
+        }
+        persist_compaction_snapshot(&inner, session_id, &history).await;
+    }
+    let report = CompactionReport {
+        messages_before,
+        messages_after: history.len(),
+        chars_before,
+        chars_after: history.iter().map(context::message_chars).sum(),
+        target_chars,
+        ceiling_chars: ceiling,
+        compacted: messages_before > history.len(),
+        semantic,
+    };
+    tracing::info!(
+        session = %session_id,
+        before_messages = report.messages_before,
+        after_messages = report.messages_after,
+        before_chars = report.chars_before,
+        after_chars = report.chars_after,
+        "forced compaction"
+    );
+    Ok(report)
+}
+
+/// The model-assisted half of a forced compaction.
+///
+/// Mirrors [`run_semantic_compaction`] without a [`LoopSpec`]: the forced path has
+/// no run to inherit a model, a deadline or a cancellation token from, so it
+/// builds its own. Every failure is "no prose", never "no compaction".
+async fn summarize_for_compaction(
+    inner: &Arc<RuntimeInner>,
+    model: &kc_core::config::ModelConfig,
+    limits: &kc_core::config::Limits,
+    batch: &context::EvictionBatch,
+) -> Option<String> {
+    let mut model = model.clone();
+    if let Some(configured) = limits
+        .compaction_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        model.model = configured.to_string();
+    }
+    let provider = match inner.deps.providers.build(&model).await {
+        Ok(provider) => provider,
+        Err(e) => {
+            tracing::debug!(error = %e, "compaction model unavailable; keeping the state ledger");
+            return None;
+        }
+    };
+    context::synthesize_semantic_compaction_with_timeout(
+        provider.as_ref(),
+        &model.model,
+        batch,
+        limits.compaction_max_tokens.max(1),
+        limits.compaction_timeout_secs.max(1),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
 }
 
 /// What one call answered, as a key the loop guard can compare.

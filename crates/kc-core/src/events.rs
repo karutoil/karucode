@@ -219,6 +219,23 @@ pub enum Event {
         level: String,
         message: String,
     },
+    /// A slash command produced its result.
+    ///
+    /// Emitted after the row is persisted, so a client that receives this frame
+    /// and a client that reloads the transcript converge on the same message.
+    /// `message_id` is the id of that row - a client uses it to match the frame
+    /// against the transcript it already has instead of appending a duplicate,
+    /// and `state` says whether the command did what it was asked.
+    CommandResult {
+        /// The command without its slash, e.g. `compact`.
+        command: String,
+        /// The persisted transcript row this result was written to.
+        message_id: i64,
+        /// The rendered markdown, exactly as it was stored.
+        content: String,
+        /// `ok` when the command did what it says; `error` when it refused.
+        state: String,
+    },
     /// A human-facing notification: the run settled, something is waiting for an
     /// answer, or a plugin asked for attention.
     ///

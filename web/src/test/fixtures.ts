@@ -401,6 +401,12 @@ export function resetAppState(): void {
   store.composerDraft.value = null;
   store.composerHandoff.value = null;
   store.recallingQueued.value = {};
+  // The slash-command catalog is cached module state: a test that loaded one must
+  // not hand the next test a menu from another fixture's server.
+  store.commandCatalog.value = null;
+  store.commandCatalogProject.value = null;
+  store.commandCatalogError.value = null;
+  store.commandCatalogTick.value = 0;
   store.resetToastTimers();
 }
 

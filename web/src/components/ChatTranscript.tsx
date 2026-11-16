@@ -7,6 +7,7 @@ import type {
   ChatItem,
   CommandItem,
   MessageItem,
+  SlashItem,
   ToolItem,
 } from '../state/chat';
 import type { ApprovalView } from '../state/chat';
@@ -21,14 +22,15 @@ import {
   type TurnRow,
 } from '../state/transcriptLayout';
 import { clockTime, formatDuration } from '../lib/format';
-import { noteOwnScroll } from '../lib/ownScroll';
-import { elementAtBottom } from '../lib/stickyBottom';
+import { noteOwnScroll, isOwnScroll } from '../lib/ownScroll';
+import { elementAtBottom, followingNewest } from '../lib/stickyBottom';
 import { clampEstimate, prefixHeights, visibleRange } from '../lib/virtualWindow';
 import * as store from '../state/store';
 import { activeTheme, type ThemeGrouping, type ThemeThinking, type ThemeToolStyle, type ThemeWorking } from '../theme';
 import { ApprovalCard } from './ApprovalCard';
 import { CommandCard } from './CommandCard';
 import { Markdown } from './Markdown';
+import { SlashCard } from './SlashCard';
 import { ThinkingBlock } from './ThinkingBlock';
 import { ToolCard } from './ToolCard';
 import { ToolGroup } from './ToolGroup';
@@ -53,6 +55,8 @@ export interface ChatTranscriptProps {
    * arrived while the reader was above every row (`lib/historyLoader.ts`).
    */
   contentRef?: RefObject<HTMLElement | null>;
+  /** Called when a measurement changed the rows' geometry, so the follow can re-decide. */
+  onMeasured?: () => void;
   /**
    * Which conversation the rows belong to. A change resets the window to the
    * tail before the sticky-bottom pin moves the viewport, so a session opened
@@ -235,6 +239,8 @@ interface PartProps {
   options: ViewOptions;
   onApprovalDecision: ChatTranscriptProps['onApprovalDecision'];
   resolvingApprovals: ChatTranscriptProps['resolvingApprovals'];
+  /** Rewind a stored call in this turn; see {@link ToolRewind}. */
+  onRewind?: ChatTranscriptProps['onRewind'];
 }
 
 function TurnPart({
@@ -243,6 +249,7 @@ function TurnPart({
   options,
   onApprovalDecision,
   resolvingApprovals,
+  onRewind,
 }: PartProps): JSX.Element | null {
   switch (item.kind) {
     case 'message':
@@ -252,13 +259,20 @@ function TurnPart({
         </div>
       );
     case 'tool':
-      return <ToolCard item={item as ToolItem} variant={options.toolStyle === 'rows' ? 'row' : 'card'} />;
+      return (
+        <ToolCard
+          item={item as ToolItem}
+          variant={options.toolStyle === 'rows' ? 'row' : 'card'}
+          onRewind={onRewind}
+        />
+      );
     case 'command':
       return (
         <CommandCard
           item={item as CommandItem}
           defaultOpen={item.status === 'running'}
           variant={options.toolStyle === 'rows' ? 'row' : 'card'}
+          onRewind={onRewind}
         />
       );
     case 'approval': {
@@ -290,6 +304,8 @@ function TurnPart({
           {item.message}
         </p>
       );
+    case 'slash':
+      return <SlashCard item={item as SlashItem} />;
     default:
       return null;
   }
@@ -310,11 +326,13 @@ function Row({
   options,
   onApprovalDecision,
   resolvingApprovals,
+  onRewind,
 }: {
   row: TurnRow;
   options: ViewOptions;
   onApprovalDecision: ChatTranscriptProps['onApprovalDecision'];
   resolvingApprovals: ChatTranscriptProps['resolvingApprovals'];
+  onRewind?: ChatTranscriptProps['onRewind'];
 }): JSX.Element {
   if (row.kind === 'group') {
     return (
@@ -322,6 +340,7 @@ function Row({
         calls={row.parts}
         variant={options.toolStyle === 'rows' ? 'row' : 'card'}
         defaultOpen={options.working === 'open'}
+        onRewind={onRewind}
       />
     );
   }
@@ -332,6 +351,7 @@ function Row({
       options={options}
       onApprovalDecision={onApprovalDecision}
       resolvingApprovals={resolvingApprovals}
+      onRewind={onRewind}
     />
   ) as JSX.Element;
 }
@@ -399,12 +419,14 @@ function AssistantTurn({
   options,
   onApprovalDecision,
   resolvingApprovals,
+  onRewind,
 }: {
   turnKey: string;
   parts: ChatItem[];
   options: ViewOptions;
   onApprovalDecision: ChatTranscriptProps['onApprovalDecision'];
   resolvingApprovals: ChatTranscriptProps['resolvingApprovals'];
+  onRewind?: ChatTranscriptProps['onRewind'];
 }): JSX.Element {
   const rows = useMemo(() => turnRows(parts, options.grouping), [parts, options.grouping]);
   /**
@@ -431,6 +453,7 @@ function AssistantTurn({
       options={options}
       onApprovalDecision={onApprovalDecision}
       resolvingApprovals={resolvingApprovals}
+      onRewind={onRewind}
     />
   );
 
@@ -530,28 +553,36 @@ const MemoUserRow = memo(UserRow, rowPropsEqual);
 /**
  * "Recall to here" for one message.
  *
- * Shown for a persisted row only: a live tool call or an optimistic send has no
- * message id the server could resolve, and offering the button would produce a
- * 404 the reader cannot act on. It is also hidden while a run is in flight,
- * because the server refuses to rewind a session that is still writing.
+ * Shown for a row the server can resolve: a read row (`msg:12`) or a live row
+ * that has already learned its stored id (`withStoredMessageIds`). An optimistic
+ * send or a placeholder still streaming has neither, and offering the button
+ * would produce a 404 the reader cannot act on.
+ *
+ * It stays on screen during a run even though the server refuses to rewind a
+ * session that is still writing: hiding it made the affordance appear and
+ * disappear as the run's state changed, and a control that is not there when the
+ * reader looks for it reads as a missing feature rather than as a refusal. The
+ * click says why in the dialog instead (`actions.openRewind`).
  */
 function RewindButton({
   item,
   isAssistant,
   onRewind,
+  class: className,
 }: {
   item: MessageItem;
   isAssistant: boolean;
   onRewind?: ChatTranscriptProps['onRewind'];
+  /** Extra classes, e.g. the anchored position a tool call puts it in. */
+  class?: string;
 }): JSX.Element | null {
   if (!onRewind) return null;
-  const id = storedMessageId(item.id);
+  const id = storedMessageId(item.id) ?? item.messageId ?? null;
   if (id === null) return null;
-  if (store.chat.value.running) return null;
   return (
     <button
       type="button"
-      class="rewind-button"
+      class={className ? `rewind-button ${className}` : 'rewind-button'}
       title={isAssistant ? 'Rewind to the request that produced this' : 'Rewind to this message'}
       aria-label={
         isAssistant ? 'Rewind to the request that produced this answer' : 'Rewind to this message'
@@ -562,6 +593,41 @@ function RewindButton({
       <span>Rewind</span>
     </button>
   );
+}
+
+/**
+ * "Recall to here" for one tool call.
+ *
+ * The call's own message is the tool *result* row, which is a persisted message
+ * and therefore a valid rewind point: rewinding to it keeps the call and its
+ * output and drops everything the agent did afterwards. Live calls have no row
+ * yet (`storedMessageId` refuses them), so the button appears once the call is
+ * part of the stored transcript.
+ *
+ * This is the only control the reader has on a turn that is nothing but calls:
+ * such a turn has no prose, so the row header above it carries no rewind button
+ * of its own.
+ */
+export function ToolRewind({
+  item,
+  onRewind,
+}: {
+  item: ToolItem | CommandItem;
+  onRewind?: ChatTranscriptProps['onRewind'];
+}): JSX.Element | null {
+  if (!onRewind || !item.messageId) return null;
+  const at = {
+    kind: 'message',
+    id: `msg:${item.messageId}`,
+    at: item.at,
+    role: 'assistant',
+    content: '',
+    reasoning: '',
+    streaming: false,
+    runId: item.runId,
+    agentId: null,
+  } satisfies MessageItem;
+  return <RewindButton item={at} isAssistant onRewind={onRewind} class="rewind-tool" />;
 }
 
 /** The rows the transcript renders, in order: date markers, user rows, turns. */
@@ -687,6 +753,9 @@ function AssistantRow({
   const answer = entry.parts.find(
     (part) => part.kind === 'message' && part.role === 'assistant',
   ) as MessageItem | undefined;
+  // A turn that only called tools (no prose at all) has no answer to rewind to,
+  // so the row header would carry nothing. Each stored call then offers its own
+  // rewind (`ToolRewind`), which is the same cut: this turn's messages.
   const working = turnWorking(turn);
   return (
     <article
@@ -714,6 +783,7 @@ function AssistantRow({
           options={options}
           onApprovalDecision={onApprovalDecision}
           resolvingApprovals={resolvingApprovals}
+          onRewind={onRewind}
         />
       </div>
     </article>
@@ -780,6 +850,7 @@ export function ChatTranscript({
   viewportRef,
   contentRef,
   sessionKey = null,
+  onMeasured,
 }: ChatTranscriptProps): JSX.Element {
   const theme = activeTheme.value;
   // Frozen by identity: a new object here every render would make every row's
@@ -909,7 +980,11 @@ export function ChatTranscript({
       for (const row of root.children) {
         const box = row.getBoundingClientRect();
         if (box.bottom <= view.top) continue;
-        rowAnchor.current = { key: row.getAttribute('data-entry-key') ?? '', top: box.top, scrollTop: element.scrollTop };
+        rowAnchor.current = {
+          key: row.getAttribute('data-entry-key') ?? '',
+          top: box.top,
+          scrollTop: element.scrollTop,
+        };
         return;
       }
     };
@@ -923,7 +998,16 @@ export function ChatTranscript({
       // out): the rectangles say nothing, so the scroll offset is the only
       // measurement there is. A real transcript always has a height.
       const top = box.height > 0 ? view.top - box.top : element.scrollTop;
-      setWindowReading({ key: sessionKeyRef.current, top });
+      setWindowReading((previous) =>
+        // A reading that has not moved is not news. Committing it would run the
+        // measuring effect - the one that forces a layout - for a viewport that
+        // is exactly where it already was.
+        previous !== null &&
+        previous.key === sessionKeyRef.current &&
+        Math.abs(previous.top - top) < 0.5
+          ? previous
+          : { key: sessionKeyRef.current, top },
+      );
     };
     /**
      * Re-read the window on the scroll itself, not on the next animation frame.
@@ -941,6 +1025,13 @@ export function ChatTranscript({
      * delta on top of the layout shift).
      */
     const onScroll = (): void => {
+      // A scroll this component wrote itself - the measurement correction below
+      // - leaves the reader exactly where they were: the row at the top of the
+      // viewport is still at the top by construction. Re-reading it would rewrite
+      // the window for a viewport that never moved: new padding, a new layout
+      // shift, another correction, another scroll event. That is the loop a real
+      // profile showed running at the frame rate with nobody at the wheel.
+      if (isOwnScroll(element)) return;
       anchor();
       readWindow();
     };
@@ -1039,7 +1130,15 @@ export function ChatTranscript({
       changed = true;
     }
     const before = rowAnchor.current;
-    if (before && before.key) {
+    // Whether the reader is following decides *who* corrects this commit, and it
+    // is the same question the follow in `useStickyBottom` asks - of the same
+    // state, through `followingNewest`. Asking it differently here (this used to
+    // be "is the viewport flush with the bottom") is what made the two write
+    // against each other: a stream leaves the view a gap short of the bottom on
+    // every frame, so the follow saw "growth I have not caught up with" and
+    // scrolled down while this correction saw "not at the bottom" and held an
+    // anchor, scrolling back up. Two positions, same frame, forever.
+    if (before && before.key && !followingNewest(element)) {
       for (const row of rows) {
         if (row.getAttribute('data-entry-key') !== before.key) continue;
         const box = row.getBoundingClientRect();
@@ -1049,10 +1148,10 @@ export function ChatTranscript({
         // moving the scroll by exactly that much keeps the row still.
         const shift = box.top - before.top + (element.scrollTop - before.scrollTop);
         if (Number.isFinite(shift) && Math.abs(shift) >= 0.5) {
-          // Whether the newest content was on screen *before* this write decides
-          // what the sticky-bottom owes the reader: at the bottom, close the gap
-          // the correction opens; reading history, leave them alone. Read here,
-          // because after the write it is too late to tell.
+          // The note carries whether the newest content was on screen *before*
+          // this write, which no flag on the hook can supply: the sticky-bottom
+          // reads it to tell a gap of its own from one a reader made. Read it
+          // here, because after the write it is too late to tell.
           const atBottom = elementAtBottom(element);
           element.scrollTop += shift;
           noteOwnScroll(element, atBottom);
@@ -1074,8 +1173,16 @@ export function ChatTranscript({
       };
       break;
     }
-    if (changed) setMeasuredTick((tick) => tick + 1);
-  }, [virtual, range.start, range.end, estimates, measuredTick, viewportRef, windowTop]);
+    if (changed) {
+      setMeasuredTick((tick) => tick + 1);
+      // A row measured to a different height than the model claimed moves
+      // everything below it, while the window's padding absorbs the difference -
+      // so the document's total height can stay identical and no resize is
+      // observed. Without this, a reader following the newest content is left a
+      // few pixels short of it and nothing will ever say so.
+      onMeasured?.();
+    }
+  }, [virtual, range.start, range.end, estimates, measuredTick, viewportRef, windowTop, onMeasured]);
 
   const topPadding = range.start > 0 ? geometry.offsets[range.start] ?? 0 : 0;
   const bottomPadding =

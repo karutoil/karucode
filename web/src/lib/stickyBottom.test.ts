@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   distanceFromBottom,
+  followingNewest,
+  forgetFollow,
   isGrowthAfterFollow,
   isPinnedToBottom,
   jumpBehavior,
+  noteFollow,
+  noteSettling,
   shouldFollow,
   type FollowAnchor,
   type ScrollMetrics,
@@ -159,5 +163,80 @@ describe('jumpBehavior', () => {
     const element = scroller(999_600 - 600);
     // No `scrollTo` is exactly the old browser / jsdom shape.
     expect(jumpBehavior({ ...element, scrollTo: undefined } as unknown as HTMLElement)).toBe('auto');
+  });
+});
+
+/**
+ * The scroller shape `followingNewest` reads: it only ever asks for these three
+ * numbers, so a mutable record of them is the whole viewport.
+ */
+interface Panel {
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+}
+
+function panel(scrollTop: number, scrollHeight = 1200, clientHeight = 400): Panel {
+  return { scrollTop, scrollHeight, clientHeight };
+}
+
+/** The DOM view of a panel: the decision helpers take an element, not a record. */
+function asElement(record: Panel): HTMLElement {
+  return record as unknown as HTMLElement;
+}
+
+describe('followingNewest', () => {
+  // Two components write this scroll - the follow and the window's measurement
+  // correction - and they used to decide "is the reader following?" separately.
+  // During a stream that produced opposite answers on the same frame: the follow
+  // saw growth it had not caught up with and scrolled down, the correction saw a
+  // viewport that was not at the bottom and scrolled back up. A real Firefox
+  // profile caught it as two scroll writes and five forced reflows per frame,
+  // with nobody at the wheel. One answer, asked of one piece of state, is the fix.
+  it('is true while the view is flush with the bottom', () => {
+    expect(followingNewest(asElement(panel(800)))).toBe(true);
+    // Sub-pixel rounding of our own write still counts as the bottom.
+    expect(followingNewest(asElement(panel(799.6)))).toBe(true);
+  });
+
+  it('is false for a reader who scrolled away', () => {
+    // 700px above the newest content, and nothing recorded as the app's own
+    // movement: that gap is a decision, and neither writer may close it.
+    expect(followingNewest(asElement(panel(100)))).toBe(false);
+  });
+
+  it('is true while the gap is only content that arrived after the follow', () => {
+    const element = panel(800);
+    noteFollow(asElement(element));
+    // Nine hundred pixels of cards landed below the viewport, and `scrollTop`
+    // is exactly where the follow left it.
+    element.scrollHeight = 2100;
+    expect(followingNewest(asElement(element))).toBe(true);
+  });
+
+  it('is false again the moment the reader takes the view over', () => {
+    const element = panel(800);
+    noteFollow(asElement(element));
+    element.scrollHeight = 2100;
+    expect(followingNewest(asElement(element))).toBe(true);
+    // A wheel (or any gesture) drops the follow before the render that would
+    // still see growth.
+    forgetFollow(asElement(element));
+    expect(followingNewest(asElement(element))).toBe(false);
+  });
+
+  it('is true while a smooth scroll it started is still arriving', () => {
+    const element = panel(0, 1200);
+    noteSettling(asElement(element), true);
+    // Mid-animation the view is nowhere near the bottom, and both writers must
+    // leave the animation alone.
+    expect(followingNewest(asElement(element))).toBe(true);
+    noteSettling(asElement(element), false);
+    expect(followingNewest(asElement(element))).toBe(false);
+  });
+
+  it('records the position it followed to', () => {
+    const element = panel(800);
+    expect(noteFollow(asElement(element))).toEqual({ scrollTop: 800, scrollHeight: 1200, clientHeight: 400 });
   });
 });

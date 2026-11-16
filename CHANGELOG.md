@@ -83,6 +83,51 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Fixed
 
+- **Compaction checkpoints are rebuilt once, on upgrade.** The checkpoint's
+  watermark is a count of model-visible messages, so it has to exclude the
+  command receipts (`/compact` replies and friends) that the repaired window drops
+  - a receipt-inclusive count made the next request re-append a message the digest
+  already carried, and could start the appended tail on a `tool` row whose
+  `assistant` sat inside the digest, which providers reject. Checkpoints written
+  before that count existed cannot be told apart from correct ones on their row
+  (their watermark is *smaller* than the model count once anything is stored after
+  them), so schema v28 deletes them: the first run of each affected session
+  compacts from the transcript again, which costs one cache miss and nothing else.
+  `/compact` also refuses while a cancelled run is still unwinding (it would
+  overwrite that loop's own checkpoint), starts from the checkpoint a session
+  already has instead of rebuilding and losing its digest, and the number it
+  reports is what the fold aims to *keep* - it used to advertise a quarter of the
+  budget while keeping a fifth of it.
+
+- **A streaming transcript no longer writes its scroll twice a frame.** A real
+  Firefox profile of a long session (1 ms sampling, Windows, a rotated monitor)
+  showed the scroller being written twice and force-relaid-out five times per
+  frame, with `scrollend` between the writes and **no wheel, pointer or key event
+  anywhere in the capture**: 56 `scroll` events and 170 forced synchronous
+  reflows a second, in a metronome at 30 Hz. The follow and the window's own
+  measurement correction were each deciding "is the reader following?" and
+  answering differently on the same frame, so one scrolled down to the newest
+  content while the other held an anchor and scrolled back up; every write fired
+  a scroll event that re-measured the window and wrote again. Both now ask one
+  shared question (`followingNewest`, backed by the position the last follow left
+  behind), the follow runs as a layout effect *before* the frame is painted, and
+  a measurement correction's own scroll event is no longer read back as a new
+  viewport. A measurement that moves the rows' geometry now tells the follow to
+  re-decide (`recheck`): the document's *total* height can stay identical while
+  everything the reader is looking at moves, so no resize was ever reported.
+  Measured in Chromium over CDP at 1000×1900 (a rotated monitor): the worst frame
+  went from **three** `scrollTop` writes to **one**, and a reader who scrolls away
+  mid-stream is left alone — 0 writes and 0px of drift over 1.5s of arriving
+  content. The browser harness that proves it
+  (`scripts/verify_transcript_scroll.py`) grew `--thinking`, `--viewport`, a
+  writes-per-frame check, a "leaves a reader alone" check and two idle checks (a
+  still conversation must make zero scroll writes and re-lay out zero rows over
+  four seconds — 241 frames, one layout state, no writes), and now waits for
+  the stream to stop moving the document before judging where a jump landed —
+  two checks had been flapping on token timing. Its seed data had every tool turn
+  sharing one row id, which is why it kept reporting one-row-height yanks in the
+  window's arithmetic that the app never produced.
+
 - **The transcript stops fighting the reader.** Opening a long session could
   land it a screen short of its own newest row with "Jump to latest" showing on a
   conversation nobody had touched, scrolling down could jump the view back up,
@@ -144,6 +189,29 @@ matters to an operator says which behaviour changed, not which number.
   asserts that a tap in its centre lands inside it (30 checks).
 
 ### Added
+
+- **Slash commands: `/compact`, `/skills`, `/model` and the rest, from any client.**
+  A message whose first token is `/name` is resolved by the **server**, so the web
+  composer, a control chat, an API client and `curl` all get the same commands. The
+  built-in set is `help`, `compact` (compact the conversation now instead of
+  waiting for the budget), `context`, `model`, `effort`, `rename`, `stop`,
+  `skills`, `skill`, `mcp`, `tools`, `agents` and `docs`, and **every skill whose id
+  is a valid command name becomes one** (`/release`), with `/skill <id>` always
+  available and a built-in never shadowed. A command answers **in place**: no run
+  starts, the answer is a transcript row of its own (`name: "slash:<command>"`,
+  `slash:<command>:error` for a refusal) published as a `command_result` event, and
+  the runtime keeps those rows out of the model's request so `/help` costs no
+  tokens. `/skill` is the exception - it rewrites the message into a prompt and
+  runs it, because a skill is instructions for the model. Commands are answered in
+  every message mode, so `/stop` (and every other command) works while a run is
+  working rather than queueing behind it; `/compact` is the one that refuses then,
+  because a running loop holds its own copy of the window. `GET /api/commands` is
+  the catalog (built-ins plus skills, with the exact text the composer inserts),
+  the composer opens a `/` menu from it, and the transcript draws an answer as a
+  receipt card with the command on its face. A message that merely *starts* with a
+  slash - a pasted `/home/me/notes.md` - stays an ordinary prompt, and a lone
+  unknown token (`/compcat`) is a `400` naming the closest commands. The full
+  contract is the `slash-commands` doc topic.
 
 - **A plugin can have its own tool-output budget, and only the operator can grant
   it.** Every tool result is cut at `limits.max_tool_output_bytes` (24,000 bytes),

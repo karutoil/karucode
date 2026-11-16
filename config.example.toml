@@ -133,6 +133,28 @@ supports_images = false
 #   cost_output = 15.0
 #   # catalog_provider = "anthropic"   # models.dev provider it was prefilled from
 #
+#   # Reasoning levels for THIS model. Declaring them does two things: only the
+#   # levels listed here are offered in the composer and accepted by
+#   # PATCH /api/sessions/:id/model, and a level sends exactly the body written
+#   # under it instead of a bare `reasoning_effort` string. Write "off" and "on"
+#   # explicitly so both states are a request the endpoint really receives.
+#   #
+#   # Leave the whole section out to keep the old behaviour: every level
+#   # (none/minimal/low/medium/high/max) is offered and sent as
+#   # reasoning_effort = "<level>".
+#   #
+#   # [providers.models.variants.none]
+#   # thinking = { type = "disabled" }
+#   #
+#   # [providers.models.variants.low]
+#   # thinking = { type = "enabled", budget_tokens = 4000 }
+#   #
+#   # [providers.models.variants.medium]
+#   # thinking = { type = "enabled", budget_tokens = 12000 }
+#   #
+#   # [providers.models.variants.high]
+#   # thinking = { type = "enabled", budget_tokens = 32000 }
+#
 #   [[providers.models]]
 #   id = "qwen2.5-coder-32b"
 #   name = "Qwen2.5 Coder 32B"

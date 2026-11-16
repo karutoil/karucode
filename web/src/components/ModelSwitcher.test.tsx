@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
-import { ModelControls, ModelSwitcher, REASONING_OPTIONS, ReasoningSelector, filterModelOptions, modelOptions } from './ModelSwitcher';
+import { ModelControls, ModelSwitcher, REASONING_OPTIONS, ReasoningSelector, effortOptions, filterModelOptions, modelOptions } from './ModelSwitcher';
 import type { Config, SessionModelSelection, SessionSummary } from '../api/types';
 import { jsonResponse, resetAppState, summaryFixture } from '../test/fixtures';
 import * as store from '../state/store';
@@ -821,5 +821,60 @@ describe('REASONING_OPTIONS', () => {
     expect(
       [...container.querySelectorAll('.model-switcher-option-id')].map((node) => node.textContent),
     ).toEqual(REASONING_OPTIONS.map((option) => option.description));
+  });
+});
+
+/**
+ * `effortOptions` is what makes a model's declared variants mean something in
+ * the UI: a level the endpoint does not implement must not be offered at all.
+ */
+describe('effortOptions', () => {
+  it('offers the full built-in set when the model declares no variants', () => {
+    // `null` is "not declared", which must keep every install working unchanged.
+    expect(effortOptions(null).map((option) => option.value)).toEqual(
+      REASONING_OPTIONS.map((option) => option.value),
+    );
+  });
+
+  it('offers Default plus exactly the declared levels, in display order', () => {
+    expect(effortOptions(['high', 'none', 'low']).map((option) => option.value)).toEqual([
+      'default',
+      'none',
+      'low',
+      'high',
+    ]);
+    // Unimplemented levels are gone, not merely disabled.
+    const values = effortOptions(['high']).map((option) => option.value);
+    expect(values).not.toContain('max');
+    expect(values).not.toContain('minimal');
+  });
+
+  it('offers only Default when a model declares an empty variant map', () => {
+    expect(effortOptions([]).map((option) => option.value)).toEqual(['default']);
+  });
+
+  it('still shows a level this build has no label for', () => {
+    const options = effortOptions(['turbo']);
+    expect(options.map((option) => option.value)).toContain('turbo');
+    // Labelled with its wire value rather than hidden, so a pin made by a newer
+    // server stays visible and selectable.
+    expect(options.find((option) => option.value === 'turbo')?.label).toBe('turbo');
+  });
+
+  it('renders only the declared levels in the popover', () => {
+    resetAppState();
+    const config = twoProfileConfig();
+    // The fixture's active model is `model-b`, so that is the entry the picker
+    // resolves (`store.selectedModelEntry`) and the one whose variants matter.
+    const profile = config.providers[0]!;
+    profile.models[1] = { ...profile.models[1]!, variants: { none: {}, high: {} } };
+    store.config.value = config;
+    store.currentSessionId.value = summaryFixture.id;
+    const { container } = render(<ReasoningSelector />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Reasoning effort:/ }));
+    expect(
+      [...container.querySelectorAll('.model-switcher-option-name')].map((node) => node.textContent),
+    ).toEqual(['Default', 'Off', 'High']);
   });
 });

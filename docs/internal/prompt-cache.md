@@ -33,9 +33,11 @@ Verified against a real gateway: appending a turn to an identical prefix hit
 * Compaction is **quantised**: it runs only when the window passes one of its
   two budgets - `limits.context_max_chars` (how much text) or
   `limits.max_context_messages` (how many messages) - and then cuts the oldest
-  exchanges until the remaining window leaves room for about 50 more turns
-  (never below 15% of either budget). One cache miss per compaction instead of
-  one per turn.
+  exchanges until what is left is about **a fifth of the character budget**
+  (never below 15% of it), or until about 50 more turns fit under the item
+  ceiling. One cache miss per compaction instead of one per turn, and most of a
+  window handed back to work in rather than the few turns a nearly-full window
+  left.
 * The original user turn and the exchange in flight are never compacted, so a
   long run keeps its goal and the results it is currently reasoning about.
 * **Written findings are sticky.** An assistant turn with at least 200

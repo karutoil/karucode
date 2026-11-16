@@ -4,6 +4,8 @@ import type { ImageAttachment } from '../api/types';
 import { formatDuration, jsonSummary } from '../lib/format';
 import { imageDataUrl, imageLabel } from '../lib/images';
 import type { ToolItem } from '../state/chat';
+import type { ChatTranscriptProps } from './ChatTranscript';
+import { ToolRewind } from './ChatTranscript';
 import { toolStatusLabel } from '../state/selectors';
 import { Dialog } from './Dialog';
 import { TpsBadge } from './TpsBadge';
@@ -26,6 +28,12 @@ export interface ToolCardProps {
    * (`ThemeToolStyle`), so a long turn can read as a list.
    */
   variant?: 'card' | 'row';
+  /**
+   * Rewind this call, when it is part of the stored transcript. The button rides
+   * the call's own header and is revealed on hover, like every other rewind in
+   * the transcript.
+   */
+  onRewind?: ChatTranscriptProps['onRewind'];
 }
 
 /** Above this the numbered preview stops rendering lines; the tool was truncated anyway. */
@@ -183,7 +191,12 @@ function ToolOutput({
  * "Rows" transcript view: a turn with twenty calls reads as a list instead of
  * twenty blocks, while every byte of output is still one click away.
  */
-export function ToolCard({ item, defaultOpen = false, variant = 'card' }: ToolCardProps): JSX.Element {
+export function ToolCard({
+  item,
+  defaultOpen = false,
+  variant = 'card',
+  onRewind,
+}: ToolCardProps): JSX.Element {
   const [open, setOpen] = useState(defaultOpen || item.status === 'error');
   const previousStatus = useRef(item.status);
   const bodyId = useId();
@@ -245,6 +258,10 @@ export function ToolCard({ item, defaultOpen = false, variant = 'card' }: ToolCa
           </span>
         </button>
 
+        {/* Outside the disclosure button: a rewind inside the header's click
+            target would toggle the row as well as open the dialog. */}
+        <ToolRewind item={item} onRewind={onRewind} />
+
         {item.images && item.images.length > 0 ? (
           <ToolImages images={item.images} tool={item.name} />
         ) : null}
@@ -290,6 +307,12 @@ export function ToolCard({ item, defaultOpen = false, variant = 'card' }: ToolCa
           {toolStatusLabel(item.status)}
         </span>
       </header>
+
+      {/* Outside the header, like the row variant: every rewind rule in chat.css is
+          `.tool-card > .rewind-tool` (absolute, revealed on hover of the card), so a
+          button inside the flex header stayed at `opacity: 0` and competed with the
+          status for header width - invisible except by keyboard focus. */}
+      <ToolRewind item={item} onRewind={onRewind} />
 
       {item.images && item.images.length > 0 ? (
         <ToolImages images={item.images} tool={item.name} />
