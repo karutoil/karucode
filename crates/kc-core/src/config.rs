@@ -827,6 +827,24 @@ pub struct Limits {
     /// takes longer than this is abandoned and the deterministic ledger is used.
     #[serde(default = "d_compaction_timeout")]
     pub compaction_timeout_secs: u64,
+    /// How many times a plugin may keep a finished run going, per run.
+    ///
+    /// The `on_stop` hook exists so a workflow plugin can refuse to let a run go
+    /// quiet while something is still open - "this session is not completed yet,
+    /// keep going". That is a hook with an opinion about *stopping*, which is the
+    /// one thing a run must always be able to do, so it is bounded here: after
+    /// this many continuations the run ends regardless, with a notice that says
+    /// which plugin kept asking.
+    ///
+    /// `3` by default, `0` disables the gate entirely (a plugin is then asked and
+    /// ignored). The continuation is a normal turn: it costs a model call, it is
+    /// persisted like any other, and the person can still cancel the run.
+    #[serde(default = "d_stop_continuations")]
+    pub max_stop_continuations: u32,
+}
+
+fn d_stop_continuations() -> u32 {
+    3
 }
 
 fn d_turn_retries() -> u32 {
@@ -915,6 +933,7 @@ impl Default for Limits {
             compaction_model: None,
             compaction_max_tokens: d_compaction_max_tokens(),
             compaction_timeout_secs: d_compaction_timeout(),
+            max_stop_continuations: d_stop_continuations(),
         }
     }
 }

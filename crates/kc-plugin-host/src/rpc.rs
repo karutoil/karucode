@@ -23,9 +23,10 @@
 
 use kc_core::config::PluginConfig;
 use kc_core::plugin::{
-    allowed_ui_url, hideable_ui_target, known_ui_slot, methods, tool_output::Grants,
-    ui_kind_supported, valid_panel_id, valid_ui_id, PluginDiagnostics, PluginError, PluginManifest,
-    PluginPanel, PluginPanelData, PluginStatus, PluginToolDef, PluginToolResult,
+    allowed_ui_url, hideable_ui_target, known_ui_slot, methods, replaceable_ui_target,
+    tool_output::Grants, ui_kind_supported, valid_panel_id, valid_ui_id, PluginDiagnostics,
+    PluginError, PluginManifest, PluginPanel, PluginPanelData, PluginStatus, PluginToolDef,
+    PluginToolResult, MAX_UI_BADGE_BYTES, UI_KIND_REPLACE, UI_REPLACEABLE,
     PluginUiActionResult, PluginUiContribution, ToolCallContext, MAX_UI_CONTRIBUTIONS,
     MAX_UI_LABEL_BYTES, MAX_UI_MESSAGE_BYTES, MAX_UI_RESULT_MESSAGE_BYTES, MAX_UI_RESULT_REFRESH,
     MAX_UI_TITLE_BYTES, PANEL_SOURCE_STATIC, PANEL_SOURCE_TOOL, PLUGIN_PROTOCOL_VERSION,
@@ -1654,6 +1655,50 @@ pub(crate) fn parse_ui(
             });
             continue;
         }
+        // `replace` (§R6): rename a built-in element's own text. A stricter
+        // catalogue than `hide` for a different reason - a plugin may rename
+        // "Project" to "Workspace", never relabel the safety controls - and the
+        // text is capped like any other label.
+        if kind == UI_KIND_REPLACE {
+            let target = item.target.as_deref().map(str::trim).unwrap_or("");
+            if target.is_empty() {
+                return Err(format!(
+                    "plugin `{plugin}` declared a `replace` contribution with no `target`; name \
+                     one of: {}",
+                    UI_REPLACEABLE.join(", ")
+                ));
+            }
+            if !replaceable_ui_target(target) {
+                skipped.push(format!(
+                    "ignored `replace` target `{target}`: this build only lets a plugin replace \
+                     the text of {} (safety controls are never relabelled)",
+                    UI_REPLACEABLE.join(", ")
+                ));
+                continue;
+            }
+            let text = item.replace.as_deref().map(str::trim).unwrap_or("");
+            if text.is_empty() {
+                return Err(format!(
+                    "plugin `{plugin}` declared `replace` for `{target}` with an empty `replace`; \
+                     give the text to draw instead"
+                ));
+            }
+            if text.len() > MAX_UI_TITLE_BYTES {
+                return Err(format!(
+                    "plugin `{plugin}` declared `replace` for `{target}` with {}-byte text; the \
+                     limit is {MAX_UI_TITLE_BYTES}",
+                    text.len()
+                ));
+            }
+            out.push(PluginUiContribution {
+                kind: kind.to_string(),
+                id: format!("replace-{target}"),
+                target: Some(target.to_string()),
+                replace: Some(text.to_string()),
+                ..PluginUiContribution::default()
+            });
+            continue;
+        }
 
         // `button` and `command`: a labelled, namespaced, idempotent control.
         if !valid_ui_id(&item.id) {
@@ -1671,7 +1716,32 @@ pub(crate) fn parse_ui(
             ));
         }
         let label = item.label.trim();
-        if label.is_empty() {
+        // A badge/chip is text drawn on a row, not a labelled control: `text` is
+        // its content and `label` is only its accessible name (falling back to the
+        // text). Everything else about it is a button - one action, one message.
+        let badge_text = item.text.as_deref().map(str::trim).unwrap_or("");
+        let is_badge_slot = item
+            .slot
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(kc_core::plugin::ui_slot_is_badge);
+        if is_badge_slot {
+            if badge_text.is_empty() && label.is_empty() {
+                return Err(format!(
+                    "plugin `{plugin}` declared a badge `{}` with neither `text` nor `label`; a \
+                     chip needs something to show",
+                    item.id
+                ));
+            }
+            if badge_text.len() > MAX_UI_BADGE_BYTES {
+                return Err(format!(
+                    "plugin `{plugin}` declared a badge `{}` with {}-byte text; the limit is \
+                     {MAX_UI_BADGE_BYTES} (it sits on a session row beside the title)",
+                    item.id,
+                    badge_text.len()
+                ));
+            }
+        } else if label.is_empty() {
             return Err(format!(
                 "plugin `{plugin}` declared `{kind}` `{}` with a blank label; a control needs a \
                  name a person can read",
@@ -1804,13 +1874,41 @@ pub(crate) fn parse_ui(
             kind: kind.to_string(),
             id: item.id.clone(),
             slot,
-            label: label.to_string(),
+            label: if label.is_empty() {
+                badge_text.to_string()
+            } else {
+                label.to_string()
+            },
             title: title.map(str::to_string),
             icon: item.icon.clone(),
             action: action.map(str::to_string),
             message: message.map(str::to_string),
             keys,
             target: None,
+            text: if badge_text.is_empty() {
+                None
+            } else {
+                Some(badge_text.to_string())
+            },
+            tone: item
+                .tone
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(|t| kc_core::plugin::ui_tone_or_default(Some(t)).to_string()),
+            summary: item
+                .summary
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            sets: item
+                .sets
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            replace: None,
         });
     }
     Ok((out, skipped))

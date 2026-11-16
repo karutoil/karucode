@@ -1061,6 +1061,11 @@ async fn run_loop_inner(
     // counter that starts a fresh turn to say it started a fresh turn.
     let mut iterations = 0u32;
     let mut last_text = String::new();
+    // How many times a plugin's `on_stop` has already kept this run alive. Bounded
+    // by `limits.max_stop_continuations`, and deliberately *not* part of the turn
+    // count: a continuation is not an iteration of new work, it is the same run
+    // being told what is still missing.
+    let mut stop_continuations = 0u32;
     // Answers this run has already seen, and how many turns in a row have taught
     // the model nothing new. With no turn budget to end a runaway, this streak is
     // what ends one: a model that keeps asking questions it already has the
@@ -1475,6 +1480,56 @@ is {})",
             // comes back for it.
             sent_chars = fitted.chars();
             let messages = fitted.messages;
+
+            // --- the model-request gate ---------------------------------------
+            // A plugin may APPEND to the system prompt for this request, never
+            // replace it: the assembled prompt states the harness's own rules
+            // (that shell commands are unsandboxed, that tool output is
+            // untrusted), and a replacement would let a plugin delete them
+            // silently. The plugin host caps the append at 4 KiB; the request is
+            // then fitted with that block reserved, so it cannot push the turn
+            // over the window.
+            let extra_system = {
+                let mut names: Vec<String> =
+                    tool_specs.iter().map(|t| t.name.clone()).collect();
+                names.sort();
+                let gate = kc_core::hooks::ModelRequestGate {
+                    session_id: spec.session_id.0.clone(),
+                    run_id: spec.run_id.0.clone(),
+                    system: messages
+                        .first()
+                        .map(|m| m.content.clone())
+                        .unwrap_or_default(),
+                    messages: messages.len(),
+                    tools: names,
+                };
+                match tokio::time::timeout(HOOK_BUDGET, inner.deps.hooks.on_model_request(&gate))
+                    .await
+                {
+                    Ok(append) => append.unwrap_or_default(),
+                    Err(_) => {
+                        ctx.notice(
+                            "warn",
+                            format!(
+                                "a plugin model-request hook did not answer within {}s; \
+                                 sending the request without its text",
+                                HOOK_BUDGET.as_secs()
+                            ),
+                        );
+                        String::new()
+                    }
+                }
+            };
+            let messages = if extra_system.trim().is_empty() {
+                messages
+            } else {
+                let mut messages = messages;
+                if let Some(system) = messages.first_mut() {
+                    system.content.push_str("\n\n");
+                    system.content.push_str(&extra_system);
+                }
+                messages
+            };
 
             let request = ChatRequest {
                 admission: Some(kc_core::provider::AttemptAdmission {
@@ -1893,6 +1948,38 @@ is {})",
                     last_text,
                     iterations,
                 );
+            }
+            // --- the stop gate -------------------------------------------------
+            // The model produced no tool call, so the run would end here. A
+            // plugin may refuse that while something it tracks is unfinished
+            // ("this session is still open"), and the only thing it gets is one
+            // more turn carrying its reason as the note the next iteration
+            // starts from. The budget is per run and lives in the settings, not
+            // in the plugin: a hook must never be able to make a run unendable.
+            if let Some(reason) = stop_gate_continuation(&inner, &spec, &ctx, stop_continuations)
+                .await
+            {
+                stop_continuations += 1;
+                ctx.notice(
+                    "info",
+                    format!(
+                        "a plugin asked for another turn ({}/{}): {reason}",
+                        stop_continuations, spec.limits.max_stop_continuations
+                    ),
+                );
+                if let Err(e) = persist(
+                    &inner,
+                    &spec.session_id,
+                    &spec.run_id,
+                    spec.agent_id.as_ref(),
+                    &Message::user(&format!("[keep going] {reason}")),
+                )
+                .await
+                {
+                    ctx.error("store", format!("could not persist the stop note: {e}"));
+                }
+                history.push(Message::user(&format!("[keep going] {reason}")));
+                continue;
             }
             return LoopOutcome::new(RunStatus::Completed, None, last_text, iterations);
         }
@@ -3290,14 +3377,43 @@ async fn run_one_tool(
             }
             Some(ref tool) => {
                 let tool = Arc::clone(tool);
-                let arguments = parsed.expect("a parsed call has arguments");
+                let mut arguments = parsed.expect("a parsed call has arguments");
                 let tool_spec = tool.spec();
+                // --- the tool-call gate ----------------------------------------
+                // Runs on the parsed arguments and BEFORE approval: a plugin may
+                // block the call (its reason becomes the result, so the model
+                // learns why instead of retrying) or hand back different
+                // arguments, which are then validated against the same schema the
+                // model was offered - a plugin cannot smuggle a shape past the
+                // tool's contract. A gate answer never widens permission; the
+                // approval policy below is untouched by it.
+                //
+                // A block is reported as an *execution* outcome, not a usage
+                // failure: the call was written correctly, a policy declined it,
+                // exactly like an approval denial.
+                let mut blocked: Option<String> = None;
+                match gate_tool_call(inner, spec, ctx, &tool, &arguments).await {
+                    GateOutcome::Allow => {}
+                    GateOutcome::Blocked(reason) => {
+                        blocked = Some(format!(
+                            "blocked by a plugin: {reason}\nNothing ran. Adjust the call or ask \
+                             the person; do not re-issue it unchanged."
+                        ));
+                    }
+                    GateOutcome::Rewrite {
+                        arguments: rewritten,
+                    } => {
+                        arguments = rewritten;
+                    }
+                }
                 // The schema the model was offered is the one it is held to:
                 // a mismatch is reported with the arguments it should have
                 // sent, before anything is approved or executed. A schema the
                 // harness cannot check (a bare `{"type":"object"}` from an MCP
                 // server, `anyOf`, `$ref`) is left to the tool.
-                if let Err(problems) = tool_spec.validate_arguments(&arguments) {
+                if let Some(reason) = blocked {
+                    kc_core::tool::ToolOutcome::err(reason)
+                } else if let Err(problems) = tool_spec.validate_arguments(&arguments) {
                     usage = true;
                     kc_core::tool::ToolOutcome::err(format!(
                         "arguments rejected for `{}`:\n- {}\nRe-issue the call as: {}",
@@ -3462,6 +3578,30 @@ async fn run_one_tool(
         }
     };
 
+    // --- the tool-result gate ------------------------------------------------
+    // Runs after the tool answered and BEFORE the runtime's own cut, so a
+    // replacement is held to exactly the budget the real output was held to: a
+    // plugin may summarise a huge result, strip a secret or normalise a diff, and
+    // it still cannot use this hook to widen the context window. Its images and
+    // ok/usage flags are left untouched - it replaces text, not outcomes.
+    let outcome = match gate_tool_result(
+        inner,
+        spec,
+        ctx,
+        &call.name,
+        outcome.ok,
+        &outcome.content,
+        outcome.truncated,
+    )
+    .await
+    {
+        Some(replacement) => kc_core::tool::ToolOutcome {
+            content: replacement,
+            ..outcome
+        },
+        None => outcome,
+    };
+
     // The cut is the runtime's, not the tool's: a tool that rendered against its
     // own budget (read_file, list_dir, glob, search_files) already ended with a
     // continuation, and this catches what is left over. The advice has to match
@@ -3604,6 +3744,162 @@ const TOOL_CANCEL_GRACE: Duration = Duration::from_millis(500);
 /// deadline. The hook is advisory: losing its notes is cheaper than losing the
 /// run, so a timeout is a warning, not a failure.
 const HOOK_BUDGET: Duration = Duration::from_secs(5);
+
+/// What the `on_tool_call` gate decided, in the runtime's own terms.
+enum GateOutcome {
+    /// Run the call as written.
+    Allow,
+    /// Do not run it. The reason becomes the tool result.
+    Blocked(String),
+    /// Run different arguments, already re-validated by the schema check that
+    /// follows.
+    Rewrite { arguments: serde_json::Value },
+}
+
+/// Ask the plugin gate about one call.
+///
+/// Fails **open** on purpose: a gate that hangs, panics or answers something
+/// malformed must not stop a run from working, because the thing that actually
+/// guards danger - the approval policy, and a human's answer - is untouched by
+/// this hook. The opposite default would let one broken plugin make every tool
+/// call in the install fail.
+async fn gate_tool_call(
+    inner: &Arc<RuntimeInner>,
+    spec: &LoopSpec,
+    ctx: &EmitCtx,
+    tool: &Arc<dyn Tool>,
+    arguments: &serde_json::Value,
+) -> GateOutcome {
+    let gate = kc_core::hooks::ToolCallGate {
+        session_id: spec.session_id.0.clone(),
+        run_id: spec.run_id.0.clone(),
+        tool: tool.spec().name,
+        class: format!("{:?}", tool.class()).to_lowercase(),
+        origin: tool.spec().origin.label(),
+        arguments: arguments.clone(),
+    };
+    let deadline = spec.deadline.min(Instant::now() + HOOK_BUDGET);
+    let answer = tokio::select! {
+        biased;
+        _ = spec.cancel.cancelled() => return GateOutcome::Allow,
+        answer = tokio::time::timeout_at(deadline, inner.deps.hooks.on_tool_call(&gate)) => answer,
+    };
+    match answer {
+        Ok(kc_core::hooks::GateDecision::Allow) => GateOutcome::Allow,
+        Ok(kc_core::hooks::GateDecision::Block { reason }) => GateOutcome::Blocked(reason),
+        Ok(kc_core::hooks::GateDecision::Rewrite { arguments }) => {
+            GateOutcome::Rewrite { arguments }
+        }
+        Err(_) => {
+            ctx.notice(
+                "warn",
+                format!(
+                    "a plugin tool-call gate did not answer within {}s; running the call",
+                    HOOK_BUDGET.as_secs()
+                ),
+            );
+            GateOutcome::Allow
+        }
+    }
+}
+
+/// Ask the plugin gate whether it wants to replace a tool result.
+///
+/// Runs **before** truncation, so whatever the plugin returns is then bounded by
+/// the tool's own output budget exactly like real output - a plugin cannot use
+/// this hook to widen the context window.
+async fn gate_tool_result(
+    inner: &Arc<RuntimeInner>,
+    spec: &LoopSpec,
+    ctx: &EmitCtx,
+    tool: &str,
+    ok: bool,
+    output: &str,
+    truncated: bool,
+) -> Option<String> {
+    let gate = kc_core::hooks::ToolResultGate {
+        session_id: spec.session_id.0.clone(),
+        run_id: spec.run_id.0.clone(),
+        tool: tool.to_string(),
+        ok,
+        output: output.to_string(),
+        truncated,
+    };
+    let deadline = spec.deadline.min(Instant::now() + HOOK_BUDGET);
+    let answer = tokio::select! {
+        biased;
+        _ = spec.cancel.cancelled() => return None,
+        answer = tokio::time::timeout_at(deadline, inner.deps.hooks.on_tool_result_gate(&gate)) => answer,
+    };
+    match answer {
+        Ok(replacement) => replacement,
+        Err(_) => {
+            ctx.notice(
+                "warn",
+                format!(
+                    "a plugin tool-result gate did not answer within {}s; keeping the real result",
+                    HOOK_BUDGET.as_secs()
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// Ask the stop gate whether this run may end, returning the note to continue with.
+///
+/// Fails closed in the only way that keeps a run endable: no hook, a timeout, a
+/// cancel, a disabled budget or an exhausted one all mean "stop", and the run
+/// ends exactly as it would have without the hook. The plugin never sees a
+/// failure here - its gate is advisory by construction.
+async fn stop_gate_continuation(
+    inner: &Arc<RuntimeInner>,
+    spec: &LoopSpec,
+    ctx: &EmitCtx,
+    used: u32,
+) -> Option<String> {
+    let max = spec.limits.max_stop_continuations;
+    if max == 0 || used >= max {
+        return None;
+    }
+    let gate = kc_core::hooks::StopGate {
+        session_id: spec.session_id.0.clone(),
+        run_id: spec.run_id.0.clone(),
+        status: RunStatus::Completed.as_str().to_string(),
+        continuations: used,
+        max_continuations: max,
+    };
+    let deadline = spec.deadline.min(Instant::now() + HOOK_BUDGET);
+    let decision = tokio::select! {
+        biased;
+        _ = spec.cancel.cancelled() => None,
+        answer = tokio::time::timeout_at(deadline, inner.deps.hooks.on_stop(&gate)) => {
+            match answer {
+                Ok(decision) => decision,
+                Err(_) => {
+                    ctx.notice(
+                        "warn",
+                        format!(
+                            "a plugin stop hook did not answer within {}s; ending the run",
+                            HOOK_BUDGET.as_secs()
+                        ),
+                    );
+                    None
+                }
+            }
+        }
+    };
+    decision
+        .filter(|d| d.keep_going)
+        .map(|d| {
+            if d.reason.trim().is_empty() {
+                "a plugin asked for another turn".to_string()
+            } else {
+                d.reason
+            }
+        })
+}
+
 
 /// Consume the provider stream, emitting deltas live.
 async fn consume(

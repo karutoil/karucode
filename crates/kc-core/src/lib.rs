@@ -45,6 +45,9 @@ pub use paths::Workspace;
 pub use queue::{
     AttachmentMode, QueuedAttachment, QueuedKind, QueuedMessage, MAX_QUEUED_ATTACHMENTS,
 };
+pub use hooks::{
+    GateDecision, ModelRequestGate, StopDecision, StopGate, ToolCallGate, ToolResultGate,
+};
 pub use settings::Settings;
 pub use skill::{CustomSkill, Skill, SkillRegistry, SkillRoot, SkillSource, SkillsConfig};
 pub use store::{RewindPoint, StoredMessage};

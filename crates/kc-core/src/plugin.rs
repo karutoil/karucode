@@ -170,6 +170,8 @@ pub const UI_KIND_COMMAND: &str = "command";
 pub const UI_KIND_KEYBINDING: &str = "keybinding";
 /// One `hide` contribution: a built-in element the app should not draw.
 pub const UI_KIND_HIDE: &str = "hide";
+/// One `replace` contribution: a built-in element's own text, replaced (§R6).
+pub const UI_KIND_REPLACE: &str = "replace";
 
 /// Every contribution kind this build understands.
 ///
@@ -180,7 +182,19 @@ pub const UI_KINDS: &[&str] = &[
     UI_KIND_COMMAND,
     UI_KIND_KEYBINDING,
     UI_KIND_HIDE,
+    UI_KIND_REPLACE,
 ];
+
+/// The tones a badge or chip may use.
+///
+/// Closed on purpose: the app owns the palette (and the theme owns the colours),
+/// so a plugin picks a *role* - done, active, warn - and never a hex value. An
+/// unknown tone draws `neutral` rather than failing.
+pub const UI_TONES: &[&str] = &["neutral", "accent", "success", "warn", "danger", "muted"];
+/// The tone drawn when a badge names none, or names one this build does not have.
+pub const UI_TONE_DEFAULT: &str = "neutral";
+/// Cap on a badge's text, in bytes. It sits on a session row beside the title.
+pub const MAX_UI_BADGE_BYTES: usize = 24;
 
 /// The composer's action row, left of the model pins.
 pub const UI_SLOT_COMPOSER_TOOLBAR: &str = "composer.toolbar";
@@ -188,36 +202,80 @@ pub const UI_SLOT_COMPOSER_TOOLBAR: &str = "composer.toolbar";
 pub const UI_SLOT_INSPECTOR_HEADER: &str = "inspector.header";
 /// The session header row above the transcript.
 pub const UI_SLOT_SESSION_HEADER: &str = "session.header";
+/// The workspace status bar at the bottom of the window.
+pub const UI_SLOT_STATUS_BAR: &str = "statusbar.item";
+/// A small chip drawn on a row of the project rail's session list.
+pub const UI_SLOT_SESSION_ROW_BADGE: &str = "session.row.badge";
+/// An item in a rail session row's right-click menu.
+pub const UI_SLOT_SESSION_ROW_MENU: &str = "session.row.menu";
+/// A chip in the open session's header, beside its title.
+pub const UI_SLOT_SESSION_HEADER_CHIP: &str = "session.header.chip";
 
 /// Every slot a `button` may target.
 ///
 /// Closed on purpose: the app decides where a control can land, so no plugin can
 /// mint a position and no CSS escaping is involved. Adding a slot is a one-line
 /// change here plus the mount point in the frontend.
+///
+/// The three `session.*` entries are what makes a workflow plugin possible
+/// without shipping markup: a badge is text plus a tone, a menu item is a label
+/// plus an action, and a header chip is the same. All three are drawn by the app.
 pub const UI_SLOTS: &[&str] = &[
     UI_SLOT_COMPOSER_TOOLBAR,
     UI_SLOT_INSPECTOR_HEADER,
     UI_SLOT_SESSION_HEADER,
+    UI_SLOT_STATUS_BAR,
+    UI_SLOT_SESSION_ROW_BADGE,
+    UI_SLOT_SESSION_ROW_MENU,
+    UI_SLOT_SESSION_HEADER_CHIP,
 ];
 
 /// Harness identifiers of built-in UI that a plugin may hide.
 ///
-/// An **allowlist**, and a short one. Hiding is app-wide (every session, every
-/// project) and a plugin could otherwise remove the control that stops a runaway
-/// run or answers an approval, so only cosmetic and navigational elements are
-/// listed. Anything not named here is refused with the list, which teaches the
-/// author instead of silently doing nothing.
+/// An **allowlist**. Hiding is app-wide (every session, every project) and a
+/// plugin could otherwise remove the control that stops a runaway run or answers
+/// an approval, so only cosmetic and navigational elements are listed. Anything
+/// not named here is refused with the list, which teaches the author instead of
+/// silently doing nothing.
+///
+/// The list is the app's element registry: every entry maps to a documented
+/// mount point in the web UI, and a contribution naming one the running build
+/// does not draw is accepted and simply matches nothing - the same graceful
+/// degradation as an icon name the app does not have.
 pub const UI_HIDEABLE: &[&str] = &[
     UI_HIDE_COMPOSER_ATTACH,
+    UI_HIDE_COMPOSER_MODEL,
     UI_HIDE_INSPECTOR_TAB_WORKSPACE,
     UI_HIDE_INSPECTOR_TAB_CHANGES,
     UI_HIDE_INSPECTOR_TAB_SESSION,
     UI_HIDE_INSPECTOR_TAB_AGENTS,
     UI_HIDE_INSPECTOR_CONTEXT,
+    UI_HIDE_RAIL_FOOTER,
+    UI_HIDE_SESSION_HEADER_ACTIONS,
+    UI_HIDE_NOTIFICATIONS,
+    UI_HIDE_STATUS_BAR,
+    UI_HIDE_COMMAND_PALETTE,
+];
+
+/// Elements a plugin may **replace the text of**, rather than hide.
+///
+/// A narrower catalogue than [`UI_HIDEABLE`] and for a different reason: text
+/// substitution is how an organisation renames the product in its own
+/// deployment ("Session" → "Thread", "Project" → "Workspace") without forking.
+/// Nothing that states a safety property is listed - a plugin must not be able to
+/// relabel "Approve" or rewrite the unsandboxed-shell warning.
+pub const UI_REPLACEABLE: &[&str] = &[
+    UI_REPLACE_APP_NAME,
+    UI_REPLACE_SESSION_LABEL,
+    UI_REPLACE_PROJECT_LABEL,
+    UI_REPLACE_NEW_SESSION_LABEL,
+    UI_REPLACE_GREETING,
 ];
 
 /// The composer's paperclip / attach-files button.
 pub const UI_HIDE_COMPOSER_ATTACH: &str = "composer.attach";
+/// The composer's model / provider picker.
+pub const UI_HIDE_COMPOSER_MODEL: &str = "composer.model";
 /// The results inspector's **Files** tab.
 pub const UI_HIDE_INSPECTOR_TAB_WORKSPACE: &str = "inspector.tab.workspace";
 /// The results inspector's **Git** tab.
@@ -232,6 +290,30 @@ pub const UI_HIDE_INSPECTOR_TAB_AGENTS: &str = "inspector.tab.agents";
 /// header and now sits in the session header, so hiding it works whether the
 /// results panel is docked, popped out or closed.
 pub const UI_HIDE_INSPECTOR_CONTEXT: &str = "inspector.context";
+/// The rail's footer (theme and settings buttons).
+pub const UI_HIDE_RAIL_FOOTER: &str = "rail.footer";
+/// The session header's action buttons, beside the title.
+pub const UI_HIDE_SESSION_HEADER_ACTIONS: &str = "session.header.actions";
+/// The notification bell and its panel.
+pub const UI_HIDE_NOTIFICATIONS: &str = "notifications";
+/// The workspace status bar.
+pub const UI_HIDE_STATUS_BAR: &str = "statusbar";
+/// The `Ctrl/Cmd+K` command palette entry point.
+///
+/// The chord itself stays bound (it is the app's key map); this removes the
+/// visible affordance, which is what a deployment with its own launcher wants.
+pub const UI_HIDE_COMMAND_PALETTE: &str = "command-palette";
+
+/// The product name drawn in the rail's lockup.
+pub const UI_REPLACE_APP_NAME: &str = "app.name";
+/// The word used for a conversation ("Session").
+pub const UI_REPLACE_SESSION_LABEL: &str = "label.session";
+/// The word used for a workspace root ("Project").
+pub const UI_REPLACE_PROJECT_LABEL: &str = "label.project";
+/// The "New session" button label.
+pub const UI_REPLACE_NEW_SESSION_LABEL: &str = "label.new-session";
+/// The empty-state greeting above the composer.
+pub const UI_REPLACE_GREETING: &str = "empty.greeting";
 
 /// Most contributions one plugin may add. A manifest is a manifest, not a UI
 /// framework: a plugin that needs more than this is a page, and pages belong in a
@@ -386,6 +468,24 @@ pub struct PluginUiContribution {
     /// For `hide`: one of [`UI_HIDEABLE`].
     #[serde(default)]
     pub target: Option<String>,
+    /// For a `session.row.badge` (§R5): the chip's text. Short by design - it is
+    /// drawn on a 26 px row next to the session's own title.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// For a `session.row.badge`: one of [`UI_TONES`]. Defaults to `neutral`.
+    #[serde(default)]
+    pub tone: Option<String>,
+    /// For `command`: the slash command's summary line, shown in the `/` menu and
+    /// in `GET /api/commands` if this contribution is also a command (§R3).
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// For a session-state command: the state keys it writes, so the UI can
+    /// refresh exactly those instead of every panel. Informational.
+    #[serde(default)]
+    pub sets: Vec<String>,
+    /// For `replace` (§R6): the literal text to put in place of the element's own.
+    #[serde(default)]
+    pub replace: Option<String>,
 }
 
 /// Whether `id` is usable as a contribution id.
@@ -410,6 +510,33 @@ pub fn known_ui_slot(slot: &str) -> bool {
 /// Whether `target` is a built-in element a plugin may ask the app to hide.
 pub fn hideable_ui_target(target: &str) -> bool {
     UI_HIDEABLE.contains(&target)
+}
+
+/// Whether `target` is an element whose text a plugin may replace (§R6).
+pub fn replaceable_ui_target(target: &str) -> bool {
+    UI_REPLACEABLE.contains(&target)
+}
+
+/// Whether `tone` is a badge tone this build draws.
+pub fn known_ui_tone(tone: &str) -> bool {
+    UI_TONES.contains(&tone)
+}
+
+/// The tone a badge is actually drawn with: its own if known, else `neutral`.
+pub fn ui_tone_or_default(tone: Option<&str>) -> &'static str {
+    match tone {
+        Some(tone) if known_ui_tone(tone) => UI_TONES
+            .iter()
+            .find(|t| **t == tone)
+            .copied()
+            .unwrap_or(UI_TONE_DEFAULT),
+        _ => UI_TONE_DEFAULT,
+    }
+}
+
+/// Whether `slot` holds a chip/badge, which carries `text` instead of a label.
+pub fn ui_slot_is_badge(slot: &str) -> bool {
+    slot == UI_SLOT_SESSION_ROW_BADGE || slot == UI_SLOT_SESSION_HEADER_CHIP
 }
 
 /// The id a contribution is hosted under: `plugin__<plugin>__<id>`.
@@ -540,6 +667,64 @@ pub mod methods {
     /// refresh, and optionally a URL to open. It runs because a person activated
     /// a control the plugin itself contributed — not on a model's initiative.
     pub const UI_ACTION: &str = super::UI_ACTION_METHOD;
+    /// Plugin-owned durable state (host → plugin: none; the plugin asks the host).
+    ///
+    /// The four calls are `plugin/state/get`, `plugin/state/set`,
+    /// `plugin/state/delete` and `plugin/state/list`. They are requests the
+    /// **plugin** sends to the host, over the same stdio channel tools and
+    /// `notify` already use, and the host answers with a JSON-RPC response. A
+    /// plugin therefore keeps its own data without growing a database of its own,
+    /// and without the harness ever exposing another session's rows.
+    pub const STATE_GET: &str = "plugin/state/get";
+    pub const STATE_SET: &str = "plugin/state/set";
+    pub const STATE_DELETE: &str = "plugin/state/delete";
+    pub const STATE_LIST: &str = "plugin/state/list";
+}
+
+/// Scopes a plugin may store state in.
+///
+/// * `session` — one conversation. The host fills in the session id, so a plugin
+///   cannot name a session it was not asked about; deleting a session deletes its
+///   rows.
+/// * `project` — one project, visible to every session in it.
+/// * `install` — this server, every project. The natural home for "the operator
+///   turned this plugin off", not for per-session workflow state.
+pub mod state_scope {
+    pub const SESSION: &str = "session";
+    pub const PROJECT: &str = "project";
+    pub const INSTALL: &str = "install";
+    pub const ALL: &[&str] = &[SESSION, PROJECT, INSTALL];
+}
+
+/// Longest key a plugin may store under, in bytes.
+///
+/// Keys are sorted and shown in a panel and in `GET /api/plugins/:name/state`, so
+/// they stay short and boring: `[a-z0-9._-]`, which makes them stable across
+/// languages and impossible to confuse with a path.
+pub const MAX_STATE_KEY_BYTES: usize = 120;
+/// Largest single value a plugin may store, in bytes (JSON, serialised).
+///
+/// This is *data*, so the bound is generous next to a tool result: a workflow
+/// plugin keeping a per-session note does not need more, and a plugin that wants
+/// to keep a database is a plugin that should be writing a file.
+pub const MAX_STATE_VALUE_BYTES: usize = 64 * 1024;
+/// Rows one plugin may hold per scope, so a leak is bounded even under the byte cap.
+pub const MAX_STATE_KEYS_PER_SCOPE: usize = 4_096;
+/// Rows a `plugin/state/list` answer returns at most.
+pub const MAX_STATE_LIST: usize = 512;
+
+/// Whether `key` is a usable plugin state key.
+pub fn valid_state_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= MAX_STATE_KEY_BYTES
+        && key.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' || c == '.'
+        })
+}
+
+/// Whether `scope` is one [`state_scope::ALL`] names.
+pub fn valid_state_scope(scope: &str) -> bool {
+    state_scope::ALL.contains(&scope)
 }
 
 /// Hooks the core can invoke on a plugin. Unsupported hooks are documented as
@@ -557,8 +742,21 @@ pub mod hooks {
     /// Called for every notification the runtime emits, so a plugin can bridge
     /// karucode to an external notifier (ntfy, Pushover, a desktop daemon).
     pub const ON_NOTIFY: &str = "on_notify";
+    /// Asked when a run is about to end. May keep it going for one more turn.
+    pub const ON_STOP: &str = "on_stop";
+    /// Called when the operator draws a session list, to shape how it is shown.
+    pub const BEFORE_SESSION_LIST: &str = "before_session_list";
 
-    pub const IMPLEMENTED: &[&str] = &[BEFORE_PROMPT, ON_RUN_END, ON_TOOL_RESULT, ON_NOTIFY];
+    pub const IMPLEMENTED: &[&str] = &[
+        BEFORE_PROMPT,
+        ON_RUN_END,
+        ON_TOOL_RESULT,
+        ON_NOTIFY,
+        ON_TOOL_CALL,
+        ON_MODEL_REQUEST,
+        ON_STOP,
+        BEFORE_SESSION_LIST,
+    ];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

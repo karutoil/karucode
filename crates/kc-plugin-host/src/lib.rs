@@ -2020,6 +2020,59 @@ impl PluginHooks {
     }
 }
 
+/// Turn the answers to `on_tool_call` into one decision, in **plugin order**.
+///
+/// Determinism is the point: the first plugin to block wins, and a block always
+/// beats a rewrite, so two plugins cannot race to decide what a call means. A
+/// rewrite from a later plugin is applied only if every earlier answer was
+/// `allow` too - "the most restrictive answer that still makes sense" is easier
+/// to reason about than "whichever process answered last".
+///
+/// A malformed answer is ignored with a warning rather than treated as a block:
+/// a broken plugin must not be able to wedge every tool call in the install. The
+/// approval policy is still the security gate.
+pub(crate) fn fold_gate_answers(values: Vec<Value>) -> kc_core::hooks::GateDecision {
+    use kc_core::hooks::GateDecision;
+    let mut decision = GateDecision::Allow;
+    for value in values {
+        match value {
+            Value::Null => continue,
+            Value::Object(ref map) => {
+                if map.get("block").and_then(Value::as_bool).unwrap_or(false) {
+                    let reason = map
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|r| !r.is_empty())
+                        .unwrap_or("a plugin blocked this tool call without a reason")
+                        .to_string();
+                    return GateDecision::Block { reason };
+                }
+                if let Some(arguments) = map.get("arguments") {
+                    if arguments.is_object() {
+                        decision = GateDecision::Rewrite {
+                            arguments: arguments.clone(),
+                        };
+                    }
+                }
+            }
+            other => {
+                warn!(
+                    hook = hooks::ON_TOOL_CALL,
+                    answer = %other,
+                    "ignored a malformed on_tool_call answer (expected {{\"block\"}} or {{\"arguments\"}})"
+                );
+            }
+        }
+    }
+    decision
+}
+
+/// Pick the gate's live plugin list: the handle follows reloads, like `panels`.
+fn gate_targets(self_: &PluginHooks) -> Vec<Arc<PluginShared>> {
+    self_.plugins.snapshot()
+}
+
 #[async_trait]
 impl kc_core::hooks::Hooks for PluginHooks {
     async fn before_prompt(&self, session_id: &str, workspace: &str) -> Vec<String> {
@@ -2051,6 +2104,22 @@ impl kc_core::hooks::Hooks for PluginHooks {
             "ok": ok,
         });
         fan_out(&self.plugins.snapshot(), hooks::ON_TOOL_RESULT, &payload).await;
+    }
+
+    async fn on_tool_call(&self, call: &kc_core::hooks::ToolCallGate) -> kc_core::hooks::GateDecision {
+        fold_gate_answers(gate_tool_call(gate_targets(self), call).await)
+    }
+
+    async fn on_tool_result_gate(&self, result: &kc_core::hooks::ToolResultGate) -> Option<String> {
+        replace_tool_result(gate_targets(self), result).await
+    }
+
+    async fn on_model_request(&self, request: &kc_core::hooks::ModelRequestGate) -> Option<String> {
+        append_to_prompt(gate_targets(self), request).await
+    }
+
+    async fn on_stop(&self, stop: &kc_core::hooks::StopGate) -> Option<kc_core::hooks::StopDecision> {
+        keep_going(gate_targets(self), stop).await
     }
 
     fn notifier(&self) -> Option<std::sync::Arc<dyn kc_core::hooks::NotificationObserver>> {
@@ -2105,6 +2174,22 @@ impl kc_core::hooks::Hooks for PluginHost {
         fan_out(&self.ready_plugins(), hooks::ON_TOOL_RESULT, &payload).await;
     }
 
+    async fn on_tool_call(&self, call: &kc_core::hooks::ToolCallGate) -> kc_core::hooks::GateDecision {
+        fold_gate_answers(gate_tool_call(self.ready_plugins(), call).await)
+    }
+
+    async fn on_tool_result_gate(&self, result: &kc_core::hooks::ToolResultGate) -> Option<String> {
+        replace_tool_result(self.ready_plugins(), result).await
+    }
+
+    async fn on_model_request(&self, request: &kc_core::hooks::ModelRequestGate) -> Option<String> {
+        append_to_prompt(self.ready_plugins(), request).await
+    }
+
+    async fn on_stop(&self, stop: &kc_core::hooks::StopGate) -> Option<kc_core::hooks::StopDecision> {
+        keep_going(self.ready_plugins(), stop).await
+    }
+
     fn notifier(&self) -> Option<std::sync::Arc<dyn kc_core::hooks::NotificationObserver>> {
         Some(std::sync::Arc::new(PluginHooks {
             plugins: self.live_plugins.clone(),
@@ -2116,6 +2201,193 @@ impl kc_core::hooks::Hooks for PluginHost {
 pub(crate) const MAX_HOOK_NOTE_BYTES: usize = 4 * 1024;
 /// Largest total of all hook contributions injected into the system prompt.
 pub(crate) const MAX_HOOK_NOTES_BYTES: usize = 16 * 1024;
+/// Largest arguments object forwarded to, or accepted back from, `on_tool_call`.
+///
+/// The gate sees what the model wrote and may hand back a replacement that the
+/// harness re-validates. 64 KiB is far above any real call (the biggest schema
+/// here is a few kilobytes) and keeps a plugin from turning one tool call into a
+/// context bomb.
+pub(crate) const MAX_GATE_ARGUMENT_BYTES: usize = 64 * 1024;
+/// Largest tool output forwarded to `on_tool_result`.
+///
+/// The hook is the place a plugin *replaces* a result, so it must see enough to
+/// decide. It gets the pre-truncation output up to this bound; beyond it the text
+/// is cut with the usual marker and `truncated: true` says so, so a plugin can
+/// choose to leave a huge result alone instead of rewriting it blind.
+pub(crate) const MAX_GATE_OUTPUT_BYTES: usize = 256 * 1024;
+/// Largest replacement a `on_tool_result` may return.
+///
+/// The result is truncated to the tool's own budget immediately afterwards, so
+/// this only bounds what crosses the wire.
+pub(crate) const MAX_GATE_REPLACEMENT_BYTES: usize = 256 * 1024;
+/// Largest text `on_model_request` may append to the system prompt.
+///
+/// The prompt is billed on every call of every run; a plugin appending a manual
+/// would be a permanent cost its author never sees.
+pub(crate) const MAX_PROMPT_APPEND_BYTES: usize = 4 * 1024;
+/// Largest `reason` a `on_stop` may carry into the next turn.
+pub(crate) const MAX_STOP_REASON_BYTES: usize = 2 * 1024;
+
+/// Ask every ready plugin whether a tool call may run, and how.
+async fn gate_tool_call(
+    plugins: Vec<Arc<PluginShared>>,
+    call: &kc_core::hooks::ToolCallGate,
+) -> Vec<Value> {
+    let (arguments, cut) = cap_value(call.arguments.clone(), MAX_GATE_ARGUMENT_BYTES);
+    if cut {
+        warn!(
+            hook = hooks::ON_TOOL_CALL,
+            tool = %call.tool,
+            limit = MAX_GATE_ARGUMENT_BYTES,
+            "the arguments forwarded to on_tool_call were truncated; a rewrite would be refused"
+        );
+    }
+    let payload = serde_json::json!({
+        "session_id": call.session_id,
+        "run_id": call.run_id,
+        "tool": call.tool,
+        "class": call.class,
+        "origin": call.origin,
+        "arguments": arguments,
+        "truncated": cut,
+    });
+    fan_out(&plugins, hooks::ON_TOOL_CALL, &payload).await
+}
+
+/// Ask every ready plugin whether it wants to replace a tool result.
+///
+/// The **first** non-empty replacement wins, in plugin order, for the same
+/// determinism reason as the call gate. An answer over the cap is dropped with a
+/// warning: a replacement the harness would have to cut mid-sentence is worse
+/// than the real output.
+async fn replace_tool_result(
+    plugins: Vec<Arc<PluginShared>>,
+    result: &kc_core::hooks::ToolResultGate,
+) -> Option<String> {
+    let (output, cut) = cap_text(&result.output, MAX_GATE_OUTPUT_BYTES);
+    if cut {
+        debug!(
+            hook = hooks::ON_TOOL_RESULT,
+            tool = %result.tool,
+            limit = MAX_GATE_OUTPUT_BYTES,
+            "the tool output forwarded to on_tool_result was truncated"
+        );
+    }
+    let payload = serde_json::json!({
+        "session_id": result.session_id,
+        "run_id": result.run_id,
+        "tool": result.tool,
+        "ok": result.ok,
+        "output": output,
+        "truncated": result.truncated || cut,
+    });
+    for value in fan_out(&plugins, hooks::ON_TOOL_RESULT, &payload).await {
+        let Some(replacement) = value.get("output").and_then(Value::as_str) else {
+            continue;
+        };
+        if replacement.len() > MAX_GATE_REPLACEMENT_BYTES {
+            warn!(
+                hook = hooks::ON_TOOL_RESULT,
+                tool = %result.tool,
+                bytes = replacement.len(),
+                limit = MAX_GATE_REPLACEMENT_BYTES,
+                "ignored an on_tool_result replacement that was over the cap"
+            );
+            continue;
+        }
+        return Some(replacement.to_string());
+    }
+    None
+}
+
+/// Ask every ready plugin whether it has text to append to this request's prompt.
+///
+/// Contributions are joined in plugin order and capped **in total**, not each:
+/// two plugins that each stay under their own budget can still add up to an
+/// expensive prompt.
+async fn append_to_prompt(
+    plugins: Vec<Arc<PluginShared>>,
+    request: &kc_core::hooks::ModelRequestGate,
+) -> Option<String> {
+    let payload = serde_json::json!({
+        "session_id": request.session_id,
+        "run_id": request.run_id,
+        "system": request.system,
+        "messages": request.messages,
+        "tools": request.tools,
+    });
+    let mut joined = String::new();
+    for value in fan_out(&plugins, hooks::ON_MODEL_REQUEST, &payload).await {
+        let Some(text) = value_to_text(&value) else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if !joined.is_empty() {
+            joined.push_str("\n\n");
+        }
+        joined.push_str(text);
+        if joined.len() >= MAX_PROMPT_APPEND_BYTES {
+            break;
+        }
+    }
+    if joined.is_empty() {
+        return None;
+    }
+    let (joined, cut) = cap_text(&joined, MAX_PROMPT_APPEND_BYTES);
+    if cut {
+        warn!(
+            hook = hooks::ON_MODEL_REQUEST,
+            limit = MAX_PROMPT_APPEND_BYTES,
+            "the text appended to the system prompt was truncated"
+        );
+    }
+    Some(joined)
+}
+
+/// Ask every ready plugin whether this run may stop.
+///
+/// The first plugin that says "not yet" wins, in plugin order, and its reason is
+/// cut to [`MAX_STOP_REASON_BYTES`]. The runtime owns the continuation budget:
+/// this function only reports what a plugin asked for.
+async fn keep_going(
+    plugins: Vec<Arc<PluginShared>>,
+    stop: &kc_core::hooks::StopGate,
+) -> Option<kc_core::hooks::StopDecision> {
+    let payload = serde_json::json!({
+        "session_id": stop.session_id,
+        "run_id": stop.run_id,
+        "status": stop.status,
+        "continuations": stop.continuations,
+        "max_continuations": stop.max_continuations,
+    });
+    for value in fan_out(&plugins, hooks::ON_STOP, &payload).await {
+        if !value.get("continue").and_then(Value::as_bool).unwrap_or(false) {
+            continue;
+        }
+        let reason = value
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .unwrap_or("a plugin asked for another turn");
+        let (reason, _) = cap_text(reason, MAX_STOP_REASON_BYTES);
+        return Some(kc_core::hooks::StopDecision::keep_going(reason));
+    }
+    None
+}
+
+/// Truncate a JSON value's string content to `max` bytes, keeping it valid JSON.
+fn cap_value(value: Value, max: usize) -> (Value, bool) {
+    let text = value.to_string();
+    if text.len() <= max {
+        return (value, false);
+    }
+    let (text, _) = cap_text(&text, max);
+    (Value::String(text), true)
+}
 /// Largest user turn forwarded in the `before_prompt` payload.
 ///
 /// The turn is the user's own text and can be a pasted file, but a plugin's hook
