@@ -622,6 +622,16 @@ impl Store for FakeStore {
                 .filter(|m| m.session_id == session_id)
                 .count() as u64,
             messages_main: main.len() as u64,
+            // The same rule as the real store: a command receipt is a row the
+            // model never reads, so it is not part of the model-visible count.
+            messages_model: main
+                .iter()
+                .filter(|message| {
+                    !message.name.as_deref().is_some_and(|name| {
+                        name.starts_with(kc_core::store::COMMAND_MESSAGE_PREFIX)
+                    })
+                })
+                .count() as u64,
             messages_subagent: db
                 .messages
                 .iter()
@@ -1803,7 +1813,11 @@ impl Settings for FakeSettings {
                 // Same rule as the server: a declared-level map wins, otherwise
                 // the bare `reasoning_effort` string.
                 let variants = model.variants.clone();
-                kc_core::config::Config::apply_reasoning_level(&mut model, effort, &variants);
+                kc_core::config::Config::apply_reasoning_level(
+                    &mut model,
+                    effort,
+                    variants.as_ref(),
+                );
             }
         }
         model

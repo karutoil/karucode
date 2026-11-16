@@ -1423,16 +1423,29 @@ export async function sendChatMessage(content: string): Promise<boolean> {
     try {
       const result = await api.sendMessage(sessionId, trimmed);
       if (store.currentSessionId.value === sessionId) {
-        const current = store.chat.value;
-        // A message the server answered as a slash command started no run: the
-        // answer arrives as a `command_result` frame, and the optimistic row the
-        // composer drew stays a user bubble with no run behind it.
-        const runId = 'run_id' in result ? result.run_id : null;
-        store.chat.value = {
-          ...current,
-          runId: runId ?? current.runId,
-          items: runId === null ? current.items : markUserRun(current.items, runId),
-        };
+        if (result.mode === 'command') {
+          // The server answered this message as a slash command: it stored the
+          // command's reply and *no* user row, and started no run. The answer
+          // arrives as a `command_result` frame, so the optimistic bubble is a
+          // message that does not exist and the run state it set is not a run -
+          // leaving either behind stuck the session "running" (every later send
+          // returned false at the guard) and left a bubble with nothing behind it.
+          const current = store.chat.value;
+          store.chat.value = {
+            ...current,
+            items: current.items.filter((item) => item.id !== localId),
+            running: false,
+            runStatus: null,
+            iteration: 0,
+          };
+        } else {
+          const current = store.chat.value;
+          store.chat.value = {
+            ...current,
+            runId: result.run_id,
+            items: markUserRun(current.items, result.run_id),
+          };
+        }
       }
       // The new row (a draft's first send included) belongs in the rail now: the
       // first message is also what titles an untitled session.

@@ -193,18 +193,19 @@ pub(super) async fn context(
          | Model | `{}` on `{}` ({}) |\n\
          | Window | {} |\n\
          | Request budget | {} characters |\n\
-         | `/compact` target | {} characters |\n\
+         | `/compact` ceiling | {} characters (a quarter of the budget) |\n\
+         | `/compact` keeps | about a fifth of that ceiling, minus headroom for the turns in flight |\n\
          | Messages | {} in this conversation, {} in subagents |\n\
          | Tools | {} available |\n\n\
-         The budget is what one request may carry. `/compact` folds the conversation down to \
-         a quarter of it; until then older turns ride along and the provider's prefix cache \
-         keeps them cheap.\n",
+         The budget is what one request may carry. `/compact` folds the conversation against \
+         a quarter of it, keeping a share of that ceiling; until then older turns ride along \
+         and the provider's prefix cache keeps them cheap.\n",
         escape(&model.model),
         escape(&model.provider),
         pinned,
         window,
         thousands(budget),
-        thousands((budget / 4).max(2_000)),
+        thousands(kc_runtime::context::forced_compaction_ceiling(budget)),
         thousands(stats.messages_main as usize),
         thousands(stats.messages_subagent as usize),
         state.runtime().tools().len(),

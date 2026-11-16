@@ -524,18 +524,30 @@ export function withStoredMessageIds(items: ChatItem[], detail: SessionDetail): 
    * the live text of a settled row is exactly the stored content - and only when
    * no row agrees does the newest one stand in, which still rewinds to the same
    * turn the reader clicked.
+   *
+   * Rows are claimed one-to-one, in conversation order. Two identical prompts in
+   * one run (a prompt and a steer that repeats it, "continue" being the common
+   * one) otherwise both matched the *newest* row, so clicking the first one sent
+   * the second one's id and rewound to the wrong turn.
    */
+  const claimed = new Set<number>();
   const proseSource = (item: MessageItem): number | undefined => {
     if (!item.runId) return undefined;
     const candidates = rows.get(`${item.runId}|${item.role}`);
     if (candidates === undefined || candidates.length === 0) return undefined;
+    const free = candidates.filter((candidate) => !claimed.has(candidate.id));
     if (item.content !== '') {
-      for (let index = candidates.length - 1; index >= 0; index -= 1) {
-        const candidate = candidates[index];
-        if (candidate !== undefined && candidate.content === item.content) return candidate.id;
+      // Oldest unclaimed match: the items are walked in conversation order, so the
+      // n-th item with a given text takes the n-th row with that text.
+      const match = free.find((candidate) => candidate.content === item.content);
+      if (match !== undefined) {
+        claimed.add(match.id);
+        return match.id;
       }
     }
-    return candidates[candidates.length - 1]?.id;
+    const fallback = free[free.length - 1];
+    if (fallback !== undefined) claimed.add(fallback.id);
+    return fallback?.id;
   };
 
   let changed = false;

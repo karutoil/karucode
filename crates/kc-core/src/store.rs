@@ -639,6 +639,16 @@ pub struct SessionStats {
     pub messages_total: u64,
     /// Messages the main agent's conversation holds (`agent_id` is NULL).
     pub messages_main: u64,
+    /// Main-agent messages **the model reads**: [`Self::messages_main`] without the
+    /// command receipts (`name` starting with [`COMMAND_MESSAGE_PREFIX`]).
+    ///
+    /// The two differ because `repair_history` drops those rows before a request:
+    /// a `/compact` reply is written for the reader, not for the model. The
+    /// compaction snapshot's watermark is a count of model-visible messages, so it
+    /// has to use this one - a receipt written after a snapshot otherwise inflates
+    /// the tail the loader appends, and the next request re-sends a message the
+    /// digest already folded away.
+    pub messages_model: u64,
     /// Messages belonging to any subagent.
     pub messages_subagent: u64,
     /// Messages by role: `user`, `assistant`, `tool`, `system`.

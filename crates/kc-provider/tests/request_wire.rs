@@ -92,7 +92,7 @@ async fn a_pinned_reasoning_level_sends_its_declared_thinking_budget() {
         }))
         .unwrap();
     let mut model = config.clone();
-    kc_core::config::Config::apply_reasoning_level(&mut model, "high", &variants);
+    kc_core::config::Config::apply_reasoning_level(&mut model, "high", Some(&variants));
 
     let mut request = full_request();
     request.extra_body = model
@@ -466,6 +466,39 @@ async fn extra_body_can_switch_to_max_completion_tokens() {
     assert!(
         body.get("max_tokens").is_none(),
         "the operator's spelling must replace ours, not join it: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_variants_output_limit_survives_the_profiles_other_spelling() {
+    // A reasoning variant writes the modern spelling; the profile still carries the
+    // legacy one. Both are one limit, so the wire must carry exactly one - and it
+    // must be the run's, not the profile's. Merging the profile last without
+    // re-applying the request deleted the variant's value and sent the stale one.
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, OK_SSE).await }).await;
+    let mut config = base_config(&server);
+    config.max_output_tokens = Some(8_192);
+    config.extra_body = BTreeMap::from_iter([("max_tokens".to_string(), serde_json::json!(8_192))]);
+    let provider = OpenAiProvider::new(config).unwrap();
+    let mut request = full_request();
+    request
+        .extra_body
+        .insert("max_completion_tokens".into(), serde_json::json!(32_768));
+    let stream = provider
+        .stream_chat(request, CancellationToken::new())
+        .await
+        .unwrap();
+    drain(stream).await;
+
+    let body = server.wait_for_request().await.json();
+    assert_eq!(
+        body["max_completion_tokens"], 32_768,
+        "the variant's limit is the one that reaches the provider: {body}"
+    );
+    assert!(
+        body.get("max_tokens").is_none(),
+        "and only one spelling of the limit is sent: {body}"
     );
 }
 

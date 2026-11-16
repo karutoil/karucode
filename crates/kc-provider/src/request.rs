@@ -96,14 +96,9 @@ pub fn build_chat_body(request: &ChatRequest) -> Value {
         // different value can set it through `model.extra_body.tool_choice`,
         // which is allowed through below.
     }
-    for (key, value) in &request.extra_body {
-        if RESERVED_BODY_KEYS.contains(&key.as_str()) {
-            tracing::debug!(key, "ignoring extra_body key reserved by the provider");
-            continue;
-        }
-        body.insert(key.clone(), value.clone());
-    }
-    Value::Object(body)
+    let mut body = Value::Object(body);
+    support::apply_request_extra_body(&mut body, &request.extra_body);
+    body
 }
 
 /// Build the request body for one streaming turn, including the output limit
@@ -173,22 +168,26 @@ pub(crate) mod support {
     /// request already set (from `ChatRequest::extra_body`) wins, and framing keys
     /// are ignored.
     ///
-    /// `request_is_authoritative` says the request's `extra_body` was built for
-    /// *this run* from a session's pinned reasoning level, so it must supersede any
-    /// stale entry the profile still carries. Concretely: the body may hold
-    /// `reasoning_effort: "high"` because the operator pinned that level while
-    /// `[model.extra_body]` still says `reasoning_effort = "low"`, and the run must
-    /// send `high`. It also lets a declared key be *removed* by sending `null`,
-    /// which is how "thinking disabled" is expressed on endpoints that take the
-    /// field but not a budget.
+    /// One rule, deliberately: **fill gaps, never override**. The request body is
+    /// built first (`build_chat_body`) and carries the keys the run chose - a
+    /// session's pinned reasoning level, a declared variant's exact body - so the
+    /// profile only contributes keys the request did not set. A profile entry can
+    /// therefore never replace a run decision, and a request that sends `null` for
+    /// a key (which is how "thinking disabled" is expressed on endpoints that take
+    /// the field but not a budget) keeps that `null`: the key is present, so the
+    /// profile's value is skipped.
     ///
-    /// With the flag unset the merge is the historical one: fill in gaps, never
-    /// override, so a plain `[model.extra_body]` cannot silently replace something
-    /// the provider built.
+    /// `max_tokens` and `max_completion_tokens` are two spellings of one limit, and
+    /// newer OpenAI models reject the former, so the body must carry at most one.
+    /// The operator's spelling replaces the other here - that is the documented
+    /// override (`extra_body_can_switch_to_max_completion_tokens`) - and it is safe
+    /// to do at this point because the *request's* own keys are applied again
+    /// afterwards (`apply_request_extra_body`): a run's decision is the last word on
+    /// the wire, so a variant's `max_completion_tokens` can never be deleted by a
+    /// stale profile `max_tokens`.
     pub(crate) fn apply_config_extra_body(
         body: &mut Value,
         extra: &std::collections::BTreeMap<String, Value>,
-        request_is_authoritative: bool,
     ) {
         let Some(map) = body.as_object_mut() else {
             return;
@@ -197,24 +196,43 @@ pub(crate) mod support {
             if RESERVED_BODY_KEYS.contains(&key.as_str()) {
                 continue;
             }
-            // `max_tokens` and `max_completion_tokens` are two spellings of one
-            // limit. Newer OpenAI models reject the former, so an operator who sets
-            // the latter through `extra_body` must get exactly that key on the wire,
-            // not both.
             if let Some(other) = output_limit_counterpart(key) {
                 map.remove(other);
             }
-            if request_is_authoritative {
-                if map.contains_key(key) {
-                    // The run already decided this key; the profile's entry is stale.
-                    continue;
-                }
-                map.insert(key.clone(), value.clone());
-            } else {
-                // The historical merge: fill gaps, never override, so a plain
-                // `[model.extra_body]` cannot replace what the provider built.
-                map.entry(key.clone()).or_insert_with(|| value.clone());
+            if map.contains_key(key) {
+                // The run already decided this key; the profile's entry is stale.
+                continue;
             }
+            map.insert(key.clone(), value.clone());
+        }
+    }
+
+    /// Apply the request's own `extra_body`, which is built for *this run* from a
+    /// session's pinned reasoning level or a declared variant.
+    ///
+    /// It is applied twice on purpose: once while the body is built, and once after
+    /// the profile's inherited keys are merged (`apply_config_extra_body`), so a run
+    /// decision is the last word - including for the two spellings of the output
+    /// limit. Merging the profile second without this second pass is what let a
+    /// profile's stale `max_tokens` delete a variant's `max_completion_tokens`.
+    pub(crate) fn apply_request_extra_body(
+        body: &mut Value,
+        extra: &serde_json::Map<String, Value>,
+    ) {
+        let Some(map) = body.as_object_mut() else {
+            return;
+        };
+        for (key, value) in extra {
+            if RESERVED_BODY_KEYS.contains(&key.as_str()) {
+                tracing::debug!(key, "ignoring extra_body key reserved by the provider");
+                continue;
+            }
+            // The run's spelling replaces the other one, so the body never carries
+            // both `max_tokens` and `max_completion_tokens`.
+            if let Some(other) = output_limit_counterpart(key) {
+                map.remove(other);
+            }
+            map.insert(key.clone(), value.clone());
         }
     }
 }
@@ -441,12 +459,8 @@ mod tests {
     /// re-export `support`'s private items (and shadowing this name is precisely
     /// how the request tests once asserted against a helper instead of the real
     /// function).
-    fn merge(
-        body: &mut Value,
-        extra: &std::collections::BTreeMap<String, Value>,
-        request_is_authoritative: bool,
-    ) {
-        super::support::apply_config_extra_body(body, extra, request_is_authoritative);
+    fn merge(body: &mut Value, extra: &std::collections::BTreeMap<String, Value>) {
+        super::support::apply_config_extra_body(body, extra);
     }
 
     fn request() -> ChatRequest {
@@ -683,7 +697,7 @@ mod tests {
         config_extra.insert("reasoning_effort".to_string(), Value::String("low".into()));
         config_extra.insert("prompt_cache".to_string(), Value::Bool(true));
         config_extra.insert("stream".to_string(), Value::Bool(false));
-        merge(&mut body, &config_extra, false);
+        merge(&mut body, &config_extra);
         assert_eq!(body["seed"], 7);
         assert_eq!(body["reasoning_effort"], "high");
         assert_eq!(body["prompt_cache"], true);
@@ -709,7 +723,7 @@ mod tests {
             "thinking".to_string(),
             serde_json::json!({ "type": "disabled" }),
         );
-        merge(&mut body, &config_extra, true);
+        merge(&mut body, &config_extra);
 
         assert_eq!(body["reasoning_effort"], "high");
         assert_eq!(body["thinking"]["budget_tokens"], 32000);

@@ -1526,7 +1526,7 @@ pub fn resolve_session_model(
         // level can carry `thinking.budget_tokens` or `thinking_budget` instead
         // of the OpenAI-shaped `reasoning_effort` string. A model that declares
         // no variants keeps the historical spelling.
-        Config::apply_reasoning_level(&mut model, effort, &selection_variants);
+        Config::apply_reasoning_level(&mut model, effort, selection_variants.as_ref());
     }
     model
 }
@@ -2515,7 +2515,9 @@ fn validate_model_entry(provider_id: &str, model: &ModelEntry) -> Result<()> {
             }
         }
     }
-    validate_model_variants(provider_id, id, &model.variants)?;
+    if let Some(variants) = model.variants.as_ref() {
+        validate_model_variants(provider_id, id, variants)?;
+    }
     Ok(())
 }
 
@@ -4645,19 +4647,28 @@ mod tests {
     }
 
     /// A model whose `variants` is `{}` offers nothing but "endpoint default".
+    ///
+    /// `{}` is a *declaration*, not an absence: `variant_levels()` answers
+    /// `Some([])` for it, so every level is refused. An absent map (`None`) is the
+    /// opposite answer and keeps the whole built-in set.
     #[test]
     fn validate_refuses_every_level_when_a_model_declares_an_empty_variant_map() {
         let mut cfg = two_profile_config();
         cfg.providers[0].models[1] = ModelEntry {
             id: "model-b".into(),
-            variants: BTreeMap::new(),
+            variants: Some(std::collections::BTreeMap::new()),
             ..ModelEntry::default()
         };
         cfg.normalize_providers();
         assert!(validate_session_model(&cfg, &selection("gateway", "model-b", None)).is_ok());
+        let err = validate_session_model(&cfg, &selection("gateway", "model-b", Some("high")))
+            .expect_err("a declared but empty map offers no level");
+        assert!(err.to_string().contains("high"), "{err}");
+
+        // And the same model with no declaration at all accepts it.
+        cfg.providers[0].models[1].variants = None;
         assert!(
-            validate_session_model(&cfg, &selection("gateway", "model-b", Some("high"))).is_ok(),
-            "an empty map means 'not declared', not 'nothing offered'"
+            validate_session_model(&cfg, &selection("gateway", "model-b", Some("high"))).is_ok()
         );
     }
 

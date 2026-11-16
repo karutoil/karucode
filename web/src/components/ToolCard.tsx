@@ -306,8 +306,13 @@ export function ToolCard({
           <StatusGlyph status={item.status} />
           {toolStatusLabel(item.status)}
         </span>
-        <ToolRewind item={item} onRewind={onRewind} />
       </header>
+
+      {/* Outside the header, like the row variant: every rewind rule in chat.css is
+          `.tool-card > .rewind-tool` (absolute, revealed on hover of the card), so a
+          button inside the flex header stayed at `opacity: 0` and competed with the
+          status for header width - invisible except by keyboard focus. */}
+      <ToolRewind item={item} onRewind={onRewind} />
 
       {item.images && item.images.length > 0 ? (
         <ToolImages images={item.images} tool={item.name} />

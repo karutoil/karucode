@@ -261,6 +261,40 @@ async fn a_skill_invoked_by_its_own_name_works_too() {
 }
 
 #[tokio::test]
+async fn a_skill_invocation_titles_the_session_from_what_was_typed() {
+    // The expansion replaces the *message*, not the reason the person is here. A
+    // title derived from it read "Use the `release` skill. Read it with the `skill`
+    // tool..." - the boilerplate, with the task buried in it.
+    let h = HarnessBuilder::new(vec![text("following the release skill")])
+        .no_ai_titles()
+        .build()
+        .await;
+    write_skill(&h, "release", RELEASE);
+    // Untitled on purpose: a session the user named keeps its name.
+    let session = h.create_session(None).await;
+
+    let response = post_message(&h, &session, "/skill release bump to 1.2").await;
+    assert_eq!(response.status, StatusCode::ACCEPTED, "{}", response.text());
+    h.wait_until_idle(&session).await;
+
+    let row = store_of(&h)
+        .get_session(&session)
+        .await
+        .expect("read the session")
+        .expect("the session exists");
+    assert!(
+        row.title.contains("bump to 1.2"),
+        "titled from the task the person typed: {:?}",
+        row.title
+    );
+    assert!(
+        !row.title.contains("skill` tool"),
+        "not from the expanded prompt: {:?}",
+        row.title
+    );
+}
+
+#[tokio::test]
 async fn an_unknown_skill_is_a_refusal_in_the_transcript() {
     let h = HarnessBuilder::new(Vec::new()).no_ai_titles().build().await;
     let session = h.create_session(Some("skills")).await;

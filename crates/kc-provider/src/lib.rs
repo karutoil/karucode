@@ -697,10 +697,12 @@ impl Provider for OpenAiProvider {
     ) -> Result<ProviderStream> {
         let url = self.endpoint()?;
         let mut body = request::build_chat_body_for(&self.config, &request);
-        // The request's own `extra_body` is where a session's pinned reasoning
-        // level lands, and a declared level is a promise: its keys win over the
-        // profile's inherited `extra_body` rather than losing to it.
-        request::support::apply_config_extra_body(&mut body, &self.config.extra_body, true);
+        // The profile's inherited `extra_body` first, then the request's own keys
+        // again: a declared reasoning level or variant is a promise about the wire,
+        // so the run's decision is the last word - including for the two spellings
+        // of the output limit.
+        request::support::apply_config_extra_body(&mut body, &self.config.extra_body);
+        request::support::apply_request_extra_body(&mut body, &request.extra_body);
         let headers = request::build_headers(&self.config, &request)?;
         let secrets = self.secrets(&headers);
         let timeout = timeout_for(&self.config);

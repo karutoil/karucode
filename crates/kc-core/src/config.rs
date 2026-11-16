@@ -191,10 +191,13 @@ pub struct ModelConfig {
     ///
     /// Copied from its [`ModelEntry`] by [`Config::model_for`] so a session pin
     /// can be turned into the right request body without looking the profile up
-    /// again at run time; see [`Config::apply_reasoning_level`]. Empty means "not
-    /// declared", which keeps the bare `reasoning_effort` spelling.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub variants: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    /// again at run time; see [`Config::apply_reasoning_level`].
+    ///
+    /// `None` means "not declared", which keeps the bare `reasoning_effort`
+    /// spelling; `Some(empty)` means the model declared variants and offers none,
+    /// which is a different answer (see [`ModelEntry::variant_levels`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variants: Option<BTreeMap<String, BTreeMap<String, serde_json::Value>>>,
 }
 
 fn default_provider() -> String {
@@ -255,7 +258,7 @@ impl Default for ModelConfig {
             parallel_tool_calls: default_parallel_tool_calls(),
             supports_images: false,
             aggregator: false,
-            variants: BTreeMap::new(),
+            variants: None,
         }
     }
 }
@@ -335,10 +338,12 @@ pub struct ModelEntry {
     /// chosen for this model, so the picker only offers what the endpoint really
     /// implements.
     ///
-    /// Empty (the default) keeps the historical behaviour: every built-in level
-    /// is offered and sent as the bare `reasoning_effort` string.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub variants: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    /// Absent (`None`, the default) keeps the historical behaviour: every built-in
+    /// level is offered and sent as the bare `reasoning_effort` string. An
+    /// **empty map is a real declaration** - "this model offers no levels beyond
+    /// Default" - so it survives a config round trip instead of reading as absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variants: Option<BTreeMap<String, BTreeMap<String, serde_json::Value>>>,
 }
 
 impl ModelEntry {
@@ -367,14 +372,12 @@ impl ModelEntry {
     /// "Default" and labels the endpoint does not implement is exactly what
     /// declaring variants is for avoiding.
     pub fn variant_levels(&self) -> Option<Vec<&'static str>> {
-        if self.variants.is_empty() {
-            return None;
-        }
+        let variants = self.variants.as_ref()?;
         Some(
             REASONING_EFFORTS
                 .iter()
                 .copied()
-                .filter(|level| self.variants.contains_key(*level))
+                .filter(|level| variants.contains_key(*level))
                 .collect(),
         )
     }
@@ -3332,19 +3335,22 @@ impl Config {
     pub fn apply_reasoning_level(
         model: &mut ModelConfig,
         level: &str,
-        variants: &BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+        variants: Option<&BTreeMap<String, BTreeMap<String, serde_json::Value>>>,
     ) {
         let level = level.trim();
         if level.is_empty() {
             return;
         }
-        if variants.is_empty() {
+        let Some(variants) = variants else {
+            // Not declared: the historical bare spelling.
             model.extra_body.insert(
                 "reasoning_effort".to_string(),
                 serde_json::Value::String(level.to_string()),
             );
             return;
-        }
+        };
+        // Declared - possibly with no levels at all, which sends no reasoning body
+        // rather than the bare string the endpoint was said not to take.
         if let Some(body) = variants.get(level) {
             for (key, value) in body {
                 model.extra_body.insert(key.clone(), value.clone());
@@ -3396,7 +3402,7 @@ mod tests {
             .unwrap();
         let entry = ModelEntry {
             id: "claude".into(),
-            variants,
+            variants: Some(variants),
             ..ModelEntry::default()
         };
 
@@ -3413,7 +3419,7 @@ mod tests {
             model: "claude".into(),
             ..Default::default()
         };
-        Config::apply_reasoning_level(&mut model, "high", &entry.variants);
+        Config::apply_reasoning_level(&mut model, "high", entry.variants.as_ref());
         assert_eq!(
             model.extra_body.get("thinking"),
             Some(&serde_json::json!({ "type": "enabled", "budget_tokens": 32000 }))
@@ -3440,7 +3446,7 @@ mod tests {
             model: "gpt-4o".into(),
             ..Default::default()
         };
-        Config::apply_reasoning_level(&mut model, "high", &entry.variants);
+        Config::apply_reasoning_level(&mut model, "high", entry.variants.as_ref());
         assert_eq!(
             model.extra_body.get("reasoning_effort"),
             Some(&serde_json::Value::String("high".into()))
@@ -3451,6 +3457,43 @@ mod tests {
     /// A stale pin - a level the model no longer declares - sends the model's
     /// "off" payload when it has one, rather than a level the endpoint cannot
     /// implement, and still records which level was asked for.
+    /// `variants = {}` is a declaration: "this model offers nothing but the
+    /// endpoint default", which is a different answer from "not declared" (every
+    /// built-in level offered). Both must survive a round trip, or the editor's
+    /// toggle flips itself off after a reload.
+    #[test]
+    fn an_empty_variant_map_is_a_declaration_that_round_trips() {
+        let entry: ModelEntry = toml::from_str("id = \"m\"\n[variants]\n").unwrap();
+        assert_eq!(entry.variants, Some(BTreeMap::new()), "parsed as declared");
+        assert_eq!(
+            entry.variant_levels(),
+            Some(Vec::new()),
+            "declared, and it offers no level"
+        );
+
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            json["variants"],
+            serde_json::json!({}),
+            "an empty map is sent, not dropped: {json}"
+        );
+        let back: ModelEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back.variant_levels(),
+            Some(Vec::new()),
+            "and it comes back a declaration, not an absence"
+        );
+
+        // Absent is the other answer, and stays absent.
+        let plain: ModelEntry = toml::from_str("id = \"m\"\n").unwrap();
+        assert_eq!(plain.variants, None);
+        assert_eq!(plain.variant_levels(), None);
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("variants")
+            .is_none());
+    }
+
     #[test]
     fn a_level_the_variants_do_not_declare_falls_back_to_off() {
         let variants: BTreeMap<String, BTreeMap<String, serde_json::Value>> =
@@ -3460,7 +3503,7 @@ mod tests {
             }))
             .unwrap();
         let mut model = ModelConfig::default();
-        Config::apply_reasoning_level(&mut model, "medium", &variants);
+        Config::apply_reasoning_level(&mut model, "medium", Some(&variants));
         assert_eq!(
             model.extra_body.get("thinking"),
             Some(&serde_json::json!({ "type": "disabled" })),
@@ -3481,7 +3524,7 @@ mod tests {
             }))
             .unwrap();
         let mut model = ModelConfig::default();
-        Config::apply_reasoning_level(&mut model, "max", &variants);
+        Config::apply_reasoning_level(&mut model, "max", Some(&variants));
         assert!(!model.extra_body.contains_key("thinking_budget"));
         assert_eq!(
             model.extra_body.get("reasoning_effort"),
@@ -3506,7 +3549,7 @@ mod tests {
                     ModelEntry::new("plain"),
                     ModelEntry {
                         id: "thinky".into(),
-                        variants: variant_map,
+                        variants: Some(variant_map),
                         ..ModelEntry::default()
                     },
                 ],
@@ -3518,14 +3561,16 @@ mod tests {
         cfg.active_model = Some("plain".into());
 
         let profile = cfg.active_profile().unwrap();
-        assert!(cfg.model_for(profile, "plain").variants.is_empty());
+        assert!(cfg.model_for(profile, "plain").variants.is_none());
         assert_eq!(
             cfg.reasoning_levels_for(profile, "thinky"),
             Some(vec!["high"])
         );
         assert_eq!(cfg.reasoning_levels_for(profile, "plain"), None);
         assert_eq!(
-            cfg.model_for(profile, "thinky").variants.len(),
+            cfg.model_for(profile, "thinky")
+                .variants
+                .map_or(0, |map| map.len()),
             1,
             "the map follows the resolved model"
         );
@@ -3738,7 +3783,8 @@ mod tests {
         assert_eq!(
             entry
                 .variants
-                .get("high")
+                .as_ref()
+                .and_then(|variants| variants.get("high"))
                 .and_then(|body| body.get("thinking")),
             Some(&serde_json::json!({ "type": "enabled", "budget_tokens": 32000 }))
         );

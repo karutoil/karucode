@@ -8,6 +8,10 @@ import * as store from '../state/store';
 
 const idle: Activity = { kind: 'idle', label: 'Ready' };
 
+function textFile(name: string, content: string): File {
+  return new File([content], name, { type: 'text/plain' });
+}
+
 const CATALOG: CommandSpec[] = [
   {
     name: 'help',
@@ -54,7 +58,8 @@ function renderComposer(overrides: Partial<ComposerProps> = {}) {
   };
   const result = render(<Composer {...props} />);
   const textarea = screen.getByLabelText('Message karucode') as HTMLTextAreaElement;
-  return { ...result, props, textarea };
+  const fileInput = result.container.querySelector('input[type="file"]') as HTMLInputElement;
+  return { ...result, props, textarea, fileInput };
 }
 
 describe('the composer slash menu', () => {
@@ -143,6 +148,28 @@ describe('the composer slash menu', () => {
     await waitFor(() => expect(props.onCommand).toHaveBeenCalledWith('/compact'));
     expect(props.onSend).not.toHaveBeenCalled();
     await waitFor(() => expect(textarea.value).toBe(''));
+  });
+
+  it('refuses to run a command with an attachment instead of losing the file', async () => {
+    // The text after a command is its arguments, so an attachment would be read as
+    // arguments and never reach the model - and the command's reply clears the
+    // composer, taking the file with it. Enter used to fall through to the ordinary
+    // send path here and the file was gone with nothing said.
+    const { props, textarea, fileInput } = renderComposer();
+    fireEvent.input(textarea, { target: { value: '/' } });
+    await screen.findByText('Compact the conversation');
+
+    fireEvent.change(fileInput, { target: { files: [textFile('notes.md', '# Note')] } });
+    await screen.findByText('notes.md');
+
+    fireEvent.input(textarea, { target: { value: '/compact' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
+
+    await waitFor(() => expect(screen.getByText(/cannot carry attachments/)).toBeTruthy());
+    expect(props.onCommand).not.toHaveBeenCalled();
+    expect(props.onSend).not.toHaveBeenCalled();
+    expect(textarea.value).toBe('/compact');
+    expect(screen.getByText('notes.md')).toBeTruthy();
   });
 
   it('runs a command while a run is in flight instead of queueing it', async () => {

@@ -408,6 +408,38 @@ describe('withStoredMessageIds', () => {
     expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([10, 11]);
   });
 
+  it('gives repeated prompts their own rows, in the order they were sent', () => {
+    // A prompt and a steer that repeats it. Both live items carry the same text,
+    // so matching on content alone sent *both* to the newest row - and clicking
+    // the first one rewound to the second one's turn.
+    const items = [
+      live({ id: 'user:r_x', content: 'continue' }),
+      live({ id: 'steer:r_x:2', content: 'continue' }),
+    ];
+    const detail = sessionWith([
+      storedMessage({ id: 10, role: 'user', content: 'continue' }),
+      storedMessage({ id: 20, role: 'user', content: 'continue' }),
+    ]);
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([10, 20]);
+  });
+
+  it('refuses to guess when there are more live items than stored rows', () => {
+    // Three prompts, two rows: the two that match take a row each, and the third
+    // gets none - no rewind beats a rewind to somebody else's turn.
+    const items = [
+      live({ id: 'a', content: 'continue' }),
+      live({ id: 'b', content: 'continue' }),
+      live({ id: 'c', content: 'continue' }),
+    ];
+    const detail = sessionWith([
+      storedMessage({ id: 10, role: 'user', content: 'continue' }),
+      storedMessage({ id: 20, role: 'user', content: 'continue' }),
+    ]);
+
+    expect(withStoredMessageIds(items, detail).map(storedId)).toEqual([10, 20, undefined]);
+  });
+
   it('keeps every item id, which is what the transcript keys its rows on', () => {
     const items = [live()];
     const next = withStoredMessageIds(items, sessionWith([storedMessage({ id: 10, role: 'user' })]));

@@ -3019,7 +3019,27 @@ fn warn_elided(messages: &[Message], max_chars: usize) {
 /// makes a huge exchange buy a huge reserve; the percentage term is what stops a
 /// *small* exchange from leaving the window almost full, which is what a
 /// compaction sized by turns alone did.
-fn target_chars(messages: &[Message], max_chars: usize) -> usize {
+/// The character ceiling a forced `/compact` folds against.
+///
+/// A **quarter** of the request budget, never below a floor so a tiny window still
+/// leaves a conversation behind. A run only compacts once the window is over the
+/// whole ceiling; taking a quarter is what makes `/compact` a force - a
+/// conversation at 60% of the budget is folded too.
+pub fn forced_compaction_ceiling(budget: usize) -> usize {
+    (budget / 4).max(crate::MIN_COMPACTION_TARGET_CHARS)
+}
+
+/// What a forced `/compact` actually aims to *keep*, for a window of `history`.
+///
+/// This is the number the report carries and the one a reader is shown. It is not
+/// the ceiling: the shared [`target_chars`] rule keeps a share of whatever ceiling
+/// it is given (a fifth, with headroom for the turns in flight), so reporting the
+/// ceiling would advertise 25% of the budget while the fold kept 5%.
+pub fn forced_compaction_target(messages: &[Message], budget: usize) -> usize {
+    target_chars(messages, forced_compaction_ceiling(budget))
+}
+
+pub(crate) fn target_chars(messages: &[Message], max_chars: usize) -> usize {
     let turn = recent_exchange_chars(messages);
     let by_turn = max_chars.saturating_sub(turn.saturating_mul(TURNS_OF_HEADROOM));
     by_turn
@@ -7926,6 +7946,44 @@ mod two_tier_tests {
             batch.state_ledger.contains("src/parser.rs"),
             "the ledger is the deterministic half: {}",
             batch.state_ledger
+        );
+    }
+}
+
+#[cfg(test)]
+mod forced_compaction_target_tests {
+    use super::*;
+
+    /// `/compact` reports what it aims to keep, not the ceiling it folds against.
+    ///
+    /// The bug this pins: the caller passed a quarter of the budget as the
+    /// *ceiling*, and the shared rule keeps a share of whatever ceiling it is
+    /// given, so the fold kept ~5% of the budget while `/context` and the report
+    /// both said 25%. A reader was told far more history survived than did.
+    #[test]
+    fn reports_the_share_it_keeps_not_the_ceiling() {
+        let budget = 320_000;
+        let ceiling = forced_compaction_ceiling(budget);
+        assert_eq!(ceiling, 80_000, "a quarter of the budget is the ceiling");
+
+        let history = vec![Message::user("x".repeat(200_000))];
+        let target = forced_compaction_target(&history, budget);
+        assert!(
+            target <= ceiling,
+            "the target sits inside the ceiling: {target} > {ceiling}"
+        );
+        assert!(
+            target < ceiling / 2,
+            "and is a share of it, not the ceiling itself: {target} of {ceiling}"
+        );
+    }
+
+    #[test]
+    fn a_tiny_budget_still_leaves_a_conversation_behind() {
+        assert_eq!(
+            forced_compaction_ceiling(1_000),
+            crate::MIN_COMPACTION_TARGET_CHARS,
+            "the floor keeps a message or two"
         );
     }
 }

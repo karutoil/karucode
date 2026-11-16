@@ -8292,6 +8292,141 @@ async fn a_follow_up_turn_reuses_the_compaction_snapshot() {
     );
 }
 
+/// A command receipt is written for the reader, not for the model.
+///
+/// `repair_history` drops `slash:` rows, so the compaction snapshot's watermark
+/// has to count the same thing. Counting every main row made `newer` one too
+/// large per receipt, and the next request re-sent the last message the snapshot
+/// already carried - with a second receipt in between, the appended tail could
+/// even begin on a `tool` row whose `assistant` sat inside the digest, which the
+/// provider rejects outright.
+#[tokio::test]
+async fn a_command_receipt_does_not_duplicate_the_snapshot_tail() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::text("first answer"),
+        Script::text("second answer"),
+    ])
+    .build()
+    .await;
+    h.run_to_finish("first prompt").await;
+    h.wait_idle().await;
+
+    // The window the previous run would have saved, covering both stored rows.
+    let stored = visible(&h).await;
+    let watermark = stored.len();
+    let mut digest = kc_core::message::Message::user(
+        "[context digest: 40 earlier messages omitted; the work they describe is still done - \
+         do not redo it]\n### Modified & Created Files\n- file: `src/parser.rs` — write (1 edit)",
+    );
+    digest.name = Some("kc-runtime:context-digest".into());
+    let snapshot = vec![
+        kc_core::message::Message::user("TASK: fix the parser"),
+        digest,
+        kc_core::message::Message::assistant("first answer", Vec::new()),
+    ];
+    h.store
+        .save_compaction_snapshot(h.session(), watermark, &snapshot)
+        .await
+        .expect("save snapshot");
+
+    // The `/compact` reply row, stored after the snapshot exactly as
+    // `slash::record` does it.
+    let mut receipt = crate::tests_support::new_message(
+        h.session(),
+        "assistant",
+        "compacted: 12 messages -> 4; the next message starts from that digest",
+    );
+    receipt.name = Some(format!("{}compact", kc_core::store::COMMAND_MESSAGE_PREFIX));
+    h.store.append_message(&receipt).await.expect("receipt");
+
+    h.run_to_finish("second prompt").await;
+    h.wait_idle().await;
+
+    let requests = h.factory.requests();
+    let last = requests.last().expect("the second turn was sent");
+    let contents: Vec<&str> = last
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect();
+    assert_eq!(
+        contents
+            .iter()
+            .filter(|content| **content == "first answer")
+            .count(),
+        1,
+        "the snapshot's own tail is sent once, not re-appended: {contents:?}"
+    );
+    assert_eq!(
+        contents
+            .iter()
+            .filter(|content| **content == "second prompt")
+            .count(),
+        1,
+        "and the new prompt is there exactly once: {contents:?}"
+    );
+    assert!(
+        !contents
+            .iter()
+            .any(|content| content.contains("compacted: 12 messages")),
+        "a command receipt is never sent to the model: {contents:?}"
+    );
+}
+
+/// Forced compaction starts from the checkpoint the session already has.
+///
+/// Rebuilding from the raw transcript folds an earlier digest and its semantic
+/// summary away and replaces them with a slightly different one, so `/compact`
+/// would lose the accumulated context (and the provider's cached prefix) every
+/// time it ran.
+#[tokio::test]
+async fn a_second_compaction_starts_from_the_existing_checkpoint() {
+    let mut h = HarnessBuilder::new(vec![Script::text("first answer")])
+        .build()
+        .await;
+    h.run_to_finish("first prompt").await;
+    h.wait_idle().await;
+
+    // The checkpoint the session already has, covering the two stored rows.
+    let watermark = visible(&h).await.len();
+    let snapshot = vec![
+        kc_core::message::Message::user("TASK: fix the parser #checkpoint-marker"),
+        kc_core::message::Message::assistant("first answer", Vec::new()),
+    ];
+    h.store
+        .save_compaction_snapshot(h.session(), watermark, &snapshot)
+        .await
+        .expect("save snapshot");
+
+    // One message stored after it, which the window must append.
+    let mut later = crate::tests_support::new_message(h.session(), "user", "later question");
+    later.run_id = Some("r_old".into());
+    h.store.append_message(&later).await.expect("append");
+
+    let store: std::sync::Arc<dyn kc_core::store::Store> = h.store.clone();
+    let window = crate::agent::compaction_window(&store, h.session(), 32_000)
+        .await
+        .expect("window");
+    let joined: String = window
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    assert!(
+        joined.contains("#checkpoint-marker"),
+        "the existing checkpoint is carried forward instead of being rebuilt from the raw \
+         transcript: {joined:?}"
+    );
+    assert!(
+        joined.contains("later question"),
+        "and what was stored after it is appended: {joined:?}"
+    );
+    assert!(
+        !joined.contains("first prompt"),
+        "the raw transcript is not reloaded on top of the snapshot: {joined:?}"
+    );
+}
+
 /// Visible (non-rewound) messages of the harness session, oldest first.
 async fn visible(h: &Harness) -> Vec<kc_core::store::StoredMessage> {
     h.store
@@ -8499,6 +8634,40 @@ async fn a_cancelled_but_unwinding_run_still_blocks_rewind() {
     let events = h.collect_until_finished().await;
     assert_eq!(finished_status(&events), "cancelled");
     assert!(h.wait_idle().await.is_empty());
+}
+
+#[tokio::test]
+async fn compact_refuses_a_cancelled_run_that_is_still_unwinding() {
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![])])
+        .build()
+        .await;
+    h.submit("cancel, then compact").await;
+    let finish_gate = h.store.gate_next("finish_run");
+    assert!(h.runtime.cancel(h.session()));
+    finish_gate.wait_entered().await;
+    assert!(!h.runtime.is_running(h.session()));
+
+    // The loop is cancelled but has not deregistered: it is still writing its
+    // final tool results, and it will persist its own compaction snapshot from the
+    // pre-cancel window. A checkpoint saved now would be overwritten a moment
+    // later, and `repair_rows` could register a placeholder for a tool call whose
+    // real result is still on its way.
+    let error = h
+        .runtime
+        .compact_session(h.session())
+        .await
+        .expect_err("a cancelled run is not quiescent until it deregisters");
+    assert!(error.to_string().contains("unwinding"), "{error}");
+
+    finish_gate.release();
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "cancelled");
+    assert!(h.wait_idle().await.is_empty());
+    // Once it has deregistered, the checkpoint is safe to take.
+    h.runtime
+        .compact_session(h.session())
+        .await
+        .expect("the session is quiescent again");
 }
 
 #[tokio::test]

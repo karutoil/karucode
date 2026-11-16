@@ -899,10 +899,20 @@ export function Composer({
   };
 
   const submit = async (): Promise<void> => {
+    // A command carries no attachments: the text after the command is its
+    // arguments, so an attachment would be read as arguments and never reach the
+    // model. The command's reply clears the composer, so the reader would simply
+    // lose the file. Refuse, and keep both the draft and the attachments.
+    if (slashCommand !== null && attachments.length > 0) {
+      setAnnouncement(
+        `/${slashCommand.name} cannot carry attachments. Remove them to run the command, or send them with a message.`,
+      );
+      return;
+    }
     // A command is answered by the server and is never queued: queueing it behind
     // the run it is trying to change is exactly the wrong behaviour. This branch
     // comes first for that reason.
-    if (slashCommand !== null && attachments.length === 0) {
+    if (slashCommand !== null) {
       if (!canType || sending) return;
       const submitted = { draft, attachments };
       setSending(true);

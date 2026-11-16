@@ -68,6 +68,13 @@ export function noteSettling(element: HTMLElement | null, active: boolean): void
 export function followingNewest(element: HTMLElement): boolean {
   if (settling.has(element)) return true;
   const metrics = readMetrics(element);
+  // `isPinnedToBottom` is the follow's own tolerance (`PIN_THRESHOLD_PX`), so a
+  // reader parked a few pixels above the newest row counts as following here too.
+  // That is deliberate: the two writers must agree on the answer, and the
+  // threshold is the app's existing definition of "at the bottom". The cost is
+  // that the correction stops holding an anchor for that reader - they are close
+  // enough to the newest content that a row-height shift is unlikely to matter,
+  // and the follow will close the last few pixels on the next growth.
   if (isPinnedToBottom(metrics)) return true;
   return shouldFollow(metrics, lastFollow.get(element) ?? null, false);
 }
@@ -509,6 +516,20 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
   }, [handleOwnScroll, markFollow]);
   reconcileRef.current = reconcile;
 
+  /**
+   * Ask the follow to look again after a measurement moved the rows, without
+   * interrupting a jump the app started.
+   *
+   * A measurement is not new content: while a smooth scroll is still arriving,
+   * following from here would write an instant `scrollTop` and cut the animation
+   * short - the very thing `noteSettling` exists to prevent. The settle timer
+   * closes whatever is left once the animation lands.
+   */
+  const recheck = useCallback(() => {
+    if (settlingRef.current) return;
+    reconcile();
+  }, [reconcile]);
+
   // Scroll tracking plus layout observation for reflow that produces no text delta.
   useEffect(() => {
     const element = scrollRef.current;
@@ -635,5 +656,5 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
     pinToBottom('smooth');
   }, [sentMessageTick, pinToBottom]);
 
-  return { scrollRef, showJump, scrolledAway: showJump, recheck: reconcile, jumpToLatest };
+  return { scrollRef, showJump, scrolledAway: showJump, recheck, jumpToLatest };
 }

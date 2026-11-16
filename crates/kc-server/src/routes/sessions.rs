@@ -649,12 +649,24 @@ pub async fn send_message(
         .clone()
         .ok_or_else(|| ApiError::bad_request("content is required"))?;
     validate_prompt(&content)?;
+    // What a derived session title is written from: the person's own words. A skill
+    // invocation rewrites `content` into the expanded prompt below, and titling a
+    // session "Use the `release` skill. Read it with the `skill` tool..." hides the
+    // task they actually typed.
+    let mut title_source = content.clone();
 
     // A message that is a slash command is answered here rather than sent to the
     // model. This runs before the mode match on purpose: `/stop` is most useful
     // while a run is in flight, and a command must never be queued behind the
     // work it is trying to change. See `crate::slash`.
     if let Some(invocation) = slash::parse(&content) {
+        // The invocation's args are the task ("bump to 1.2"); the command name is
+        // not part of it. With no args the typed text is all there is.
+        title_source = if invocation.args_trimmed().is_empty() {
+            content.clone()
+        } else {
+            invocation.args_trimmed().to_string()
+        };
         let workspace = state
             .workspace_for_session(session.project_id.as_deref(), &session.workspace)
             .ok();
@@ -759,7 +771,7 @@ pub async fn send_message(
             // is on, which it is by default - with a short model-written one in
             // the background. `expected` is `None` for a session the user already
             // named, which is what disables the model title for it.
-            let expected = maybe_auto_title(&state, &session, &content).await;
+            let expected = maybe_auto_title(&state, &session, &title_source).await;
             let handle = state
                 .runtime()
                 .submit(&id, content.clone())
@@ -776,7 +788,7 @@ pub async fn send_message(
             // right now, which is what the generated title must still replace for
             // the rename to be honest about who set it.
             if let Some(expected) = expected {
-                spawn_ai_title(state.clone(), id.clone(), expected, content);
+                spawn_ai_title(state.clone(), id.clone(), expected, title_source);
             }
 
             Ok((

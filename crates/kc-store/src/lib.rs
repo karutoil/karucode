@@ -4689,29 +4689,39 @@ impl Store for SqliteStore {
             // snapshots and could disagree.
             let mut counts = conn
                 .prepare(
-                    "SELECT role, (agent_id IS NOT NULL) AS sub, COUNT(*) AS n
+                    "SELECT role, (agent_id IS NOT NULL) AS sub,
+                            (instr(coalesce(name, ''), ?2) = 1) AS cmd,
+                            COUNT(*) AS n
                        FROM messages
                       WHERE session_id = ?1 AND rewound_at IS NULL
-                      GROUP BY role, sub",
+                      GROUP BY role, sub, cmd",
                 )
                 .map_err(|e| db_err("session_stats messages prepare", e))?;
             let rows = counts
-                .query_map(params![session_id], |row| {
-                    Ok((
-                        row.get::<_, String>("role")?,
-                        row.get::<_, i64>("sub")? != 0,
-                        row.get::<_, i64>("n")?,
-                    ))
-                })
+                .query_map(
+                    params![session_id, kc_core::store::COMMAND_MESSAGE_PREFIX],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>("role")?,
+                            row.get::<_, i64>("sub")? != 0,
+                            row.get::<_, i64>("cmd")? != 0,
+                            row.get::<_, i64>("n")?,
+                        ))
+                    },
+                )
                 .map_err(|e| db_err("session_stats messages query", e))?;
             for row in rows {
-                let (role, subagent, n) = row.map_err(|e| db_err("session_stats messages", e))?;
+                let (role, subagent, command, n) =
+                    row.map_err(|e| db_err("session_stats messages", e))?;
                 let n = u64_of(n);
                 stats.messages_total += n;
                 if subagent {
                     stats.messages_subagent += n;
                 } else {
                     stats.messages_main += n;
+                    if !command {
+                        stats.messages_model += n;
+                    }
                     *stats.messages_main_by_role.entry(role.clone()).or_insert(0) += n;
                 }
                 *stats.messages_by_role.entry(role).or_insert(0) += n;
