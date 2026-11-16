@@ -1,0 +1,15 @@
+[package]
+name = "session-status"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A workspace member, so the SDK is a relative path. A plugin installed anywhere
+# else must vendor the SDK (`karucode plugin init <dir>`) instead of copying this.
+[[bin]]
+name = "session-status"
+path = "src/main.rs"
+
+[dependencies]
+kc-plugin-sdk.workspace = true
+serde_json.workspace = true

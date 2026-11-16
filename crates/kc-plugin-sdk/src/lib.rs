@@ -694,6 +694,9 @@ pub struct UiActionRequest {
     pub project: Option<String>,
     /// Absolute path of the project root the click belongs to.
     pub workspace: String,
+    /// The text typed after a slash command, when this action was run from the
+    /// composer (§R3) rather than from a clicked control. Empty for a click.
+    pub args: String,
 }
 
 /// Constructors for [`PluginToolResult`].
@@ -973,6 +976,11 @@ struct HostClientInner {
     /// Set once the plugin has started serving, so a client created inside a
     /// handler can still reach the installed router.
     started: AtomicBool,
+    /// The SDK's one stdout writer. A frame this plugin SENDS goes through the
+    /// same channel its replies use: a second writer on stdout would interleave
+    /// half-lines with the first and, worse, block the reader loop that is
+    /// waiting to hand us the answer.
+    writer: Mutex<Option<mpsc::Sender<Value>>>,
 }
 
 impl std::fmt::Debug for HostClient {
@@ -1004,15 +1012,28 @@ impl HostClient {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, String> {
-        let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        // Our ids carry `PLUGIN_REQUEST_FLAG`, so they can never equal an id the
+        // host allocated for its own request (it counts up from 1). The host echoes
+        // ours on the reply; without the flag the two id spaces collide on the very
+        // first call, and a reply is delivered to the wrong waiter.
+        let id = (self.inner.next_id.fetch_add(1, Ordering::SeqCst) + 1) & !PLUGIN_REQUEST_FLAG
+            | PLUGIN_REQUEST_FLAG;
         let (tx, rx) = mpsc::channel();
         if let Ok(mut pending) = self.inner.pending.lock() {
             pending.insert(id, tx);
         }
         let frame = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        // A write failure means the host closed the pipe: the plugin is being
-        // stopped, and the caller should hear that rather than wait for a timeout.
-        if let Err(e) = write_frame(&frame) {
+        // A send failure means the writer is gone (host closed the pipe): the
+        // plugin is being stopped, and the caller should hear that rather than
+        // wait for a timeout.
+        let sender = self.inner.writer.lock().ok().and_then(|w| w.clone());
+        if sender.is_none() {
+            if let Ok(mut pending) = self.inner.pending.lock() {
+                pending.remove(&id);
+            }
+            return Err("the host is not reachable: this plugin is not running".to_string());
+        }
+        if let Err(e) = sender.expect("checked above").send(frame) {
             if let Ok(mut pending) = self.inner.pending.lock() {
                 pending.remove(&id);
             }
@@ -1148,37 +1169,45 @@ fn state_params(scope: &str, session_id: &str, project_id: &str, key: &str) -> V
     params
 }
 
-/// Write one frame on the protocol channel, under the process-wide write lock.
+/// The bit this plugin sets on the ids of the requests **it** sends.
 ///
-/// The SDK's own replies go through its writer thread; this path is for frames a
-/// plugin *sends*. Both end on stdout, so both take the same lock: two threads
-/// interleaving half a line each is protocol corruption, not a cosmetic bug.
-fn write_frame(frame: &Value) -> std::io::Result<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let lock = LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let mut stdout = std::io::stdout();
-    writeln!(stdout, "{frame}")?;
-    stdout.flush()
-}
+/// Both sides number their own requests from 1, so an unmarked plugin id can equal
+/// a host id: the host would read the plugin's question as the answer to its own,
+/// and a reply would land on the wrong waiter (a hook that times out while its
+/// answer is logged as "unknown request id"). Marking ours keeps the two id spaces
+/// disjoint, and the host echoes the id verbatim. Mirrors
+/// `kc_plugin_host::PLUGIN_REQUEST_FLAG`.
+pub const PLUGIN_REQUEST_FLAG: u64 = 1 << 62;
 
 /// Route one inbound frame: `true` when it was a response to this plugin's own
 /// request, `false` when it is a job for a worker.
+///
+/// Only a frame carrying [`PLUGIN_REQUEST_FLAG`] is ours. Anything else with an
+/// `id` is a request from the host and belongs to a worker, even if its number
+/// happens to equal one this plugin is waiting on - which is exactly the collision
+/// this flag exists to prevent.
 fn route_inbound(client: &HostClient, value: &Value) -> bool {
-    let Some(id) = value.get("id").and_then(Value::as_u64) else {
+    let Some(raw) = value.get("id").and_then(Value::as_u64) else {
         return false;
     };
-    // A request from the host also carries an `id`; only a frame with no `method`
-    // is a response to us.
-    if value.get("method").is_some() {
+    // The host echoes our id verbatim, so the marker it carries is OUR marker.
+    // Anything without it is the host's own request (or a notification) and
+    // belongs to a worker, even if its number happens to equal one we wait on.
+    if raw & PLUGIN_REQUEST_FLAG == 0 {
         return false;
     }
+    // No `method` check: the host's answer to `plugin/state/*` is written by the
+    // host, but the SDK's own machinery can echo a frame that still carries the
+    // method, and a `method` here is not evidence of a request.
+    // Keyed by the id EXACTLY as `call` registered it, marker included: stripping
+    // it here and not in `call` is a lookup miss, and the caller waits out its
+    // whole timeout with the answer sitting unread.
     let waiter = client
         .inner
         .pending
         .lock()
         .ok()
-        .and_then(|mut pending| pending.remove(&id));
+        .and_then(|mut pending| pending.remove(&raw));
     match waiter {
         Some(tx) => {
             let _ = tx.send(value.clone());
@@ -1236,11 +1265,11 @@ impl Plugin {
     /// handler (and never across a handler's own back-call, if it has one).
     pub fn handle_request(&self, request: Value) -> Option<Value> {
         let id = request.get("id").cloned();
-        let method = request
-            .get("method")
-            .and_then(|m| m.as_str())
-            .unwrap_or_default()
-            .to_string();
+        // A frame with no `method` is a RESPONSE, not a request: it is the host
+        // answering a call this plugin made. Answering it back is at best noise and
+        // at worst an infinite ping-pong, so it is never handled here. (`route_inbound`
+        // consumes ours first; this is the belt to that braces.)
+        let method = request.get("method").and_then(|m| m.as_str())?.to_string();
         let params = request.get("params").cloned().unwrap_or(Value::Null);
 
         // Notifications (e.g. `notifications/initialized`) get no response.
@@ -1379,6 +1408,7 @@ impl Plugin {
                                 .and_then(|v| v.as_str())
                                 .map(str::to_string),
                             workspace: string_of(&params, "workspace"),
+                            args: string_of(&params, "args"),
                         };
                         match user_handler("ui action", &action, || handler(request)) {
                             Ok(result) => serde_json::to_value(result).map_err(|e| {
@@ -1467,10 +1497,13 @@ impl Plugin {
         let pump_stop = Arc::new(AtomicBool::new(false));
         // From here on the host is reachable: a handler may call back into it
         // (`plugin/state/*`, §R2) and the reader loop routes the answer.
-        HostClient::global()
-            .inner
-            .started
-            .store(true, Ordering::SeqCst);
+        {
+            let client = HostClient::global();
+            if let Ok(mut slot) = client.inner.writer.lock() {
+                *slot = Some(write_tx.clone());
+            }
+            client.inner.started.store(true, Ordering::SeqCst);
+        }
         let pump = {
             let out = write_tx.clone();
             let finished = Arc::clone(&pump_finished);
@@ -2035,6 +2068,83 @@ impl PluginBuilder {
         handler: impl Fn(Value) -> Value + Send + Sync + 'static,
     ) -> Self {
         self.capability("hooks").hook("before_session_list", handler)
+    }
+
+    /// Contribute a **chip** — a small coloured label with an action — into a
+    /// badge slot (`session.row.badge`, `session.header.chip`).
+    ///
+    /// A chip differs from a button only in what it draws: `text` plus a `tone`
+    /// instead of a label plus an icon. It carries exactly one `action` (or one
+    /// `message`), so it is still a control a person activates, never markup.
+    /// `title` is the tooltip, and the accessible name falls back to `text`.
+    pub fn chip_with(
+        self,
+        slot: &str,
+        id: &str,
+        text: &str,
+        tone: &str,
+        title: Option<&str>,
+        handler: impl Fn(UiActionRequest) -> PluginUiActionResult + Send + Sync + 'static,
+    ) -> Self {
+        self.chip_command(slot, id, text, tone, title, handler)
+    }
+
+    /// A chip that sends a user turn instead of running code.
+    pub fn message_chip(
+        self,
+        slot: &str,
+        id: &str,
+        text: &str,
+        tone: &str,
+        title: Option<&str>,
+        message: &str,
+    ) -> Self {
+        self.ui(PluginUiContribution {
+            kind: UI_KIND_BUTTON.to_string(),
+            id: id.to_string(),
+            slot: Some(slot.to_string()),
+            label: text.to_string(),
+            title: title.map(str::to_string),
+            icon: None,
+            action: None,
+            message: Some(message.to_string()),
+            keys: None,
+            target: None,
+            text: Some(text.to_string()),
+            tone: Some(tone.to_string()),
+            summary: None,
+            sets: Vec::new(),
+            replace: None,
+        })
+    }
+
+    fn chip_command(
+        mut self,
+        slot: &str,
+        id: &str,
+        text: &str,
+        tone: &str,
+        title: Option<&str>,
+        handler: impl Fn(UiActionRequest) -> PluginUiActionResult + Send + Sync + 'static,
+    ) -> Self {
+        self.ui_actions.insert(id.to_string(), Box::new(handler));
+        self.ui(PluginUiContribution {
+            kind: UI_KIND_BUTTON.to_string(),
+            id: id.to_string(),
+            slot: Some(slot.to_string()),
+            label: text.to_string(),
+            title: title.map(str::to_string),
+            icon: None,
+            action: Some(id.to_string()),
+            message: None,
+            keys: None,
+            target: None,
+            text: Some(text.to_string()),
+            tone: Some(tone.to_string()),
+            summary: None,
+            sets: Vec::new(),
+            replace: None,
+        })
     }
 
     /// Contribute a command-palette entry that sends a user turn.

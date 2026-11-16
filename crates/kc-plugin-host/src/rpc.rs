@@ -724,6 +724,8 @@ impl PluginShared {
             "session_id": context.session_id,
             "project": context.project,
             "workspace": context.workspace,
+            // The typed remainder of a slash command (§R3); empty for a click.
+            "args": context.args,
         });
         let reply = self
             .request(methods::PANELS_READ, params, self.timeouts.call())
@@ -831,6 +833,8 @@ impl PluginShared {
             "session_id": context.session_id,
             "project": context.project,
             "workspace": context.workspace,
+            // The typed remainder of a slash command (§R3); empty for a click.
+            "args": context.args,
         });
         let reply = self
             .request(methods::UI_ACTION, params, self.timeouts.call())
@@ -1272,7 +1276,25 @@ impl PluginShared {
                 return;
             }
         };
-        if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
+        let flagged = msg
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .is_some_and(|raw| raw & crate::PLUGIN_REQUEST_FLAG != 0);
+        if flagged {
+            // An id carrying the plugin-request marker is never an answer to
+            // anything the host asked: the host numbers its own requests from 1 and
+            // never sets the flag. Either the plugin is *asking* (a `method`, which
+            // the dispatch below handles - `plugin/state/*` in particular) or it is
+            // echoing an answer the host just wrote, which is nothing to do.
+            if msg.get("method").is_none() {
+                debug!(
+                    plugin = %self.name,
+                    "ignoring a stray frame carrying a plugin request id: {}",
+                    truncate(line, 200)
+                );
+                return;
+            }
+        } else if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
             let waiter = self.lock().pending.remove(&id);
             let reply = match (msg.get("error"), msg.get("result")) {
                 (Some(err), _) if !err.is_null() => Reply::Remote(parse_error(err)),
@@ -1312,6 +1334,8 @@ impl PluginShared {
                     debug!(plugin = %self.name, "ignoring a state call with no id");
                     return;
                 };
+                // Echoed back verbatim: the plugin's router matches on the id it
+                // sent, which carries `PLUGIN_REQUEST_FLAG` (see the SDK).
                 self.spawn_state_request(id, method, params);
                 return;
             }
@@ -1442,11 +1466,16 @@ impl PluginShared {
         let shared = Arc::clone(self);
         tokio::spawn(async move {
             let answer = shared.state_call(&method, &params).await;
+            // Echo the plugin's own id exactly. Its request ids carry
+            // `PLUGIN_REQUEST_FLAG` (1<<62) and the host's own ids never do, so
+            // the two id spaces are disjoint and this reply cannot be confused
+            // with a response to one of the host's requests.
+            let reply_id = id;
             let frame = match answer {
-                Ok(result) => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                Ok(result) => serde_json::json!({"jsonrpc": "2.0", "id": reply_id, "result": result}),
                 Err(message) => serde_json::json!({
                     "jsonrpc": "2.0",
-                    "id": id,
+                    "id": reply_id,
                     "error": {"code": -32602, "message": message},
                 }),
             };
@@ -1508,7 +1537,16 @@ impl PluginShared {
             kc_core::plugin::methods::STATE_GET => backend
                 .get(&name, scope, &owner, key)
                 .await
-                .map(|value| serde_json::json!({"value": value}))
+                .map(|value| {
+                    // Parsed, not quoted: a plugin sets JSON and reads JSON back,
+                    // so `value["status"]` works on what it stored. A row written
+                    // by something that is not JSON comes back as the string it is,
+                    // rather than failing the read.
+                    let value = value.map(|raw| {
+                        serde_json::from_str::<Value>(&raw).unwrap_or(Value::String(raw))
+                    });
+                    serde_json::json!({ "value": value })
+                })
                 .map_err(|e| e.to_string()),
             kc_core::plugin::methods::STATE_SET => {
                 let value = params.get("value").ok_or_else(|| {

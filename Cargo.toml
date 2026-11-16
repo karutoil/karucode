@@ -12,6 +12,7 @@ members = [
   "crates/kc-docs",
   "crates/kc-server",
   "plugins/example-hello",
+  "plugins/session-status",
 ]
 
 [workspace.package]

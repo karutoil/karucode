@@ -2391,6 +2391,16 @@ pub(crate) const MAX_PROMPT_APPEND_BYTES: usize = 4 * 1024;
 /// Largest `reason` a `on_stop` may carry into the next turn.
 pub(crate) const MAX_STOP_REASON_BYTES: usize = 2 * 1024;
 
+/// The bit a plugin sets on the ids of the requests **it** sends (§R2).
+///
+/// Both sides number their own requests from 1, so without a marker a plugin's
+/// request id would equal one of the host's: the host would take the plugin's
+/// request for the answer to its own, and a reply would be delivered to the wrong
+/// waiter - a hook that times out while its answer is logged as "unknown request
+/// id". The bit is never allocated by the host's `next_id`, which counts up from 1.
+/// Mirrors `kc_plugin_sdk::PLUGIN_REQUEST_FLAG`.
+pub const PLUGIN_REQUEST_FLAG: u64 = 1 << 62;
+
 /// Ask ready plugins how to draw a session list (§R4).
 ///
 /// Merged by id, capped, and sanitised here rather than in the frontend: an
