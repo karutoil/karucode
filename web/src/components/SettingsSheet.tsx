@@ -1,4 +1,5 @@
 import type { ComponentChildren, JSX } from 'preact';
+import { PluginSettingsForm } from './PluginSettingsForm';
 import { useEffect, useState } from 'preact/hooks';
 import { ApiError, toErrorMessage } from '../api/client';
 import { listMcpServers, listPlugins, reloadMcpServer, reloadMcpServers, reloadPlugin, rescanPlugins, setPluginEnabled } from '../api/endpoints';
@@ -2067,7 +2068,13 @@ const SCOPE_NOTES: Record<SettingsScope, string> = {
  * "press Save changes" over such a pane is the small lie that teaches someone to
  * press a button that does nothing.
  */
-const SELF_SAVING: ReadonlySet<SettingsTab> = new Set<SettingsTab>(['skills']);
+const SELF_SAVING: ReadonlySet<SettingsTab> = new Set<SettingsTab>([
+  'skills',
+  // A plugin's settings are saved by its own "Save and restart", which also
+  // restarts that plugin. The footer's "Save changes" cannot apply them, so
+  // leaving this tab out would make a saved edit look discarded.
+  'plugins',
+]);
 
 const SELF_SAVING_NOTE = 'Every control here saves itself — Save changes does not affect this section.';
 
@@ -3365,6 +3372,10 @@ export function SettingsSheet(): JSX.Element | null {
                                     >
                                       {plugin.status === 'disabled' ? 'Enable' : 'Disable'}
                                     </button>
+                                    {/* The plugin's own schema decides what appears
+                                      * here; the app supplies no per-plugin form. A
+                                      * plugin that declares no settings draws nothing. */}
+                                    <PluginSettingsForm plugin={plugin.name} />
                                   </span>
                                 </li>
                               ))}

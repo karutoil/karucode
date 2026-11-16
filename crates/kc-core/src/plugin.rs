@@ -42,6 +42,13 @@ pub struct PluginManifest {
     /// and a plugin that declares none changes nothing.
     #[serde(default)]
     pub ui: Vec<PluginUiContribution>,
+    /// Settings this plugin declares (§S1). The host validates them before the
+    /// plugin is marked ready, the operator edits them in Settings → Plugins &
+    /// MCP, and the plugin reads the effective values from
+    /// `KARUCODE_PLUGIN_SETTINGS`. Additive: a plugin that declares none keeps
+    /// working unchanged.
+    #[serde(default)]
+    pub settings: Vec<PluginSetting>,
 }
 
 fn protocol_version() -> String {
@@ -331,6 +338,348 @@ pub const MAX_UI_RESULT_MESSAGE_BYTES: usize = 2_000;
 pub const MAX_UI_RESULT_REFRESH: usize = 16;
 /// Cap on a `keys` spec, in bytes. A shortcut is a shortcut, not a chord book.
 pub const MAX_UI_KEYS_BYTES: usize = 32;
+
+// ---------------------------------------------------------------------------
+// Settings a plugin declares (phase 2, §S1)
+//
+// A plugin used to be configurable only by hand-editing `[[plugins]]` in
+// config.toml: `KARUCODE_PLUGIN_SETTINGS` existed, but nothing could write it and
+// nothing told the operator what was configurable. These types are that
+// declaration. The host validates them before a plugin is marked ready, and the
+// web UI renders a form from them - so a plugin gets settings in the product
+// without a line of app code per plugin.
+// ---------------------------------------------------------------------------
+
+/// Most settings one plugin may declare. More than this is a configuration
+/// surface nobody fills in; the plugin should read a file or use `plugin/state/*`.
+pub const MAX_PLUGIN_SETTINGS: usize = 32;
+/// Cap on a setting key: `[a-z0-9._-]`, short enough to read in a URL.
+pub const MAX_SETTING_KEY_BYTES: usize = 48;
+/// Cap on a setting's label (what the field is called in the UI).
+pub const MAX_SETTING_LABEL_BYTES: usize = 80;
+/// Cap on a setting's help text, in bytes.
+pub const MAX_SETTING_HELP_BYTES: usize = 400;
+/// Cap on a `text` setting's value, and on each `select` option, in bytes.
+pub const MAX_SETTING_TEXT_BYTES: usize = 2_000;
+/// Most options a `select` may offer.
+pub const MAX_SETTING_OPTIONS: usize = 32;
+/// Cap on a number of settings a plugin may mark `secret`.
+pub const MAX_SECRET_SETTINGS: usize = 8;
+
+/// The kind of value a setting holds.
+///
+/// Deliberately a closed set: each one has a renderer, a validator and a JSON
+/// encoding, so an unknown type is a manifest error rather than a field the UI
+/// silently drops. `secret` is a `text` whose value is never echoed back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginSettingKind {
+    Bool,
+    Text,
+    Number,
+    Select,
+    Secret,
+}
+
+impl PluginSettingKind {
+    /// Every kind, for validation and for the docs.
+    pub const ALL: [PluginSettingKind; 5] = [
+        PluginSettingKind::Bool,
+        PluginSettingKind::Text,
+        PluginSettingKind::Number,
+        PluginSettingKind::Select,
+        PluginSettingKind::Secret,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PluginSettingKind::Bool => "bool",
+            PluginSettingKind::Text => "text",
+            PluginSettingKind::Number => "number",
+            PluginSettingKind::Select => "select",
+            PluginSettingKind::Secret => "secret",
+        }
+    }
+
+    /// Whether a value of this kind is a number, which is the only kind that
+    /// carries `min`/`max`.
+    pub fn is_number(self) -> bool {
+        matches!(self, PluginSettingKind::Number)
+    }
+}
+
+/// One option of a `select` setting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSettingOption {
+    /// The value written to the config.
+    pub value: String,
+    /// What the operator reads. Defaults to `value`.
+    #[serde(default)]
+    pub label: String,
+}
+
+/// One setting a plugin declares.
+///
+/// Every field beyond `key`, `type` and `default` is presentation or validation:
+/// the host stores the value and checks it against this declaration, and the UI
+/// draws the field. Nothing here runs code.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginSetting {
+    /// Stable key, `[a-z0-9._-]`, unique within the plugin. This is what appears
+    /// in `KARUCODE_PLUGIN_SETTINGS` and in the settings API.
+    pub key: String,
+    /// The field's label in the UI.
+    pub label: String,
+    /// What kind of value it holds.
+    #[serde(rename = "type")]
+    pub kind: PluginSettingKind,
+    /// The value when the operator has set nothing.
+    #[serde(default)]
+    pub default: serde_json::Value,
+    /// One or two sentences under the field.
+    #[serde(default)]
+    pub help: String,
+    /// For `number`: the accepted range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    /// For `select`: the offered values.
+    #[serde(default)]
+    pub options: Vec<PluginSettingOption>,
+}
+
+/// Why a declared setting was refused.
+///
+/// Returned rather than logged so the manifest error can name the field: a plugin
+/// author reading "setting `foo`: default is not a number" fixes it in seconds,
+/// and one reading "invalid manifest" does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingProblem {
+    pub key: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for SettingProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.key.is_empty() {
+            write!(f, "{}", self.message)
+        } else {
+            write!(f, "setting `{}`: {}", self.key, self.message)
+        }
+    }
+}
+
+/// Is `key` a legal setting key: `[a-z0-9._-]`, 1..=[`MAX_SETTING_KEY_BYTES`]?
+pub fn valid_setting_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= MAX_SETTING_KEY_BYTES
+        && key
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Check one declared setting, including that its default matches its type.
+pub fn validate_setting(setting: &PluginSetting) -> Result<(), SettingProblem> {
+    let problem = |message: String| {
+        Err(SettingProblem {
+            key: setting.key.clone(),
+            message,
+        })
+    };
+    if !valid_setting_key(&setting.key) {
+        return problem(format!(
+            "the key must be ascii lowercase letters, digits, `.`, `_` or `-`, 1 to \
+             {MAX_SETTING_KEY_BYTES} bytes"
+        ));
+    }
+    let label = setting.label.trim();
+    if label.is_empty() {
+        return problem("a label is required: it is what the field is called".into());
+    }
+    if label.len() > MAX_SETTING_LABEL_BYTES {
+        return problem(format!(
+            "the label is longer than {MAX_SETTING_LABEL_BYTES} bytes"
+        ));
+    }
+    if setting.help.len() > MAX_SETTING_HELP_BYTES {
+        return problem(format!(
+            "the help text is longer than {MAX_SETTING_HELP_BYTES} bytes"
+        ));
+    }
+    if let (Some(min), Some(max)) = (setting.min, setting.max) {
+        if !min.is_finite() || !max.is_finite() || min > max {
+            return problem("`min` must be a finite number no greater than `max`".into());
+        }
+    }
+    if setting.kind != PluginSettingKind::Number && (setting.min.is_some() || setting.max.is_some())
+    {
+        return problem(format!(
+            "`min`/`max` only apply to a `number` setting, not `{}`",
+            setting.kind.as_str()
+        ));
+    }
+    if setting.kind != PluginSettingKind::Select && !setting.options.is_empty() {
+        return problem(format!(
+            "`options` only apply to a `select` setting, not `{}`",
+            setting.kind.as_str()
+        ));
+    }
+    if setting.kind == PluginSettingKind::Select {
+        if setting.options.is_empty() {
+            return problem("a `select` needs at least one option".into());
+        }
+        if setting.options.len() > MAX_SETTING_OPTIONS {
+            return problem(format!("more than {MAX_SETTING_OPTIONS} options"));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for option in &setting.options {
+            if option.value.trim().is_empty() || option.value.len() > MAX_SETTING_TEXT_BYTES {
+                return problem("every option needs a non-empty value".into());
+            }
+            if option.label.len() > MAX_SETTING_LABEL_BYTES {
+                return problem(format!(
+                    "an option label is longer than {MAX_SETTING_LABEL_BYTES} bytes"
+                ));
+            }
+            if !seen.insert(option.value.as_str()) {
+                return problem(format!("two options share the value `{}`", option.value));
+            }
+        }
+    }
+    // The default must be a value the setting could actually hold: a form that
+    // offers a default the validator would reject is a form that cannot be saved.
+    match check_setting_value(setting, &setting.default) {
+        Ok(()) => Ok(()),
+        Err(message) => problem(format!("the default is invalid: {message}")),
+    }
+}
+
+/// Check that `value` is acceptable for `setting`.
+///
+/// This is the single place a stored value is judged - the settings API, the
+/// config loader and the UI all defer to it, so they cannot disagree about what
+/// a legal value is.
+pub fn check_setting_value(
+    setting: &PluginSetting,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let kind = setting.kind;
+    fn require_text<'v>(
+        setting: &PluginSetting,
+        value: &'v serde_json::Value,
+    ) -> Result<&'v str, String> {
+        let text = value
+            .as_str()
+            .ok_or_else(|| format!("`{}` expects a string", setting.key))?;
+        if text.len() > MAX_SETTING_TEXT_BYTES {
+            return Err(format!(
+                "the value is longer than {MAX_SETTING_TEXT_BYTES} bytes"
+            ));
+        }
+        Ok(text)
+    }
+    match kind {
+        PluginSettingKind::Bool => {
+            if !value.is_boolean() {
+                return Err(format!("`{}` expects true or false", setting.key));
+            }
+        }
+        PluginSettingKind::Text | PluginSettingKind::Secret => {
+            require_text(setting, value)?;
+        }
+        PluginSettingKind::Number => {
+            let number = value
+                .as_f64()
+                .ok_or_else(|| format!("`{}` expects a number", setting.key))?;
+            if !number.is_finite() {
+                return Err(format!("`{}` must be a finite number", setting.key));
+            }
+            if let Some(min) = setting.min {
+                if number < min {
+                    return Err(format!("`{}` must be at least {min}", setting.key));
+                }
+            }
+            if let Some(max) = setting.max {
+                if number > max {
+                    return Err(format!("`{}` must be at most {max}", setting.key));
+                }
+            }
+        }
+        PluginSettingKind::Select => {
+            let text = require_text(setting, value)?;
+            if !setting.options.iter().any(|o| o.value == text) {
+                let offered: Vec<&str> = setting.options.iter().map(|o| o.value.as_str()).collect();
+                return Err(format!(
+                    "`{}` must be one of [{}]",
+                    setting.key,
+                    offered.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a whole declared set: bounds, uniqueness, and each setting's own rules.
+pub fn validate_settings(settings: &[PluginSetting]) -> Result<(), SettingProblem> {
+    if settings.len() > MAX_PLUGIN_SETTINGS {
+        return Err(SettingProblem {
+            key: String::new(),
+            message: format!("a plugin may declare at most {MAX_PLUGIN_SETTINGS} settings"),
+        });
+    }
+    let secrets = settings
+        .iter()
+        .filter(|s| s.kind == PluginSettingKind::Secret)
+        .count();
+    if secrets > MAX_SECRET_SETTINGS {
+        return Err(SettingProblem {
+            key: String::new(),
+            message: format!("a plugin may declare at most {MAX_SECRET_SETTINGS} secrets"),
+        });
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for setting in settings {
+        validate_setting(setting)?;
+        if !seen.insert(setting.key.as_str()) {
+            return Err(SettingProblem {
+                key: setting.key.clone(),
+                message: "declared twice".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Apply an operator's values over a plugin's declared defaults.
+///
+/// Values that do not fit the declaration are **dropped rather than applied**: the
+/// plugin then sees its default, which is the safe direction. The settings API
+/// refuses such a write in the first place, so this only fires for a config file
+/// edited by hand - and a hand-edited typo must not stop a plugin from loading.
+pub fn effective_settings(
+    settings: &[PluginSetting],
+    configured: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut out = std::collections::BTreeMap::new();
+    for setting in settings {
+        let value = configured
+            .get(&setting.key)
+            .filter(|value| check_setting_value(setting, value).is_ok())
+            .cloned()
+            .unwrap_or_else(|| setting.default.clone());
+        out.insert(setting.key.clone(), value);
+    }
+    // Keys the plugin never declared are kept: a newer plugin installed on an
+    // older declaration would otherwise lose its operator's values on load.
+    for (key, value) in configured {
+        if !out.contains_key(key) {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    out
+}
 
 /// Shortcuts the app itself already owns, in canonical form.
 ///
@@ -679,6 +1028,13 @@ pub mod methods {
     pub const STATE_SET: &str = "plugin/state/set";
     pub const STATE_DELETE: &str = "plugin/state/delete";
     pub const STATE_LIST: &str = "plugin/state/list";
+    /// Read this plugin's **effective settings** (§S2): what the operator set,
+    /// over the defaults its own manifest declared.
+    ///
+    /// Read-only by design. A plugin must not be able to change its own settings,
+    /// or it could quietly relax a guard rail the operator switched on. Settings
+    /// are operator data; the plugin is a consumer.
+    pub const SETTINGS_GET: &str = "plugin/settings/get";
 }
 
 /// Scopes a plugin may store state in.
@@ -693,6 +1049,14 @@ pub mod state_scope {
     pub const SESSION: &str = "session";
     pub const PROJECT: &str = "project";
     pub const INSTALL: &str = "install";
+    /// Values the **operator** set through the settings API (§S2).
+    ///
+    /// Deliberately absent from [`ALL`]: `valid_state_scope` gates every
+    /// `plugin/state/*` call, so a plugin cannot read or write this scope with
+    /// the plugin-facing API. Its only writer is the server, on behalf of the
+    /// person at the keyboard - otherwise a plugin could relax a guard rail the
+    /// operator switched on.
+    pub const SETTING: &str = "setting";
     pub const ALL: &[&str] = &[SESSION, PROJECT, INSTALL];
 }
 
@@ -1540,5 +1904,226 @@ mod tests {
         let value = serde_json::json!({"ok": true, "message": "m", "refresh": ["todo"]});
         let parsed: PluginUiActionResult = serde_json::from_value(value).unwrap();
         assert_eq!(parsed.refresh, vec!["todo".to_string()]);
+    }
+
+    // ---- declared settings (phase 2, §S1) ----
+
+    fn setting(key: &str, kind: PluginSettingKind, default: serde_json::Value) -> PluginSetting {
+        PluginSetting {
+            key: key.into(),
+            label: key.into(),
+            kind,
+            default,
+            help: String::new(),
+            min: None,
+            max: None,
+            options: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_well_formed_setting_manifest_is_accepted() {
+        let settings = vec![
+            setting("collapse", PluginSettingKind::Bool, serde_json::json!(true)),
+            setting(
+                "label",
+                PluginSettingKind::Text,
+                serde_json::json!("Completed"),
+            ),
+            PluginSetting {
+                min: Some(0.0),
+                max: Some(120.0),
+                ..setting("after", PluginSettingKind::Number, serde_json::json!(0))
+            },
+            PluginSetting {
+                options: vec![
+                    PluginSettingOption {
+                        value: "bottom".into(),
+                        label: "Bottom".into(),
+                    },
+                    PluginSettingOption {
+                        value: "top".into(),
+                        label: "Top".into(),
+                    },
+                ],
+                ..setting(
+                    "place",
+                    PluginSettingKind::Select,
+                    serde_json::json!("bottom"),
+                )
+            },
+        ];
+        assert!(validate_settings(&settings).is_ok());
+    }
+
+    #[test]
+    fn a_bad_setting_is_refused_with_the_reason_named() {
+        // The point of a SettingProblem is that the author can fix it from the
+        // message alone, so each case asserts the message says what is wrong.
+        let cases: Vec<(PluginSetting, &str)> = vec![
+            (
+                PluginSetting {
+                    key: "Not A Key".into(),
+                    ..setting("ok", PluginSettingKind::Bool, serde_json::json!(true))
+                },
+                "key must be",
+            ),
+            // A default that does not match the declared type: the form would
+            // open on a value it then refuses to save.
+            (
+                setting("flag", PluginSettingKind::Bool, serde_json::json!("yes")),
+                "default is invalid",
+            ),
+            (
+                setting("n", PluginSettingKind::Number, serde_json::json!(true)),
+                "default is invalid",
+            ),
+            (
+                PluginSetting {
+                    min: Some(10.0),
+                    max: Some(1.0),
+                    ..setting("r", PluginSettingKind::Number, serde_json::json!(5))
+                },
+                "min",
+            ),
+            // min/max on a non-number, options on a non-select: silently ignoring
+            // either would leave the author believing the field was constrained.
+            (
+                PluginSetting {
+                    min: Some(0.0),
+                    ..setting("t", PluginSettingKind::Text, serde_json::json!("x"))
+                },
+                "only apply to a `number`",
+            ),
+            (
+                PluginSetting {
+                    options: vec![PluginSettingOption {
+                        value: "a".into(),
+                        label: String::new(),
+                    }],
+                    ..setting("b", PluginSettingKind::Bool, serde_json::json!(true))
+                },
+                "only apply to a `select`",
+            ),
+            (
+                setting("s", PluginSettingKind::Select, serde_json::json!("a")),
+                "at least one option",
+            ),
+        ];
+        for (bad, expected) in cases {
+            let error = validate_setting(&bad).expect_err("should be refused");
+            assert!(
+                error.message.contains(expected),
+                "expected {expected:?} in {:?}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_select_only_accepts_its_declared_options() {
+        let select = PluginSetting {
+            options: vec![PluginSettingOption {
+                value: "bottom".into(),
+                label: "Bottom".into(),
+            }],
+            ..setting(
+                "place",
+                PluginSettingKind::Select,
+                serde_json::json!("bottom"),
+            )
+        };
+        assert!(check_setting_value(&select, &serde_json::json!("bottom")).is_ok());
+        let error = check_setting_value(&select, &serde_json::json!("middle")).unwrap_err();
+        assert!(
+            error.contains("bottom"),
+            "the reason lists the options: {error}"
+        );
+    }
+
+    #[test]
+    fn a_number_is_bounded_by_its_range() {
+        let number = PluginSetting {
+            min: Some(0.0),
+            max: Some(10.0),
+            ..setting("n", PluginSettingKind::Number, serde_json::json!(5))
+        };
+        assert!(check_setting_value(&number, &serde_json::json!(0)).is_ok());
+        assert!(check_setting_value(&number, &serde_json::json!(10.0)).is_ok());
+        assert!(check_setting_value(&number, &serde_json::json!(10.5)).is_err());
+        assert!(check_setting_value(&number, &serde_json::json!(-1)).is_err());
+        // JSON has no NaN literal, but a computed value can still be absurd.
+        assert!(check_setting_value(&number, &serde_json::json!("5")).is_err());
+    }
+
+    #[test]
+    fn duplicate_and_excessive_settings_are_refused() {
+        let twice = vec![
+            setting("dup", PluginSettingKind::Bool, serde_json::json!(true)),
+            setting("dup", PluginSettingKind::Text, serde_json::json!("x")),
+        ];
+        assert!(validate_settings(&twice)
+            .unwrap_err()
+            .message
+            .contains("twice"));
+
+        let many: Vec<PluginSetting> = (0..=MAX_PLUGIN_SETTINGS)
+            .map(|i| {
+                setting(
+                    &format!("k{i}"),
+                    PluginSettingKind::Bool,
+                    serde_json::json!(true),
+                )
+            })
+            .collect();
+        assert!(validate_settings(&many).is_err());
+    }
+
+    #[test]
+    fn effective_settings_fall_back_to_defaults_and_keep_unknown_keys() {
+        let declared = vec![
+            setting("collapse", PluginSettingKind::Bool, serde_json::json!(true)),
+            setting(
+                "label",
+                PluginSettingKind::Text,
+                serde_json::json!("Completed"),
+            ),
+        ];
+        let mut configured = std::collections::BTreeMap::new();
+        // A legal override, an illegal one, and a key the plugin never declared.
+        configured.insert("collapse".to_string(), serde_json::json!(false));
+        configured.insert("label".to_string(), serde_json::json!(42));
+        configured.insert("future_key".to_string(), serde_json::json!("kept"));
+
+        let effective = effective_settings(&declared, &configured);
+        assert_eq!(effective.get("collapse"), Some(&serde_json::json!(false)));
+        // An illegal value falls back to the default rather than reaching the
+        // plugin: a hand-edited config typo must not break a plugin's assumptions.
+        assert_eq!(
+            effective.get("label"),
+            Some(&serde_json::json!("Completed"))
+        );
+        // A key a newer build knows about survives a load by an older declaration.
+        assert_eq!(
+            effective.get("future_key"),
+            Some(&serde_json::json!("kept"))
+        );
+    }
+
+    #[test]
+    fn a_manifest_may_declare_settings_and_an_old_one_need_not() {
+        let with: PluginManifest = serde_json::from_value(serde_json::json!({
+            "name": "p", "version": "1",
+            "settings": [
+                {"key": "collapse", "label": "Collapse", "type": "bool", "default": true}
+            ]
+        }))
+        .expect("manifest");
+        assert_eq!(with.settings.len(), 1);
+        assert_eq!(with.settings[0].kind, PluginSettingKind::Bool);
+
+        let without: PluginManifest =
+            serde_json::from_value(serde_json::json!({"name": "p", "version": "1"})).expect("old");
+        assert!(without.settings.is_empty(), "settings are additive");
     }
 }

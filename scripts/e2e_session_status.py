@@ -211,6 +211,72 @@ def main() -> int:
         check("the session is open again", badge_text(client, session_id) == "open",
               badge_text(client, session_id))
 
+        # 7. Settings: the schema is published, the operator can edit it, and the
+        # plugin's behaviour actually follows (§S1-S2). This is the check that
+        # separates "a form exists" from "a setting does something".
+        status, schema = client.get("/api/plugins/session-status/settings")
+        keys = [f["key"] for f in schema.get("settings") or []]
+        check("the plugin publishes its settings schema",
+              status == 200 and keys == ["collapse_completed", "group_label", "after_minutes"],
+              json.dumps(schema)[:300])
+        values = {f["key"]: f.get("value") for f in schema.get("settings") or []}
+        check("the values in force are the declared defaults",
+              values.get("collapse_completed") is True and values.get("group_label") == "Completed",
+              json.dumps(values)[:200])
+
+        # Turn folding OFF: the completed session must stop being grouped away.
+        status, saved = client.patch(
+            "/api/plugins/session-status/settings",
+            {"settings": {"collapse_completed": False}},
+        )
+        check("a setting can be saved", status == 200 and saved.get("restarted") is True,
+              json.dumps(saved)[:300])
+
+        status, listing = client.get("/api/sessions")
+        group_of = {a["id"]: a.get("group") for a in listing.get("annotations") or []}
+        check("saving a setting changes what the plugin reports",
+              group_of.get(session_id) == 0, json.dumps(group_of))
+
+        # A value of the wrong type is refused, and nothing is written.
+        status, refused = client.patch(
+            "/api/plugins/session-status/settings",
+            {"settings": {"after_minutes": "soon"}},
+        )
+        check("a wrong type is refused with the field named",
+              status == 400 and "after_minutes" in json.dumps(refused),
+              json.dumps(refused)[:300])
+        status, refused = client.patch(
+            "/api/plugins/session-status/settings",
+            {"settings": {"no_such_setting": 1}},
+        )
+        check("an undeclared setting is refused", status == 400,
+              json.dumps(refused)[:300])
+        status, refused = client.patch(
+            "/api/plugins/session-status/settings",
+            {"settings": {"after_minutes": -5}},
+        )
+        check("an out-of-range number is refused", status == 400,
+              json.dumps(refused)[:300])
+
+        # Turn it back on, and mark the session completed again: the reopen above
+        # cleared the mark, so without this the restart check would be asserting
+        # against an open session and could not fail for the right reason.
+        client.patch(
+            "/api/plugins/session-status/settings",
+            {"settings": {"collapse_completed": True}},
+        )
+        client.post(
+            f"/api/sessions/{session_id}/messages", {"content": "/plugin-session-status-complete back"}
+        )
+        server.terminate()
+        server.wait(timeout=30)
+        server = start(args.binary, out, port, workspace, data_dir, home, provider_port)
+        client = Client(port)
+        status, listing = client.get("/api/sessions")
+        group_of = {a["id"]: a.get("group") for a in listing.get("annotations") or []}
+        check("a saved setting survives a server restart",
+              group_of.get(session_id) == 1, json.dumps(group_of))
+
         # 7. An unknown command is still refused rather than silently ignored.
         status, reply = client.post(
             f"/api/sessions/{session_id}/messages",

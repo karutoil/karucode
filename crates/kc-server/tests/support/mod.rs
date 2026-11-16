@@ -561,6 +561,9 @@ impl HarnessBuilder {
         };
 
         let store = Arc::new(SqliteStore::open(&db_path).await.expect("store"));
+        // A second handle for the settings backend: `store` below is moved into
+        // `AppStateDeps`.
+        let store_for_state = Arc::clone(&store);
         let settings = SettingsHandle::new(config.clone(), store.clone())
             .await
             .expect("settings");
@@ -636,6 +639,11 @@ impl HarnessBuilder {
             providers: factory.clone(),
             projects,
             plugins,
+            // The same backend the host got: a test that saves a setting must
+            // write and read through the production path, not a stub.
+            plugin_state: Arc::new(kc_server::plugin_state::StoreStateBackend::new(Arc::clone(
+                &store_for_state,
+            ))),
             mcp,
             builtin_tools,
             web_dir,

@@ -92,6 +92,127 @@ pub async fn reload_plugin(
         .map_err(|e| ApiError::internal(format!("could not serialize plugin: {e}")))
 }
 
+/// `GET /api/plugins/:name/settings` — the declared schema **and** the values
+/// currently in force (§S2).
+///
+/// One request rather than two because the UI needs both to draw anything: the
+/// schema says which fields exist and what is legal, the values say what to put
+/// in them. `secret` values are **never** echoed - the field arrives with
+/// `configured: true` and no value, which is all a password-style input needs.
+pub async fn plugin_settings(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let (declared, effective) = {
+        let host = state.plugins().lock().await;
+        host.plugin_settings(&name)
+            .await
+            .ok_or_else(|| ApiError::not_found(format!("plugin `{name}` is not configured")))?
+    };
+    let mut fields = Vec::with_capacity(declared.len());
+    for setting in &declared {
+        let secret = setting.kind == kc_core::plugin::PluginSettingKind::Secret;
+        let configured = effective.contains_key(&setting.key);
+        let mut value = serde_json::to_value(setting)
+            .map_err(|e| ApiError::internal(format!("could not serialize a setting: {e}")))?;
+        if let Some(object) = value.as_object_mut() {
+            let effective_value = effective.get(&setting.key).cloned().unwrap_or_default();
+            if secret {
+                // Presence, not content: a secret's value never leaves the server.
+                object.insert("value".into(), serde_json::Value::Null);
+                object.insert("configured".into(), json!(configured));
+            } else {
+                object.insert("value".into(), effective_value);
+            }
+        }
+        fields.push(value);
+    }
+    Ok(Json(json!({ "name": name, "settings": fields })))
+}
+
+/// `PATCH /api/plugins/:name/settings` — save the operator's choices.
+///
+/// The body is `{"settings": {"collapse_completed": false}}`, merged into what is
+/// already saved, so a form can post one field without sending the rest. Every
+/// value is checked against the plugin's own declaration first: an unknown key, a
+/// wrong type or a number out of range is a `400` naming the field, and **nothing
+/// is written** — a half-applied form is worse than a rejected one.
+///
+/// The values are operator data: they live in a scope the plugin-facing
+/// `plugin/state/*` API cannot reach, so a plugin can read its settings but never
+/// write them. A plugin that could would be able to switch off its own guard rails.
+pub async fn update_plugin_settings(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        settings: std::collections::BTreeMap<String, serde_json::Value>,
+    }
+    let body: Body = parse_required(&body, "PATCH /api/plugins/:name/settings")?;
+    if body.settings.len() > kc_core::plugin::MAX_PLUGIN_SETTINGS {
+        return Err(ApiError::bad_request(format!(
+            "at most {} settings may be sent at once",
+            kc_core::plugin::MAX_PLUGIN_SETTINGS
+        )));
+    }
+
+    let declared = {
+        let host = state.plugins().lock().await;
+        host.plugin_settings(&name)
+            .await
+            .ok_or_else(|| ApiError::not_found(format!("plugin `{name}` is not configured")))?
+            .0
+    };
+    if declared.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "plugin `{name}` declares no settings, so it has nothing to configure"
+        )));
+    }
+
+    // Validate the whole body before writing anything.
+    for (key, value) in &body.settings {
+        let setting = declared.iter().find(|s| &s.key == key).ok_or_else(|| {
+            let known: Vec<&str> = declared.iter().map(|s| s.key.as_str()).collect();
+            ApiError::bad_request(format!(
+                "plugin `{name}` has no setting `{key}`; it declares [{}]",
+                known.join(", ")
+            ))
+        })?;
+        kc_core::plugin::check_setting_value(setting, value)
+            .map_err(|reason| ApiError::bad_request(format!("setting `{key}`: {reason}")))?;
+    }
+
+    let backend = state.plugin_state_backend().ok_or_else(|| {
+        ApiError::internal("plugin state is not available, so settings cannot be saved")
+    })?;
+    for (key, value) in &body.settings {
+        let encoded = serde_json::to_string(value)
+            .map_err(|e| ApiError::internal(format!("could not encode setting `{key}`: {e}")))?;
+        backend
+            .set(
+                &name,
+                kc_core::plugin::state_scope::SETTING,
+                "",
+                key,
+                &encoded,
+            )
+            .await
+            .map_err(|e| ApiError::internal(format!("could not save setting `{key}`: {e}")))?;
+    }
+
+    // A fresh process is how a plugin sees new values; restart this one only.
+    // A plugin that fails to restart is not a reason to lose the save, so the
+    // error is reported alongside the settings that were written.
+    let restart = state.reload_plugin(&name).await;
+    Ok(Json(json!({
+        "saved": body.settings.keys().cloned().collect::<Vec<_>>(),
+        "restarted": restart.is_ok(),
+        "error": restart.err().map(|e| format!("{e:?}")),
+    })))
+}
+
 pub async fn enable_plugin(
     State(state): State<AppState>,
     Path(name): Path<String>,

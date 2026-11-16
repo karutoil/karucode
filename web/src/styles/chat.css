@@ -3052,17 +3052,10 @@
   outline-offset: 1px;
 }
 
-/* Touch and narrow layouts have no hover, so the control has to be reachable. */
+/* Touch and narrow layouts have no hover, so the message control has to be reachable. */
 @media (hover: none) {
-  .rewind-button {
+  .msg-top > .rewind-button {
     opacity: 1;
     border-color: var(--line);
-  }
-
-  /* Revealed inline in metadata without stacking or overlapping */
-  .rewind-tool {
-    display: inline-flex;
-    opacity: 0.85;
-    background: var(--surface-raised);
   }
 }

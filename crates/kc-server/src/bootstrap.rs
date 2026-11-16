@@ -711,9 +711,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     // Where a plugin keeps its own durable state (§R2). Installed before
     // `start_all` so a plugin that reads its state during its own handshake
     // already finds it.
-    plugin_host.set_state_backend(Arc::new(crate::plugin_state::StoreStateBackend::new(
-        Arc::clone(&sqlite_store),
-    )));
+    // Kept as its own handle too: the settings API writes the operator's values
+    // through it, in a scope the plugin-facing API cannot reach (§S2).
+    let plugin_state: Arc<dyn kc_core::plugin::PluginStateBackend> = Arc::new(
+        crate::plugin_state::StoreStateBackend::new(Arc::clone(&sqlite_store)),
+    );
+    plugin_host.set_state_backend(Arc::clone(&plugin_state));
     // Subscribe *before* `start_all`: a plugin that raises a notification during
     // its own startup would otherwise have it dropped on the floor.
     let plugin_notices = plugin_host.listen_notifications();
@@ -787,6 +790,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         providers,
         projects: Arc::clone(&projects),
         plugins: Arc::clone(&plugins),
+        plugin_state: Arc::clone(&plugin_state),
         mcp: Arc::clone(&mcp),
         builtin_tools,
         web_dir: config.web_dir.clone(),

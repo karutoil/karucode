@@ -243,6 +243,10 @@ pub fn api_router() -> Router<AppState> {
             post(plugin_install::cancel_install),
         )
         .route("/plugins/:name/enable", post(plugins::enable_plugin))
+        .route(
+            "/plugins/:name/settings",
+            get(plugins::plugin_settings).patch(plugins::update_plugin_settings),
+        )
         .route("/plugins/:name/reload", post(plugins::reload_plugin))
         // Per-plugin tool-output budgets: read the record, file the ask, answer
         // it, forget it. The decision and the clear are operator-only.

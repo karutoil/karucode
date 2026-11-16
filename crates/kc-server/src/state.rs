@@ -403,6 +403,10 @@ pub struct AppStateDeps {
     /// implicit workspace too, which is `None` on a fresh install.
     pub projects: Arc<ProjectRegistry>,
     pub plugins: Arc<Mutex<PluginHost>>,
+    /// The plugin state store the host also uses. The server keeps its own handle
+    /// so the settings API (§S2) can write operator values in a scope the
+    /// plugin-facing `plugin/state/*` API cannot reach.
+    pub plugin_state: Arc<dyn kc_core::plugin::PluginStateBackend>,
     pub mcp: Arc<Mutex<McpManager>>,
     /// First-party tools (plus test extras). Kept so `reload_tools` can rebuild
     /// the registry after a plugin is enabled or disabled.
@@ -430,6 +434,7 @@ pub struct AppStateInner {
     pub runtime: Arc<Runtime>,
     pub providers: Arc<dyn ProviderFactory>,
     pub plugins: Arc<Mutex<PluginHost>>,
+    pub plugin_state: Arc<dyn kc_core::plugin::PluginStateBackend>,
     pub mcp: Arc<Mutex<McpManager>>,
     pub builtin_tools: Vec<Arc<dyn Tool>>,
     pub web: WebAssets,
@@ -507,6 +512,7 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 settings: deps.settings,
                 store: deps.store,
+                plugin_state: deps.plugin_state,
                 runtime: deps.runtime,
                 providers: deps.providers,
                 plugins: deps.plugins,
@@ -545,6 +551,11 @@ impl AppState {
     }
 
     /// Per-plugin tool-output budgets: the stored answers and the live grants.
+    /// The plugin state store, for the settings API (§S2).
+    pub fn plugin_state_backend(&self) -> Option<Arc<dyn kc_core::plugin::PluginStateBackend>> {
+        Some(Arc::clone(&self.inner.plugin_state))
+    }
+
     pub fn plugin_tool_output(&self) -> &Arc<crate::plugin_tool_output::PluginToolOutput> {
         &self.inner.plugin_tool_output
     }

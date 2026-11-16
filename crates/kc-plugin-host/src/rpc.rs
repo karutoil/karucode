@@ -487,6 +487,19 @@ impl PluginShared {
         self.lock().panels.iter().find(|p| p.id == panel).cloned()
     }
 
+    /// The settings this plugin declared, in manifest order.
+    ///
+    /// Public because the settings API validates an operator's write against it
+    /// and the web UI builds its form from it - the declaration is the contract
+    /// between the plugin and the person configuring it.
+    pub fn declared_settings(&self) -> Vec<kc_core::plugin::PluginSetting> {
+        self.lock()
+            .manifest
+            .as_ref()
+            .map(|m| m.settings.clone())
+            .unwrap_or_default()
+    }
+
     /// The validated UI contributions this plugin declared, in manifest order.
     pub(crate) fn ui_defs(&self) -> Vec<PluginUiContribution> {
         self.lock().ui.clone()
@@ -1139,6 +1152,15 @@ impl PluginShared {
         // failing the plugin, so a plugin written for a newer host degrades to
         // "one button missing" rather than "plugin failed to start".
         let (ui, ui_skipped) = parse_ui(&self.name, &manifest)?;
+        // A declared setting is a promise to the OPERATOR: they will be offered
+        // this field and expect it to mean something. So a bad declaration fails
+        // the plugin with the field named, rather than starting and drawing a form
+        // that cannot be saved. Unlike a UI contribution there is no "skip one
+        // field" fallback - a plugin whose own config schema is wrong is not
+        // ready.
+        if let Err(problem) = kc_core::plugin::validate_settings(&manifest.settings) {
+            return Err(format!("the settings it declares are not valid: {problem}"));
+        }
         let mut inner = self.lock();
         // EOF may race the final tools/list response. The reader has already
         // failed the slot and removed `out`; never overwrite that with Ready.
@@ -1336,6 +1358,14 @@ impl PluginShared {
                 self.spawn_state_request(id, method, params);
                 return;
             }
+            if method == kc_core::plugin::methods::SETTINGS_GET {
+                let Some(id) = msg.get("id").and_then(|v| v.as_u64()) else {
+                    debug!(plugin = %self.name, "ignoring a settings call with no id");
+                    return;
+                };
+                self.spawn_settings_request(id);
+                return;
+            }
             debug!(
                 plugin = %self.name,
                 method,
@@ -1446,6 +1476,80 @@ impl PluginShared {
             );
         }
         false
+    }
+
+    /// Answer `plugin/settings/get` (§S2): the operator's values over the
+    /// defaults the plugin's own manifest declared.
+    ///
+    /// Computed on demand from the stored manifest and config rather than cached,
+    /// so a settings write followed by a restart always answers with the values
+    /// that are actually in force. Read-only: there is deliberately no `set`.
+    fn spawn_settings_request(self: &Arc<Self>, id: u64) {
+        let out = self.lock().out.clone();
+        let shared = Arc::clone(self);
+        tokio::spawn(async move {
+            let effective = shared.effective_settings().await;
+            let frame = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "settings": effective },
+            });
+            if let Some(out) = out {
+                let _ = out.try_send(frame.to_string());
+            }
+        });
+    }
+
+    /// The settings actually in force for this plugin (§S2).
+    ///
+    /// Three layers, lowest first: the defaults the manifest declares, the
+    /// `[[plugins]]` table in `config.toml`, and the operator's choices saved in
+    /// the settings UI. The last one wins because it is the most recent act of a
+    /// person; `config.toml` stays a supported place to set them for an install
+    /// managed by hand, and the manifest default is the floor.
+    ///
+    /// Every layer is filtered through the declaration, so a value of the wrong
+    /// type or out of range falls back rather than reaching the plugin.
+    pub async fn effective_settings(
+        &self,
+    ) -> std::collections::BTreeMap<String, serde_json::Value> {
+        let declared = {
+            let inner = self.lock();
+            inner
+                .manifest
+                .as_ref()
+                .map(|m| m.settings.clone())
+                .unwrap_or_default()
+        };
+        let backend = self
+            .state_backend
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        let mut saved = std::collections::BTreeMap::new();
+        if let Some(backend) = backend {
+            // `setting` is the operator-only scope; a plugin cannot reach it.
+            if let Ok(rows) = backend
+                .list(
+                    &self.name,
+                    kc_core::plugin::state_scope::SETTING,
+                    "",
+                    "",
+                    kc_core::plugin::MAX_PLUGIN_SETTINGS,
+                )
+                .await
+            {
+                for (key, raw) in rows {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        saved.insert(key, value);
+                    }
+                }
+            }
+        }
+        // config.toml first, the UI's saved values over it.
+        let mut configured = self.config.settings.clone();
+        configured.extend(saved);
+        kc_core::plugin::effective_settings(&declared, &configured)
     }
 
     /// Answer one `plugin/state/*` request from the plugin (§R2).

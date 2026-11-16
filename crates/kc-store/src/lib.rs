@@ -474,7 +474,11 @@ DELETE FROM session_compaction_state;
 const MIGRATION_29: &str = r#"
 CREATE TABLE IF NOT EXISTS plugin_state (
  plugin     TEXT NOT NULL,
- scope      TEXT NOT NULL CHECK (scope IN ('session','project','install')),
+ -- `setting` is the operator-only scope (phase 2, §S2): values the person saved
+ -- in the settings UI. It is deliberately absent from `kc_core::plugin::
+ -- state_scope::ALL`, so `plugin/state/*` can never reach it - a plugin reads its
+ -- settings and cannot rewrite them.
+ scope      TEXT NOT NULL CHECK (scope IN ('session','project','install','setting')),
  owner_id   TEXT NOT NULL,
  key        TEXT NOT NULL,
  value      TEXT NOT NULL,

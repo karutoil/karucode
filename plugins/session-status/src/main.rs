@@ -34,7 +34,8 @@
 //! Then `/plugin-session-status-complete`, or right-click a row in the rail.
 
 use kc_plugin_sdk::{
-    hooks, methods, state_scope, HostClient, PluginBuilder, PluginToolResult, PluginToolResultExt,
+    hooks, setting_bool, setting_number, setting_text, settings, state_scope, HostClient,
+    PluginBuilder, PluginSetting, PluginSettingKind, PluginToolResult, PluginToolResultExt,
     ToolRequest, UiActionRequest, UiActionResult, UiActionResultExt,
 };
 use serde_json::{json, Value};
@@ -47,6 +48,21 @@ const REOPEN_COMMAND: &str = "plugin-session-status-reopen";
 
 fn main() -> std::io::Result<()> {
     let host = HostClient::global();
+    // The operator's choices, over this plugin's own declared defaults. Read once
+    // at start: the host restarts the plugin when a setting is saved, so a fresh
+    // process is how a new value arrives.
+    // Read inside the handler, not here: `settings()` talks to the host, and the
+    // request/response loop that carries that conversation only runs once
+    // `.run()` is entered. Calling it in `main` would fail silently and hand back
+    // the defaults, which looks correct until someone changes a setting.
+    let configured = || {
+        let values = settings();
+        (
+            setting_bool(&values, "collapse_completed", true),
+            setting_text(&values, "group_label", "Completed").to_string(),
+            setting_number(&values, "after_minutes", 0.0),
+        )
+    };
 
     // Reading one session's status is used by the tool, the commands, the badge
     // hook and the stop gate, so it is written once here.
@@ -139,11 +155,46 @@ fn main() -> std::io::Result<()> {
 
     PluginBuilder::new("session-status", "0.1.0")
         .description("Track whether a session is open or completed, and draw that in the rail")
+        .setting(PluginSetting {
+            key: "collapse_completed".into(),
+            label: "Fold completed sessions away".into(),
+            kind: PluginSettingKind::Bool,
+            default: json!(true),
+            help: "Finished sessions move into their own group at the bottom of the rail \
+                   instead of staying in the date list."
+                .into(),
+            min: None,
+            max: None,
+            options: Vec::new(),
+        })
+        .setting(PluginSetting {
+            key: "group_label".into(),
+            label: "Group label".into(),
+            kind: PluginSettingKind::Text,
+            default: json!("Completed"),
+            help: "What the folded group is called in the rail.".into(),
+            min: None,
+            max: None,
+            options: Vec::new(),
+        })
+        .setting(PluginSetting {
+            key: "after_minutes".into(),
+            label: "Wait before folding".into(),
+            kind: PluginSettingKind::Number,
+            default: json!(0),
+            help: "Minutes to leave a finished session where it is before it files itself \
+                   away. 0 folds it immediately."
+                .into(),
+            min: Some(0.0),
+            max: Some(20_160.0),
+            options: Vec::new(),
+        })
         // Declaring the hooks is what makes the host call them; an undeclared hook
         // is never invoked, even though the handler would work.
         .hook(hooks::BEFORE_SESSION_LIST, {
             move |payload: Value| -> Value {
                 let read = read.clone();
+                let (collapse_completed, group_label, after_minutes) = configured();
                 let sessions = payload
                     .get("sessions")
                     .and_then(Value::as_array)
@@ -158,24 +209,41 @@ fn main() -> std::io::Result<()> {
                         // drop the row - the rail would lose sessions it never
                         // annotated, which is the whole list on a fresh install.
                         let completed = read(&id);
-                        if completed
+                        let finished_at = completed
                             .as_ref()
-                            .and_then(|v| v.get("status"))
-                            .and_then(Value::as_str)
-                            == Some("completed")
-                        {
+                            .filter(|v| v.get("status").and_then(Value::as_str) == Some("completed"))
+                            .and_then(|v| v.get("at"))
+                            .and_then(Value::as_u64);
+                        let Some(finished_at) = finished_at else {
                             return Some(json!({
                                 "id": id,
-                                // Group 1: below every open session, so open work is
-                                // never pushed off the top by busy finished work.
-                                "group": 1,
+                                "group": 0,
+                                "badges": [{"text": "open", "tone": "accent"}],
+                            }));
+                        };
+                        // `after_minutes` is the grace period: a session finished a
+                        // moment ago stays where the person is still looking, and
+                        // files itself away later. 0 groups immediately.
+                        let elapsed_minutes = (unix_now().saturating_sub(finished_at)) as f64 / 60.0;
+                        let settled = elapsed_minutes >= after_minutes;
+                        if !collapse_completed || !settled {
+                            // Not filed away yet: keep its place and its chip, so a
+                            // session does not vanish from under the pointer.
+                            return Some(json!({
+                                "id": id,
+                                "group": 0,
                                 "badges": [{"text": "completed", "tone": "muted"}],
                             }));
                         }
                         Some(json!({
                             "id": id,
-                            "group": 0,
-                            "badges": [{"text": "open", "tone": "accent"}],
+                            // Group 1: the rail draws a lower group below group 0 and
+                            // folds a `collapsed` group shut, so finished work files
+                            // itself away without disappearing.
+                            "group": 1,
+                            "collapsed": true,
+                            "group_label": group_label,
+                            "badges": [{"text": "completed", "tone": "muted"}],
                         }))
                     })
                     .collect();
@@ -322,17 +390,4 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Pinned here so the docs and the tests cannot drift from the code that hosts
-/// these names. `methods` and `state_scope` are used through the SDK's clients;
-/// naming them keeps the constants visible in one place.
-#[allow(dead_code)]
-fn protocol_names() -> (&'static str, &'static str, &'static str, &'static str) {
-    (
-        methods::STATE_GET,
-        methods::STATE_SET,
-        state_scope::SESSION,
-        COMPLETE_COMMAND,
-    )
 }

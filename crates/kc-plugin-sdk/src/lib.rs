@@ -50,7 +50,7 @@
 // @kc-title: Write and install a plugin
 // @kc-summary: Build a plugin with the SDK, register it, install a plugin collection from a GitHub repository or a local directory, ask the operator for a tool-output budget, and debug it when it fails to start.
 // @kc-tags: plugins, extension, sdk, tools, hooks, jsonrpc, panels, ui, buttons, commands, shortcuts, notifications, budget, tool-output, state, gates, badges, session-list, chips
-// @kc-applies-to: config:[[plugins]], file:~/.local/share/karucode/plugins/<name>/plugin.toml, file:index.toml, config:[install], config:install.build, config:install.build_timeout_secs, config:install.exclude, file:install.json, dir:plugins/example-hello, tool:plugin__<plugin>__<tool>, cmd:cargo build -p example-hello, cmd:karucode plugin init, cmd:karucode plugin sdk, cmd:karucode plugin sdk --check, cmd:karucode plugin install, cmd:karucode plugin install --list, cmd:karucode plugin install --force, cmd:karucode plugin install --ref, cmd:karucode plugin install --no-build, cmd:karucode plugin install --build-timeout-secs, cmd:karucode plugin install --data-dir, cmd:karucode plugin tool-output request, cmd:karucode plugin tool-output show, cmd:karucode plugin tool-output decide, cmd:karucode plugin tool-output clear, config:plugins.tool_output_bytes, config:limits.max_plugin_tool_output_bytes, config:limits.max_tool_output_bytes, url:codeload.github.com/<owner>/<repo>/tar.gz/<ref>, env:GH_TOKEN, env:GITHUB_TOKEN, file:src/sdk.rs, file:src/protocol.rs, doc:docs/PLUGINS.md, env:KARUCODE_PLUGIN_NAME, env:KARUCODE_PLUGIN_PROTOCOL, env:KARUCODE_PLUGIN_PERMISSIONS, env:KARUCODE_PLUGIN_SETTINGS, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, config:panels, config:ui, config:plugins_watch, config:plugins_watch_secs, config:notifications.plugin, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/tool-output, route:POST /api/plugins/:name/tool-output/request, route:POST /api/plugins/:name/tool-output/decision, route:DELETE /api/plugins/:name/tool-output, route:POST /api/plugins/install/preview, route:POST /api/plugins/install, route:GET /api/plugins/install/:id, route:POST /api/plugins/install/:id/cancel, route:GET /api/plugins/:name/panels/:panel, route:POST /api/plugins/:name/ui/actions/:action, config:plugin_panels, config:plugin_ui, method:notify, method:ui/action, hook:on_notify, hook:before_prompt, fn:PluginBuilder::panel, fn:PluginBuilder::button, fn:PluginBuilder::message_button, fn:PluginBuilder::command, fn:PluginBuilder::message_command, fn:PluginBuilder::keybinding, fn:PluginBuilder::message_keybinding, fn:PluginBuilder::hide, fn:PluginBuilder::on_ui_action, fn:PluginBuilder::on_notify, fn:PluginBuilder::on_tool_call, fn:PluginBuilder::on_tool_result_gate, fn:PluginBuilder::on_model_request, fn:PluginBuilder::on_stop, fn:PluginBuilder::on_session_list, fn:PluginBuilder::chip_with, fn:PluginBuilder::message_chip, fn:notify, fn:normalise_ui_keys, method:plugin/state/get, method:plugin/state/set, method:plugin/state/delete, method:plugin/state/list, hook:before_session_list, slot:session.row.badge, slot:session.header.chip, ui:Settings > Plugins & MCP
+// @kc-applies-to: config:[[plugins]], file:~/.local/share/karucode/plugins/<name>/plugin.toml, file:index.toml, config:[install], config:install.build, config:install.build_timeout_secs, config:install.exclude, file:install.json, dir:plugins/example-hello, tool:plugin__<plugin>__<tool>, cmd:cargo build -p example-hello, cmd:karucode plugin init, cmd:karucode plugin sdk, cmd:karucode plugin sdk --check, cmd:karucode plugin install, cmd:karucode plugin install --list, cmd:karucode plugin install --force, cmd:karucode plugin install --ref, cmd:karucode plugin install --no-build, cmd:karucode plugin install --build-timeout-secs, cmd:karucode plugin install --data-dir, cmd:karucode plugin tool-output request, cmd:karucode plugin tool-output show, cmd:karucode plugin tool-output decide, cmd:karucode plugin tool-output clear, config:plugins.tool_output_bytes, config:limits.max_plugin_tool_output_bytes, config:limits.max_tool_output_bytes, url:codeload.github.com/<owner>/<repo>/tar.gz/<ref>, env:GH_TOKEN, env:GITHUB_TOKEN, file:src/sdk.rs, file:src/protocol.rs, doc:docs/PLUGINS.md, env:KARUCODE_PLUGIN_NAME, env:KARUCODE_PLUGIN_PROTOCOL, env:KARUCODE_PLUGIN_PERMISSIONS, env:KARUCODE_PLUGIN_SETTINGS, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, config:panels, config:ui, config:plugins_watch, config:plugins_watch_secs, config:notifications.plugin, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/settings, route:PATCH /api/plugins/:name/settings, fn:PluginBuilder::setting, method:plugin/settings/get, scope:setting, route:GET /api/plugins/:name/tool-output, route:POST /api/plugins/:name/tool-output/request, route:POST /api/plugins/:name/tool-output/decision, route:DELETE /api/plugins/:name/tool-output, route:POST /api/plugins/install/preview, route:POST /api/plugins/install, route:GET /api/plugins/install/:id, route:POST /api/plugins/install/:id/cancel, route:GET /api/plugins/:name/panels/:panel, route:POST /api/plugins/:name/ui/actions/:action, config:plugin_panels, config:plugin_ui, method:notify, method:ui/action, hook:on_notify, hook:before_prompt, fn:PluginBuilder::panel, fn:PluginBuilder::button, fn:PluginBuilder::message_button, fn:PluginBuilder::command, fn:PluginBuilder::message_command, fn:PluginBuilder::keybinding, fn:PluginBuilder::message_keybinding, fn:PluginBuilder::hide, fn:PluginBuilder::on_ui_action, fn:PluginBuilder::on_notify, fn:PluginBuilder::on_tool_call, fn:PluginBuilder::on_tool_result_gate, fn:PluginBuilder::on_model_request, fn:PluginBuilder::on_stop, fn:PluginBuilder::on_session_list, fn:PluginBuilder::chip_with, fn:PluginBuilder::message_chip, fn:notify, fn:normalise_ui_keys, method:plugin/state/get, method:plugin/state/set, method:plugin/state/delete, method:plugin/state/list, hook:before_session_list, slot:session.row.badge, slot:session.header.chip, ui:Settings > Plugins & MCP
 //
 // A plugin is a separate executable that speaks newline-delimited JSON-RPC 2.0 on
 // stdin/stdout, protocol version `1`. It never links the harness, so it can be
@@ -336,6 +336,76 @@
 //   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
 //   | ./target/release/example-hello
 // ```
+//
+// # Settings the operator can edit
+//
+// A plugin declares what is configurable once, in its manifest, and the operator
+// edits it in **Settings → Plugins & MCP**. There is no per-plugin form to wire:
+// the host validates the declaration, the settings API stores the values, and the
+// web UI draws a field for each one.
+//
+// ```rust
+// use kc_plugin_sdk::{setting_bool, setting_number, setting_text, settings, PluginBuilder,
+//                     PluginSetting, PluginSettingKind};
+// use serde_json::json;
+//
+// let plugin = PluginBuilder::new("session-status", "0.1.0")
+//     .setting(PluginSetting {
+//         key: "collapse_completed".into(),
+//         label: "Fold completed sessions away".into(),
+//         kind: PluginSettingKind::Bool,
+//         default: json!(true),
+//         help: "Finished sessions move into their own group at the bottom.".into(),
+//         min: None, max: None, options: Vec::new(),
+//     })
+//     .setting(PluginSetting {
+//         key: "after_minutes".into(),
+//         label: "Wait before folding".into(),
+//         kind: PluginSettingKind::Number,
+//         default: json!(0),
+//         help: "Minutes to leave a finished session where it is.".into(),
+//         min: Some(0.0), max: Some(20160.0), options: Vec::new(),
+//     });
+// ```
+//
+// Read them from a **handler**, never from `main` before `.run()`: the call
+// travels the same JSON-RPC connection the loop carries, so before the loop is
+// live it fails and you get the defaults back.
+//
+// ```rust
+// let values = settings();
+// let collapse = setting_bool(&values, "collapse_completed", true);
+// let after = setting_number(&values, "after_minutes", 0.0);
+// let label = setting_text(&values, "group_label", "Completed");
+// ```
+//
+// Types are `bool`, `text`, `number` (with `min`/`max`), `select` (with
+// `options`) and `secret`. Up to 32 settings, unique keys of `[a-z0-9._-]`. A
+// declaration that is wrong — a default of the wrong type, `min` on a text, two
+// options with the same value — fails the plugin at startup with the field
+// named, because a form that cannot be saved is worse than no form.
+//
+// **Settings are operator data.** The plugin reads them and can never write them:
+// `plugin/state/*` cannot reach the scope they live in. That is deliberate — a
+// plugin able to rewrite its own settings could quietly switch off a guard rail
+// the operator turned on.
+//
+// Changing a setting restarts that one plugin, so a fresh process asks for its
+// values. Values persist across a server restart.
+//
+// ```bash
+// curl -s localhost:8787/api/plugins/session-status/settings | jq
+// # { "name": "session-status", "settings": [ { "key": "collapse_completed",
+// #   "type": "bool", "value": true, ... } ] }
+//
+// curl -s -X PATCH localhost:8787/api/plugins/session-status/settings \
+//   -H 'content-type: application/json' \
+//   -d '{"settings": {"collapse_completed": false}}'
+// # { "saved": ["collapse_completed"], "restarted": true, "error": null }
+// ```
+//
+// A `secret` is never echoed back: the field arrives with `"value": null` and
+// `"configured": true`, which is all a password input needs.
 //
 // # Panels (a tab in the inspector)
 //
@@ -1238,6 +1308,80 @@ impl HostClient {
     }
 }
 
+/// Read this plugin's **effective settings** (§S2).
+///
+/// The values the operator set in Settings → Plugins & MCP, over the defaults
+/// this plugin's own manifest declared. Read-only by design: a plugin that could
+/// write its settings could quietly switch off a guard rail the operator turned
+/// on, so the call is a read and there is deliberately no `set`.
+///
+/// Call it once at start, and again if you need to notice a change — the host
+/// restarts the plugin when a setting is saved, so a fresh process is the normal
+/// way to see new values. On a host that predates settings this returns an empty
+/// object rather than failing, so a plugin still starts.
+pub fn settings() -> std::collections::BTreeMap<String, Value> {
+    let answer =
+        HostClient::global().call(methods::SETTINGS_GET, json!({}), Duration::from_secs(10));
+    let map = match answer {
+        Ok(value) => value.get("settings").cloned().unwrap_or(Value::Null),
+        Err(error) => {
+            // The usual cause is calling this from `main` before `.run()`: the
+            // loop that carries the conversation is not running, so the host can
+            // never answer. Saying so is far more useful than quietly handing back
+            // defaults that look correct until someone changes a setting.
+            if !HostClient::global().inner.started.load(Ordering::SeqCst) {
+                eprintln!(
+                    "kc-plugin-sdk: settings() was called before the plugin started serving \
+                     (are you calling it from main before .run()?); using defaults. Call it \
+                     from a handler instead."
+                );
+            } else {
+                eprintln!("kc-plugin-sdk: could not read settings ({error}); using defaults");
+            }
+            Value::Null
+        }
+    };
+    map.as_object()
+        .map(|object| {
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One setting as a `bool`, falling back to `default` when it is absent or of
+/// another type. A settings file edited by hand must not crash a plugin.
+pub fn setting_bool(
+    settings: &std::collections::BTreeMap<String, Value>,
+    key: &str,
+    default: bool,
+) -> bool {
+    settings
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or(default)
+}
+
+/// One setting as a number, falling back to `default`.
+pub fn setting_number(
+    settings: &std::collections::BTreeMap<String, Value>,
+    key: &str,
+    default: f64,
+) -> f64 {
+    settings.get(key).and_then(Value::as_f64).unwrap_or(default)
+}
+
+/// One setting as a string, falling back to `default`.
+pub fn setting_text<'a>(
+    settings: &'a std::collections::BTreeMap<String, Value>,
+    key: &str,
+    default: &'a str,
+) -> &'a str {
+    settings.get(key).and_then(Value::as_str).unwrap_or(default)
+}
+
 /// The common `plugin/state/*` params, with the ids the host expects.
 fn state_params(scope: &str, session_id: &str, project_id: &str, key: &str) -> Value {
     let mut params = json!({"scope": scope, "key": key});
@@ -1741,12 +1885,39 @@ impl PluginBuilder {
                 tool_prefix: None,
                 panels: Vec::new(),
                 ui: Vec::new(),
+                settings: Vec::new(),
             },
             tools: BTreeMap::new(),
             hooks: BTreeMap::new(),
             panels: BTreeMap::new(),
             ui_actions: BTreeMap::new(),
         }
+    }
+
+    /// Declare a setting the operator can edit in Settings → Plugins & MCP.
+    ///
+    /// The declaration is a promise: the operator will be offered this field, so
+    /// the host checks it (type, bounds, unique key) before the plugin is marked
+    /// ready. Read the value back with [`settings`] and the typed accessors.
+    ///
+    /// ```rust
+    /// use kc_plugin_sdk::PluginBuilder;
+    /// use kc_core::plugin::{PluginSetting, PluginSettingKind};
+    ///
+    /// let plugin = PluginBuilder::new("mine", "0.1.0").setting(PluginSetting {
+    ///     key: "collapse_completed".into(),
+    ///     label: "Collapse completed sessions".into(),
+    ///     kind: PluginSettingKind::Bool,
+    ///     default: serde_json::json!(true),
+    ///     help: "Finished sessions fold into a group at the bottom.".into(),
+    ///     min: None,
+    ///     max: None,
+    ///     options: Vec::new(),
+    /// });
+    /// ```
+    pub fn setting(mut self, setting: kc_core::plugin::PluginSetting) -> Self {
+        self.manifest.settings.push(setting);
+        self
     }
 
     /// Human-readable description shown in diagnostics.

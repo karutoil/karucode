@@ -533,6 +533,28 @@ impl PluginHost {
     }
 
     /// Snapshot of every plugin slot, ready or not.
+    /// One plugin's declared settings and the values in force (§S2).
+    ///
+    /// Owned data, not the live slot: the settings API needs the declaration to
+    /// validate a write and the values to draw the form, and neither needs the
+    /// process handle the host keeps to itself.
+    pub async fn plugin_settings(
+        &self,
+        name: &str,
+    ) -> Option<(
+        Vec<kc_core::plugin::PluginSetting>,
+        std::collections::BTreeMap<String, serde_json::Value>,
+    )> {
+        let shared = self
+            .plugins
+            .iter()
+            .find(|slot| slot.config.name == name)
+            .and_then(|slot| slot.shared.as_ref().map(Arc::clone))?;
+        let declared = shared.declared_settings();
+        let effective = shared.effective_settings().await;
+        Some((declared, effective))
+    }
+
     pub fn diagnostics(&self) -> Vec<PluginDiagnostics> {
         let tools = colliding_tools(&self.plugins);
         let panels = colliding_panels(&self.plugins);

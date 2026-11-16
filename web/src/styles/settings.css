@@ -2079,3 +2079,80 @@
   font-family: var(--font-mono);
   font-size: var(--fs-tiny);
 }
+
+/*
+ * A plugin's declared settings (phase 2, §S1-S3).
+ *
+ * One form for every plugin: the schema decides what is here, so these rules
+ * must not assume a field count or a particular setting. Collapsed by default —
+ * a plugin's config is a thing you go looking for, not something that pushes the
+ * plugin list off the panel.
+ */
+.plugin-settings {
+  margin-top: var(--space-2);
+}
+
+.plugin-settings-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-fill);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--fs-tiny);
+  font-weight: 500;
+}
+
+.plugin-settings-toggle:hover { text-decoration: underline; }
+
+.plugin-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.plugin-setting { display: flex; flex-direction: column; gap: var(--space-1); }
+
+.plugin-setting-label {
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-tiny);
+  font-weight: 500;
+}
+
+/* A checkbox label reads as one control: the box and its word belong together. */
+.plugin-setting-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--fs-small);
+}
+
+.plugin-setting-help {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+}
+
+.plugin-setting-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--fs-tiny);
+}
+
+.plugin-setting-notice {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+}
