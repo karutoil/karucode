@@ -422,7 +422,10 @@ async fn compacting_a_long_conversation_reports_what_it_saved() {
     h.wait_until_idle(&session).await;
     let detail = h.get(&format!("/api/sessions/{session}")).await.json();
     assert_eq!(
-        detail["runs"].as_array().and_then(|runs| runs.last()).map(|run| run["status"].clone()),
+        detail["runs"]
+            .as_array()
+            .and_then(|runs| runs.last())
+            .map(|run| run["status"].clone()),
         Some(json!("completed"))
     );
 }
