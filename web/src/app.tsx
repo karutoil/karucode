@@ -383,8 +383,12 @@
 //   and Escape or Tab closes and returns focus to the trigger. A menu opened by a
 //   **right-click** is portalled into `<body>` on the `.menu-layer` (z-index 90 —
 //   above the app chrome, below the dialogs it can be opened from inside), measured
-//   after mount and clamped to the viewport, and it closes on scroll or resize
-//   because its anchor is a snapshot of where the pointer was. Rows that answer a
+//   after mount and clamped to the viewport. It closes when the row it points at
+//   moves — its own list scrolling, a resize that displaces it, the row being
+//   removed — and *not* when something else in the page scrolls: the transcript
+//   re-pins itself on every chunk of a streaming answer, so "any scroll closes the
+//   menu" made a right-click during a run vanish in the same millisecond. Rows
+//   that answer a
 //   right-click offer the actions they already offer by a visible control: session
 //   rows (both rails and the control plane's dashboard) offer Rename, Copy title and
 //   Delete, project tiles in the rail offer New session, Rename and Delete, git history rows offer Copy sha and Copy subject, a changed-file row

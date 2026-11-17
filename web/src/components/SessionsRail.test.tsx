@@ -993,6 +993,17 @@ describe('SessionsRail project switcher (phones)', () => {
     closeSheets.mockRestore();
   });
 
+  it('offers each session action exactly once', () => {
+    render(<SessionsRail />);
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Fix login bug' }));
+    const labels = within(screen.getByRole('menu', { name: 'Session actions for Fix login bug' }))
+      .getAllByRole('menuitem')
+      .map((item) => (item.textContent || '').trim());
+    // A duplicated "Copy title" shipped in the right-click commit and nobody
+    // noticed: two identical rows do nothing but look broken.
+    expect(labels).toEqual(['Rename', 'Copy title', 'Delete…']);
+  });
+
   it('closes a session menu on Escape without closing the sheet', async () => {
     const closeSheets = vi.spyOn(actions, 'closeSheets').mockImplementation(() => undefined);
     render(<SessionsRail />);

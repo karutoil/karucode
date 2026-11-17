@@ -186,6 +186,115 @@ describe('the menu primitive', () => {
 });
 
 /**
+ * The page moves under a menu all the time, and most of that movement has
+ * nothing to do with the menu.
+ *
+ * `useStickyBottom` re-pins the transcript by writing `scrollTop` on every chunk
+ * of a streaming answer, and a `scroll` listener in the capture phase hears it
+ * from a rail tile's menu. The primitive used to close on any scroll at all, so
+ * a right-click during a run made a menu that disappeared in the same
+ * millisecond it appeared. What the dismissal is actually for is the menu's own
+ * subject moving.
+ */
+describe('a pointer-anchored menu and the page moving under it', () => {
+  const rowOf = (): HTMLElement => screen.getByText('row body').parentElement as HTMLElement;
+
+  const atPointer = (): void => {
+    fireEvent.contextMenu(rowOf(), { clientX: 120, clientY: 340 });
+  };
+
+  const box = (x: number, y: number): DOMRect => ({
+    x, y, left: x, top: y, width: 40, height: 20,
+    right: x + 40, bottom: y + 20, toJSON: () => ({}),
+  }) as DOMRect;
+
+  /** Fires a `scroll` from an element that is not the row and is not the menu:
+   *  no `bubbles`, because a real `scroll` does not bubble - the window's
+   *  capture listener is what sees it. Same shape as the transcript.
+   *
+   *  Wrapped in `act`: a dismissal is a state update, and Preact applies it on
+   *  the next microtask, so a bare dispatch leaves the assertion looking at the
+   *  DOM before the menu was removed. */
+  const scrollElsewhere = (): void => {
+    const scroller = document.createElement('div');
+    scroller.className = 'chat-scroll';
+    document.body.appendChild(scroller);
+    act(() => {
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+    scroller.remove();
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('stays open when something unrelated in the page scrolls', () => {
+    render(<Harness float />);
+    atPointer();
+    expect(screen.getByRole('menu')).not.toBeNull();
+
+    scrollElsewhere();
+    expect(screen.getByRole('menu')).not.toBeNull();
+
+    // ...however many times it happens: an answer streams for minutes.
+    for (let index = 0; index < 20; index += 1) scrollElsewhere();
+    expect(screen.getByRole('menu')).not.toBeNull();
+  });
+
+  it('stays open when the page is resized under it', () => {
+    render(<Harness float />);
+    atPointer();
+    fireEvent(window, new Event('resize'));
+    expect(screen.getByRole('menu')).not.toBeNull();
+  });
+
+  it('closes when the row it points at moves', () => {
+    render(<Harness float />);
+    const row = rowOf();
+    const rect = vi.spyOn(row, 'getBoundingClientRect').mockReturnValue(box(60, 300));
+    atPointer();
+    expect(screen.getByRole('menu')).not.toBeNull();
+
+    // The rail scrolled: the row is somewhere else, so the menu's snapshot is
+    // no longer about anything on screen.
+    rect.mockReturnValue(box(60, 180));
+    scrollElsewhere();
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('closes when the row it points at is gone', () => {
+    render(<Harness float />);
+    const row = rowOf();
+    const rect = vi.spyOn(row, 'getBoundingClientRect').mockReturnValue(box(60, 300));
+    atPointer();
+    rect.mockReturnValue(box(0, 0));
+    Object.defineProperty(row, 'isConnected', { configurable: true, get: () => false });
+    scrollElsewhere();
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('lets the menu itself scroll without dismissing', () => {
+    render(<Harness float />);
+    const row = rowOf();
+    vi.spyOn(row, 'getBoundingClientRect').mockReturnValue(box(60, 300));
+    atPointer();
+    const menu = screen.getByRole('menu');
+    menu.dispatchEvent(new Event('scroll'));
+    expect(screen.getByRole('menu')).not.toBeNull();
+  });
+
+  it('survives a parent re-render - a stream re-renders the app constantly', () => {
+    const { rerender } = render(<Harness float />);
+    atPointer();
+    const menu = screen.getByRole('menu');
+    rerender(<Harness float />);
+    expect(screen.getByRole('menu')).toBe(menu);
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'First' }));
+  });
+});
+
+/**
  * The touch half of the same contract. `contextmenu` never fires on iOS Safari,
  * so a menu wired to it alone is a desktop-only menu: that is exactly how the
  * "copy what the row shows" rows shipped unreachable on a phone.

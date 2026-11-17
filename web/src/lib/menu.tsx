@@ -32,8 +32,9 @@ import type { TargetedKeyboardEvent } from 'preact';
  *     a dialog opened from a menu item always records a connected return target;
  *   - a pointer-anchored menu (`openAtPointer`, i.e. right-click) renders through
  *     a portal, clamped to the viewport, because a row near the bottom of a long
- *     rail would otherwise open its menu off-screen; it closes on scroll and
- *     resize because its anchor is a snapshot of where the pointer was.
+ *     rail would otherwise open its menu off-screen; it closes when the row it
+ *     points at moves, and *only* then - a scroll elsewhere in the page is none
+ *     of its business (see `anchorMoved`).
  *
  * Two placements, one behaviour. A trigger-anchored menu renders inline where the
  * caller puts it and is positioned by the shared CSS (`.session-menu`,
@@ -88,6 +89,27 @@ export interface MenuController {
 
 const ITEMS = '[role="menuitem"]:not(:disabled)';
 
+/** A menu that points at a row points at a *place*: the pointer coordinates are
+ *  a snapshot, so it is only valid while the row is still there. Sub-pixel
+ *  reflow is not movement; a scroll is. */
+const ANCHOR_SLOP_PX = 1;
+
+function anchorRectOf(el: HTMLElement | null): DOMRect | null {
+  if (!el || !el.isConnected) return null;
+  return el.getBoundingClientRect();
+}
+
+/** Did the element the menu points at move since the menu opened?
+ *
+ * A `DOMRect` from `getBoundingClientRect` is a snapshot, not a live box, which
+ * is what makes the comparison meaningful.
+ */
+function anchorMoved(before: DOMRect | null, after: DOMRect | null): boolean {
+  if (!before || !after) return before !== after;
+  return Math.abs(before.x - after.x) > ANCHOR_SLOP_PX
+    || Math.abs(before.y - after.y) > ANCHOR_SLOP_PX;
+}
+
 /** One item in the Tab order: the focused one, never two, never zero while open.
  *  Every `[role="menuitem"]` is set, disabled ones included: a disabled button
  *  keeps the browser's default tab index unless told otherwise. */
@@ -102,6 +124,13 @@ export function useMenu(): MenuController {
   const [pointer, setPointer] = useState<Pointer | null>(null);
   const triggerRef = useRef<HTMLElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  /** Where the menu's subject was when it opened; `null` means "no anchor". */
+  const anchorRect = useRef<DOMRect | null>(null);
+
+  const dismiss = useCallback((): void => {
+    setOpen(false);
+    setPointer(null);
+  }, []);
 
   const close = useCallback((restoreFocus = false): void => {
     setOpen(false);
@@ -116,6 +145,10 @@ export function useMenu(): MenuController {
 
   const openAt = useCallback((x: number, y: number, trigger?: HTMLElement | null): void => {
     if (trigger !== undefined) triggerRef.current = trigger;
+    // Snapshot the subject's box now, while the pointer coordinates are still
+    // true: the menu is drawn at `(x, y)` and only stays right while the row it
+    // describes stays put.
+    anchorRect.current = anchorRectOf(triggerRef.current);
     setPointer({ x, y });
     setOpen(true);
   }, []);
@@ -183,22 +216,31 @@ export function useMenu(): MenuController {
     return () => document.removeEventListener('mousedown', onPointerDown);
   }, [open]);
 
-  // A pointer-anchored menu's position is a snapshot; scrolling or resizing the
-  // window moves the row it belongs to, so the menu goes rather than drifting
-  // away from its subject.
+  // A pointer-anchored menu's position is a snapshot of where its subject was,
+  // so it must go when that subject moves - and only then. It is *not* a
+  // dismissal of "anything scrolled": the page scrolls constantly while a run
+  // streams (the transcript's sticky bottom writes `scrollTop` on every chunk),
+  // and a right-click menu over the rail used to vanish a few milliseconds after
+  // it opened for that reason. A `scroll` listener in the capture phase hears
+  // every scroller in the document, so the check has to be about the anchor, not
+  // about the event.
   useLayoutEffect(() => {
     if (!open || !pointer) return;
-    const dismiss = (): void => {
-      setOpen(false);
-      setPointer(null);
+    const revalidate = (event: Event): void => {
+      // A scroll inside the menu itself - a long list of items - is the reader
+      // moving the menu, not the page moving under it.
+      const target = event.target;
+      if (target instanceof Node && menuRef.current?.contains(target)) return;
+      if (!anchorMoved(anchorRect.current, anchorRectOf(triggerRef.current))) return;
+      dismiss();
     };
-    window.addEventListener('resize', dismiss);
-    window.addEventListener('scroll', dismiss, true);
+    window.addEventListener('resize', revalidate);
+    window.addEventListener('scroll', revalidate, true);
     return () => {
-      window.removeEventListener('resize', dismiss);
-      window.removeEventListener('scroll', dismiss, true);
+      window.removeEventListener('resize', revalidate);
+      window.removeEventListener('scroll', revalidate, true);
     };
-  }, [open, pointer]);
+  }, [open, pointer, dismiss]);
 
   return {
     open,

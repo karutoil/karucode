@@ -414,8 +414,16 @@ be opened from inside either and must be dismissed by either. It is portalled in
 
 **Placement is computed, never guessed.** A pointer-anchored menu is measured
 after mount and clamped to the viewport (flipped up when it would overflow the
-bottom, pulled left at the right edge, never off-edge). It closes on `scroll` and
-on `resize`, because its anchor is a snapshot of where the pointer was.
+bottom, pulled left at the right edge, never off-edge). It closes when the row it
+points at moves — because its anchor is a snapshot of where the pointer was — and
+**only** then. A `scroll` anywhere else in the document is none of its business:
+the transcript re-pins itself on every chunk of a streaming answer, and a
+capture-phase scroll listener that dismissed on any event closed a rail menu
+milliseconds after it opened whenever a run was going. `lib/menu.tsx` therefore
+compares the anchor's box (`getBoundingClientRect` snapshot at open) with its box
+at the event, ignores scrolls that originate inside the menu itself, and keeps
+`resize` to the same test. A right-click menu is not a scroll-triggered popover;
+it is a menu about a row.
 
 **The keyboard contract**, implemented once: open focuses the first *enabled*
 item; ArrowDown/ArrowUp wrap and Home/End jump over enabled items; exactly one

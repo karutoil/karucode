@@ -565,3 +565,24 @@ keys and ceiling, Escape closes it instead of reaching the run, opening Context
 closes it, a 390px phone keeps its sheet (no header button, no card, no overflow),
 and choosing *Docked* again restores the split. Screenshots and `report.json` land in
 its artifact directory.
+
+### Focused real-browser context-menu check
+
+A right-click menu must survive a streaming chat. `useStickyBottom` re-pins the
+transcript on every chunk of an answer, and a `scroll` listener in the capture
+phase hears that from anywhere in the document; the primitive used to close on any
+scroll at all, so a rail menu disappeared in the same millisecond it opened while a
+run was going. `scripts/verify_context_menu_streaming.py` is the proof, against a
+real browser and a stub provider that streams a long answer:
+
+```bash
+(cd web && npm run build)
+cargo build -p kc-server --bin karucode
+python3 scripts/verify_context_menu_streaming.py
+```
+
+Mid-stream it right-clicks a session-rail row and, with the session list collapsed,
+a project-rail tile; it asserts the menu is still there after 2.5 s of transcript
+scrolls (and counts them), that the rail was not remounted, that Escape still closes
+it, and - as a canary for every other popover - that the model picker stays open
+with its typed filter and its focus across the same stream.

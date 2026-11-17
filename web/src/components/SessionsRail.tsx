@@ -307,7 +307,6 @@ function SessionRow({
           >
             <MenuItem menu={menu} action={{ label: 'Rename', onSelect: startRename }} />
             <MenuItem menu={menu} action={{ label: 'Copy title', onSelect: () => void copyTitle() }} />
-            <MenuItem menu={menu} action={{ label: 'Copy title', onSelect: () => void copyTitle() }} />
             <MenuItem
               menu={menu}
               action={{
