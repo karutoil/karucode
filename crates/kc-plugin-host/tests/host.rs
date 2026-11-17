@@ -3508,7 +3508,11 @@ async fn two_replace_contributions_for_one_target_keep_the_first_and_report_the_
         notes.contains("label.new-session") && notes.contains("alpha"),
         "the losing plugin must be told which target it lost and to whom: {notes}"
     );
-    assert_eq!(beta.status, PluginStatus::Ready, "a lost target is not a failure");
+    assert_eq!(
+        beta.status,
+        PluginStatus::Ready,
+        "a lost target is not a failure"
+    );
     // The winner is not blamed for its own contribution.
     let alpha = host.diagnostics_for("alpha").expect("alpha diagnostics");
     let alpha_notes = alpha.error.clone().unwrap_or_default();

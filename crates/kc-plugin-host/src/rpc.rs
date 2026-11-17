@@ -615,7 +615,10 @@ impl PluginShared {
     /// the fallback for a plugin that does not echo the id, but it is only right
     /// while one call is running; with two sessions sharing a plugin it would
     /// attribute both to whichever started last.
-    pub(crate) fn context_for_call(&self, call_id: u64) -> Option<kc_core::plugin::ToolCallContext> {
+    pub(crate) fn context_for_call(
+        &self,
+        call_id: u64,
+    ) -> Option<kc_core::plugin::ToolCallContext> {
         let guard = self.live_contexts.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .iter()
@@ -2223,10 +2226,9 @@ pub(crate) fn parse_ui(
             // (`ui_of`), but a manifest that names the same target twice is an
             // authoring mistake this validator can catch while the plugin is
             // still starting, so it is reported here at full strength.
-            if out
-                .iter()
-                .any(|existing| existing.kind == UI_KIND_REPLACE && existing.target.as_deref() == Some(target))
-            {
+            if out.iter().any(|existing| {
+                existing.kind == UI_KIND_REPLACE && existing.target.as_deref() == Some(target)
+            }) {
                 skipped.push(format!(
                     "ignored a second `replace` for `{target}`: a target can hold only one \
                      replacement, and the first declared one (in manifest order) was kept"
@@ -3327,12 +3329,7 @@ mod state_owner_tests {
             Ok(Vec::new())
         }
 
-        async fn bytes(
-            &self,
-            plugin: &str,
-            scope: &str,
-            owner: &str,
-        ) -> kc_core::Result<i64> {
+        async fn bytes(&self, plugin: &str, scope: &str, owner: &str) -> kc_core::Result<i64> {
             self.seen.lock().unwrap().push((
                 plugin.to_string(),
                 scope.to_string(),

@@ -61,7 +61,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let snapshot = request.clone();
     let body = kc_provider::build_chat_body_for(&config, &snapshot);
-    eprintln!("=== request body ===\n{}\n", serde_json::to_string_pretty(&body)?);
+    eprintln!(
+        "=== request body ===\n{}\n",
+        serde_json::to_string_pretty(&body)?
+    );
 
     let started = Instant::now();
     let mut stream = OpenAiProvider::new(config)?

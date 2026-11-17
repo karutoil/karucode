@@ -55,6 +55,7 @@ nav:
       - The built-in tools the agent can call: internal/builtin-tools.md
       - Coordinate work across projects: internal/central-control.md
       - Change karucode's configuration: internal/configuration.md
+      - Extend or override harness behaviour (contribution registry): internal/contribution-registry.md
       - Run it as a systemd service: internal/deployment.md
       - How karucode's own documentation works: internal/documentation.md
       - Run a temporary chat: internal/ephemeral-sessions.md

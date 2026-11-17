@@ -573,10 +573,7 @@ impl PluginHost {
         self.plugins
             .iter()
             .map(|slot| {
-                slot_diagnostics(
-                    slot,
-                    &collision_notes(slot, &tools, &panels, &replacements),
-                )
+                slot_diagnostics(slot, &collision_notes(slot, &tools, &panels, &replacements))
             })
             .collect()
     }
@@ -600,10 +597,7 @@ impl PluginHost {
             .iter()
             .find(|s| s.config.name == name)
             .map(|slot| {
-                slot_diagnostics(
-                    slot,
-                    &collision_notes(slot, &tools, &panels, &replacements),
-                )
+                slot_diagnostics(slot, &collision_notes(slot, &tools, &panels, &replacements))
             })
     }
 

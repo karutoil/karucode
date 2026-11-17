@@ -1927,7 +1927,10 @@ mod tests {
         // "New session" buttons and the empty-state heading. Adding an entry that
         // no component reads is the bug this list exists to prevent.
         for target in UI_REPLACEABLE {
-            assert!(replaceable_ui_target(target), "{target} must be replaceable");
+            assert!(
+                replaceable_ui_target(target),
+                "{target} must be replaceable"
+            );
         }
         for reserved in [UI_REPLACE_SESSION_LABEL, UI_REPLACE_PROJECT_LABEL] {
             assert!(

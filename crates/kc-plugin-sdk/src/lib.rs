@@ -1555,7 +1555,10 @@ impl Plugin {
         // frame raised inside it is attributed to THIS call. Thread-local because
         // each request runs to completion on one worker thread, so two concurrent
         // calls cannot see each other's id.
-        if let Some(call_id) = params.get(kc_core::plugin::CALL_ID_PARAM).and_then(Value::as_u64) {
+        if let Some(call_id) = params
+            .get(kc_core::plugin::CALL_ID_PARAM)
+            .and_then(Value::as_u64)
+        {
             CURRENT_CALL_ID.with(|cell| cell.set(Some(call_id)));
         }
 

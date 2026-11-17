@@ -132,7 +132,13 @@ pub struct Contribution<T> {
 }
 
 impl<T> Contribution<T> {
-    pub fn new(source: impl Into<String>, op: Op, name: impl Into<String>, value: T, priority: i64) -> Self {
+    pub fn new(
+        source: impl Into<String>,
+        op: Op,
+        name: impl Into<String>,
+        value: T,
+        priority: i64,
+    ) -> Self {
         Self {
             source: source.into(),
             op,
@@ -167,7 +173,11 @@ impl<T> Contribution<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Conflict {
     /// `Add` of a name that is already present (built-in or added, not removed).
-    AlreadyPresent { name: String, source: String, held_by: String },
+    AlreadyPresent {
+        name: String,
+        source: String,
+        held_by: String,
+    },
     /// `Replace` or `Wrap` of a name nothing provides.
     UnknownTarget { name: String, source: String },
     /// A lower-precedence `Remove`/`Replace` lost to a higher one.
@@ -179,27 +189,38 @@ pub enum Conflict {
     /// A `Wrap` on a name that was removed by a higher-precedence claim.
     WrappedAfterRemoval { name: String, source: String },
     /// An `Add`/`Replace`/`Wrap` built without a value.
-    MissingValue { name: String, source: String, op: Op },
+    MissingValue {
+        name: String,
+        source: String,
+        op: Op,
+    },
 }
 
 impl std::fmt::Display for Conflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Conflict::AlreadyPresent { name, source, held_by } => write!(
+            Conflict::AlreadyPresent {
+                name,
+                source,
+                held_by,
+            } => write!(
                 f,
                 "`{source}` cannot add `{name}`: it is already provided by `{held_by}`"
             ),
             Conflict::UnknownTarget { name, source } => {
                 write!(f, "`{source}` names `{name}`, which nothing provides")
             }
-            Conflict::Outranked { name, source, lost_to } => write!(
+            Conflict::Outranked {
+                name,
+                source,
+                lost_to,
+            } => write!(
                 f,
                 "`{source}`'s claim on `{name}` lost to `{lost_to}` (higher priority)"
             ),
-            Conflict::WrappedAfterRemoval { name, source } => write!(
-                f,
-                "`{source}` cannot wrap `{name}`: it was removed"
-            ),
+            Conflict::WrappedAfterRemoval { name, source } => {
+                write!(f, "`{source}` cannot wrap `{name}`: it was removed")
+            }
             Conflict::MissingValue { name, source, op } => write!(
                 f,
                 "`{source}` cannot {} `{name}`: the contribution carries no value",
@@ -316,7 +337,10 @@ impl<T: Clone> ContributionRegistry<T> {
                 .then_with(|| a.source.cmp(&b.source))
                 .then_with(|| ia.cmp(ib))
         });
-        ordered.into_iter().map(|(_, contribution)| contribution).collect()
+        ordered
+            .into_iter()
+            .map(|(_, contribution)| contribution)
+            .collect()
     }
 
     /// Work out what is in effect, and every request that did not take effect.
@@ -325,7 +349,12 @@ impl<T: Clone> ContributionRegistry<T> {
         let mut state: BTreeMap<String, Working<T>> = self
             .builtins
             .iter()
-            .map(|(name, value)| (name.clone(), (value.clone(), "builtin".to_string(), Vec::new())))
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    (value.clone(), "builtin".to_string(), Vec::new()),
+                )
+            })
             .collect();
         let mut removed: BTreeMap<String, String> = BTreeMap::new();
         // Names already *decided* by a higher-precedence `Remove` or `Replace`.
@@ -537,7 +566,10 @@ mod tests {
 
         let contribution = Contribution::<Arc<dyn Marker>>::remove("guard", "run_command", 0);
         assert_eq!(contribution.op, Op::Remove);
-        assert!(contribution.value.is_none(), "a Remove never carries a payload");
+        assert!(
+            contribution.value.is_none(),
+            "a Remove never carries a payload"
+        );
 
         // The value a Remove used to be built around does not exist, so the
         // registry has to work with types that cannot make one.
@@ -545,7 +577,13 @@ mod tests {
             ContributionRegistry::new("tools");
         registry.builtin("run_command", Arc::new(A));
         registry.contribute(Contribution::remove("guard", "run_command", 0));
-        registry.contribute(Contribution::new("mine", Op::Add, "my_tool", Arc::new(B(1)), 0));
+        registry.contribute(Contribution::new(
+            "mine",
+            Op::Add,
+            "my_tool",
+            Arc::new(B(1)),
+            0,
+        ));
         let view = registry.resolve();
         assert!(view.get("run_command").is_none());
         assert!(view.get("my_tool").is_some());
@@ -577,7 +615,11 @@ mod tests {
             priority: 0,
         });
         let view = registry.resolve();
-        assert_eq!(view.get("on_run_end").unwrap().value, "runtime", "unchanged");
+        assert_eq!(
+            view.get("on_run_end").unwrap().value,
+            "runtime",
+            "unchanged"
+        );
         assert!(view.get("on_extra").is_none());
         assert_eq!(
             view.conflicts
@@ -594,7 +636,13 @@ mod tests {
     #[test]
     fn a_plugin_can_replace_a_builtin_value() {
         let mut registry = reg();
-        registry.contribute(Contribution::new("mine", Op::Replace, "on_run_end", "mine", 0));
+        registry.contribute(Contribution::new(
+            "mine",
+            Op::Replace,
+            "on_run_end",
+            "mine",
+            0,
+        ));
         let view = registry.resolve();
         let entry = view.get("on_run_end").unwrap();
         assert_eq!(entry.value, "mine");
@@ -604,7 +652,13 @@ mod tests {
     #[test]
     fn a_wrap_keeps_the_original_and_records_the_wrapper() {
         let mut registry = reg();
-        registry.contribute(Contribution::new("veto", Op::Wrap, "on_tool_call", "veto", 0));
+        registry.contribute(Contribution::new(
+            "veto",
+            Op::Wrap,
+            "on_tool_call",
+            "veto",
+            0,
+        ));
         let view = registry.resolve();
         let entry = view.get("on_tool_call").unwrap();
         assert_eq!(entry.value, "runtime", "a wrap does not replace");
@@ -618,10 +672,7 @@ mod tests {
         registry.contribute(Contribution::new("mine", Op::Add, "on_run_end", "mine", 0));
         let view = registry.resolve();
         assert_eq!(view.get("on_run_end").unwrap().value, "runtime");
-        assert!(matches!(
-            view.conflicts[0],
-            Conflict::AlreadyPresent { .. }
-        ));
+        assert!(matches!(view.conflicts[0], Conflict::AlreadyPresent { .. }));
         assert!(view.conflicts[0].to_string().contains("on_run_end"));
     }
 
@@ -630,7 +681,13 @@ mod tests {
         let mut registry = reg();
         // Low priority removes; high priority replaces.
         registry.contribute(Contribution::remove("low", "on_run_end", 0));
-        registry.contribute(Contribution::new("high", Op::Replace, "on_run_end", "high", 10));
+        registry.contribute(Contribution::new(
+            "high",
+            Op::Replace,
+            "on_run_end",
+            "high",
+            10,
+        ));
         let view = registry.resolve();
         assert_eq!(
             view.get("on_run_end").unwrap().value,
@@ -638,7 +695,9 @@ mod tests {
             "the higher priority claim decides"
         );
         assert!(
-            view.conflicts.iter().any(|c| matches!(c, Conflict::Outranked { source, .. } if source == "low")),
+            view.conflicts
+                .iter()
+                .any(|c| matches!(c, Conflict::Outranked { source, .. } if source == "low")),
             "and the loser is reported: {:?}",
             view.conflicts
         );
@@ -647,12 +706,21 @@ mod tests {
     #[test]
     fn equal_priority_resolves_by_source_name_so_runs_are_deterministic() {
         let mut registry = reg();
-        registry.contribute(Contribution::new("zeta", Op::Replace, "on_run_end", "zeta", 0));
+        registry.contribute(Contribution::new(
+            "zeta",
+            Op::Replace,
+            "on_run_end",
+            "zeta",
+            0,
+        ));
         registry.contribute(Contribution::remove("alpha", "on_run_end", 0));
         // "alpha" < "zeta", so alpha applies first and zeta's replace then fails
         // (the target is gone) — which must be reported, not silently ignored.
         let view = registry.resolve();
-        assert!(view.get("on_run_end").is_none(), "alpha's removal applied first");
+        assert!(
+            view.get("on_run_end").is_none(),
+            "alpha's removal applied first"
+        );
         assert!(view
             .conflicts
             .iter()
@@ -684,7 +752,10 @@ mod tests {
 
         let one = first.resolve();
         let two = second.resolve();
-        assert_eq!(one.get("on_run_end").is_some(), two.get("on_run_end").is_some());
+        assert_eq!(
+            one.get("on_run_end").is_some(),
+            two.get("on_run_end").is_some()
+        );
         assert_eq!(one.conflicts.len(), two.conflicts.len());
     }
 
@@ -714,7 +785,10 @@ mod tests {
         assert_eq!(end.is_none(), two.get("on_run_end").is_none());
         // Equal priority, so `alpha` < `zeta`: alpha removes first, zeta's
         // replace then loses the name — the same whichever order they arrived.
-        assert!(end.is_none(), "equal priority resolves by source, not arrival");
+        assert!(
+            end.is_none(),
+            "equal priority resolves by source, not arrival"
+        );
         assert_eq!(one.conflicts, two.conflicts);
 
         // Wrappers keep precedence order (lowest first) regardless of arrival.
@@ -726,7 +800,11 @@ mod tests {
                 .map(|(source, _)| source.clone())
                 .collect::<Vec<String>>()
         };
-        assert_eq!(wrappers(&one), vec!["beta", "gamma"], "source breaks the tie");
+        assert_eq!(
+            wrappers(&one),
+            vec!["beta", "gamma"],
+            "source breaks the tie"
+        );
         assert_eq!(wrappers(&two), wrappers(&one));
     }
 
@@ -737,13 +815,27 @@ mod tests {
         let claim = |sources: (&'static str, &'static str)| {
             let mut registry = reg();
             registry.contribute(Contribution::remove(sources.0, "on_run_end", 0));
-            registry.contribute(Contribution::new(sources.1, Op::Replace, "on_run_end", "kept", 0));
+            registry.contribute(Contribution::new(
+                sources.1,
+                Op::Replace,
+                "on_run_end",
+                "kept",
+                0,
+            ));
             let view = registry.resolve();
             (view.get("on_run_end").is_none(), view.conflicts.len())
         };
         // Whoever sorts first applies first, and its decision stands.
-        assert_eq!(claim(("aaa", "zzz")), (true, 1), "aaa's remove wins the tie");
-        assert_eq!(claim(("zzz", "aaa")), (false, 1), "aaa's replace wins the tie");
+        assert_eq!(
+            claim(("aaa", "zzz")),
+            (true, 1),
+            "aaa's remove wins the tie"
+        );
+        assert_eq!(
+            claim(("zzz", "aaa")),
+            (false, 1),
+            "aaa's replace wins the tie"
+        );
     }
 
     #[test]

@@ -357,7 +357,10 @@ fn a_replace_contribution_renames_text_and_refuses_safety_controls() {
     .expect("manifest");
     let (contributions, skipped) = crate::rpc::parse_ui("wf", &ok).expect("accepted");
     assert!(skipped.is_empty(), "{skipped:?}");
-    assert_eq!(contributions[0].target.as_deref(), Some("label.new-session"));
+    assert_eq!(
+        contributions[0].target.as_deref(),
+        Some("label.new-session")
+    );
     assert_eq!(contributions[0].replace.as_deref(), Some("New thread"));
 
     // One target, one text: a manifest that names the same target twice keeps the
