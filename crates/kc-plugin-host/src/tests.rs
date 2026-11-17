@@ -352,13 +352,30 @@ fn an_unknown_tone_falls_back_rather_than_failing() {
 fn a_replace_contribution_renames_text_and_refuses_safety_controls() {
     let ok: PluginManifest = serde_json::from_value(serde_json::json!({
         "name": "wf", "version": "1", "protocol": "1",
-        "ui": [{"kind": "replace", "target": "label.project", "replace": "Workspace"}]
+        "ui": [{"kind": "replace", "target": "label.new-session", "replace": "New thread"}]
     }))
     .expect("manifest");
     let (contributions, skipped) = crate::rpc::parse_ui("wf", &ok).expect("accepted");
-    assert!(skipped.is_empty());
-    assert_eq!(contributions[0].target.as_deref(), Some("label.project"));
-    assert_eq!(contributions[0].replace.as_deref(), Some("Workspace"));
+    assert!(skipped.is_empty(), "{skipped:?}");
+    assert_eq!(contributions[0].target.as_deref(), Some("label.new-session"));
+    assert_eq!(contributions[0].replace.as_deref(), Some("New thread"));
+
+    // One target, one text: a manifest that names the same target twice keeps the
+    // first in manifest order and says so, instead of shipping both and leaving
+    // the client to pick.
+    let twice: PluginManifest = serde_json::from_value(serde_json::json!({
+        "name": "wf", "version": "1", "protocol": "1",
+        "ui": [
+            {"kind": "replace", "target": "label.new-session", "replace": "New thread"},
+            {"kind": "replace", "target": "label.new-session", "replace": "Start"}
+        ]
+    }))
+    .expect("manifest");
+    let (contributions, skipped) = crate::rpc::parse_ui("wf", &twice).expect("accepted");
+    assert_eq!(contributions.len(), 1, "{contributions:?}");
+    assert_eq!(contributions[0].replace.as_deref(), Some("New thread"));
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert!(skipped[0].contains("label.new-session"), "{}", skipped[0]);
 
     // A target outside the catalogue is skipped with a reason, never applied:
     // relabelling approval controls is exactly what this must refuse.

@@ -11,7 +11,28 @@ export interface DialogProps {
   labelId?: string;
   /** Optional supporting line under the title; announced as the dialog description. */
   description?: string;
+  /**
+   * The measure and anchor, named explicitly. Callers migrating off `Dialog`
+   * should pass this; it always wins over the class fallback below.
+   */
+  role?: OverlayRole;
 }
+
+/**
+ * The class→role table for call sites that predate the `role` prop.
+ *
+ * These are the exact classes the unmigrated surfaces pass, matched whole (not
+ * by substring), so a caller that names a *new* class can never accidentally
+ * land on a measure by containing a word like `dialog-confirm` in something
+ * else. Anything not listed here is the standard measure.
+ */
+const CLASS_ROLES: Readonly<Record<string, OverlayRole>> = {
+  'dialog-file': 'full',
+  'dialog-artifact': 'full',
+  'dialog-confirm': 'compact',
+  'dialog-rewind': 'compact',
+  'dialog-palette': 'palette',
+};
 
 /**
  * Accessible modal shell: focus trap, Escape to close, scroll lock, focus restore
@@ -35,7 +56,8 @@ export interface DialogProps {
  * sites that predate the role table keep compiling while they migrate. It does
  * not scroll its own body: callers that manage a scroller (Settings, the Theme
  * studio, the palette, the file viewer) keep doing so, which is exactly what
- * `Overlay scrollBody={false}` expresses.
+ * `Overlay bodyLayout="contents"` expresses — the children are laid out as direct
+ * children of the surface, with no `.overlay-body` scroller wrapped around them.
  */
 export function Dialog({
   open,
@@ -46,19 +68,12 @@ export function Dialog({
   showHeader = true,
   labelId,
   description,
+  role: explicitRole,
 }: DialogProps): ComponentChildren {
-  // The role is derived from the caller's class so the shell picks the right
-  // measure for surfaces that have not migrated yet: a file or artifact is full,
-  // a question or a rewind is compact, the palette has its own, and everything
-  // else is the standard measure.
-  const role: OverlayRole =
-    className.includes('dialog-file') || className.includes('dialog-artifact')
-      ? 'full'
-      : className.includes('dialog-confirm') || className.includes('dialog-rewind')
-        ? 'compact'
-        : className.includes('dialog-palette')
-          ? 'palette'
-          : 'standard';
+  // The role comes from the caller when it names one. Only the surfaces that
+  // have not migrated yet fall back to `CLASS_ROLES`, which matches the whole
+  // class: a new class can never land on a measure by containing a word.
+  const role: OverlayRole = explicitRole ?? CLASS_ROLES[className.trim()] ?? 'standard';
   return (
     <Overlay
       open={open}

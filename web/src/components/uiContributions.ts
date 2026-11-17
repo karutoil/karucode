@@ -24,6 +24,8 @@
  * `innerHTML`. Entities are drawn by first-party components only.
  */
 
+import type { PluginUiContributionWire, PluginUiHiddenWire } from '../api/types';
+
 /** The composer's action row, left of the model pins. */
 export const UI_SLOT_COMPOSER_TOOLBAR = 'composer.toolbar';
 /** The results inspector's header. */
@@ -112,6 +114,13 @@ export const UI_HIDE_COMMAND_PALETTE = 'command-palette';
  * Every entry here is consumed by an `isUiHidden(...)` call at its real control;
  * `statusbar` was removed because this build has no application status bar to
  * hide, and a target that nothing reads is a promise the app does not keep.
+ *
+ * No combination of hides can lock somebody out of Settings: `rail.footer` (the
+ * settings avatar) is the one control that opens Settings directly, so hiding it
+ * always keeps the bell (when the bell was hidden too) or the command palette —
+ * *Settings* is one of its commands. The rule is implemented once, in
+ * {@link settingsHides}, and every mount site reads the result instead of the
+ * raw flag.
  */
 export const UI_HIDE_TARGETS: readonly string[] = [
   UI_HIDE_COMPOSER_ATTACH,
@@ -129,9 +138,22 @@ export const UI_HIDE_TARGETS: readonly string[] = [
 
 /** The product name in the rail's lockup. */
 export const UI_REPLACE_APP_NAME = 'app.name';
-/** The word for a conversation ("Session"). */
+/**
+ * The word for a conversation ("Session").
+ *
+ * Reserved, not reachable: no control in this build draws one word for
+ * "session", so this is deliberately absent from `UI_REPLACE_TARGETS` and a
+ * `replace` naming it is refused. The constant stays so the spelling is fixed
+ * for the day a single control does.
+ */
 export const UI_REPLACE_SESSION_LABEL = 'label.session';
-/** The word for a workspace root ("Project"). */
+/**
+ * The word for a workspace root ("Project").
+ *
+ * Reserved, not reachable for the same reason as `label.session`: the rail, the
+ * project sheet and the dialogs each phrase their own copy, so there is no one
+ * label a rename could change.
+ */
 export const UI_REPLACE_PROJECT_LABEL = 'label.project';
 /** The "New session" button label. */
 export const UI_REPLACE_NEW_SESSION_LABEL = 'label.new-session';
@@ -142,13 +164,19 @@ export const UI_REPLACE_GREETING = 'empty.greeting';
  * Every element a plugin may **replace the text of**, rather than hide.
  *
  * Mirrors `kc_core::plugin::UI_REPLACEABLE`. Nothing that states a safety
- * property is on it: a plugin may rename "Project" to "Workspace", never relabel
- * an approval control or rewrite the unsandboxed-shell warning.
+ * property is on it: a plugin may rename "New session" to "New thread", never
+ * relabel an approval control or rewrite the unsandboxed-shell warning.
+ *
+ * Every entry here is consumed by a `pluginText(...)` call at the control it
+ * names — the rail lockup (`app.name`, `ProjectRail.tsx`), the "New session"
+ * buttons (`label.new-session`, `SessionsRail.tsx`) and the empty-state heading
+ * (`empty.greeting`, `EmptyState.tsx`). `label.session` and `label.project` were
+ * dropped from the catalogue because nothing rendered them, and a target that
+ * nothing reads is a promise the app does not keep. `uiContributions.test.ts`
+ * asserts the two lists agree, so the client and the host cannot drift apart.
  */
 export const UI_REPLACE_TARGETS: readonly string[] = [
   UI_REPLACE_APP_NAME,
-  UI_REPLACE_SESSION_LABEL,
-  UI_REPLACE_PROJECT_LABEL,
   UI_REPLACE_NEW_SESSION_LABEL,
   UI_REPLACE_GREETING,
 ];
@@ -297,6 +325,7 @@ export interface UiContribution {
   hosted_id: string;
   /** For a button: the slot it mounts in. */
   slot: string | null;
+  /** The accessible name; for a chip, the name a screen reader hears. */
   label: string;
   title: string | null;
   icon: string | null;
@@ -306,6 +335,15 @@ export interface UiContribution {
   message: string | null;
   /** For a keybinding: the canonical chord (`mod+shift+f`). */
   keys: string | null;
+  /**
+   * For a chip in a {@link UI_BADGE_SLOTS} slot: the short text drawn on it.
+   *
+   * A chip is text plus a tone rather than a labelled control, so this — not
+   * `label` — is what a person reads. Null on every other kind.
+   */
+  text: string | null;
+  /** For a chip: one of {@link UI_TONES}; never null, `neutral` when unstated. */
+  tone: string;
 }
 
 /** A built-in element one or more plugins asked the app to hide. */
@@ -367,6 +405,19 @@ function stringOrNull(value: unknown): string | null {
 }
 
 /**
+ * The tone a chip is drawn with: its own when this build knows it, `neutral`
+ * otherwise.
+ *
+ * The host already resolved an unknown tone to `neutral`, so this only matters
+ * for a stale or hand-written payload — but drawing a tone the stylesheet has no
+ * class for would silently drop the chip's only visual signal.
+ */
+function chipTone(value: unknown): string {
+  const trimmed = text(value);
+  return UI_TONES.includes(trimmed) ? trimmed : UI_TONE_DEFAULT;
+}
+
+/**
  * Validate one contribution from the wire.
  *
  * Returns the control, or a reason string. Every branch is a case a hostile or
@@ -405,10 +456,6 @@ function readContribution(
   }
   if (seen.has(hosted_id)) return `\`${hosted_id}\` is declared twice`;
   const label = text(record.label);
-  if (label === '') return `\`${hosted_id}\` has no label`;
-  if (label.length > MAX_UI_LABEL_CHARS) {
-    return `\`${hosted_id}\` has a ${label.length}-character label`;
-  }
   const action = stringOrNull(record.action);
   const message = stringOrNull(record.message);
   if (action !== null && message !== null) {
@@ -426,6 +473,22 @@ function readContribution(
     if (!UI_SLOT_IDS.includes(slot)) {
       return `\`${hosted_id}\` targets the slot \`${slot || '?'}\`, which this build does not mount`;
     }
+  }
+  // A chip in a badge slot is drawn from `text`, and `text` is its content: the
+  // label is only the accessible name (the host fills it in from `text` when the
+  // plugin gave none). Refusing a chip for an empty label would throw away the one
+  // thing it exists to show, so the cap below applies to whichever string is drawn.
+  const is_chip = slot !== null && UI_BADGE_SLOTS.includes(slot);
+  const chip_text = stringOrNull(record.text);
+  if (label === '' && !is_chip) return `\`${hosted_id}\` has no label`;
+  if (label.length > MAX_UI_LABEL_CHARS) {
+    return `\`${hosted_id}\` has a ${label.length}-character label`;
+  }
+  if (is_chip && label === '' && chip_text === null) {
+    return `\`${hosted_id}\` has neither a text nor a label to draw`;
+  }
+  if (chip_text !== null && chip_text.length > MAX_UI_LABEL_CHARS) {
+    return `\`${hosted_id}\` has ${chip_text.length} characters of chip text`;
   }
   let keys: string | null = null;
   if (kind === 'keybinding') {
@@ -458,6 +521,8 @@ function readContribution(
     action,
     message,
     keys,
+    text: chip_text,
+    tone: chipTone(record.tone),
   };
 }
 
@@ -472,8 +537,11 @@ function readHidden(raw: unknown, refused: string[]): Record<string, string[]> {
   const hidden: Record<string, string[]> = {};
   if (!Array.isArray(raw)) return hidden;
   for (const entry of raw) {
-    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
-    const record = entry as Record<string, unknown>;
+    // Typed as the wire shape rather than cast to a bare record: the field names
+    // this reads are then the ones `PluginUiHiddenWire` declares, so a server that
+    // renames one fails to compile here instead of silently hiding nothing.
+    const record = entry as PluginUiHiddenWire | null;
+    if (record === null || typeof record !== 'object' || Array.isArray(record)) continue;
     const target = text(record.target);
     if (!UI_HIDE_TARGETS.includes(target)) {
       if (target !== '') refused.push(`hide target \`${target}\` is not hideable`);
@@ -504,8 +572,10 @@ function readReplacements(raw: unknown, refused: string[]): Record<string, strin
   const replacements: Record<string, string> = {};
   if (!Array.isArray(raw)) return replacements;
   for (const entry of raw) {
-    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
-    const record = entry as Record<string, unknown>;
+    // Same reasoning as `readHidden`: the type is the wire record, so `kind`,
+    // `target` and `replace` are the names `PluginUiContributionWire` declares.
+    const record = entry as PluginUiContributionWire | null;
+    if (record === null || typeof record !== 'object' || Array.isArray(record)) continue;
     if (text(record.kind) !== 'replace') continue;
     const target = text(record.target);
     const label = text(record.replace);
@@ -591,6 +661,86 @@ export function slotContributions(ui: ParsedPluginUi, slot: string): UiContribut
 /** Whether a plugin asked the app to hide one built-in control. */
 export function isUiHidden(ui: ParsedPluginUi, target: string): boolean {
   return Object.prototype.hasOwnProperty.call(ui.hidden, target);
+}
+
+/**
+ * The hides that actually apply, once the escape hatch is resolved.
+ *
+ * Hiding is cosmetic, but `rail.footer` (the settings avatar), `command-palette`
+ * and `notifications` are the three entries into Settings — and Settings is where
+ * the person puts a hidden control back. Hiding all three would therefore be
+ * irreversible from inside the app: no avatar, no bell, no palette to run
+ * *Settings* from. So the app keeps a way out instead of honouring the last one:
+ *
+ * * the palette is not an entry by itself — it is a way to *run* the Settings
+ *   command, which needs somebody to open it first. The bell is not an entry
+ *   either, for the same reason. The avatar is the only control that opens
+ *   Settings directly. So a hide of `rail.footer` always keeps one of the other
+ *   two: the bell when the payload asked for the bell (it is the smaller control,
+ *   and the person may have asked for exactly the avatar-plus-bell pair), or the
+ *   palette when it did not — *Settings* is one of its commands, so that is the
+ *   escape hatch out of the state where the avatar is gone.
+ *
+ * One hide is overridden at most, and only when `rail.footer` was hidden: the
+ * bell when the bell was hidden as well, otherwise nothing (`rail.footer` alone
+ * leaves the palette on screen, and no hide was refused).
+ *
+ * A single function so the rule is decided once. No component special-cases the
+ * pair on its own: they read this instead of the raw flag, and the settings
+ * screen reports the override (see {@link settingsEscapeHatch}) so a plugin author
+ * can see that one of its hides did not take effect.
+ *
+ * The rule is a property of the hide list, not a patch of the previous one: the
+ * case that keeps anything is "`rail.footer` is hidden", and the hide that is
+ * dropped is never the footer. Running it again therefore changes nothing — and
+ * says nothing, because {@link settingsEscapeHatch} reports a kept entry only when
+ * the payload asked for it. The store applies the person's overrides to the
+ * *declared* payload and this to that result, so the two passes must agree.
+ *
+ * Returning the `ParsedPluginUi` (rather than three booleans) keeps
+ * `ui.hidden` the only truth: a caller that wants `isUiHidden` still gets it.
+ */
+export function settingsHides(ui: ParsedPluginUi): ParsedPluginUi {
+  // Decided from what was *asked*, never from a previously resolved map: a rule
+  // that re-read its own output would be a two-state loop, because keeping the
+  // bell is exactly the thing that would then justify dropping the palette.
+  const requested = ui.hidden;
+  const footer = Object.prototype.hasOwnProperty.call(requested, UI_HIDE_RAIL_FOOTER);
+  const askedBell = Object.prototype.hasOwnProperty.call(requested, UI_HIDE_NOTIFICATIONS);
+  // The avatar is the only control that opens Settings directly, so a hide of it
+  // always keeps one of the two: the bell when it was asked for (and is the
+  // smaller control), otherwise the palette, whose *Settings* command is the
+  // escape hatch out of the state where the avatar is gone.
+  const keepBell = askedBell && footer;
+  const keepPalette = !askedBell && footer;
+  if (!keepBell && !keepPalette) return ui;
+  const hidden = { ...ui.hidden };
+  if (keepBell) delete hidden[UI_HIDE_NOTIFICATIONS];
+  if (keepPalette) delete hidden[UI_HIDE_COMMAND_PALETTE];
+  return { ...ui, hidden };
+}
+
+/**
+ * The hide target the app kept alive against a plugin's request, or `null`.
+ *
+ * One entry point at most can be overridden, so a single answer is enough for the
+ * settings screen and for the diagnostics line the person reads. Null means every
+ * hide took effect (or nothing asked for the combination that would lock the app).
+ */
+export function settingsEscapeHatch(ui: ParsedPluginUi): string | null {
+  const resolved = settingsHides(ui);
+  // `settingsHides` builds a fresh `{ ...ui, hidden }` whenever it keeps anything,
+  // so identity can never be the "nothing changed" signal: ask the resolved hide
+  // map. `isUiHidden` is the right question here — not "is the target mentioned
+  // anywhere in the payload", which a plugin that hid the rail footer *and* the
+  // bell would also satisfy.
+  if (isUiHidden(ui, UI_HIDE_NOTIFICATIONS) && !isUiHidden(resolved, UI_HIDE_NOTIFICATIONS)) {
+    return UI_HIDE_NOTIFICATIONS;
+  }
+  if (isUiHidden(ui, UI_HIDE_COMMAND_PALETTE) && !isUiHidden(resolved, UI_HIDE_COMMAND_PALETTE)) {
+    return UI_HIDE_COMMAND_PALETTE;
+  }
+  return null;
 }
 
 /**

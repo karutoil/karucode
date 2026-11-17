@@ -24,7 +24,7 @@ import type {
   UpdateStatus,
 } from '../api/types';
 import { isAgentLive } from '../api/types';
-import { applyUiPreferences, parsePluginUi, type ParsedPluginUi, type UiContribution } from '../components/uiContributions';
+import { applyUiPreferences, parsePluginUi, settingsHides, type ParsedPluginUi, type UiContribution } from '../components/uiContributions';
 import { pluginUiPreferences } from './pluginUiPreferences';
 import { emptyChatState, type ChatState } from './chat';
 import { controlChats as controlChatList } from './controlPlane';
@@ -459,15 +459,17 @@ export const pluginPanelData = signal<Record<string, PluginPanelState>>({});
  * * `pluginUiDeclared` is exactly what the plugins asked for. The settings screen
  *   lists it, because that is the only way to switch back on what somebody turned
  *   off (and to see a hide that was overridden).
- * * `pluginUi` applies the person's overrides (`state/pluginUiPreferences.ts`).
- *   Every component that draws a control reads this one, so nothing downstream
- *   has to know why a control is absent.
+ * * `pluginUi` applies the person's overrides (`state/pluginUiPreferences.ts`)
+ *   and then the escape hatch (`settingsHides`): a combination of hides that
+ *   would leave no way back into Settings keeps one, because Settings is where a
+ *   hidden control is put back. Every component that draws a control reads this
+ *   one, so nothing downstream has to know why a control is absent.
  */
 export const pluginUiDeclared = computed<ParsedPluginUi>(() =>
   parsePluginUi(config.value?.plugin_ui),
 );
 export const pluginUi = computed<ParsedPluginUi>(() =>
-  applyUiPreferences(pluginUiDeclared.value, pluginUiPreferences.value),
+  settingsHides(applyUiPreferences(pluginUiDeclared.value, pluginUiPreferences.value)),
 );
 
 

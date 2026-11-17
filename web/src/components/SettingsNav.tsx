@@ -186,7 +186,6 @@ export function paneCaption(section: SettingsSectionMeta): string | null {
   return section.scope === 'mixed' ? section.caption : null;
 }
 
-
 /** The metadata of one section; a hard lookup because the union has no gaps. */
 export function settingsSection(id: SettingsTab): SettingsSectionMeta {
   const section = SETTINGS_SECTIONS.find((candidate) => candidate.id === id);

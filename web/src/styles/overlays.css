@@ -42,6 +42,27 @@
   --overlay-scrim: color-mix(in srgb, var(--text) 12%, transparent);
 }
 
+/* ---------- the layer ladder -------------------------------------------- */
+/* Four published rungs, in one place, because they are a *relationship* and not
+ * four independent numbers: a sheet (an inspector, a workbench panel) sits under
+ * a modal; a modal sits under a toast; a toast sits under the skip link. Toasts
+ * used to be an unexplained `130` while `.dialog-layer` was a literal `100`, so
+ * a toast painted over a modal's own surface — a message about the dialog
+ * covering the dialog. They are still *above* the modal (a save that fails while
+ * Settings is open has to be readable), but only just: `--z-toast` is one rung
+ * above `--z-modal` and it is now stated, not implied. `styles/overlays.test.ts`
+ * asserts the ordering. */
+:root {
+  /* Under a modal on purpose: the inspector's sheets and the workbench drawers. */
+  --z-sheet: 90;
+  --z-modal: 100;
+  /* Above the modal, below the skip link: the one surface that must be readable
+   * over a dialog. */
+  --z-toast: 130;
+  /* Above everything, including a toast: `base.css`'s "skip to content". */
+  --z-skip-link: 200;
+}
+
 /* ---------- one veil per stack ------------------------------------------ */
 /* A second overlay opened over the first painted a second veil: Settings ->
  * Theme studio -> Ctrl+K dimmed the page twice (18% over 18% = 32.8%) while the
@@ -57,7 +78,7 @@
  * rule the day it is written. */
 body
   > .dialog-layer:has(~ .dialog-layer)
-  :is(.dialog-backdrop, .theme-shade) {
+  .dialog-backdrop {
   background: transparent;
   backdrop-filter: none;
 }
@@ -67,7 +88,7 @@ body
 .dialog-layer {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: var(--z-modal);
   display: grid;
   place-items: center;
   padding: var(--space-9);
@@ -457,44 +478,47 @@ body
 
 /* The field *is* the top bar, and it paints no fill of its own: the dialog's own
  * edge is its frame and a hairline is the only thing under it, the way the file
- * toolbar separates itself from the document it sits over. */
-/* The palette's one header band: the search field *is* the top of the
- * document, and it paints no fill of its own — the dialog's edge is its frame
- * and a hairline is the only thing under it, the way the file toolbar separates
- * itself from the document it sits over. */
-.dialog-palette .dialog-header {
-  padding: 0;
-  border-bottom: 0;
-  align-items: center;
-}
-
-.dialog-palette .dialog-title {
-  align-self: center;
-  padding-left: var(--space-8);
-  color: var(--muted);
-  font-size: var(--fs-tiny);
-  font-weight: 600;
-  letter-spacing: var(--tracking-kicker);
-  text-transform: uppercase;
-}
-
-.dialog-palette .dialog-header .icon-button {
-  margin-right: var(--space-5);
-  border-color: transparent;
-  background: transparent;
-}
-
+ * toolbar separates itself from the document it sits over.
+ *
+ * There is no `.dialog-palette .dialog-header` / `.dialog-title` variant to
+ * match: the palette passes `showHeader={false}` (the field *is* the header), so
+ * `Overlay` paints no header band at all and those rules could never apply. The
+ * three that were here — an unpadded band, a muted uppercase title and a
+ * borderless icon button — also described the pre-`Overlay` shell. */
 .palette-search {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-6);
-  flex: 1 1 auto;
   min-width: 0;
   min-height: 56px;
-  padding: 0 var(--space-5);
+  /* The rail below is inset off this edge, the way `.palette-item::before` is. */
+  padding: 0 var(--space-5) 0 calc(var(--space-5) + var(--space-2));
   /* The glyph is decoration (§4): `--faint` is the role for it, and it is what
    * the rail's own search field uses. */
   color: var(--faint);
+}
+
+/* The palette's focus cue: one 2px accent rail at the dialog's leading edge while
+ * the field has the caret. The field is the only input in the dialog and it is
+ * focused whenever the palette is open, so this is the state the surface spends
+ * its whole life in — it is the mark that says "typing goes here", and it is the
+ * same shape the active row and the session rail use. Transparent when focus is
+ * elsewhere, so there is exactly one rail in the dialog at a time (this one, or
+ * `.palette-item.is-active::before` on a row). */
+.palette-search::before {
+  content: '';
+  position: absolute;
+  top: var(--space-3);
+  bottom: var(--space-3);
+  left: 0;
+  width: 2px;
+  border-radius: var(--radius-xs);
+  background: transparent;
+}
+
+.palette-search:focus-within::before {
+  background: var(--accent);
 }
 
 .palette-input {
@@ -507,19 +531,12 @@ body
   font-size: var(--fs-body);
 }
 
+/* The field paints no second frame of its own: the rail above *is* its cue, and a
+ * ring around a field that runs the dialog's full width read as a second edge
+ * inside the dialog's edge. (It was a 2px ring.) The caret is still visible —
+ * the text is `--text` on the dialog's own surface. */
 .palette-input:focus-visible {
-  border-radius: var(--radius-xs);
-  outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: var(--focus-ring-offset);
-}
-
-/* The field is the only input in the dialog and it is focused whenever the
- * palette is open, so its focus cue is the divider itself changing colour — one
- * hairline, not a second 2px rule stacked on the first. Two of those made the
- * top of the dialog read as a banner. The divider is the header's own
- * `border-bottom`, so the cue is painted on the band that owns it. */
-.dialog-palette:focus-within .dialog-header {
-  border-bottom-color: var(--accent);
+  outline: none;
 }
 
 .palette-input::placeholder {
@@ -527,7 +544,6 @@ body
 }
 
 .palette-list {
-  flex: 1 1 auto;
   min-height: 0;
   max-height: 380px;
   margin: 0;
@@ -1135,12 +1151,17 @@ body
 
 /* ---------- toasts ----------------------------------------------------- */
 
-/* The mock's stack is content-sized: each toast hugs its message. */
+/* The mock's stack is content-sized: each toast hugs its message.
+ *
+ * Above the modal rung on purpose and by exactly one step (see the layer ladder
+ * at the top of this file): a toast reports on the thing the dialog is doing, so
+ * it is the one surface that may paint over it — but it may never be under it,
+ * or a failed save inside Settings would be announced to nobody. */
 .toast-region {
   position: fixed;
   right: 25px;
   bottom: 22px;
-  z-index: 130;
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   align-items: flex-end;
@@ -1373,14 +1394,15 @@ body
     border-radius: var(--radius);
   }
 
-  .overlay-palette .dialog-header,
-  .overlay-palette .overlay-header {
-    padding: var(--space-2) var(--space-1) var(--space-2) var(--space-6);
-  }
-
-  .overlay-palette .dialog-title,
-  .overlay-palette .overlay-title {
-    font-size: var(--fs-micro);
+  /* The palette's field is its own top band: no header row is rendered, so the
+   * inset belongs to `.palette-search` and nowhere else. This rule used to arrive
+   * as `padding: var(--space-2) var(--space-1) …` on the `.dialog-header` and
+   * `.overlay-header` selectors, taking the band from 20px to 4px/2px across the
+   * whole row — with the close button's inset on the right rather than the field's
+   * — and on a phone that is what would squash a header's close button. Scoped
+   * back to the field, which is the only band the palette has. */
+  .overlay-palette .palette-search {
+    padding: var(--space-2) var(--space-5);
   }
 
   .palette-item {

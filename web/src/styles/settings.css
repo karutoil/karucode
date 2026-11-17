@@ -4,18 +4,23 @@
  * Visual contract: the v3 mock's `.setting-row` / `.toggle` blocks (typography,
  * dividers, 36×21 switches) inside the shell language the rest of the harness
  * already speaks — the rail's rows and active tint (`.session-row`), the
- * inspector's section rhythm, `.eyebrow` kickers, `.badge` facts and the Theme
- * Studio's header (title, subtitle, one close button).
+ * inspector's section rhythm, `.eyebrow`-style kickers, `.badge` facts and the
+ * Theme Studio's header (title, subtitle, one close button).
  *
  * Layout model, pinned by `styles/settings.test.ts`:
  *
- *   .settings-form
- *     .settings-shell          two columns, fills the sheet
- *       .settings-nav          kicker, search, one row per section
- *       .settings-content
- *         .settings-pane-head  section title, scope badge, caption, close
- *         .settings-panels     the scroller; every panel stays mounted
- *     .settings-footer         error or save note, then Cancel / Save changes
+ *   .settings-body              the sheet's column, fills the tall role
+ *     .settings-form
+ *       .settings-shell           two columns, fills the sheet
+ *         .settings-nav           head (search + hint), one row per section
+ *         .settings-content
+ *           .settings-pane-head   section title, scope badge, caption, close
+ *           .settings-panels      the scroller; every panel stays mounted
+ *
+ * There is no `.settings-footer` band: the save note and the Cancel / Save
+ * actions ride the shell's own `.overlay-footer` (`.overlay-footer-note` +
+ * `.overlay-footer-actions`), and the nav has no kicker — a heading above a
+ * search field above a list was one line of chrome too many.
  *
  * The scroll lives on the *panel*, not on the body or the content column: the
  * rail and the footer have to stay put, and the pane header has to keep naming

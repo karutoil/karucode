@@ -267,13 +267,20 @@ pub const UI_HIDEABLE: &[&str] = &[
 ///
 /// A narrower catalogue than [`UI_HIDEABLE`] and for a different reason: text
 /// substitution is how an organisation renames the product in its own
-/// deployment ("Session" → "Thread", "Project" → "Workspace") without forking.
-/// Nothing that states a safety property is listed - a plugin must not be able to
-/// relabel "Approve" or rewrite the unsandboxed-shell warning.
+/// deployment ("Karucode" → "Acme Agent", "New session" → "New thread") without
+/// forking. Nothing that states a safety property is listed - a plugin must not
+/// be able to relabel "Approve" or rewrite the unsandboxed-shell warning.
+///
+/// Every entry is drawn: the web client reads each one through `pluginText(...)`
+/// at the control it names (the rail lockup, the "New session" button, the
+/// empty-state greeting). Two label targets - `label.session` and
+/// `label.project` - used to be listed here while nothing read them; they were
+/// removed, because advertising a rename the app does not perform is a promise
+/// the app does not keep. Adding a target here is only half the change: the
+/// client catalogue (`web/src/components/uiContributions.ts`) and the component
+/// that draws the label must change in the same commit.
 pub const UI_REPLACEABLE: &[&str] = &[
     UI_REPLACE_APP_NAME,
-    UI_REPLACE_SESSION_LABEL,
-    UI_REPLACE_PROJECT_LABEL,
     UI_REPLACE_NEW_SESSION_LABEL,
     UI_REPLACE_GREETING,
 ];
@@ -311,8 +318,16 @@ pub const UI_HIDE_COMMAND_PALETTE: &str = "command-palette";
 /// The product name drawn in the rail's lockup.
 pub const UI_REPLACE_APP_NAME: &str = "app.name";
 /// The word used for a conversation ("Session").
+///
+/// Reserved, not reachable: no target in this build reads it. It is kept as the
+/// stable spelling a future `label` target would use. Attempting to replace it
+/// is refused, because it is not on [`UI_REPLACEABLE`].
 pub const UI_REPLACE_SESSION_LABEL: &str = "label.session";
 /// The word used for a workspace root ("Project").
+///
+/// Reserved, not reachable: no target in this build reads it. It is kept as the
+/// stable spelling a future `label` target would use. Attempting to replace it
+/// is refused, because it is not on [`UI_REPLACEABLE`].
 pub const UI_REPLACE_PROJECT_LABEL: &str = "label.project";
 /// The "New session" button label.
 pub const UI_REPLACE_NEW_SESSION_LABEL: &str = "label.new-session";
@@ -992,6 +1007,19 @@ impl InboundRaw {
     }
 }
 
+/// The params key the host stamps into every request it sends to a plugin, and
+/// the key the SDK echoes back on a `plugin/state/*` frame.
+///
+/// It exists so a state call raised from inside a handler is attributed to *that*
+/// call by identity instead of to whichever call started most recently. The plugin
+/// cannot forge an owner with it: an id that is not in the host's live-call table
+/// falls back to the newest live context, and with no live call the scoped request
+/// is refused outright (`crates/kc-plugin-host/src/rpc.rs`).
+///
+/// Leading underscore because it is a protocol detail, not part of a plugin's
+/// public params — a plugin echoes it without interpreting it.
+pub const CALL_ID_PARAM: &str = "_call_id";
+
 /// Well-known method names for both directions.
 pub mod methods {
     pub const INITIALIZE: &str = "initialize";
@@ -1128,10 +1156,17 @@ pub mod hooks {
 
     /// The hook points as an extensible registry.
     ///
-    /// [`IMPLEMENTED`] is the fixed set the runtime calls today: a plugin may
-    /// advertise any name, but the host only fans out the ones listed there, so
-    /// `ON_RUN_START` and `ON_MODEL_RESPONSE` exist as constants with no call
-    /// site. This registry is how that stops being a hard-coded truth:
+    /// **Reserved: nothing in a running karucode calls this.** [`IMPLEMENTED`] is
+    /// the fixed set the runtime calls today — the plugin host fans out exactly
+    /// those names and checks a plugin's adopted hooks against exactly that list.
+    /// This function builds the same set as a
+    /// [`ContributionRegistry`](crate::contrib::ContributionRegistry) so a future
+    /// host can decide liveness from data instead of a `contains` on a constant,
+    /// but no production caller builds or resolves it, so today a plugin that
+    /// `Add`s a hook point still never receives it, and a plugin that `Remove`s or
+    /// `Replace`s one changes nothing. Only a build in which the host resolves
+    /// this view (and fan out reads the view, not [`IMPLEMENTED`]) would make the
+    /// bullets below reachable:
     ///
     /// * every name in [`IMPLEMENTED`] is a built-in entry;
     /// * a plugin may `Add` a hook point it implements;
@@ -1140,6 +1175,10 @@ pub mod hooks {
     /// * the caller resolves it once and fans out to whatever the view contains,
     ///   so "is this hook name live?" is a data question rather than a `contains`
     ///   on a constant.
+    ///
+    /// The caller that wires it must set each contribution's `source` from the
+    /// manifest name *the host assigned*, never from the name the plugin claims —
+    /// at equal priority `source` is the tie-break (see [`kc_core::contrib`]).
     ///
     /// Resolution is deterministic (see [`kc_core::contrib`]), so two plugins
     /// claiming the same hook always resolve the same way on every run.
@@ -1153,8 +1192,12 @@ pub mod hooks {
 
     /// Whether `name` is a hook point this build fans out.
     ///
-    /// Kept as a plain `contains` for the hot path; use [`registry`] when a
-    /// plugin's contribution has to be resolved against it.
+    /// This — not [`registry`] — is the answer today: it is the same `contains`
+    /// the host performs against [`IMPLEMENTED`], and a name outside that list is
+    /// never dispatched. [`registry`] is the reserved, un-wired equivalent; use it
+    /// only once a host actually resolves a plugin's contributions, otherwise
+    /// `is_implemented` is the truthful question and `registry()` answers nothing
+    /// in use.
     pub fn is_implemented(name: &str) -> bool {
         IMPLEMENTED.contains(&name)
     }
@@ -1876,6 +1919,32 @@ mod tests {
             assert!(
                 !hideable_ui_target(refused),
                 "{refused} must never be hideable"
+            );
+        }
+
+        // The replaceable catalogue is a promise the browser has to keep, so it
+        // is pinned to the targets a control actually draws: the rail lockup, the
+        // "New session" buttons and the empty-state heading. Adding an entry that
+        // no component reads is the bug this list exists to prevent.
+        for target in UI_REPLACEABLE {
+            assert!(replaceable_ui_target(target), "{target} must be replaceable");
+        }
+        for reserved in [UI_REPLACE_SESSION_LABEL, UI_REPLACE_PROJECT_LABEL] {
+            assert!(
+                !replaceable_ui_target(reserved),
+                "{reserved} is reserved: no control draws it, so a rename would do nothing"
+            );
+        }
+        // Nothing that states a safety property may be renamed.
+        for refused in [
+            "approval.approve",
+            "approval.deny",
+            "composer.send",
+            "security.warning",
+        ] {
+            assert!(
+                !replaceable_ui_target(refused),
+                "{refused} must never be replaceable"
             );
         }
     }

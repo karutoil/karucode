@@ -539,22 +539,35 @@
 //   `inspector.tab.workspace`, `inspector.tab.changes`, `inspector.tab.session`,
 //   `inspector.tab.agents`, `inspector.context`, `rail.footer`,
 //   `session.header.actions`, `notifications` and `command-palette`. Every entry
-//   is consumed by a real control, so asking for one always does something.
-//   Anything else — including every control that stops a run or answers an
-//   approval — is refused, the inspector will not hide its last remaining tab, and
-//   the settings avatar in the rail footer stays reachable;
+//   is consumed by a real control, so asking for one always does something —
+//   with one deliberate exception. Settings is where a person puts a hidden
+//   control back, so the app will not let a deployment remove every way in.
+//   `rail.footer` is the settings avatar and the only control that opens Settings
+//   directly; `notifications` (the bell) and `command-palette` are only ways to
+//   reach Settings indirectly (*Settings* is a command in the palette). So hiding
+//   `rail.footer` always keeps one of the other two: the bell if you hid the bell
+//   too, otherwise the command palette. Hiding the bell or the palette alone, or
+//   both, while the avatar stays, is honoured exactly as asked. If one of your
+//   hides was overridden, Settings → Plugins & MCP → **Controls in the
+//   interface** names it. Anything else — including every control that stops a
+//   run or answers an approval — is refused, and the inspector will not hide its
+//   last remaining tab;
 // * `replace` renames a built-in label instead of hiding it, which is how a
-//   deployment makes the app speak its own vocabulary ("Session" → "Thread"):
+//   deployment makes the app speak its own vocabulary ("New session" → "New
+//   thread"):
 //
 //   ```rust
 //   .replace("label.new-session", "New thread")
 //   ```
 //
-//   The targets are `app.name`, `label.session`, `label.project`,
-//   `label.new-session` and `empty.greeting`. Nothing that states a safety
-//   property is replaceable — a plugin cannot relabel an approval control or
-//   rewrite the unsandboxed-shell warning. The first plugin to claim a target
-//   wins, in discovery order;
+//   The targets are `app.name`, `label.new-session` and `empty.greeting` — the
+//   rail's product lockup, the "New session" buttons and the empty-state
+//   greeting. Each one is drawn somewhere real, so a rename always shows.
+//   `label.session` and `label.project` are *not* targets: the app has no single
+//   place that draws those words, so asking to rename them is refused like any
+//   other unknown target. Nothing that states a safety property is replaceable —
+//   a plugin cannot relabel an approval control or rewrite the unsandboxed-shell
+//   warning. The first plugin to claim a target wins, in discovery order;
 // * the person on the other side has the last word: Settings → Plugins & MCP →
 //   **Controls in the interface** switches a contributed control off or puts a
 //   hidden built-in back, per browser, without disabling the plugin;
@@ -633,8 +646,8 @@
 // A `button` in a **badge** slot (`session.row.badge`, `session.header.chip`)
 // draws a chip: it carries `text` and `tone` (`neutral`, `accent`, `success`,
 // `warn`, `danger`, `muted`) instead of a label and an icon. `kind: "replace"`
-// renames a whitelisted label (`label.session`, `label.project`, …); nothing that
-// states a safety property is replaceable.
+// renames a whitelisted label (`app.name`, `label.new-session`, `empty.greeting`);
+// nothing that states a safety property is replaceable.
 //
 // # Shaping the session rail: `before_session_list`
 //
@@ -1415,7 +1428,25 @@ fn state_params(scope: &str, session_id: &str, project_id: &str, key: &str) -> V
     if !project_id.is_empty() {
         object.insert("project_id".into(), json!(project_id));
     }
+    // Echo the host's call id so the host attributes this read or write to the
+    // call whose handler is running, not to whichever call started last. Absent
+    // outside a handler (a bare `main` that has not served a request yet), and the
+    // host then falls back to its own rules.
+    let call_id = CURRENT_CALL_ID.with(|cell| cell.get());
+    if let Some(call_id) = call_id {
+        object.insert(kc_core::plugin::CALL_ID_PARAM.into(), json!(call_id));
+    }
     params
+}
+
+// The host's call id for the request this worker thread is currently serving.
+//
+// Set in `Plugin::handle_request` from the host's stamped params and read by
+// `state_params`. Thread-local rather than a shared `AtomicU64` because the whole
+// point is that two concurrent calls must not adopt each other's owner: a worker
+// serves one request at a time, so the thread is the natural scope.
+thread_local! {
+    static CURRENT_CALL_ID: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 /// The bit this plugin sets on the ids of the requests **it** sends.
@@ -1519,6 +1550,14 @@ impl Plugin {
         // consumes ours first; this is the belt to that braces.)
         let method = request.get("method").and_then(|m| m.as_str())?.to_string();
         let params = request.get("params").cloned().unwrap_or(Value::Null);
+
+        // Publish the host's call id for the whole handler, so a `plugin/state/*`
+        // frame raised inside it is attributed to THIS call. Thread-local because
+        // each request runs to completion on one worker thread, so two concurrent
+        // calls cannot see each other's id.
+        if let Some(call_id) = params.get(kc_core::plugin::CALL_ID_PARAM).and_then(Value::as_u64) {
+            CURRENT_CALL_ID.with(|cell| cell.set(Some(call_id)));
+        }
 
         // Notifications (e.g. `notifications/initialized`) get no response.
         let id = id?;
@@ -2542,15 +2581,16 @@ impl PluginBuilder {
     /// Ask the app to **rename** one of its own labels.
     ///
     /// `target` must be one of the replaceable names the app publishes
-    /// (`app.name`, `label.session`, `label.project`, `label.new-session`,
-    /// `empty.greeting`), and `text` is what to draw instead. This is how a
-    /// deployment speaks its own vocabulary — "Session" → "Thread", "Project" →
-    /// "Workspace" — without forking the frontend.
+    /// (`app.name`, `label.new-session`, `empty.greeting`), and `text` is what to
+    /// draw instead. This is how a deployment speaks its own vocabulary —
+    /// "New session" → "New thread", "Karucode" → "Acme Agent" — without forking
+    /// the frontend.
     ///
     /// It cannot rewrite anything that states a safety property: a target outside
-    /// the catalogue (an approval button, the unsandboxed-shell warning) is
-    /// refused with a note in the diagnostics, and so is empty text. The first
-    /// plugin to claim a target wins, in discovery order.
+    /// the catalogue (an approval button, the unsandboxed-shell warning, or a word
+    /// like `label.project` that no single control draws) is refused with a note
+    /// in the diagnostics, and so is empty text. The first plugin to claim a
+    /// target wins, in discovery order.
     ///
     /// `.replace("label.new-session", "New thread")`
     pub fn replace(self, target: &str, text: &str) -> Self {

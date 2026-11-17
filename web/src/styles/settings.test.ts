@@ -142,6 +142,37 @@ describe('settings sheet: two panes, and the panel owns the scroll', () => {
     expect(declarations('.settings-body')['overflow-y']).toBeUndefined();
   });
 
+  it('documents the tree the sheet actually renders', () => {
+    // The file header is the map a reader trusts before grepping, and it had
+    // drifted: it still showed a `.settings-footer` band and a nav "kicker", both
+    // deleted, and it omitted `.settings-body`, which is the real root. Each name
+    // the header walks must exist in the markup, and each name it says is gone
+    // must be gone. A rename that skips the header fails here.
+    const header = css.slice(0, css.indexOf('*/'));
+    const source = readFileSync(new URL('../components/SettingsSheet.tsx', import.meta.url), 'utf8');
+    const nav = readFileSync(new URL('../components/SettingsNav.tsx', import.meta.url), 'utf8');
+
+    for (const live of [
+      '.settings-body',
+      '.settings-form',
+      '.settings-shell',
+      '.settings-nav',
+      '.settings-content',
+      '.settings-pane-head',
+      '.settings-panels',
+    ]) {
+      // The tree is an indented walk, so a leaf may be followed by a newline and
+      // a named one always by a space; either way the name is in the map.
+      expect(header, `${live} is in the layout model`).toMatch(
+        new RegExp(`${live.replace('.', '\\.')}(?: |$)`, 'm'),
+      );
+      expect(source + nav, `${live} is rendered`).toContain(`"${live.slice(1)}`);
+    }
+    expect(header).toMatch(/no `?\.settings-footer`? band/);
+    expect(css).not.toContain('.settings-nav-kicker');
+    expect(nav).not.toContain('settings-nav-kicker');
+  });
+
   it('gives the pane header and footer one control height with the fields', () => {
     // The audit's M3: controls in one panel measured 37/32/30/16px tall. Every
     // button in the sheet is the 32px an `.input` is.

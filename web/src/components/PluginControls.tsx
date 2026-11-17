@@ -8,7 +8,7 @@ import {
   setHideOverridden,
 } from '../state/pluginUiPreferences';
 import { Toggle } from './Toggle';
-import type { UiContribution } from './uiContributions';
+import { applyUiPreferences, settingsEscapeHatch, type UiContribution } from './uiContributions';
 
 /**
  * The person's side of the plugin-UI bargain.
@@ -36,7 +36,25 @@ const TARGET_LABEL: Record<string, string> = {
   'inspector.tab.session': 'the Session usage tab',
   'inspector.tab.agents': 'the Agents tab',
   'inspector.context': 'the Context button in the session header',
+  'rail.footer': 'the theme and commands buttons in the rail footer',
+  notifications: 'the notification bell',
+  'command-palette': 'the command palette button',
 };
+
+/**
+ * The hide target the app kept alive because it was the last way into Settings,
+ * or `null`.
+ *
+ * Without this the settings screen would be the only place that disagrees with
+ * the screen beside it: it lists a hide that the app did not apply, with no hint
+ * why. The escape hatch is resolved from the person's own view (their overrides
+ * applied), so a hide somebody already put back is not reported twice.
+ */
+function keptForSettingsHint(): string | null {
+  return settingsEscapeHatch(
+    applyUiPreferences(store.pluginUiDeclared.value, pluginUiPreferences.value),
+  );
+}
 
 /** Where a contributed control appears, in words. */
 function whereLabel(contribution: UiContribution): string {
@@ -106,6 +124,8 @@ export function PluginControls(): JSX.Element {
   const hidden = Object.entries(declared.hidden);
   const empty = byPlugin.size === 0 && hidden.length === 0;
   const overridden = hasUiOverrides(prefs);
+  // One hide may not have taken effect: the app keeps the last way into Settings.
+  const kept = keptForSettingsHint();
 
   return (
     <div class="plugin-controls" data-testid="plugin-controls">
@@ -147,6 +167,11 @@ export function PluginControls(): JSX.Element {
             <HiddenRow key={target} target={target} plugins={plugins} />
           ))}
         </ul>
+      ) : null}
+      {kept !== null ? (
+        <p class="settings-section-note" data-testid="plugin-controls-settings-hatch">
+          {`The app kept ${targetLabel(kept)} on screen: it is the last way into Settings, and Settings is where a hidden control is put back.`}
+        </p>
       ) : null}
     </div>
   );

@@ -52,10 +52,10 @@ folds wraps inward-in, so the last wrapper sees the final answer).
 
 ## Precedence
 
-Contributions are ordered by `(priority, plugin name, sequence)`:
+Contributions are ordered by `(priority, source, sequence)`:
 
 * **priority** — higher wins, so an operator's plugin can outrank another's;
-* **plugin name** — a stable tie-break, so two plugins with the same priority
+* **source** — a stable tie-break, so two plugins with the same priority
   resolve the same way on every run and every machine;
 * **sequence** — declaration order within one plugin, so a plugin can control
   its own order.
@@ -64,6 +64,22 @@ For `Remove` and `Replace`, the **highest-precedence claim wins**: if one
 plugin removes a built-in and another replaces it, the higher-priority one
 decides, and the loser is reported in `conflicts` rather than silently
 dropped. That is the whole point of the primitive: a conflict is *visible*.
+
+### Set `source` from the host's registry, never from the plugin
+
+At equal priority the tie-break is `source`, so an alphabetic accident decides
+who wins: a plugin that calls itself `aaa-plugin` outranks one that calls
+itself `zzz-plugin` on the same priority, and a plugin could pick a name that
+sorts before everyone else's to win every tie.
+
+`source` is a free string, so `Contribution` cannot enforce this. The rule is
+on the caller: the host must set `source` to the **manifest name it assigned**
+to the plugin (the one it logs, keys state by and reports in diagnostics),
+never to a name taken from the plugin's own request, its manifest claim or a
+frame it wrote. Two plugins must also not be able to present the same
+`source`: the host assigns those names, so it already guarantees that. Until a
+host wires this registry that rule is unenforced, which is exactly why it is
+written down here.
 
 ## What it does not do
 

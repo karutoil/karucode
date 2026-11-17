@@ -1051,22 +1051,36 @@ impl ToolRegistry {
 
     /// Apply plugin contributions to the built-in set.
     ///
-    /// This is what makes "a plugin may remove or replace a built-in tool" true
-    /// rather than aspirational. `builtins` is the first-party set in the order
-    /// it was registered; each contribution names a tool:
+    /// This is what would make "a plugin may remove or replace a built-in tool"
+    /// true rather than aspirational. It has **no production caller today**: the
+    /// shipped `PluginHost` registers a plugin's tools under the host's own names
+    /// and never contributes against the first-party set, so nothing in a running
+    /// karucode removes or replaces a built-in tool. It is kept, with its tests,
+    /// as the API a host wires when it starts accepting tool contributions; do not
+    /// document it to a plugin author as reachable until that caller exists.
+    ///
+    /// `builtins` is the first-party set in the order it was registered; each
+    /// contribution names a tool:
     ///
     /// * `Add` — contributes a tool under a name nothing else uses;
     /// * `Remove` — takes a tool (built-in or plugin) out of the registry, so the
     ///   model never sees it in a request;
     /// * `Replace` — swaps a tool's implementation, keeping the name;
-    /// * `Wrap` — recorded but not applied here: a tool is a trait object, so
-    ///   wrapping means implementing the trait, which only the caller can do.
-    ///   It is returned so the caller can build the wrapper against the original.
+    /// * `Wrap` — **not applied, and not reported as applied.** A tool is a trait
+    ///   object, so wrapping means implementing the trait, which only a caller
+    ///   that knows its own tool type can do; this method cannot build that
+    ///   wrapper, so it drops the wrapper's value instead of returning it. A
+    ///   `Wrap` therefore resolves to a successful entry with zero `wrappers` in
+    ///   the view and leaves no trace here — the caller cannot build the wrapper
+    ///   from anything this returns. Reserved for a future caller that owns the
+    ///   concrete tool type.
     ///
     /// Precedence and conflict reporting are [`kc_core::contrib`]'s: the highest
     /// priority claim on a name decides, and every losing claim is returned in
     /// `conflicts` so the host can put it in the plugin's diagnostics instead of
-    /// leaving an author guessing why their tool vanished.
+    /// leaving an author guessing why their tool vanished. A `Remove` is built
+    /// with [`kc_core::contrib::Contribution::remove`], which needs no
+    /// `T: Default` — `Arc<dyn Tool>` has none.
     pub fn apply_contributions(
         &mut self,
         builtins: &[Arc<dyn Tool>],
@@ -1978,7 +1992,7 @@ mod tests {
     /// gone from the registry, so the model never sees it in a request.
     #[test]
     fn a_plugin_can_remove_a_builtin_tool() {
-        use crate::contrib::{Contribution, Op};
+        use crate::contrib::Contribution;
         struct Dummy(String);
         #[async_trait]
         impl Tool for Dummy {
@@ -2004,15 +2018,9 @@ mod tests {
 
         let conflicts = reg.apply_contributions(
             &builtins,
-            // `Contribution::remove` needs `T: Default`, and a trait object is
-            // not; the value is ignored for `Remove` anyway.
-            vec![Contribution::new(
-                "guard",
-                Op::Remove,
-                "run_command",
-                Arc::new(Dummy("unused".into())) as Arc<dyn Tool>,
-                0,
-            )],
+            // `Contribution::remove` carries no value, so a trait object — which
+            // has no `Default` — needs no placeholder here.
+            vec![Contribution::remove("guard", "run_command", 0)],
         );
         assert_eq!(
             reg.names(),

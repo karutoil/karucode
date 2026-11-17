@@ -218,4 +218,47 @@ describe('Overlay', () => {
     expect(screen.getByRole('dialog').getAttribute('data-role')).toBe('standard');
     unmount();
   });
+
+  // The classifier that used to live in `Dialog` decided the measure with
+  // `className.includes(...)`, so any class containing a word won: a new
+  // `dialog-confirm-preview` would silently become a 480px question. These four
+  // cases pin the explicit prop and the whole-class fallback table.
+  it.each([
+    ['dialog-file', 'full'],
+    ['dialog-artifact', 'full'],
+    ['dialog-confirm', 'compact'],
+    ['dialog-rewind', 'compact'],
+    ['dialog-palette', 'palette'],
+    ['dialog-skill', 'standard'],
+    ['dialog-catalog', 'standard'],
+    ['notification-center', 'standard'],
+  ] as const)('an unmigrated Dialog with class %s resolves to %s', (cls, role) => {
+    const { unmount } = render(
+      <Dialog open title="A dialog" onClose={() => undefined} class={cls}>
+        <p>Body copy.</p>
+      </Dialog>,
+    );
+    expect(screen.getByRole('dialog').getAttribute('data-role')).toBe(role);
+    unmount();
+  });
+
+  it('does not infer a measure from a substring of a class', () => {
+    const { unmount } = render(
+      <Dialog open title="A dialog" onClose={() => undefined} class="dialog-confirm-preview">
+        <p>Body copy.</p>
+      </Dialog>,
+    );
+    expect(screen.getByRole('dialog').getAttribute('data-role')).toBe('standard');
+    unmount();
+  });
+
+  it('lets an explicit role win over the class fallback', () => {
+    const { unmount } = render(
+      <Dialog open title="A dialog" onClose={() => undefined} class="dialog-confirm" role="wide">
+        <p>Body copy.</p>
+      </Dialog>,
+    );
+    expect(screen.getByRole('dialog').getAttribute('data-role')).toBe('wide');
+    unmount();
+  });
 });

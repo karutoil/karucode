@@ -82,6 +82,124 @@ describe('file viewer preview surface', () => {
     );
     expect(phone).toMatch(/\.overlay-palette \{[\s\S]*?border-radius: var\(--radius\)/);
   });
+
+  it('insets the phone palette on the field, not on every header row', () => {
+    // The regression: the phone tier took the palette's top band from the shared
+    // 20px/32px inset down to 4px/2px through a selector list that also matched
+    // `.overlay-header` — the row every other role puts its close button in. The
+    // palette renders no header (the field *is* the band), so the rule belongs to
+    // `.palette-search` alone and no `.overlay-header` may be re-padded there.
+    const phone = css.slice(css.indexOf('@media (max-width: 640px)'));
+    expect(phone).toMatch(
+      /\.overlay-palette \.palette-search \{\n {4}padding: var\(--space-2\) var\(--space-5\);/,
+    );
+    expect(phone).not.toMatch(/\.overlay-palette \.overlay-header/);
+    expect(phone).not.toMatch(/\.overlay-palette \.dialog-header/);
+  });
+});
+
+describe('overlays.css has no orphaned selector', () => {
+  /* Rules for a shell this app does not render are worse than missing rules: they
+   * read as "this is handled" while nothing matches, and a test that greps for
+   * them pins the dead state. Each case below names the selector, the component
+   * fact that makes it unreachable, and the class token that is the live one. */
+  const cssWithoutComments = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const overlaySource = readFileSync(new URL('../components/Overlay.tsx', import.meta.url), 'utf8');
+  const paletteSource = readFileSync(
+    new URL('../components/CommandPalette.tsx', import.meta.url),
+    'utf8',
+  );
+
+  it('paints no `.dialog-palette .dialog-*` variant', () => {
+    // The palette passes `showHeader={false}`, so `Overlay` renders no
+    // `.overlay-header` and never a `.dialog-header`; and the surface's own
+    // classes are `.overlay .overlay-palette .dialog-palette`. Twenty-one lines
+    // of header/title/icon-button rules matched none of that.
+    expect(paletteSource).toMatch(/role="palette"/);
+    expect(paletteSource).toContain('showHeader={false}');
+    expect(cssWithoutComments).not.toMatch(/\.dialog-palette \.dialog-/);
+    expect(cssWithoutComments).not.toMatch(/\.overlay-palette \.dialog-/);
+  });
+
+  it('paints no `.theme-shade`, which no component renders', () => {
+    // The drawer uses the shell's `.dialog-backdrop`; the one-veil rule used to
+    // keep naming the private veil it no longer has.
+    expect(cssWithoutComments).not.toContain('.theme-shade');
+    expect(css).toMatch(/\.dialog-layer:has\(~ \.dialog-layer\)\n {2}\.dialog-backdrop \{/);
+  });
+
+  it('gives every vaunted focus cue a rule that can paint', () => {
+    // The old cue was `:focus-within .dialog-header { border-bottom-color }`,
+    // which needed a header the palette never renders (and a `border-bottom: 0`
+    // in the deleted variant above it). The cue is the rail now, and the input
+    // paints no second frame.
+    expect(cssWithoutComments).not.toContain(':focus-within .dialog-header');
+    expect(declarations('.palette-search')['position']).toBe('relative');
+    expect(declarations('.palette-search::before')['width']).toBe('2px');
+    expect(declarations('.palette-search:focus-within::before')['background']).toBe('var(--accent)');
+    expect(declarations('.palette-input:focus-visible')['outline']).toBe('none');
+  });
+
+  it('keeps every `flex` in the palette on a row, where it does something', () => {
+    // `flex: 1 1 auto` on a child of the palette's *column* is inert: `flex-grow`
+    // acts on the main axis, and on a column the main axis is height, which the
+    // list bounds with `max-height` anyway. `.palette-search` and `.palette-list`
+    // are in that column, so neither may declare one; the field inside the row
+    // keeps its share of the row's width.
+    const search = declarations('.palette-search');
+    expect(search['display']).toBe('flex');
+    expect(search['flex']).toBeUndefined();
+    expect(declarations('.palette-list')['flex']).toBeUndefined();
+    expect(declarations('.palette-input')['flex']).toBe('1 1 auto');
+  });
+
+  it('drops `is-headless`, a class no stylesheet defines', () => {
+    // `Overlay` emitted it whenever `showHeader` was false and nothing consumed
+    // it; the flag's real effect is the `sr-only` title, which is still emitted.
+    expect(overlaySource).not.toContain('is-headless');
+    expect(cssWithoutComments).not.toContain('is-headless');
+    expect(overlaySource).toContain('class="sr-only"');
+  });
+});
+
+describe('layer ladder', () => {
+  /* z-index values are a relationship, and the one that had drifted was toast vs
+   * modal: `.dialog-layer` sat at a literal 100 while `.toast-region` sat at an
+   * unexplained 130, so a toast always painted over the dialog's own surface.
+   * Both read a token now, and the order is asserted here so it cannot drift back
+   * into two unrelated literals. */
+  const baseCss = readFileSync(new URL('./base.css', import.meta.url), 'utf8');
+
+  /** One `--z-*` rung from the ladder block in overlays.css. */
+  function rung(name: string): number {
+    const match = new RegExp(`--${name}: (\\d+);`).exec(css);
+    expect(match?.[1], `--${name} is declared`).toBeDefined();
+    return Number(match?.[1]);
+  }
+
+  it('declares the rungs once, in one place', () => {
+    for (const name of ['z-sheet', 'z-modal', 'z-toast', 'z-skip-link']) rung(name);
+    // A second literal would be exactly the drift this suite exists to catch.
+    expect(css).not.toMatch(/\.dialog-layer \{[^}]*z-index: \d/);
+    expect(css).not.toMatch(/\.toast-region \{[^}]*z-index: \d/);
+  });
+
+  it('puts a sheet under a modal, a modal under a toast, a toast under the skip link', () => {
+    expect(rung('z-sheet')).toBeLessThan(rung('z-modal'));
+    expect(rung('z-modal')).toBeLessThan(rung('z-toast'));
+    expect(rung('z-toast')).toBeLessThan(rung('z-skip-link'));
+    // A toast reports on the dialog's own action (a failed save), so one rung
+    // above it — not the 30 it had drifted to, and never under it.
+    expect(rung('z-toast') - rung('z-modal')).toBeLessThanOrEqual(40);
+  });
+
+  it('wires the surfaces to the rungs instead of restating them', () => {
+    expect(declarations('.dialog-layer')['z-index']).toBe('var(--z-modal)');
+    expect(declarations('.toast-region')['z-index']).toBe('var(--z-toast)');
+    // `base.css` owns the skip link, and it is the top of the ladder in both files.
+    expect(baseCss).toMatch(/\.skip-link \{[^}]*z-index: 200;/);
+    expect(rung('z-skip-link')).toBe(200);
+  });
 });
 
 describe('command palette vocabulary', () => {

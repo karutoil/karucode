@@ -93,6 +93,38 @@ describe('ProjectRail', () => {
     expect(actions.openSettings).toHaveBeenCalledTimes(1);
   });
 
+  it('hides the footer on request but never the avatar as the last way into Settings', () => {
+    // `rail.footer` takes the theme and palette buttons away, exactly as asked.
+    store.config.value = {
+      ...store.config.value!,
+      plugin_ui: { contributions: [], hidden: [{ target: 'rail.footer', plugins: ['zen'] }], slots: [], hideable: [] },
+    };
+    const { unmount } = renderRail();
+    expect(screen.queryByRole('button', { name: 'Open theme studio' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Open settings' })).not.toBeNull();
+    unmount();
+
+    // The avatar lives outside the hide target on purpose: it is the only entry
+    // into Settings the rail owns, so no combination of hides may remove it.
+    store.config.value = {
+      ...store.config.value!,
+      plugin_ui: {
+        contributions: [],
+        hidden: [
+          { target: 'rail.footer', plugins: ['zen'] },
+          { target: 'notifications', plugins: ['zen'] },
+          { target: 'command-palette', plugins: ['zen'] },
+        ],
+        slots: [],
+        hideable: [],
+      },
+    };
+    renderRail();
+    expect(screen.queryByRole('button', { name: 'Open theme studio' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Open command palette' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Open settings' })).not.toBeNull();
+  });
+
   it('renders one button per project with the documented accessible name', () => {
     const { container } = renderRail();
 

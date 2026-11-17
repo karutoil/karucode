@@ -3420,3 +3420,146 @@ for line in sys.stdin:
         "a refused replace target must be explained: {notes}"
     );
 }
+
+/// Two `replace` contributions for the same target resolve to one winner plus a
+/// stated reason for the loser - across plugins and within one manifest.
+///
+/// `replace` is the one contribution keyed by a *shared* name, so first-claim-wins
+/// has to be decided by the host: without it two plugins both "win" and whichever
+/// the browser happened to read last painted the label. The old host also put the
+/// replacement's synthetic `hosted_id` (`replace-<target>`) into the map used for
+/// controls, so the collision was reported as a button-id clash rather than as a
+/// replacement clash, and a plugin could steal another's target by loading first.
+#[tokio::test]
+async fn two_replace_contributions_for_one_target_keep_the_first_and_report_the_second() {
+    let dir = temp_dir("ui-replace-dedupe");
+    let first = manifest_plugin(serde_json::json!({
+        "name": "alpha", "version": "1.0.0", "protocol": "1",
+        "capabilities": ["tools", "ui"], "permissions": [], "hooks": [],
+        "ui": [
+            {"kind": "replace", "target": "label.new-session", "replace": "New thread"},
+        ],
+    }));
+    // Second in discovery order: the same target, plus a target of its own that
+    // must survive the dedupe untouched.
+    let second = manifest_plugin(serde_json::json!({
+        "name": "beta", "version": "1.0.0", "protocol": "1",
+        "capabilities": ["tools", "ui"], "permissions": [], "hooks": [],
+        "ui": [
+            {"kind": "replace", "target": "label.new-session", "replace": "Start"},
+            {"kind": "replace", "target": "empty.greeting", "replace": "What now?"},
+        ],
+    }));
+    let mut host = PluginHost::discover(
+        &[
+            script_plugin(&dir, "alpha", &first),
+            script_plugin(&dir, "beta", &second),
+        ],
+        &dir,
+    );
+    host.start_all().await;
+
+    let ui = host.ui();
+    let mut replaced: Vec<(String, String, String)> = ui
+        .contributions
+        .iter()
+        .filter(|c| c.kind == "replace")
+        .map(|c| {
+            (
+                c.plugin.clone(),
+                c.target.clone().unwrap_or_default(),
+                c.replace.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    replaced.sort();
+    assert_eq!(
+        replaced,
+        vec![
+            (
+                "alpha".to_string(),
+                "label.new-session".to_string(),
+                "New thread".to_string()
+            ),
+            (
+                "beta".to_string(),
+                "empty.greeting".to_string(),
+                "What now?".to_string()
+            ),
+        ],
+        "one replacement per target: the first in discovery order keeps it, and the \
+         loser's own other target is unaffected"
+    );
+
+    // The loss is recorded, not swallowed - the UI payload says which target
+    // `beta` lost, so the client is not left guessing.
+    assert_eq!(ui.replace_skipped.len(), 1, "{:?}", ui.replace_skipped);
+    assert!(
+        ui.replace_skipped[0].contains("label.new-session")
+            && ui.replace_skipped[0].contains("alpha"),
+        "the skip reason must name the target and the winner: {:?}",
+        ui.replace_skipped
+    );
+
+    // And it reaches the losing plugin's diagnostics, where an operator looks.
+    let beta = host.diagnostics_for("beta").expect("beta diagnostics");
+    let notes = beta.error.clone().unwrap_or_default();
+    assert!(
+        notes.contains("label.new-session") && notes.contains("alpha"),
+        "the losing plugin must be told which target it lost and to whom: {notes}"
+    );
+    assert_eq!(beta.status, PluginStatus::Ready, "a lost target is not a failure");
+    // The winner is not blamed for its own contribution.
+    let alpha = host.diagnostics_for("alpha").expect("alpha diagnostics");
+    let alpha_notes = alpha.error.clone().unwrap_or_default();
+    assert!(
+        !alpha_notes.contains("not exposing `replace`"),
+        "the winner must not be reported as a loser: {alpha_notes}"
+    );
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A manifest that replaces the same target twice is trimmed to one replacement
+/// at validation time, with a note - the host never has to arbitrate a manifest
+/// against itself.
+#[tokio::test]
+async fn one_manifest_cannot_replace_one_target_twice() {
+    let dir = temp_dir("ui-replace-same-manifest");
+    let script = manifest_plugin(serde_json::json!({
+        "name": "twice", "version": "1.0.0", "protocol": "1",
+        "capabilities": ["tools", "ui"], "permissions": [], "hooks": [],
+        "ui": [
+            {"kind": "replace", "target": "label.new-session", "replace": "First"},
+            {"kind": "replace", "target": "label.new-session", "replace": "Second"},
+        ],
+    }));
+    let mut host = PluginHost::discover(&[script_plugin(&dir, "twice", &script)], &dir);
+    host.start_all().await;
+
+    let ui = host.ui();
+    assert_eq!(ui.contributions.len(), 1, "{:?}", ui.contributions);
+    assert_eq!(
+        ui.contributions[0].replace.as_deref(),
+        Some("First"),
+        "manifest order decides, and the first declaration wins"
+    );
+    assert!(
+        ui.replace_skipped.is_empty(),
+        "a single plugin's own duplicate is reported by the validator, not as a \
+         cross-plugin collision: {:?}",
+        ui.replace_skipped
+    );
+
+    let diags = host.diagnostics();
+    assert_eq!(diags[0].status, PluginStatus::Ready, "{:?}", diags[0].error);
+    let notes = diags[0].error.clone().unwrap_or_default();
+    assert!(
+        notes.contains("label.new-session") && notes.contains("second `replace`"),
+        "the dropped duplicate must be explained: {notes}"
+    );
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}

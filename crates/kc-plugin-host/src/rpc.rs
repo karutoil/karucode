@@ -327,6 +327,12 @@ pub(crate) struct PluginShared {
     /// recently started live context, which is the call whose handler is
     /// executing when the plugin asks.
     live_contexts: std::sync::Mutex<Vec<(u64, kc_core::plugin::ToolCallContext)>>,
+    /// Session ids each in-flight call was told about, keyed by call id.
+    ///
+    /// A list-wide hook legitimately spans sessions and may echo an id the host
+    /// gave it; this is what keeps that from becoming "a plugin names its own
+    /// owner". Cleared with the call.
+    session_sets: std::sync::Mutex<std::collections::HashMap<u64, Vec<String>>>,
 }
 
 /// One notification a plugin asked for, already validated by the host.
@@ -424,6 +430,7 @@ impl PluginShared {
                 warned: false,
             }),
             live_contexts: std::sync::Mutex::new(Vec::new()),
+            session_sets: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -583,6 +590,8 @@ impl PluginShared {
     pub(crate) fn end_call(&self, id: u64) {
         let mut guard = self.live_contexts.lock().unwrap_or_else(|e| e.into_inner());
         guard.retain(|(call_id, _)| *call_id != id);
+        let mut sets = self.session_sets.lock().unwrap_or_else(|e| e.into_inner());
+        sets.remove(&id);
     }
 
     /// The most recently started live call context, if any.
@@ -595,6 +604,46 @@ impl PluginShared {
     pub(crate) fn live_context(&self) -> Option<kc_core::plugin::ToolCallContext> {
         let guard = self.live_contexts.lock().unwrap_or_else(|e| e.into_inner());
         guard.last().map(|(_, context)| context.clone())
+    }
+
+    /// The context of the call the plugin named, if that call is still in flight.
+    ///
+    /// This is the attribution a state request should use: the host stamps the
+    /// call id into the params of every request it sends, the SDK echoes it on
+    /// the `plugin/state/*` frame the handler raises, and the owner is then a
+    /// fact rather than a guess. [`live_context`](Self::live_context) stays as
+    /// the fallback for a plugin that does not echo the id, but it is only right
+    /// while one call is running; with two sessions sharing a plugin it would
+    /// attribute both to whichever started last.
+    pub(crate) fn context_for_call(&self, call_id: u64) -> Option<kc_core::plugin::ToolCallContext> {
+        let guard = self.live_contexts.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .iter()
+            .find(|(id, _)| *id == call_id)
+            .map(|(_, context)| context.clone())
+    }
+
+    /// A session id the plugin asks for, accepted only if the call it names was
+    /// itself told about that session.
+    ///
+    /// `plugin/state/*` may not name its own owner: an unconstrained id would let a
+    /// plugin read another conversation's rows. But a *list-wide* call — today
+    /// `before_session_list` — legitimately spans sessions, and the host handed it
+    /// the exact set. Repeating one of those ids is not inventing an owner, so it
+    /// is allowed; anything else, or any frame with no live call id, is not.
+    fn session_named_by_the_call(&self, named: &Option<u64>, params: &Value) -> Option<String> {
+        let call_id = (*named)?;
+        let session_id = params.get("session_id").and_then(Value::as_str)?;
+        if session_id.is_empty() {
+            return None;
+        }
+        let guard = self.session_sets.lock().unwrap_or_else(|e| e.into_inner());
+        let allowed = guard.get(&call_id)?;
+        if allowed.iter().any(|id| id == session_id) {
+            Some(session_id.to_string())
+        } else {
+            None
+        }
     }
 
     pub(crate) fn diagnostics(&self) -> PluginDiagnostics {
@@ -700,6 +749,18 @@ impl PluginShared {
         }
         let (tx, rx) = oneshot::channel();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        // Stamp the call id into the params so a handler that raises a
+        // `plugin/state/*` frame can echo it back and be attributed to *this*
+        // call rather than to whichever call happens to be newest. A plugin that
+        // ignores it still works while one call runs, but two sessions sharing a
+        // plugin would otherwise write into each other's rows.
+        let params = match params {
+            Value::Object(mut map) => {
+                map.insert("_call_id".to_string(), json!(id));
+                Value::Object(map)
+            }
+            other => other,
+        };
         {
             let mut inner = self.lock();
             let sender = match inner.out.as_ref() {
@@ -732,6 +793,14 @@ impl PluginShared {
         if let Some(context) = context {
             self.begin_call(id, context);
         }
+        // A list-wide request hands the plugin a set of sessions; remember them
+        // for the life of the call so a state read may echo one of those ids and
+        // nothing else. Recorded for every request, since any of them may carry a
+        // `sessions` array.
+        if let Some(ids) = crate::session_ids_in(&params) {
+            let mut guard = self.session_sets.lock().unwrap_or_else(|e| e.into_inner());
+            guard.insert(id, ids);
+        }
 
         // From here on the entry is removed by the guard, whatever happens.
         let _guard = PendingGuard { shared: self, id };
@@ -760,6 +829,12 @@ impl PluginShared {
 
     /// Ask the plugin for a hook contribution. Returns `None` when the plugin
     /// does not advertise the hook, is not ready, or the hook failed.
+    ///
+    /// The payload names the session the hook is about, so the call carries a
+    /// context: a `plugin/state/*` frame raised from inside a hook handler is
+    /// attributed to that session, exactly as one raised from a tool call is.
+    /// Without it every hook-initiated state read and write was refused, which
+    /// silently disabled the reference plugin's completed-session tracking.
     pub(crate) async fn hook_output(
         self: &Arc<Self>,
         hook: &str,
@@ -775,8 +850,15 @@ impl PluginShared {
             return None;
         }
         let params = json!({ "hook": hook, "payload": payload });
+        let context = crate::context_from_payload(payload);
         match self
-            .request(methods::HOOKS_RUN, params, self.timeouts.hook())
+            .request_cancellable_in_context(
+                methods::HOOKS_RUN,
+                params,
+                self.timeouts.hook(),
+                None,
+                context,
+            )
             .await
         {
             Ok(v) => {
@@ -817,7 +899,13 @@ impl PluginShared {
             "args": context.args,
         });
         let reply = self
-            .request(methods::PANELS_READ, params, self.timeouts.call())
+            .request_cancellable_in_context(
+                methods::PANELS_READ,
+                params,
+                self.timeouts.call(),
+                None,
+                context.clone(),
+            )
             .await;
         match reply {
             Ok(value) => {
@@ -926,7 +1014,13 @@ impl PluginShared {
             "args": context.args,
         });
         let reply = self
-            .request(methods::UI_ACTION, params, self.timeouts.call())
+            .request_cancellable_in_context(
+                methods::UI_ACTION,
+                params,
+                self.timeouts.call(),
+                None,
+                context.clone(),
+            )
             .await?;
         let parsed: PluginUiActionResult = serde_json::from_value(reply).map_err(|e| {
             RpcError::Transport(format!(
@@ -1698,16 +1792,37 @@ impl PluginShared {
         // plugin wrote. `plugin/state/*` carries no call identity of its own, so
         // an id in `params` is only ever a plugin naming its own owner: trusting
         // it let a plugin read another conversation's rows, which is exactly what
-        // the scope contract says cannot happen. `live_context()` holds the
-        // contexts of in-flight `tools/call` requests; a state call outside any
-        // of them (a hook, an unsolicited frame) has no owner and is refused.
-        let live = self.live_context();
+        // the scope contract says cannot happen.
+        //
+        // Attribution is by identity first: the host stamps `_call_id` into every
+        // request it sends and the SDK echoes it here, so two sessions sharing one
+        // plugin each write their own rows. `live_context()` (newest call) is the
+        // fallback for a plugin that does not echo the id — correct while one call
+        // runs, wrong under concurrency, which is why it is only the fallback.
+        let named = params
+            .get(kc_core::plugin::CALL_ID_PARAM)
+            .and_then(Value::as_u64);
+        let live = named
+            .and_then(|id| self.context_for_call(id))
+            .or_else(|| self.live_context());
         let owner = match scope {
             state_scope::SESSION => live.as_ref().map(|c| c.session_id.clone()),
             state_scope::PROJECT => live.as_ref().and_then(|c| c.project.clone()),
             _ => Some(String::new()),
         };
         let owner = owner.unwrap_or_default();
+        // A list-wide hook (`before_session_list`) is *about* many sessions, so it
+        // has no single session of its own to adopt - but the host did tell it
+        // which sessions exist. That set is the only place a session id may come
+        // from when the call did not name one: the plugin may repeat an id the
+        // host already sent it, never invent one. An unsolicited frame has no such
+        // call, so it stays refused.
+        let owner = if owner.is_empty() && scope == state_scope::SESSION {
+            self.session_named_by_the_call(&named, params)
+                .unwrap_or_default()
+        } else {
+            owner
+        };
         if scope != state_scope::INSTALL && owner.is_empty() {
             return Err(format!(
                 "a `{scope}`-scoped state call needs a running tool call to \
@@ -2028,8 +2143,9 @@ pub(crate) fn parse_panels(
 ///
 /// **Skipped** — something this build simply does not have, reported as a note
 /// in the diagnostics so the plugin keeps running on a host that predates the
-/// slot or the target: an unknown `kind`, an unknown `slot` for a button, and a
-/// `hide` target that is not in [`UI_HIDEABLE`].
+/// slot or the target: an unknown `kind`, an unknown `slot` for a button, a
+/// `hide` target that is not in [`UI_HIDEABLE`], and a second `replace` for a
+/// `target` this manifest already replaced (one target, one text).
 ///
 /// Hiding is the one contribution that changes app-wide state, so it is the one
 /// refused most strictly: only the catalogue in `kc-core` may be hidden, and the
@@ -2100,6 +2216,20 @@ pub(crate) fn parse_ui(
                     "ignored `replace` target `{target}`: this build only lets a plugin replace \
                      the text of {} (safety controls are never relabelled)",
                     UI_REPLACEABLE.join(", ")
+                ));
+                continue;
+            }
+            // One target, one text. The host also de-dupes across plugins
+            // (`ui_of`), but a manifest that names the same target twice is an
+            // authoring mistake this validator can catch while the plugin is
+            // still starting, so it is reported here at full strength.
+            if out
+                .iter()
+                .any(|existing| existing.kind == UI_KIND_REPLACE && existing.target.as_deref() == Some(target))
+            {
+                skipped.push(format!(
+                    "ignored a second `replace` for `{target}`: a target can hold only one \
+                     replacement, and the first declared one (in manifest order) was kept"
                 ));
                 continue;
             }
@@ -3300,6 +3430,120 @@ mod state_owner_tests {
         assert!(
             backend.seen.lock().unwrap().is_empty(),
             "a refused call must not reach the store"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_list_hook_may_read_a_session_it_was_told_about() {
+        // `before_session_list` spans many sessions and carries no single owner,
+        // so the host hands it the set it may read. Echoing one of those ids is
+        // not the plugin inventing an owner, and it is how the reference plugin
+        // draws its completed chip at all.
+        let backend = Arc::new(RecordingBackend::default());
+        let slot = slot_with(Arc::clone(&backend));
+        let params = json!({
+            "hook": "before_session_list",
+            "payload": {"sessions": [{"id": "s_known"}, {"id": "s_other"}]},
+            kc_core::plugin::CALL_ID_PARAM: 42,
+        });
+        let ids = crate::session_ids_in(&params.get("payload").cloned().unwrap())
+            .expect("the list payload names its sessions");
+        slot.session_sets.lock().unwrap().insert(42, ids);
+        slot.state_call(
+            kc_core::plugin::methods::STATE_GET,
+            &json!({
+                "scope": "session",
+                "session_id": "s_known",
+                "key": "status",
+                kc_core::plugin::CALL_ID_PARAM: 42,
+            }),
+        )
+        .await
+        .expect("a session the host listed may be read");
+        assert_eq!(backend.seen.lock().unwrap()[0].2, "s_known");
+    }
+
+    #[tokio::test]
+    async fn a_list_hook_may_not_read_a_session_it_was_not_told_about() {
+        let backend = Arc::new(RecordingBackend::default());
+        let slot = slot_with(Arc::clone(&backend));
+        slot.session_sets
+            .lock()
+            .unwrap()
+            .insert(42, vec!["s_known".to_string()]);
+        let error = slot
+            .state_call(
+                kc_core::plugin::methods::STATE_GET,
+                &json!({
+                    "scope": "session",
+                    "session_id": "s_victim",
+                    "key": "status",
+                    kc_core::plugin::CALL_ID_PARAM: 42,
+                }),
+            )
+            .await
+            .expect_err("an id outside the list is still forgery");
+        assert!(
+            error.contains("running tool call"),
+            "the refusal must stay the same: {error}"
+        );
+        assert!(backend.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_plugins_session_id_is_ignored_without_a_call_id() {
+        // No call id at all: the frame cannot name a set, so the id in params is
+        // just the plugin naming its own owner, and it is refused.
+        let backend = Arc::new(RecordingBackend::default());
+        let slot = slot_with(Arc::clone(&backend));
+        slot.session_sets
+            .lock()
+            .unwrap()
+            .insert(42, vec!["s_known".to_string()]);
+        assert!(slot
+            .state_call(
+                kc_core::plugin::methods::STATE_GET,
+                &json!({"scope": "session", "session_id": "s_known", "key": "status"}),
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_calls_do_not_adopt_each_others_session() {
+        // The bug this replaces: attribution was "the newest live call", so two
+        // sessions sharing one plugin wrote into whichever row started last.
+        let backend = Arc::new(RecordingBackend::default());
+        let slot = slot_with(Arc::clone(&backend));
+        slot.begin_call(1, context("s_first", None));
+        slot.begin_call(2, context("s_second", None));
+        slot.state_call(
+            kc_core::plugin::methods::STATE_SET,
+            &json!({
+                "scope": "session", "key": "k", "value": 1,
+                kc_core::plugin::CALL_ID_PARAM: 1,
+            }),
+        )
+        .await
+        .expect("first call may write");
+        slot.state_call(
+            kc_core::plugin::methods::STATE_SET,
+            &json!({
+                "scope": "session", "key": "k", "value": 2,
+                kc_core::plugin::CALL_ID_PARAM: 2,
+            }),
+        )
+        .await
+        .expect("second call may write");
+        let seen = backend.seen.lock().unwrap().clone();
+        // The backend records every probe it receives, so collapse to the distinct
+        // owners: what matters is that no write landed on the wrong session.
+        let mut owners: Vec<&str> = seen.iter().map(|row| row.2.as_str()).collect();
+        owners.dedup();
+        assert_eq!(
+            owners,
+            vec!["s_first", "s_second"],
+            "each call must write its own session, not the newest one"
         );
     }
 

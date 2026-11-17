@@ -7,14 +7,17 @@ wide is the drawer actually drawn". This script answers those for every dialog
 in the product, at a desktop and a phone viewport, and writes a screenshot of
 each so the numbers can be checked against a picture.
 
-It is deliberately not wired into CI: it needs `target/debug/karucode`,
+It is deliberately not wired into CI: it needs a karucode binary,
 `web/dist` and Chromium, and it is a review tool rather than a gate (the repo's
 `verify_*` scripts are the same shape). Every run uses a temporary data
 directory, workspace, config and browser profile, so it never touches a running
-karucode or a real project.
+karucode or a real project; the directory is deleted on the way out unless
+`--keep` is passed.
 
     python3 scripts/verify_modal_family.py            # both viewports
     python3 scripts/verify_modal_family.py --desktop-only
+    python3 scripts/verify_modal_family.py --chrome /usr/bin/chromium --keep
+    python3 scripts/verify_modal_family.py --server ./target/release/karucode --web-dir ./web/dist
 """
 
 from __future__ import annotations
@@ -22,6 +25,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -32,6 +37,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_ROOT = ROOT / "docs" / "internal" / "design-verify" / "modal-family"
+
+# The browser is resolved with `shutil.which` over this list (or `--chrome`), so
+# the script runs on a box that ships Chromium under another name.
+CHROME_CANDIDATES = (
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "google-chrome-stable",
+    "chrome",
+    "microsoft-edge",
+)
 
 # --------------------------------------------------------------------------- #
 # The CDP REPL (the same one `verify_settings_tabs.py` uses: one persistent
@@ -88,9 +104,26 @@ readline.on('close', () => process.exit(0));
 """
 
 
+class Options:
+    """Everything the run needs that is not a viewport: a resolved browser and
+    the two build artefacts, each overridable from the command line."""
+
+    def __init__(self, keep: bool, chrome: Path, server: Path, web_dir: Path) -> None:
+        self.keep = keep
+        self.chrome = chrome
+        self.server = server
+        self.web_dir = web_dir
+
+
+class CdpError(RuntimeError):
+    """A CDP call (or the REPL process itself) failed."""
+
+
 class Session:
-    def __init__(self, ws_url: str) -> None:
-        helper = Path(tempfile.gettempdir()) / "kc-cdp-repl.mjs"
+    def __init__(self, ws_url: str, helper_dir: Path) -> None:
+        # The REPL script lives inside this run's temp directory: two concurrent
+        # runs must not race on one shared file under /tmp.
+        helper = helper_dir / "kc-cdp-repl.mjs"
         helper.write_text(CDP_HELPER)
         self.proc = subprocess.Popen(
             ["node", str(helper), ws_url],
@@ -99,20 +132,37 @@ class Session:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
-        self.evaluate("return 1;")
+        try:
+            self.evaluate("return 1;")
+        except CdpError:
+            # A REPL that cannot reach its socket is a recorded check failure,
+            # not a traceback; close() below still reaps the node process.
+            self.close()
+            raise
 
     def _send(self, plan: dict) -> object:
         assert self.proc.stdin is not None and self.proc.stdout is not None
+        if self.proc.poll() is not None:
+            raise CdpError(f"CDP session died: {self._stderr()}")
         self.proc.stdin.write(json.dumps(plan) + "\n")
         self.proc.stdin.flush()
         line = self.proc.stdout.readline()
         if not line:
-            raise SystemExit(f"CDP session died: {self.proc.stderr.read() if self.proc.stderr else ''}")
+            raise CdpError(f"CDP session died: {self._stderr()}")
         payload = json.loads(line)
         if "error" in payload:
-            raise SystemExit(f"CDP call failed: {payload['error']}")
+            raise CdpError(f"CDP call failed: {payload['error']}")
         return payload["ok"]
+
+    def _stderr(self) -> str:
+        try:
+            if self.proc.stderr and self.proc.poll() is not None:
+                return self.proc.stderr.read().strip()[:400]
+        except Exception:
+            pass
+        return "(no stderr)"
 
     def evaluate(self, body: str) -> object:
         return self._send({"kind": "evaluate", "body": body})
@@ -125,12 +175,49 @@ class Session:
         path.write_bytes(__import__("base64").b64decode(data["data"]))
 
     def close(self) -> None:
+        self.terminate(self.proc)
+        for pipe in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+            try:
+                if pipe:
+                    pipe.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def terminate(process: subprocess.Popen, timeout: float = 5) -> None:
+        """SIGTERM the process group, wait, then SIGKILL what is left.
+
+        A wedged Chromium ignores SIGTERM; without the escalation it is
+        orphaned and keeps the profile directory (and its sockets) alive.
+        """
         try:
-            if self.proc.stdin:
-                self.proc.stdin.close()
-            self.proc.wait(timeout=5)
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
         except Exception:
-            self.proc.kill()
+            try:
+                process.terminate()
+            except Exception:
+                pass
+        try:
+            process.wait(timeout=timeout)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        # A process group that ignored SIGTERM gets SIGKILL; retry once, then
+        # give up loudly rather than wait forever.
+        for _ in range(2):
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            try:
+                process.wait(timeout=5)
+                return
+            except subprocess.TimeoutExpired:
+                continue
+        print(f"  warn: pid {process.pid} survived SIGKILL", flush=True)
 
 
 PASS: list[str] = []
@@ -341,12 +428,11 @@ def probe(session: Session, label: str, shots: Path, width: int) -> dict:
     return geometry
 
 
-def run(width: int, height: int, out: Path) -> None:
+def run(width: int, height: int, out: Path, opts: "Options") -> None:
     shots = out / "screens"
     shots.mkdir(parents=True, exist_ok=True)
 
     # The modality matrix: each row opens a dialog and reports its geometry.
-    mode = "phone" if width < 640 else "desktop"
     session = None
     tmp = Path(tempfile.mkdtemp(prefix="kc-modal-"))
     workspace = tmp / "workspace"
@@ -391,13 +477,13 @@ def run(width: int, height: int, out: Path) -> None:
     server_log = open(tmp / "server.log", "wb")
     server = subprocess.Popen(
         [
-            str(ROOT / "target/debug/karucode"),
+            str(opts.server),
             "--port", str(port),
             "--workspace", str(workspace),
             "--data-dir", str(data_dir),
             "--config", str(config),
         ],
-        env={**os.environ, "KARUCODE_WEB_DIR": str(ROOT / "web" / "dist"), "KARUCODE_LOG": "warn"},
+        env={**os.environ, "KARUCODE_WEB_DIR": str(opts.web_dir), "KARUCODE_LOG": "warn"},
         stdout=server_log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -405,7 +491,7 @@ def run(width: int, height: int, out: Path) -> None:
     chrome_log = open(tmp / "chrome.log", "wb")
     chrome = subprocess.Popen(
         [
-            "chromium", "--headless=new", "--no-sandbox", "--disable-gpu",
+            str(opts.chrome), "--headless=new", "--no-sandbox", "--disable-gpu",
             "--disable-dev-shm-usage", "--hide-scrollbars",
             f"--remote-debugging-port={cdp_port}", f"--user-data-dir={profile}",
             f"--window-size={width},{height}", "about:blank",
@@ -421,7 +507,7 @@ def run(width: int, height: int, out: Path) -> None:
         with urllib.request.urlopen(f"http://127.0.0.1:{cdp_port}/json/list", timeout=5) as response:
             targets = json.loads(response.read())
         page = next(t for t in targets if t["type"] == "page")
-        session = Session(page["webSocketDebuggerUrl"])
+        session = Session(page["webSocketDebuggerUrl"], tmp)
         session.cdp("Page.enable")
         session.cdp("Emulation.setDeviceMetricsOverride", {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": width < 640})
         session.cdp("Page.navigate", {"url": f"http://127.0.0.1:{port}/"})
@@ -483,36 +569,75 @@ def run(width: int, height: int, out: Path) -> None:
         else:
             check(f"theme studio @{width}: reachable", False, json.dumps(theme)[:600])
         session.evaluate(CLOSE_ALL)
+    except CdpError as error:
+        # A dead REPL is a result, not a crash: record it so the summary can
+        # never read "N passed, 0 failed" for a run whose browser died.
+        check(f"{width}px: the browser session stayed alive", False, str(error))
     finally:
         if session:
             session.close()
-        for process in (chrome, server):
-            try:
-                os.killpg(os.getpgid(process.pid), 15)
-            except Exception:
-                pass
+        Session.terminate(chrome)
+        Session.terminate(server)
         chrome_log.close()
         server_log.close()
+        if opts.keep:
+            print(f"  kept {tmp}", flush=True)
+        else:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def resolve_chrome(explicit: str | None) -> Path:
+    if explicit:
+        found = Path(explicit).expanduser()
+        if not found.exists():
+            raise SystemExit(f"--chrome {explicit!r} does not exist")
+        return found
+    for name in CHROME_CANDIDATES:
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    raise SystemExit(
+        "no Chromium found; looked for " + ", ".join(CHROME_CANDIDATES) + " — pass --chrome /path/to/chromium"
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--desktop-only", action="store_true")
     parser.add_argument("--phone-only", action="store_true")
+    parser.add_argument("--keep", action="store_true", help="keep each run's temp directory")
+    parser.add_argument("--chrome", default=None, help="browser binary (default: resolved on PATH)")
+    parser.add_argument(
+        "--server",
+        default=str(ROOT / "target" / "debug" / "karucode"),
+        help="karucode binary to run (default: target/debug/karucode)",
+    )
+    parser.add_argument(
+        "--web-dir",
+        default=str(ROOT / "web" / "dist"),
+        help="built UI to serve, exported as KARUCODE_WEB_DIR (default: web/dist)",
+    )
     args = parser.parse_args()
 
-    if not (ROOT / "target" / "debug" / "karucode").exists():
-        raise SystemExit("build the server first: cargo build -p kc-server --bin karucode")
-    if not (ROOT / "web" / "dist" / "index.html").exists():
-        raise SystemExit("build the UI first: (cd web && npm run build)")
+    opts = Options(
+        keep=args.keep,
+        chrome=resolve_chrome(args.chrome),
+        server=Path(args.server).expanduser().resolve(),
+        web_dir=Path(args.web_dir).expanduser().resolve(),
+    )
+
+    if not opts.server.exists():
+        raise SystemExit(f"build the server first: cargo build -p kc-server --bin karucode (or pass --server); missing {opts.server}")
+    if not (opts.web_dir / "index.html").exists():
+        raise SystemExit(f"build the UI first: (cd web && npm run build) (or pass --web-dir); missing {opts.web_dir / 'index.html'}")
 
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
     if not args.phone_only:
         print("desktop 1440x900", flush=True)
-        run(1440, 900, OUT_ROOT)
+        run(1440, 900, OUT_ROOT, opts)
     if not args.desktop_only:
         print("phone 390x740", flush=True)
-        run(390, 740, OUT_ROOT)
+        run(390, 740, OUT_ROOT, opts)
 
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
     for failure in FAIL:

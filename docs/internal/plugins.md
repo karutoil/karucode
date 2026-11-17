@@ -499,22 +499,35 @@ fn main() -> std::io::Result<()> {
   `inspector.tab.workspace`, `inspector.tab.changes`, `inspector.tab.session`,
   `inspector.tab.agents`, `inspector.context`, `rail.footer`,
   `session.header.actions`, `notifications` and `command-palette`. Every entry
-  is consumed by a real control, so asking for one always does something.
-  Anything else — including every control that stops a run or answers an
-  approval — is refused, the inspector will not hide its last remaining tab, and
-  the settings avatar in the rail footer stays reachable;
+  is consumed by a real control, so asking for one always does something —
+  with one deliberate exception. Settings is where a person puts a hidden
+  control back, so the app will not let a deployment remove every way in.
+  `rail.footer` is the settings avatar and the only control that opens Settings
+  directly; `notifications` (the bell) and `command-palette` are only ways to
+  reach Settings indirectly (*Settings* is a command in the palette). So hiding
+  `rail.footer` always keeps one of the other two: the bell if you hid the bell
+  too, otherwise the command palette. Hiding the bell or the palette alone, or
+  both, while the avatar stays, is honoured exactly as asked. If one of your
+  hides was overridden, Settings → Plugins & MCP → **Controls in the
+  interface** names it. Anything else — including every control that stops a
+  run or answers an approval — is refused, and the inspector will not hide its
+  last remaining tab;
 * `replace` renames a built-in label instead of hiding it, which is how a
-  deployment makes the app speak its own vocabulary ("Session" → "Thread"):
+  deployment makes the app speak its own vocabulary ("New session" → "New
+  thread"):
 
   ```rust
   .replace("label.new-session", "New thread")
   ```
 
-  The targets are `app.name`, `label.session`, `label.project`,
-  `label.new-session` and `empty.greeting`. Nothing that states a safety
-  property is replaceable — a plugin cannot relabel an approval control or
-  rewrite the unsandboxed-shell warning. The first plugin to claim a target
-  wins, in discovery order;
+  The targets are `app.name`, `label.new-session` and `empty.greeting` — the
+  rail's product lockup, the "New session" buttons and the empty-state
+  greeting. Each one is drawn somewhere real, so a rename always shows.
+  `label.session` and `label.project` are *not* targets: the app has no single
+  place that draws those words, so asking to rename them is refused like any
+  other unknown target. Nothing that states a safety property is replaceable —
+  a plugin cannot relabel an approval control or rewrite the unsandboxed-shell
+  warning. The first plugin to claim a target wins, in discovery order;
 * the person on the other side has the last word: Settings → Plugins & MCP →
   **Controls in the interface** switches a contributed control off or puts a
   hidden built-in back, per browser, without disabling the plugin;
@@ -593,8 +606,8 @@ the person typing, exactly like a click.
 A `button` in a **badge** slot (`session.row.badge`, `session.header.chip`)
 draws a chip: it carries `text` and `tone` (`neutral`, `accent`, `success`,
 `warn`, `danger`, `muted`) instead of a label and an icon. `kind: "replace"`
-renames a whitelisted label (`label.session`, `label.project`, …); nothing that
-states a safety property is replaceable.
+renames a whitelisted label (`app.name`, `label.new-session`, `empty.greeting`);
+nothing that states a safety property is replaceable.
 
 ## Shaping the session rail: `before_session_list`
 

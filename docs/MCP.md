@@ -168,9 +168,11 @@ before the exemption is consulted.
   `failed` status with an error string. Other servers connect normally and the
   server process always starts.
 * **Per-call timeout**: `tools/call` has a **120 s** budget
-  (`kc_mcp::MCP_CALL_TIMEOUT`, overridable via
-  `McpManager::set_timeouts(McpTimeouts { connect, call })`). A timeout is not a
-  disconnect: the server stays `connected` and the next call is attempted.
+  (`kc_mcp::MCP_CALL_TIMEOUT`, a compile-time constant — there is no environment
+  variable for it). A timeout is not a disconnect: the server stays `connected`
+  and the next call is attempted. `McpManager::set_timeouts(McpTimeouts {
+  connect, call })` can change both budgets in code, but nothing outside the
+  tests calls it today, so a running server always uses the defaults.
 * **Cancellation**: the run's `CancellationToken` is honoured by both transports.
   A cancelled call returns
   `MCP tool `x` on server `y` was cancelled; the call was abandoned.` and drops

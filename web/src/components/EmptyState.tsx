@@ -1,6 +1,8 @@
 import type { JSX } from 'preact';
 import * as actions from '../state/actions';
+import * as store from '../state/store';
 import { ArrowRightIcon, BoltIcon, LockIcon, SearchIcon, SparkIcon } from './icons';
+import { pluginText, UI_REPLACE_GREETING } from './uiContributions';
 
 /** One of the mock's three starter prompts. `prompt` is what lands in the composer. */
 export interface QuickPrompt {
@@ -44,6 +46,9 @@ export interface EmptyStateProps {
  * copy and three quick prompts that put a complete instruction in the composer
  * (and focus it). Kept deliberately plain — this is the first thing a new
  * session shows.
+ *
+ * The heading is a replaceable target (`empty.greeting`): a deployment that
+ * renamed the product can welcome its people in its own words instead.
  */
 export function EmptyState({ variant = 'empty' }: EmptyStateProps): JSX.Element {
   const usePrompt = (prompt: string): void => {
@@ -54,14 +59,16 @@ export function EmptyState({ variant = 'empty' }: EmptyStateProps): JSX.Element 
     actions.fillComposer(prompt);
   };
 
+  const greeting = pluginText(store.pluginUi.value, UI_REPLACE_GREETING, 'What are we building?');
+
   return (
     <section class="empty-state" aria-labelledby="empty-title">
       <div class="empty-content">
         <div class="empty-symbol" aria-hidden="true">
           <SparkIcon size={25} />
         </div>
-        <h2 class="empty-title" id="empty-title">
-          What are we building?
+        <h2 class="empty-title" id="empty-title" data-testid="empty-title">
+          {greeting}
         </h2>
         <p class="empty-copy">
           Start with an idea or a task. Karucode can explore your codebase, make changes, run tools, and keep

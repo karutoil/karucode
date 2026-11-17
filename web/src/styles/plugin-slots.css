@@ -63,6 +63,34 @@
   cursor: progress;
 }
 
+/* A chip (`session.row.badge`, `session.header.chip`) is text plus a tone, not a
+ * labelled button. It borrows `.session-chip`'s pill so a plugin's chip and a
+ * built-in one sit on a row as one family, and it overrides the `.button` skin
+ * that would otherwise give a 24-byte string a 30 px control's padding, height
+ * and corners. The dot still marks it as contributed.
+ *
+ * The two hover rules are not decoration: `.button:hover` sets `background` and
+ * `color` at the same specificity and is linked first, so without them a pointer
+ * over a `warn` chip would repaint it as an ordinary button and the tone — the
+ * chip's whole signal — would disappear under the cursor. */
+.plugin-slot-chip {
+  height: 18px;
+  padding: 0 var(--space-2);
+  gap: var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  line-height: 1.5;
+}
+.plugin-slot-chip .plugin-slot-label {
+  font-size: inherit;
+}
+.plugin-slot-chip:hover:not(:disabled),
+.plugin-slot-chip.session-chip-neutral {
+  color: var(--muted);
+}
+
 /* A plugin button in the inspector header sits beside Context, so it borrows the
  * same small-control rhythm rather than inventing one. */
 .inspector-head-actions .plugin-slot {

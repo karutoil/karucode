@@ -713,6 +713,73 @@ describe('ChatView workspace tabs', () => {
     expect(screen.getByRole('button', { name: 'Notifications' })).not.toBeNull();
   });
 
+  it('keeps a way into Settings when every entry into it is asked to be hidden', () => {
+    // The trap the doc used to leave open: the avatar, the bell and the palette
+    // are the three mouse paths into Settings, and Settings is the only place to
+    // put a hidden control back. A deployment that hides all three must not be
+    // able to strand the operator, so the bell survives.
+    renderChat();
+    act(() => {
+      store.config.value = {
+        ...configFixture,
+        plugin_ui: {
+          contributions: [],
+          hidden: [
+            { target: 'rail.footer', plugins: ['zen'] },
+            { target: 'notifications', plugins: ['zen'] },
+            { target: 'command-palette', plugins: ['zen'] },
+          ],
+          slots: [],
+          hideable: [],
+        },
+      };
+    });
+
+    expect(screen.getByRole('button', { name: 'Notifications' })).not.toBeNull();
+  });
+
+  it('draws the palette as well when the bell is the last entry into Settings', () => {
+    // Without the avatar, the bell is the only entry left, and the bell alone
+    // cannot open Settings — so the palette, whose Settings command is the escape
+    // hatch out of this state, stays drawn.
+    renderChat();
+    act(() => {
+      store.config.value = {
+        ...configFixture,
+        plugin_ui: {
+          contributions: [],
+          hidden: [
+            { target: 'rail.footer', plugins: ['zen'] },
+            { target: 'notifications', plugins: ['zen'] },
+          ],
+          slots: [],
+          hideable: [],
+        },
+      };
+    });
+
+    expect(screen.getByRole('button', { name: 'Notifications' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Command palette' })).not.toBeNull();
+  });
+
+  it('honours the notification hide when another way into Settings remains', () => {
+    renderChat();
+    act(() => {
+      store.config.value = {
+        ...configFixture,
+        plugin_ui: {
+          contributions: [],
+          hidden: [{ target: 'notifications', plugins: ['zen'] }],
+          slots: [],
+          hideable: [],
+        },
+      };
+    });
+
+    // The avatar is still there, so the escape hatch is not needed.
+    expect(screen.queryByRole('button', { name: 'Notifications' })).toBeNull();
+  });
+
   it('gives every workspace tab a 15px glyph and shows the changed-file count', async () => {
     vi.stubGlobal(
       'fetch',

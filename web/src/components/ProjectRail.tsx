@@ -23,8 +23,10 @@ import {
 } from './icons';
 import {
   isUiHidden,
+  pluginText,
   UI_HIDE_COMMAND_PALETTE,
   UI_HIDE_RAIL_FOOTER,
+  UI_REPLACE_APP_NAME,
 } from './uiContributions';
 import '../styles/rail.css';
 
@@ -445,13 +447,17 @@ export function ProjectRail(): JSX.Element {
   }, [activeId, projects.length]);
 
   const closeDialog = (): void => setDialog(null);
+  // A plugin may rename the product (`app.name`); the dot is drawn by the CSS on
+  // the trailing span, so only the word comes from the payload and the lockup
+  // keeps its shape whichever name a deployment chooses.
+  const appName = pluginText(store.pluginUi.value, UI_REPLACE_APP_NAME, 'k');
 
   return (
     <>
       <nav class="project-rail" aria-label="Projects" data-testid="project-rail">
         <div class="project-rail-brand">
           <button type="button" class="brand-mark control-plane-trigger" title="Control plane" aria-label="Open control plane" aria-pressed={controlPlaneOpen.value} onClick={() => { controlPlaneOpen.value = true; }}>
-            k<span>.</span>
+            <span data-testid="brand-name">{appName}</span><span>.</span>
           </button>
         </div>
         <div class="project-rail-divider" aria-hidden="true" />
@@ -567,9 +573,10 @@ export function ProjectRail(): JSX.Element {
 
         <div class="project-rail-bottom">
           {/* A plugin may hide the footer's cosmetic tools (`rail.footer`). The
-            * settings avatar is deliberately exempt: it is the only way into the
-            * settings sheet, so hiding it would strand the operator in a
-            * deployment whose own entries live inside that sheet. */}
+            * settings avatar is deliberately outside that target: it is the only
+            * entry into Settings the rail owns, and Settings is where a hidden
+            * control is put back. The header's bell is the last resort when the
+            * avatar is gone — see `settingsHides` for the rule. */}
           {isUiHidden(store.pluginUi.value, UI_HIDE_RAIL_FOOTER) ? null : (
             <>
           <button

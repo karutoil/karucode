@@ -200,6 +200,28 @@ describe('theme studio stylesheet fidelity', () => {
     expect(narrow).not.toMatch(/\.theme-studio-foot \{\s*padding/);
   });
 
+  it('hands the header and the close button to the shell, with no dead class left over', () => {
+    // The drawer emitted `theme-studio-top` on its `<header>` and `theme-close` on
+    // its close button; this commit deleted their rules (the shell's
+    // `.overlay-header` / `.overlay-close` own that geometry now) but kept the
+    // tokens in the markup. A class with no rule reads as "styled somewhere" to
+    // the next reader and silently loses to the shell's own rule. Asserted in
+    // both directions: no rule, and no class.
+    const drawerSource = readFileSync(
+      new URL('../components/ThemeStudio.tsx', import.meta.url),
+      'utf8',
+    );
+    for (const dead of ['theme-studio-top', 'theme-close']) {
+      expect(cssSource, `${dead} is not a rule`).not.toContain(`.${dead}`);
+      expect(drawerSource, `${dead} is not emitted`).not.toContain(dead);
+    }
+    // What it does use: the shared vocabulary, plus the heading wrapper that is
+    // still authored here (`.theme-studio-head` gives the heading the slack).
+    expect(drawerSource).toContain('class="overlay-header"');
+    expect(drawerSource).toContain('class="overlay-close"');
+    expect(cssDeclarations('.theme-studio-head')['flex']).toBe('1');
+  });
+
   it('keeps the mock button reset from out-specifying component styles', () => {
     // `.theme-studio button` (0,1,1) would beat `.theme-btn`/`.theme-preset` (0,1,0)
     // and strip their surface, border and font-size; `:where()` keeps it at 0,0,1.

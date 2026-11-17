@@ -358,6 +358,10 @@ export interface PluginUiContributionWire {
   hosted_id: string;
   /** For a button: the slot it mounts in. */
   slot?: string | null;
+  /**
+   * The accessible name. For a chip (`session.row.badge`, `session.header.chip`)
+   * this is the name a screen reader hears while `text` is what is drawn.
+   */
   label: string;
   title?: string | null;
   icon?: string | null;
@@ -367,6 +371,14 @@ export interface PluginUiContributionWire {
   message?: string | null;
   /** For a keybinding: the canonical chord (`mod+shift+f`). */
   keys?: string | null;
+  /** For `replace`: the built-in element whose label is being renamed. */
+  target?: string | null;
+  /** For `replace`: the text to draw in place of the app's own label. */
+  replace?: string | null;
+  /** For a chip: the short text drawn on it. Absent on every other kind. */
+  text?: string | null;
+  /** For a chip: one of `UI_TONES`. An unknown or absent tone draws `neutral`. */
+  tone?: string | null;
 }
 
 /** A built-in control one or more plugins asked the app to hide. */

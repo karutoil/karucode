@@ -8,13 +8,21 @@ import {
   normaliseUiKeys,
   parsePluginUi,
   pluginText,
+  settingsEscapeHatch,
+  settingsHides,
   slotContributions,
+  UI_HIDE_COMMAND_PALETTE,
   UI_HIDE_COMPOSER_ATTACH,
   UI_HIDE_INSPECTOR_TAB_AGENTS,
+  UI_HIDE_NOTIFICATIONS,
+  UI_HIDE_RAIL_FOOTER,
+  UI_REPLACE_GREETING,
   UI_REPLACE_NEW_SESSION_LABEL,
   UI_REPLACE_PROJECT_LABEL,
+  UI_REPLACE_TARGETS,
   UI_SLOT_COMPOSER_TOOLBAR,
   UI_SLOT_INSPECTOR_HEADER,
+  UI_SLOT_SESSION_ROW_BADGE,
   uiHiddenBy,
   visibleTabs,
 } from './uiContributions';
@@ -110,6 +118,68 @@ describe('parsing plugin_ui', () => {
     expect(ui.refused.join(' ')).toContain('declared twice');
   });
 
+  describe('chips (text + tone)', () => {
+    function chip(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      return {
+        plugin: 'kc-focus',
+        version: '0.1.0',
+        kind: 'button',
+        id: 'focus',
+        hosted_id: 'plugin__kc-focus__focus',
+        slot: UI_SLOT_SESSION_ROW_BADGE,
+        text: 'Focus',
+        tone: 'accent',
+        action: 'toggle',
+        ...overrides,
+      };
+    }
+
+    it('accepts a chip that carries only text and tone', () => {
+      // No `label`: the host omits it when the plugin omitted it and the chip's
+      // whole content is `text`. Refusing this was the MEDIUM-4 regression.
+      const ui = parsePluginUi({ contributions: [chip()] });
+      expect(ui.refused).toEqual([]);
+      const [only] = slotContributions(ui, UI_SLOT_SESSION_ROW_BADGE);
+      expect(only?.text).toBe('Focus');
+      expect(only?.tone).toBe('accent');
+      expect(only?.label).toBe('');
+    });
+
+    it('reads the tone, defaulting to neutral when it is missing or unknown', () => {
+      const ui = parsePluginUi({
+        contributions: [
+          chip({ id: 'a', hosted_id: 'plugin__kc-focus__a', tone: 'warn' }),
+          chip({ id: 'b', hosted_id: 'plugin__kc-focus__b', tone: undefined }),
+          chip({ id: 'c', hosted_id: 'plugin__kc-focus__c', tone: 'chartreuse' }),
+        ],
+      });
+      expect(ui.refused).toEqual([]);
+      expect(ui.contributions.map((c) => c.tone)).toEqual(['warn', 'neutral', 'neutral']);
+    });
+
+    it('refuses a chip with neither text nor label, and over-long chip text', () => {
+      const empty = parsePluginUi({ contributions: [chip({ text: '   ' })] });
+      expect(empty.contributions).toEqual([]);
+      expect(empty.refused.join(' ')).toContain('neither a text nor a label');
+
+      // 24 bytes is the host's `MAX_UI_BADGE_BYTES`: inside the limit, must draw.
+      const atLimit = parsePluginUi({ contributions: [chip({ text: 'x'.repeat(24) })] });
+      expect(atLimit.refused).toEqual([]);
+      expect(atLimit.contributions[0]?.text).toBe('x'.repeat(24));
+
+      const tooLong = parsePluginUi({ contributions: [chip({ text: 'x'.repeat(81) })] });
+      expect(tooLong.contributions).toEqual([]);
+      expect(tooLong.refused.join(' ')).toContain('characters of chip text');
+    });
+
+    it('still refuses a labelled control with no label', () => {
+      // The chip leniency must not reach a composer button.
+      const ui = parsePluginUi({ contributions: [button({ label: '  ', text: 'Focus' })] });
+      expect(ui.contributions).toEqual([]);
+      expect(ui.refused.join(' ')).toContain('no label');
+    });
+  });
+
   it('bounds how many controls one payload can add', () => {
     const many = Array.from({ length: MAX_UI_CONTRIBUTIONS + 5 }, (_, index) =>
       button({
@@ -144,6 +214,82 @@ describe('parsing plugin_ui', () => {
     const ui = parsePluginUi({ slots: ['composer.toolbar'], hideable: ['composer.attach'] });
     expect(ui.slots).toEqual(['composer.toolbar']);
     expect(ui.hideable).toEqual(['composer.attach']);
+  });
+});
+
+describe('the escape hatch back into Settings', () => {
+  const hide = (targets: string[]) =>
+    parsePluginUi({ hidden: targets.map((target) => ({ target, plugins: ['zen'] })) });
+
+  it('keeps the bell when the avatar, the bell and the palette are all hidden', () => {
+    const ui = hide([UI_HIDE_RAIL_FOOTER, UI_HIDE_NOTIFICATIONS, UI_HIDE_COMMAND_PALETTE]);
+    const resolved = settingsHides(ui);
+
+    expect(isUiHidden(resolved, UI_HIDE_NOTIFICATIONS)).toBe(false);
+    // The avatar and the palette are still hidden: the request was honoured where
+    // it was not the last way in.
+    expect(isUiHidden(resolved, UI_HIDE_RAIL_FOOTER)).toBe(true);
+    expect(isUiHidden(resolved, UI_HIDE_COMMAND_PALETTE)).toBe(true);
+    expect(settingsEscapeHatch(ui)).toBe(UI_HIDE_NOTIFICATIONS);
+  });
+
+  it('reports no override when only the avatar was hidden, though the palette stays', () => {
+    // Every hide took effect as declared; the palette is drawn because it is the
+    // escape hatch once the avatar is gone, not because a hide was overridden.
+    const ui = hide([UI_HIDE_RAIL_FOOTER]);
+    expect(isUiHidden(settingsHides(ui), UI_HIDE_COMMAND_PALETTE)).toBe(false);
+    expect(settingsEscapeHatch(ui)).toBeNull();
+  });
+
+  it('keeps the bell — not the palette — when the bell and the avatar are hidden', () => {
+    const ui = hide([UI_HIDE_RAIL_FOOTER, UI_HIDE_NOTIFICATIONS]);
+
+    expect(isUiHidden(settingsHides(ui), UI_HIDE_NOTIFICATIONS)).toBe(false);
+    expect(settingsEscapeHatch(ui)).toBe(UI_HIDE_NOTIFICATIONS);
+  });
+
+  it('honours one or two hides and leaves the rest alone', () => {
+    for (const targets of [
+      [UI_HIDE_NOTIFICATIONS],
+      [UI_HIDE_COMMAND_PALETTE],
+      [UI_HIDE_NOTIFICATIONS, UI_HIDE_COMMAND_PALETTE],
+    ]) {
+      const ui = hide(targets);
+      expect(settingsHides(ui)).toBe(ui);
+      expect(settingsEscapeHatch(ui)).toBeNull();
+    }
+  });
+
+  it('keeps the bell whenever the bell was asked for alongside the avatar', () => {
+    // Avatar + palette: the bell must stay, or nothing would open Settings.
+    const withPalette = hide([UI_HIDE_RAIL_FOOTER, UI_HIDE_COMMAND_PALETTE]);
+    expect(isUiHidden(settingsHides(withPalette), UI_HIDE_NOTIFICATIONS)).toBe(false);
+
+    // Avatar + bell: the palette stays, because the bell cannot open Settings.
+    const withBell = hide([UI_HIDE_RAIL_FOOTER, UI_HIDE_NOTIFICATIONS]);
+    expect(isUiHidden(settingsHides(withBell), UI_HIDE_COMMAND_PALETTE)).toBe(false);
+  });
+
+  it('always leaves Settings reachable, from any starting state', () => {
+    const all = [UI_HIDE_RAIL_FOOTER, UI_HIDE_NOTIFICATIONS, UI_HIDE_COMMAND_PALETTE];
+    for (let mask = 0; mask < 1 << all.length; mask += 1) {
+      const targets = all.filter((_, index) => (mask & (1 << index)) !== 0);
+      const resolved = settingsHides(hide(targets));
+      // Directly, or through the palette's *Settings* command: an entry the
+      // person can click that ends in Settings. This is the property the rule
+      // exists for, asserted over every combination rather than by example.
+      const reachable =
+        !isUiHidden(resolved, UI_HIDE_RAIL_FOOTER) ||
+        !isUiHidden(resolved, UI_HIDE_NOTIFICATIONS) ||
+        !isUiHidden(resolved, UI_HIDE_COMMAND_PALETTE);
+      expect({ targets, reachable }).toEqual({ targets, reachable: true });
+      // A second pass keeps the same controls on screen, so the store may apply
+      // the rule after the person's overrides without undoing anything.
+      // A second pass over the same *request* (what the payload asked for) yields
+      // the same hides, so the store may apply the rule after the person's
+      // overrides without a later pass changing what is on screen.
+      expect(settingsHides(hide(targets)).hidden).toEqual(resolved.hidden);
+    }
   });
 });
 
@@ -333,9 +479,28 @@ describe('contributed keyboard shortcuts', () => {
       });
       expect(pluginText(ui, UI_REPLACE_NEW_SESSION_LABEL, 'New session')).toBe('New thread');
       // A target nobody replaced keeps the app's own word.
-      expect(pluginText(ui, UI_REPLACE_PROJECT_LABEL, 'Project')).toBe('Project');
+      expect(pluginText(ui, UI_REPLACE_GREETING, 'What are we building?')).toBe('What are we building?');
       // The replace entry is not a drawable control.
       expect(ui.contributions).toEqual([]);
+    });
+
+    it('lists exactly the three targets the app draws, and mirrors the host', () => {
+      // The catalogue is a promise: every entry names a label `pluginText` is
+      // called with somewhere in the app. All three are rendered by
+      // `uiContributions.rendered.test.ts`, which builds one payload renaming
+      // every entry at once and asserts the text reaches the screen.
+      //
+      // The literal is the host's `kc_core::plugin::UI_REPLACEABLE`; the two
+      // lists are a contract, so a change on one side that forgets the other
+      // fails here rather than in production.
+      expect(UI_REPLACE_TARGETS).toEqual([
+        'app.name',
+        'label.new-session',
+        'empty.greeting',
+      ]);
+      // The two label words no single control draws are reserved, not listed.
+      expect(UI_REPLACE_TARGETS).not.toContain('label.session');
+      expect(UI_REPLACE_TARGETS).not.toContain('label.project');
     });
 
     it('refuses a target outside the catalogue or an empty replacement', () => {
@@ -352,18 +517,35 @@ describe('contributed keyboard shortcuts', () => {
           {
             plugin: 'evil',
             kind: 'replace',
-            id: 'replace-label.project',
-            hosted_id: 'plugin__evil__replace-label.project',
-            target: UI_REPLACE_PROJECT_LABEL,
+            id: 'replace-label.new-session',
+            hosted_id: 'plugin__evil__replace-label.new-session',
+            target: UI_REPLACE_NEW_SESSION_LABEL,
             replace: '   ',
           },
         ],
       });
       expect(pluginText(ui, 'approval.approve', 'Approve')).toBe('Approve');
-      expect(pluginText(ui, UI_REPLACE_PROJECT_LABEL, 'Project')).toBe('Project');
+      expect(pluginText(ui, UI_REPLACE_NEW_SESSION_LABEL, 'New session')).toBe('New session');
       const refused = ui.refused.join(' ');
       expect(refused).toContain('approval.approve');
       expect(refused).toContain('has no text');
+    });
+
+    it('refuses the reserved label words nothing draws', () => {
+      const ui = parsePluginUi({
+        contributions: [
+          {
+            plugin: 'org-branding',
+            kind: 'replace',
+            id: 'replace-label.project',
+            hosted_id: 'plugin__org-branding__replace-label.project',
+            target: UI_REPLACE_PROJECT_LABEL,
+            replace: 'Workspace',
+          },
+        ],
+      });
+      expect(pluginText(ui, UI_REPLACE_PROJECT_LABEL, 'Project')).toBe('Project');
+      expect(ui.refused.join(' ')).toContain('`label.project` is not replaceable');
     });
 
     it('lets the first claim on a target win and says the later one was dropped', () => {
@@ -372,22 +554,22 @@ describe('contributed keyboard shortcuts', () => {
           {
             plugin: 'a',
             kind: 'replace',
-            id: 'replace-label.project',
-            hosted_id: 'plugin__a__replace-label.project',
-            target: UI_REPLACE_PROJECT_LABEL,
-            replace: 'Workspace',
+            id: 'replace-app-name',
+            hosted_id: 'plugin__a__replace-app-name',
+            target: 'app.name',
+            replace: 'Acme',
           },
           {
             plugin: 'b',
             kind: 'replace',
-            id: 'replace-label.project',
-            hosted_id: 'plugin__b__replace-label.project',
-            target: UI_REPLACE_PROJECT_LABEL,
-            replace: 'Area',
+            id: 'replace-app-name',
+            hosted_id: 'plugin__b__replace-app-name',
+            target: 'app.name',
+            replace: 'Other',
           },
         ],
       });
-      expect(pluginText(ui, UI_REPLACE_PROJECT_LABEL, 'Project')).toBe('Workspace');
+      expect(pluginText(ui, 'app.name', 'k')).toBe('Acme');
       expect(ui.refused.join(' ')).toContain('renamed twice');
     });
   });

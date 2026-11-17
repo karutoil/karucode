@@ -44,10 +44,10 @@
 //
 // # Precedence
 //
-// Contributions are ordered by `(priority, plugin name, sequence)`:
+// Contributions are ordered by `(priority, source, sequence)`:
 //
 // * **priority** — higher wins, so an operator's plugin can outrank another's;
-// * **plugin name** — a stable tie-break, so two plugins with the same priority
+// * **source** — a stable tie-break, so two plugins with the same priority
 //   resolve the same way on every run and every machine;
 // * **sequence** — declaration order within one plugin, so a plugin can control
 //   its own order.
@@ -56,6 +56,22 @@
 // plugin removes a built-in and another replaces it, the higher-priority one
 // decides, and the loser is reported in `conflicts` rather than silently
 // dropped. That is the whole point of the primitive: a conflict is *visible*.
+//
+// ## Set `source` from the host's registry, never from the plugin
+//
+// At equal priority the tie-break is `source`, so an alphabetic accident decides
+// who wins: a plugin that calls itself `aaa-plugin` outranks one that calls
+// itself `zzz-plugin` on the same priority, and a plugin could pick a name that
+// sorts before everyone else's to win every tie.
+//
+// `source` is a free string, so `Contribution` cannot enforce this. The rule is
+// on the caller: the host must set `source` to the **manifest name it assigned**
+// to the plugin (the one it logs, keys state by and reports in diagnostics),
+// never to a name taken from the plugin's own request, its manifest claim or a
+// frame it wrote. Two plugins must also not be able to present the same
+// `source`: the host assigns those names, so it already guarantees that. Until a
+// host wires this registry that rule is unenforced, which is exactly why it is
+// written down here.
 //
 // # What it does not do
 //
@@ -105,9 +121,12 @@ pub struct Contribution<T> {
     /// The name of the entry acted on. For `Add` this is the new entry's name;
     /// for the other three it names an existing one.
     pub name: String,
-    /// The value: an `Add`/`Replace` payload, a `Wrap` payload, or `()` for a
-    /// `Remove`. Ignored by `Remove`.
-    pub value: T,
+    /// The value: an `Add`/`Replace`/`Wrap` payload, or `None` for a `Remove`,
+    /// which carries nothing. Built through [`Contribution::new`] (always
+    /// `Some`) or [`Contribution::remove`] (always `None`); a `Remove` invented
+    /// some other way loses any value it carries, because the operation has no
+    /// use for one.
+    pub value: Option<T>,
     /// Higher outranks lower. Default `0`; an operator's config can raise it.
     pub priority: i64,
 }
@@ -118,24 +137,23 @@ impl<T> Contribution<T> {
             source: source.into(),
             op,
             name: name.into(),
-            value,
+            value: Some(value),
             priority,
         }
     }
-}
 
-impl<T: Default> Contribution<T> {
     /// A `Remove`, which carries no value.
     ///
     /// Separate from [`Contribution::new`] because a `Remove` has nothing to
-    /// carry: making the caller write `()` or a placeholder invites a value that
-    /// is silently ignored.
+    /// carry: the value is `Option<T>` so this needs no `T: Default`, and a trait
+    /// object — the thing a tool registry removes — is not `Default` at all.
+    /// There is no placeholder value to write and none to be silently ignored.
     pub fn remove(source: impl Into<String>, name: impl Into<String>, priority: i64) -> Self {
         Self {
             source: source.into(),
             op: Op::Remove,
             name: name.into(),
-            value: T::default(),
+            value: None,
             priority,
         }
     }
@@ -160,6 +178,8 @@ pub enum Conflict {
     },
     /// A `Wrap` on a name that was removed by a higher-precedence claim.
     WrappedAfterRemoval { name: String, source: String },
+    /// An `Add`/`Replace`/`Wrap` built without a value.
+    MissingValue { name: String, source: String, op: Op },
 }
 
 impl std::fmt::Display for Conflict {
@@ -179,6 +199,11 @@ impl std::fmt::Display for Conflict {
             Conflict::WrappedAfterRemoval { name, source } => write!(
                 f,
                 "`{source}` cannot wrap `{name}`: it was removed"
+            ),
+            Conflict::MissingValue { name, source, op } => write!(
+                f,
+                "`{source}` cannot {} `{name}`: the contribution carries no value",
+                op.as_str()
             ),
         }
     }
@@ -277,7 +302,11 @@ impl<T: Clone> ContributionRegistry<T> {
     }
 
     /// Contributors in the order they are applied: highest priority first, then
-    /// by source name, then by declaration order.
+    /// by `source`, then by declaration order.
+    ///
+    /// `source` is the second key, so at equal priority it decides. The host must
+    /// set it from the manifest name it assigned, never from the plugin's own
+    /// claim — see the module docs, "Set `source` from the host's registry".
     fn ordered(&self) -> Vec<&Contribution<T>> {
         let mut ordered: Vec<(usize, &Contribution<T>)> =
             self.contributions.iter().enumerate().collect();
@@ -330,10 +359,9 @@ impl<T: Clone> ContributionRegistry<T> {
                             held_by: held_by.clone(),
                         });
                     } else {
-                        state.insert(
-                            name.clone(),
-                            (contribution.value.clone(), source.clone(), Vec::new()),
-                        );
+                        if let Some(value) = payload(contribution, &mut conflicts) {
+                            state.insert(name.clone(), (value, source.clone(), Vec::new()));
+                        }
                     }
                 }
                 Op::Remove => {
@@ -377,11 +405,14 @@ impl<T: Clone> ContributionRegistry<T> {
                         continue;
                     }
                     match state.get_mut(name) {
-                        Some(entry) => {
-                            entry.0 = contribution.value.clone();
-                            entry.1 = source.clone();
-                            decided.insert(name.clone(), source.clone());
-                        }
+                        Some(entry) => match payload(contribution, &mut conflicts) {
+                            Some(value) => {
+                                entry.0 = value;
+                                entry.1 = source.clone();
+                                decided.insert(name.clone(), source.clone());
+                            }
+                            None => continue,
+                        },
                         None => conflicts.push(Conflict::UnknownTarget {
                             name: name.clone(),
                             source: source.clone(),
@@ -399,7 +430,10 @@ impl<T: Clone> ContributionRegistry<T> {
                     match state.get_mut(name) {
                         // Appended in apply order, which is precedence order, so
                         // the highest-precedence wrapper is last.
-                        Some(entry) => entry.2.push((source.clone(), contribution.value.clone())),
+                        Some(entry) => match payload(contribution, &mut conflicts) {
+                            Some(value) => entry.2.push((source.clone(), value)),
+                            None => continue,
+                        },
                         None => conflicts.push(Conflict::UnknownTarget {
                             name: name.clone(),
                             source: source.clone(),
@@ -430,6 +464,26 @@ impl<T: Clone> ContributionRegistry<T> {
 /// One entry while `resolve` is applying contributions: its current value, who
 /// provided it, and the wrappers recorded so far (in apply order).
 type Working<T> = (T, String, Vec<(String, T)>);
+
+/// The value a contribution carries, or a reported conflict when it carries
+/// none.
+///
+/// Only an `Add`, `Replace` or `Wrap` reaches here and every one of those needs
+/// a value; [`Contribution::new`] always gives it one and [`Contribution::remove`]
+/// only ever builds a `Remove`. A hand-built `Op::Add` with `value: None` would
+/// otherwise have to invent a payload, so it is refused and reported like any
+/// other contribution that cannot take effect.
+fn payload<T: Clone>(contribution: &Contribution<T>, conflicts: &mut Vec<Conflict>) -> Option<T> {
+    if contribution.value.is_some() {
+        return contribution.value.clone();
+    }
+    conflicts.push(Conflict::MissingValue {
+        name: contribution.name.clone(),
+        source: contribution.source.clone(),
+        op: contribution.op,
+    });
+    None
+}
 
 #[cfg(test)]
 mod tests {
@@ -466,6 +520,75 @@ mod tests {
         let view = registry.resolve();
         assert!(view.get("on_run_end").is_none(), "removal must take effect");
         assert!(view.get("on_tool_call").is_some(), "and only that one");
+    }
+
+    /// `remove` must not need `T: Default` and must not carry a placeholder. A
+    /// trait object is the real `T` here and it is not `Default`, which is why
+    /// the value is an `Option`.
+    #[test]
+    fn remove_carries_no_value_and_needs_no_default() {
+        use std::sync::Arc;
+
+        trait Marker: Send + Sync {}
+        struct A;
+        struct B(#[allow(dead_code)] u8);
+        impl Marker for A {}
+        impl Marker for B {}
+
+        let contribution = Contribution::<Arc<dyn Marker>>::remove("guard", "run_command", 0);
+        assert_eq!(contribution.op, Op::Remove);
+        assert!(contribution.value.is_none(), "a Remove never carries a payload");
+
+        // The value a Remove used to be built around does not exist, so the
+        // registry has to work with types that cannot make one.
+        let mut registry: ContributionRegistry<Arc<dyn Marker>> =
+            ContributionRegistry::new("tools");
+        registry.builtin("run_command", Arc::new(A));
+        registry.contribute(Contribution::remove("guard", "run_command", 0));
+        registry.contribute(Contribution::new("mine", Op::Add, "my_tool", Arc::new(B(1)), 0));
+        let view = registry.resolve();
+        assert!(view.get("run_command").is_none());
+        assert!(view.get("my_tool").is_some());
+        assert!(view.conflicts.is_empty(), "{:?}", view.conflicts);
+
+        // And `new` always supplies one.
+        assert!(Contribution::new("mine", Op::Add, "x", Arc::new(A), 0)
+            .value
+            .is_some());
+    }
+
+    /// A contribution that needs a value and has none is reported, not silently
+    /// applied with an invented payload.
+    #[test]
+    fn a_valueless_add_or_replace_is_reported() {
+        let mut registry = reg();
+        registry.contribute(Contribution {
+            source: "handbuilt".into(),
+            op: Op::Add,
+            name: "on_extra".into(),
+            value: None,
+            priority: 0,
+        });
+        registry.contribute(Contribution {
+            source: "handbuilt".into(),
+            op: Op::Replace,
+            name: "on_run_end".into(),
+            value: None,
+            priority: 0,
+        });
+        let view = registry.resolve();
+        assert_eq!(view.get("on_run_end").unwrap().value, "runtime", "unchanged");
+        assert!(view.get("on_extra").is_none());
+        assert_eq!(
+            view.conflicts
+                .iter()
+                .filter(|c| matches!(c, Conflict::MissingValue { .. }))
+                .count(),
+            2,
+            "{:?}",
+            view.conflicts
+        );
+        assert!(view.conflicts[1].to_string().contains("carries no value"));
     }
 
     #[test]
@@ -563,6 +686,64 @@ mod tests {
         let two = second.resolve();
         assert_eq!(one.get("on_run_end").is_some(), two.get("on_run_end").is_some());
         assert_eq!(one.conflicts.len(), two.conflicts.len());
+    }
+
+    /// Precedence is a total order, so two orderings of the same contributions
+    /// resolve to the same values *and* the same blame. Anything less means a
+    /// conflict's outcome depends on the order the host happened to collect
+    /// plugins in.
+    #[test]
+    fn precedence_is_identical_whichever_order_contributions_arrive_in() {
+        let build = |order: [usize; 4]| {
+            let all = [
+                Contribution::remove("alpha", "on_run_end", 0),
+                Contribution::new("zeta", Op::Replace, "on_run_end", "zeta", 0),
+                Contribution::new("beta", Op::Wrap, "on_tool_call", "beta", 1),
+                Contribution::new("gamma", Op::Wrap, "on_tool_call", "gamma", 1),
+            ];
+            let mut registry = reg();
+            for index in order {
+                registry.contribute(all[index].clone());
+            }
+            registry.resolve()
+        };
+        let one = build([0, 1, 2, 3]);
+        let two = build([3, 2, 1, 0]);
+
+        let end = one.get("on_run_end");
+        assert_eq!(end.is_none(), two.get("on_run_end").is_none());
+        // Equal priority, so `alpha` < `zeta`: alpha removes first, zeta's
+        // replace then loses the name — the same whichever order they arrived.
+        assert!(end.is_none(), "equal priority resolves by source, not arrival");
+        assert_eq!(one.conflicts, two.conflicts);
+
+        // Wrappers keep precedence order (lowest first) regardless of arrival.
+        let wrappers = |view: &RegistryView<&'static str>| {
+            view.get("on_tool_call")
+                .unwrap()
+                .wrappers
+                .iter()
+                .map(|(source, _)| source.clone())
+                .collect::<Vec<String>>()
+        };
+        assert_eq!(wrappers(&one), vec!["beta", "gamma"], "source breaks the tie");
+        assert_eq!(wrappers(&two), wrappers(&one));
+    }
+
+    /// The tie-break at equal priority is `source` alone, which is exactly why
+    /// the host must assign it: the alphabet decides otherwise.
+    #[test]
+    fn equal_priority_is_decided_by_the_source_string() {
+        let claim = |sources: (&'static str, &'static str)| {
+            let mut registry = reg();
+            registry.contribute(Contribution::remove(sources.0, "on_run_end", 0));
+            registry.contribute(Contribution::new(sources.1, Op::Replace, "on_run_end", "kept", 0));
+            let view = registry.resolve();
+            (view.get("on_run_end").is_none(), view.conflicts.len())
+        };
+        // Whoever sorts first applies first, and its decision stands.
+        assert_eq!(claim(("aaa", "zzz")), (true, 1), "aaa's remove wins the tie");
+        assert_eq!(claim(("zzz", "aaa")), (false, 1), "aaa's replace wins the tie");
     }
 
     #[test]

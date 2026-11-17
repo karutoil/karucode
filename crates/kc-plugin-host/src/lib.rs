@@ -165,6 +165,12 @@ pub struct UiHiddenTarget {
 pub struct PluginUi {
     pub contributions: Vec<UiContributionSummary>,
     pub hidden: Vec<UiHiddenTarget>,
+    /// Why a `replace` contribution lost its target to an earlier plugin. The
+    /// replacement itself is not a hosted control, so it has no entry in
+    /// `contributions` and its loss would otherwise be invisible; `ui_of` fills
+    /// this and `diagnostics` reports it for the losing plugin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replace_skipped: Vec<String>,
     pub slots: Vec<String>,
     pub hideable: Vec<String>,
 }
@@ -175,6 +181,7 @@ impl PluginUi {
         Self {
             contributions: Vec::new(),
             hidden: Vec::new(),
+            replace_skipped: Vec::new(),
             slots: kc_core::plugin::UI_SLOTS
                 .iter()
                 .map(|s| s.to_string())
@@ -562,9 +569,15 @@ impl PluginHost {
     pub fn diagnostics(&self) -> Vec<PluginDiagnostics> {
         let tools = colliding_tools(&self.plugins);
         let panels = colliding_panels(&self.plugins);
+        let replacements = colliding_replacements(&self.plugins);
         self.plugins
             .iter()
-            .map(|slot| slot_diagnostics(slot, &collision_notes(slot, &tools, &panels)))
+            .map(|slot| {
+                slot_diagnostics(
+                    slot,
+                    &collision_notes(slot, &tools, &panels, &replacements),
+                )
+            })
             .collect()
     }
 
@@ -582,10 +595,16 @@ impl PluginHost {
     pub fn diagnostics_for(&self, name: &str) -> Option<PluginDiagnostics> {
         let tools = colliding_tools(&self.plugins);
         let panels = colliding_panels(&self.plugins);
+        let replacements = colliding_replacements(&self.plugins);
         self.plugins
             .iter()
             .find(|s| s.config.name == name)
-            .map(|slot| slot_diagnostics(slot, &collision_notes(slot, &tools, &panels)))
+            .map(|slot| {
+                slot_diagnostics(
+                    slot,
+                    &collision_notes(slot, &tools, &panels, &replacements),
+                )
+            })
     }
 
     /// Tools of all currently ready plugins, in discovery order.
@@ -1361,6 +1380,43 @@ fn colliding_tools(plugins: &[PluginSlot]) -> BTreeMap<String, (String, Vec<Stri
     claims
 }
 
+/// `replace` targets claimed by a plugin that did not get them, keyed by the
+/// **target**: `target -> (owner plugin, later claimant plugins)`.
+///
+/// `ui_of` decides the winner (first in discovery order) and records the loss in
+/// `PluginUi::replace_skipped`; this map is how that loss reaches each losing
+/// plugin's diagnostics. It reads the same ready plugins in the same order that
+/// `ui_of` walks, so the two cannot disagree about who won.
+fn colliding_replacements(plugins: &[PluginSlot]) -> BTreeMap<String, (String, Vec<String>)> {
+    let mut claims: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+    for slot in plugins {
+        let Some(shared) = &slot.shared else { continue };
+        if shared.status() != PluginStatus::Ready {
+            continue;
+        }
+        for contribution in shared.ui_defs() {
+            if contribution.kind != kc_core::plugin::UI_KIND_REPLACE {
+                continue;
+            }
+            let Some(target) = contribution.target else {
+                continue;
+            };
+            match claims.get_mut(&target) {
+                Some((_, claimants)) => {
+                    if !claimants.contains(&slot.config.name) {
+                        claimants.push(slot.config.name.clone());
+                    }
+                }
+                None => {
+                    claims.insert(target, (slot.config.name.clone(), Vec::new()));
+                }
+            }
+        }
+    }
+    claims.retain(|_, (_, claimants)| !claimants.is_empty());
+    claims
+}
+
 /// Hosted panel names claimed by more than one ready plugin. Delimiters are not
 /// an encoding: `a`/`b__c` and `a__b`/`c` both produce `plugin__a__b__c`.
 fn colliding_panels(plugins: &[PluginSlot]) -> BTreeMap<String, (String, Vec<String>)> {
@@ -1407,10 +1463,20 @@ fn panel_collision_note(name: &str, owner: &str) -> String {
     )
 }
 
+fn replace_collision_note(target: &str, owner: &str) -> String {
+    format!(
+        "not exposing `replace` for `{target}`: plugin `{owner}` already provides it. A built-in \
+         label can only be replaced once, so the first plugin in discovery order keeps the target \
+         and this one was refused rather than overwriting it. Rename the target or drop the \
+         contribution"
+    )
+}
+
 fn collision_notes(
     slot: &PluginSlot,
     tools: &BTreeMap<String, (String, Vec<String>)>,
     panels: &BTreeMap<String, (String, Vec<String>)>,
+    replacements: &BTreeMap<String, (String, Vec<String>)>,
 ) -> Vec<String> {
     tools
         .iter()
@@ -1421,6 +1487,12 @@ fn collision_notes(
                 .iter()
                 .filter(|(_, (_, claimants))| claimants.contains(&slot.config.name))
                 .map(|(name, (owner, _))| panel_collision_note(name, owner)),
+        )
+        .chain(
+            replacements
+                .iter()
+                .filter(|(_, (_, claimants))| claimants.contains(&slot.config.name))
+                .map(|(target, (owner, _))| replace_collision_note(target, owner)),
         )
         .collect()
 }
@@ -1715,6 +1787,56 @@ fn load_plugin_file(path: &Path) -> Result<(PluginConfig, Option<String>), Strin
 /// `before_prompt` output is joined into the system prompt on every model
 /// call, so an order that depended on which process answered first would
 /// rewrite message 0 between turns and cost a full prompt-cache miss.
+/// Session ids a request handed to a plugin, if any.
+///
+/// A list-wide request (`before_session_list`) carries `sessions: [{id, …}]` inside
+/// the hook payload (`params.payload.sessions`); that array is the only set a
+/// plugin may echo a session id from. Looks at the top level too, since a future
+/// request may carry the array directly. Returns `None` when neither exists, so
+/// the caller stores nothing.
+pub(crate) fn session_ids_in(params: &Value) -> Option<Vec<String>> {
+    let sessions = params
+        .get("sessions")
+        .or_else(|| params.get("payload").and_then(|p| p.get("sessions")))?
+        .as_array()?;
+    let ids: Vec<String> = sessions
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    if ids.is_empty() {
+        None
+    } else {
+        Some(ids)
+    }
+}
+
+/// A `ToolCallContext` built from the session a hook payload names.
+///
+/// Hook payloads carry `session_id`, `project` and `workspace` because the hook
+/// is *about* a conversation. Turning them into a context is what lets a
+/// `plugin/state/*` frame raised inside a hook handler name its owner without the
+/// plugin choosing it: the same rule as a tool call, different carrier.
+pub(crate) fn context_from_payload(payload: &Value) -> kc_core::plugin::ToolCallContext {
+    let text = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    kc_core::plugin::ToolCallContext {
+        session_id: text("session_id"),
+        run_id: text("run_id"),
+        workspace: text("workspace"),
+        project: payload
+            .get("project")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        ..Default::default()
+    }
+}
+
 async fn fan_out(plugins: &[Arc<PluginShared>], hook: &str, payload: &Value) -> Vec<Value> {
     let mut set = JoinSet::new();
     for (index, shared) in plugins.iter().enumerate() {
@@ -2121,6 +2243,14 @@ fn ui_of(plugins: &[Arc<PluginShared>]) -> PluginUi {
     // One chord, one handler: a later claimant is skipped, not stacked, so a
     // keystroke can never run two plugins at once.
     let mut bound: BTreeMap<String, String> = BTreeMap::new();
+    // One target, one replacement: `replace` is the one contribution keyed by a
+    // *shared* name rather than its own id, so two plugins - or one plugin's own
+    // manifest - can legitimately claim the same target, and the client resolves
+    // that against a single winning text. The winner is decided here, once, in
+    // discovery order (and manifest order within a plugin), so every surface that
+    // reads `ui()` agrees and the loser is reported instead of silently dropped.
+    let mut replaced: BTreeMap<String, String> = BTreeMap::new();
+    let mut replace_skipped: Vec<String> = Vec::new();
     for shared in plugins {
         if shared.status() != PluginStatus::Ready {
             continue;
@@ -2141,7 +2271,31 @@ fn ui_of(plugins: &[Arc<PluginShared>]) -> PluginUi {
                 continue;
             }
             let hosted_id = kc_core::plugin::hosted_ui_id(&shared.name, &contribution.id);
-            if let Some(owner) = seen.get(&hosted_id) {
+            // `replace` is not a hosted control: nothing dispatches to its id, so
+            // its `hosted_id` must never take a slot in `seen` - doing that
+            // dropped a legitimate second `replace` target that happened to share
+            // an id before the client could see it. De-dupe on the target instead.
+            let is_replace = contribution.kind == kc_core::plugin::UI_KIND_REPLACE;
+            if is_replace {
+                let target = contribution.target.clone().unwrap_or_default();
+                if let Some(owner) = replaced.get(&target) {
+                    warn!(
+                        plugin = %shared.name,
+                        target = %target,
+                        claimed_by = %owner,
+                        "not exposing plugin UI replacement: another plugin already replaces \
+                         `{target}`; the first in discovery order keeps it"
+                    );
+                    replace_skipped.push(format!(
+                        "not exposing `replace` for `{target}`: plugin `{owner}` already provides \
+                         it. A built-in label can only be replaced once, so the first plugin in \
+                         discovery order keeps the target and this one was refused rather than \
+                         overwriting it"
+                    ));
+                    continue;
+                }
+                replaced.insert(target, shared.name.clone());
+            } else if let Some(owner) = seen.get(&hosted_id) {
                 warn!(
                     plugin = %shared.name,
                     contribution = %contribution.id,
@@ -2166,11 +2320,14 @@ fn ui_of(plugins: &[Arc<PluginShared>]) -> PluginUi {
                 }
                 bound.insert(keys.clone(), shared.name.clone());
             }
-            seen.insert(hosted_id.clone(), shared.name.clone());
+            // Only a dispatched control owns a hosted id; a `replace` was already
+            // claimed by target above and must not burn an id in `seen`.
+            if !is_replace {
+                seen.insert(hosted_id.clone(), shared.name.clone());
+            }
             // A `replace` contribution keeps its target and its text: the client
             // uses `target` to pick which built-in label to draw and `replace` as
             // the text. Every other kind leaves both empty.
-            let is_replace = contribution.kind == kc_core::plugin::UI_KIND_REPLACE;
             out.contributions.push(UiContributionSummary {
                 plugin: shared.name.clone(),
                 version: version.clone(),
@@ -2201,6 +2358,7 @@ fn ui_of(plugins: &[Arc<PluginShared>]) -> PluginUi {
         .into_iter()
         .map(|(target, plugins)| UiHiddenTarget { target, plugins })
         .collect();
+    out.replace_skipped = replace_skipped;
     out
 }
 

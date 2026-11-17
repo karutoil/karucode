@@ -116,9 +116,10 @@ export function Overlay({
   useFocusTrap(ref, open, onClose);
   if (!open) return null;
 
-  const surfaceClass = ['overlay', `overlay-${role}`, showHeader ? '' : 'is-headless', className]
-    .filter(Boolean)
-    .join(' ');
+  // No longer emitted: it was a hook no stylesheet ever defined, so every
+  // `showHeader={false}` surface (the palette) carried a dead class. The flag's
+  // real effect is the `sr-only` title below, which is what the shell keys on.
+  const surfaceClass = ['overlay', `overlay-${role}`, className].filter(Boolean).join(' ');
 
   const layer = (
     <div class="dialog-layer" data-overlay-role={role}>

@@ -431,7 +431,7 @@ export function ThemeStudio(): JSX.Element | null {
         data-testid="theme-studio"
         data-role="drawer"
       >
-        <header class="overlay-header theme-studio-top">
+        <header class="overlay-header">
           <div class="overlay-headings theme-studio-head">
             <h2 class="overlay-title theme-studio-title" id={titleId}>
               Theme studio
@@ -442,7 +442,7 @@ export function ThemeStudio(): JSX.Element | null {
           </div>
           <button
             type="button"
-            class="overlay-close theme-close"
+            class="overlay-close"
             onClick={actions.closeThemeStudio}
             aria-label="Close theme studio"
           >

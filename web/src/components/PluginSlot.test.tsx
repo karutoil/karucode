@@ -3,7 +3,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/pr
 import { configFixture, resetAppState } from '../test/fixtures';
 import * as store from '../state/store';
 import { PluginSlot } from './PluginSlot';
-import { UI_SLOT_COMPOSER_TOOLBAR, UI_SLOT_INSPECTOR_HEADER } from './uiContributions';
+import {
+  UI_BADGE_SLOTS,
+  UI_SLOT_COMPOSER_TOOLBAR,
+  UI_SLOT_INSPECTOR_HEADER,
+  UI_SLOT_SESSION_HEADER_CHIP,
+} from './uiContributions';
 
 /**
  * A plugin's button, from click to toast.
@@ -192,5 +197,96 @@ describe('plugin-contributed buttons', () => {
     // Both buttons exist: an unknown icon name is a neutral glyph, not a failure.
     expect(screen.getByRole('button', { name: /Known/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Unknown/ })).toBeTruthy();
+  });
+});
+
+/**
+ * Chips: a `session.row.badge` / `session.header.chip` entry carries `text` and
+ * `tone`, not a `label`. The regression this guards is the drawn word coming from
+ * the wrong field — a chip whose payload had only `text`+`tone` used to be refused
+ * by the parser (its `label` was empty) and, before that, to render an empty
+ * button.
+ *
+ * `UI_BADGE_SLOTS` is asserted against, not restated: the slots these tests use
+ * are chips only for as long as the catalogue says so.
+ */
+describe('plugin-contributed chips', () => {
+  beforeEach(() => {
+    resetAppState();
+    runPluginUiAction.mockReset();
+    sendMessage.mockReset();
+  });
+
+  afterEach(() => {
+    cleanup();
+    resetAppState();
+  });
+
+  function chip(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      plugin: 'kc-focus',
+      version: '0.1.0',
+      kind: 'button',
+      id: 'focus',
+      hosted_id: 'plugin__kc-focus__focus',
+      slot: UI_SLOT_SESSION_HEADER_CHIP,
+      // Deliberately no `label`: the host sends only what the plugin declared
+      // here, and a chip's content is `text`.
+      text: 'Focus 25m',
+      tone: 'success',
+      message: 'Start a focus block.',
+      ...overrides,
+    };
+  }
+
+  it('draws a chip from text and tone when it has no label at all', () => {
+    expect(UI_BADGE_SLOTS).toContain(UI_SLOT_SESSION_HEADER_CHIP);
+    withUi({ contributions: [chip()] });
+    const { container } = render(<PluginSlot slot={UI_SLOT_SESSION_HEADER_CHIP} />);
+
+    const control = screen.getByRole('button', { name: 'Focus 25m' });
+    expect(control.textContent).toContain('Focus 25m');
+    expect(control.classList.contains('session-chip')).toBe(true);
+    expect(control.classList.contains('session-chip-success')).toBe(true);
+    expect(control.getAttribute('data-tone')).toBe('success');
+    // The group is labelled for chips, not for controls that are not there.
+    expect(container.querySelector('.plugin-slot')?.getAttribute('aria-label')).toBe(
+      'Plugin chips',
+    );
+  });
+
+  it('draws the tail of a 24-byte chip text the label cap would have refused', () => {
+    // `MAX_UI_BADGE_BYTES` is 24 and `MAX_UI_LABEL_CHARS` 80, so this is inside the
+    // host's own limit; the parser must not be the thing that drops it.
+    const text = 'a'.repeat(24);
+    withUi({ contributions: [chip({ text })] });
+    render(<PluginSlot slot={UI_SLOT_SESSION_HEADER_CHIP} />);
+    expect(screen.getByRole('button', { name: text })).toBeTruthy();
+  });
+
+  it('keeps the plugin text when the label is a different accessible name', () => {
+    withUi({ contributions: [chip({ label: 'Focus session in progress' })] });
+    const { container } = render(<PluginSlot slot={UI_SLOT_SESSION_HEADER_CHIP} />);
+    // Drawn: the chip text. Announced: the label, which is the fuller sentence.
+    expect(container.querySelector('.plugin-slot-label')?.textContent).toBe('Focus 25m');
+    expect(screen.getByRole('button', { name: 'Focus session in progress' })).toBeTruthy();
+  });
+
+  it('falls back to a neutral tone instead of an empty class', () => {
+    withUi({ contributions: [chip({ tone: 'not-a-tone' })] });
+    const { container } = render(<PluginSlot slot={UI_SLOT_SESSION_HEADER_CHIP} />);
+    const control = container.querySelector('.plugin-slot-button');
+    expect(control?.classList.contains('session-chip-neutral')).toBe(true);
+    expect(control?.className).not.toContain('session-chip- ');
+  });
+
+  it('runs an action from a chip that has one', async () => {
+    runPluginUiAction.mockResolvedValue({ ok: true, message: 'Focused', refresh: [], open_url: null });
+    withUi({ contributions: [chip({ message: null, action: 'focus' })] });
+    render(<PluginSlot slot={UI_SLOT_SESSION_HEADER_CHIP} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Focus 25m' }));
+    await waitFor(() => expect(runPluginUiAction).toHaveBeenCalledTimes(1));
+    expect(runPluginUiAction.mock.calls[0]?.slice(0, 2)).toEqual(['kc-focus', 'focus']);
   });
 });
