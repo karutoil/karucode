@@ -209,12 +209,8 @@ pub const UI_SLOT_COMPOSER_TOOLBAR: &str = "composer.toolbar";
 pub const UI_SLOT_INSPECTOR_HEADER: &str = "inspector.header";
 /// The session header row above the transcript.
 pub const UI_SLOT_SESSION_HEADER: &str = "session.header";
-/// The workspace status bar at the bottom of the window.
-pub const UI_SLOT_STATUS_BAR: &str = "statusbar.item";
 /// A small chip drawn on a row of the project rail's session list.
 pub const UI_SLOT_SESSION_ROW_BADGE: &str = "session.row.badge";
-/// An item in a rail session row's right-click menu.
-pub const UI_SLOT_SESSION_ROW_MENU: &str = "session.row.menu";
 /// A chip in the open session's header, beside its title.
 pub const UI_SLOT_SESSION_HEADER_CHIP: &str = "session.header.chip";
 
@@ -224,16 +220,20 @@ pub const UI_SLOT_SESSION_HEADER_CHIP: &str = "session.header.chip";
 /// mint a position and no CSS escaping is involved. Adding a slot is a one-line
 /// change here plus the mount point in the frontend.
 ///
-/// The three `session.*` entries are what makes a workflow plugin possible
-/// without shipping markup: a badge is text plus a tone, a menu item is a label
-/// plus an action, and a header chip is the same. All three are drawn by the app.
+/// The two `session.*` entries are what makes a workflow plugin possible without
+/// shipping markup: a row badge and a header chip are text plus a tone, and the
+/// app draws them.
+///
+/// Two slots were removed because they were advertised and validated but never
+/// mounted, so a plugin declaring them saw a success and nothing appeared:
+/// `session.row.menu` (a menu entry needs the rail's own `MenuItem` rendering,
+/// which a contributed control cannot provide) and `statusbar.item` (this build
+/// has no application status bar).
 pub const UI_SLOTS: &[&str] = &[
     UI_SLOT_COMPOSER_TOOLBAR,
     UI_SLOT_INSPECTOR_HEADER,
     UI_SLOT_SESSION_HEADER,
-    UI_SLOT_STATUS_BAR,
     UI_SLOT_SESSION_ROW_BADGE,
-    UI_SLOT_SESSION_ROW_MENU,
     UI_SLOT_SESSION_HEADER_CHIP,
 ];
 
@@ -260,7 +260,6 @@ pub const UI_HIDEABLE: &[&str] = &[
     UI_HIDE_RAIL_FOOTER,
     UI_HIDE_SESSION_HEADER_ACTIONS,
     UI_HIDE_NOTIFICATIONS,
-    UI_HIDE_STATUS_BAR,
     UI_HIDE_COMMAND_PALETTE,
 ];
 
@@ -303,8 +302,6 @@ pub const UI_HIDE_RAIL_FOOTER: &str = "rail.footer";
 pub const UI_HIDE_SESSION_HEADER_ACTIONS: &str = "session.header.actions";
 /// The notification bell and its panel.
 pub const UI_HIDE_NOTIFICATIONS: &str = "notifications";
-/// The workspace status bar.
-pub const UI_HIDE_STATUS_BAR: &str = "statusbar";
 /// The `Ctrl/Cmd+K` command palette entry point.
 ///
 /// The chord itself stays bound (it is the app's key map); this removes the
@@ -1128,6 +1125,39 @@ pub mod hooks {
         ON_STOP,
         BEFORE_SESSION_LIST,
     ];
+
+    /// The hook points as an extensible registry.
+    ///
+    /// [`IMPLEMENTED`] is the fixed set the runtime calls today: a plugin may
+    /// advertise any name, but the host only fans out the ones listed there, so
+    /// `ON_RUN_START` and `ON_MODEL_RESPONSE` exist as constants with no call
+    /// site. This registry is how that stops being a hard-coded truth:
+    ///
+    /// * every name in [`IMPLEMENTED`] is a built-in entry;
+    /// * a plugin may `Add` a hook point it implements;
+    /// * a plugin may `Remove` or `Replace` one (a policy plugin that wants to
+    ///   own `on_tool_call` can take it, and the loser is told);
+    /// * the caller resolves it once and fans out to whatever the view contains,
+    ///   so "is this hook name live?" is a data question rather than a `contains`
+    ///   on a constant.
+    ///
+    /// Resolution is deterministic (see [`kc_core::contrib`]), so two plugins
+    /// claiming the same hook always resolve the same way on every run.
+    pub fn registry() -> crate::contrib::ContributionRegistry<&'static str> {
+        let mut registry = crate::contrib::ContributionRegistry::new("hooks");
+        for name in IMPLEMENTED {
+            registry.builtin(*name, *name);
+        }
+        registry
+    }
+
+    /// Whether `name` is a hook point this build fans out.
+    ///
+    /// Kept as a plain `contains` for the hot path; use [`registry`] when a
+    /// plugin's contribution has to be resolved against it.
+    pub fn is_implemented(name: &str) -> bool {
+        IMPLEMENTED.contains(&name)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

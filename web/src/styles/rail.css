@@ -450,7 +450,7 @@
 /* ---------- dialogs ---------- */
 
 .project-rail-dialog {
-  width: min(520px, calc(100vw - 32px));
+  width: min(var(--overlay-w-standard), 100%);
 }
 
 .project-rail-form {

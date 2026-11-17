@@ -35,7 +35,6 @@ import {
   LockIcon,
   PaletteIcon,
   SearchIcon,
-  SettingsIcon,
   SparkIcon,
 } from './icons';
 
@@ -171,6 +170,22 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
     keywords: 'version upgrade release changelog build commit auto check manifest',
   },
 ];
+
+/**
+ * The pane header's one supporting line, or `null` where there is nothing to
+ * say that the label, the scope badge and the sections under it do not.
+ *
+ * It used to print `caption` on every tab, under a `<h2>` that already named the
+ * section and beside a badge that already said who commits it. A sentence that
+ * restates its own heading is the thing that made this sheet read as bloated:
+ * it costs a line of vertical space on every tab and teaches nothing. It is
+ * kept only for `mixed`, where "half of this saves itself and half does not" is
+ * a genuinely two-part fact no other element carries.
+ */
+export function paneCaption(section: SettingsSectionMeta): string | null {
+  return section.scope === 'mixed' ? section.caption : null;
+}
+
 
 /** The metadata of one section; a hard lookup because the union has no gaps. */
 export function settingsSection(id: SettingsTab): SettingsSectionMeta {
@@ -339,10 +354,6 @@ export function SettingsNav({
   return (
     <nav class="settings-nav" aria-label="Settings">
       <div class="settings-nav-head">
-        <p class="settings-nav-kicker">
-          <SettingsIcon size={13} />
-          Settings
-        </p>
         <label class="side-search settings-search">
           <SearchIcon size={14} />
           <input

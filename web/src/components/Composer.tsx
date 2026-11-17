@@ -44,7 +44,7 @@ import { FileMentionMenu, mentionOptionId } from './FileMentionMenu';
 import { SlashMenu, slashOptionId } from './SlashMenu';
 import { ModelControls } from './ModelSwitcher';
 import { PluginSlot } from './PluginSlot';
-import { isUiHidden, UI_HIDE_COMPOSER_ATTACH, UI_SLOT_COMPOSER_TOOLBAR } from './uiContributions';
+import { isUiHidden, UI_HIDE_COMPOSER_ATTACH, UI_HIDE_COMPOSER_MODEL, UI_SLOT_COMPOSER_TOOLBAR } from './uiContributions';
 import {
   AlertIcon,
   ArrowUpIcon,
@@ -1312,7 +1312,7 @@ export function Composer({
                 aria-label="Model and reasoning pins for subsequent runs in this session"
                 title="Model and reasoning changes apply to subsequent runs, not a run already in flight."
               >
-                <ModelControls />
+                {isUiHidden(store.pluginUi.value, UI_HIDE_COMPOSER_MODEL) ? null : <ModelControls />}
               </div>
               {/* Controls plugins contributed to this row. Nothing is drawn when
                * no plugin asked for a place here, which is the normal case. */}

@@ -4,7 +4,7 @@ import { relativeTime } from '../lib/format';
 import { matchSegments } from '../lib/paletteMatch';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
-import { Dialog } from './Dialog';
+import { Overlay } from './Overlay';
 import {
   ArrowRightIcon,
   BellIcon,
@@ -191,13 +191,35 @@ export function CommandPalette(): JSX.Element | null {
   };
 
   return (
-    <Dialog
+    <Overlay
       open
       title="Command palette"
       onClose={actions.closePalette}
+      role="palette"
       class="dialog-palette"
       labelId="palette-title"
+      // The header band *is* the search field: a title above it would be a
+      // second line saying what the placeholder and the list already say.
       showHeader={false}
+      bodyLayout="static"
+      footer={
+        // One hint line: what the keys do, with the match count read off the
+        // group headings and announced once by the live region above. The count
+        // used to be printed here as well, which was the third place it
+        // appeared (live region, group headings, footer).
+        <span class="palette-keys">
+          <span>
+            <kbd>↑</kbd>
+            <kbd>↓</kbd> move
+          </span>
+          <span>
+            <kbd>Enter</kbd> run
+          </span>
+          <span>
+            <kbd>Esc</kbd> close
+          </span>
+        </span>
+      }
     >
       <div class="palette-search">
         <SearchIcon size={17} />
@@ -233,7 +255,6 @@ export function CommandPalette(): JSX.Element | null {
             }
           }}
         />
-        <kbd class="palette-esc">Esc</kbd>
       </div>
 
       <p class="sr-only" aria-live="polite">
@@ -289,29 +310,6 @@ export function CommandPalette(): JSX.Element | null {
           })
         )}
       </ul>
-
-      {/* One hint line: what the keys do on the left, how many rows are in front
-       * of you on the right. The count is aria-hidden because the live region
-       * above already announces it — a screen reader must not hear it twice. */}
-      <footer class="palette-footer">
-        <span class="palette-keys">
-          <span>
-            <kbd>↑</kbd>
-            <kbd>↓</kbd> move
-          </span>
-          <span>
-            <kbd>Enter</kbd> run
-          </span>
-          <span>
-            <kbd>Esc</kbd> close
-          </span>
-        </span>
-        <span class="palette-count" aria-hidden="true">
-          {filtered.length === actionsList.length
-            ? `${filtered.length} result${filtered.length === 1 ? '' : 's'}`
-            : `${filtered.length} of ${actionsList.length}`}
-        </span>
-      </footer>
-    </Dialog>
+    </Overlay>
   );
 }

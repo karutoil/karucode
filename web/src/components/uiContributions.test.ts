@@ -7,9 +7,12 @@ import {
   MAX_UI_CONTRIBUTIONS,
   normaliseUiKeys,
   parsePluginUi,
+  pluginText,
   slotContributions,
   UI_HIDE_COMPOSER_ATTACH,
   UI_HIDE_INSPECTOR_TAB_AGENTS,
+  UI_REPLACE_NEW_SESSION_LABEL,
+  UI_REPLACE_PROJECT_LABEL,
   UI_SLOT_COMPOSER_TOOLBAR,
   UI_SLOT_INSPECTOR_HEADER,
   uiHiddenBy,
@@ -313,5 +316,79 @@ describe('contributed keyboard shortcuts', () => {
     });
     expect(filtered.keybindings).toEqual([]);
   });
-});
 
+  describe('replace (renaming a built-in label)', () => {
+    it('renames a replaceable target and leaves everything else alone', () => {
+      const ui = parsePluginUi({
+        contributions: [
+          {
+            plugin: 'org-branding',
+            kind: 'replace',
+            id: 'replace-label.new-session',
+            hosted_id: 'plugin__org-branding__replace-label.new-session',
+            target: UI_REPLACE_NEW_SESSION_LABEL,
+            replace: 'New thread',
+          },
+        ],
+      });
+      expect(pluginText(ui, UI_REPLACE_NEW_SESSION_LABEL, 'New session')).toBe('New thread');
+      // A target nobody replaced keeps the app's own word.
+      expect(pluginText(ui, UI_REPLACE_PROJECT_LABEL, 'Project')).toBe('Project');
+      // The replace entry is not a drawable control.
+      expect(ui.contributions).toEqual([]);
+    });
+
+    it('refuses a target outside the catalogue or an empty replacement', () => {
+      const ui = parsePluginUi({
+        contributions: [
+          {
+            plugin: 'evil',
+            kind: 'replace',
+            id: 'replace-approve',
+            hosted_id: 'plugin__evil__replace-approve',
+            target: 'approval.approve',
+            replace: 'Go',
+          },
+          {
+            plugin: 'evil',
+            kind: 'replace',
+            id: 'replace-label.project',
+            hosted_id: 'plugin__evil__replace-label.project',
+            target: UI_REPLACE_PROJECT_LABEL,
+            replace: '   ',
+          },
+        ],
+      });
+      expect(pluginText(ui, 'approval.approve', 'Approve')).toBe('Approve');
+      expect(pluginText(ui, UI_REPLACE_PROJECT_LABEL, 'Project')).toBe('Project');
+      const refused = ui.refused.join(' ');
+      expect(refused).toContain('approval.approve');
+      expect(refused).toContain('has no text');
+    });
+
+    it('lets the first claim on a target win and says the later one was dropped', () => {
+      const ui = parsePluginUi({
+        contributions: [
+          {
+            plugin: 'a',
+            kind: 'replace',
+            id: 'replace-label.project',
+            hosted_id: 'plugin__a__replace-label.project',
+            target: UI_REPLACE_PROJECT_LABEL,
+            replace: 'Workspace',
+          },
+          {
+            plugin: 'b',
+            kind: 'replace',
+            id: 'replace-label.project',
+            hosted_id: 'plugin__b__replace-label.project',
+            target: UI_REPLACE_PROJECT_LABEL,
+            replace: 'Area',
+          },
+        ],
+      });
+      expect(pluginText(ui, UI_REPLACE_PROJECT_LABEL, 'Project')).toBe('Workspace');
+      expect(ui.refused.join(' ')).toContain('renamed twice');
+    });
+  });
+});

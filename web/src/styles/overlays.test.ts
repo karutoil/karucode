@@ -72,9 +72,15 @@ describe('file viewer preview surface', () => {
   });
 
   it('keeps palette overlays compact on narrow viewports', () => {
-    expect(css).toContain('.dialog.dialog-palette {');
-    expect(css).toMatch(/\.dialog\.dialog-palette\s*\{[\s\S]*?width:\s*calc\(100vw - 28px\)/);
-    expect(css).toMatch(/\.dialog\.dialog-palette\s*\{[\s\S]*?border-radius:\s*var\(--radius\)/);
+    // Two facts: the desktop palette takes the role's measure (not a literal),
+    // and the phone tier keeps it a compact floating box rather than promoting
+    // it to a full-height sheet the way every other role goes.
+    expect(css).toMatch(/\.overlay-palette \{[\s\S]*?width:\s*min\(var\(--overlay-w-palette\)/);
+    const phone = css.slice(css.indexOf('@media (max-width: 640px)'));
+    expect(phone).toMatch(
+      /\.overlay-palette \{\n {4}align-self: center;\n {4}width: calc\(100vw - 28px\);/,
+    );
+    expect(phone).toMatch(/\.overlay-palette \{[\s\S]*?border-radius: var\(--radius\)/);
   });
 });
 
@@ -110,10 +116,14 @@ describe('command palette vocabulary', () => {
   it('re-uses the shared keycap instead of authoring a third one', () => {
     // base.css styles `kbd` (10px mono, `--line-keycap`, no fill). The palette used
     // to override it twice — an 18px outlined chip in the search row and a 16px
-    // filled one in the footer — so the same key looked like two controls.
-    expect(declarations('.palette-esc')).toEqual({ 'flex': '0 0 auto' });
+    // filled one in the footer — so the same key looked like two controls. The
+    // in-field chip is gone entirely now: the footer's hints already teach Esc,
+    // and a keycap inside the input competed with the placeholder.
+    expect(css).not.toMatch(/\.palette-esc\s*\{/);
     expect(css).not.toMatch(/\.palette-footer kbd\s*\{/);
-    expect(css).not.toMatch(/\.palette-esc\s*\{[^}]*background:/);
+    // The footer's keys inherit the shell's footer band; only their layout is
+    // authored here.
+    expect(declarations('.palette-keys')['display']).toBe('inline-flex');
   });
 
   it('draws a group heading with the shared label and its mono count', () => {
@@ -133,12 +143,14 @@ describe('command palette vocabulary', () => {
     expect(declarations('.palette-item.is-active .palette-arrow')['display']).toBe('inline-grid');
   });
 
-  it('keeps the footer one line with the match count on the right', () => {
-    expect(declarations('.palette-footer')['justify-content']).toBeUndefined();
-    expect(declarations('.palette-count')['margin-left']).toBe('auto');
-    // The count is a visual reading of the live region above it, never a second
-    // announcement.
-    expect(paletteSource).toMatch(/class="palette-count"\s+aria-hidden="true"/);
+  it('states the match count once, not three times', () => {
+    // It was announced by the live region, counted on every group heading, and
+    // printed again in the footer. The footer copy is gone; the live region is
+    // the announcement and the group headings are the reading.
+    expect(css).not.toMatch(/\.palette-count\s*\{/);
+    expect(paletteSource).toContain('aria-live="polite"');
+    expect(paletteSource).not.toContain('palette-count');
+    expect(paletteSource).toMatch(/class="session-group-label palette-group-label"/);
   });
 
   it('highlights the run the filter actually tested', () => {

@@ -206,7 +206,12 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
           {preview === null
             ? loading
               ? 'Working out what this will change…'
-              : 'The rewind preview could not be loaded. Close this dialog and try again before rewinding.'
+              : // The one preview-failure line. It used to say "close this dialog
+                // and try again", while the `previewError` line below it said the
+                // conversation half still applies — two contradictory
+                // instructions on screen at once. The true reading is the one
+                // below: the file half is unknown, so it stays disabled.
+                'The file changes after this message could not be read. The transcript half can still be rewound.'
             : preview.messages_removed === 0
               ? 'Nothing after this message: the agent will just answer it again.'
               : `${preview.messages_removed} message${

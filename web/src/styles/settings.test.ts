@@ -126,12 +126,20 @@ describe('settings sheet: two panes, and the panel owns the scroll', () => {
     expect(hidden['display']).toBe('none');
   });
 
-  it('keeps the footer out of the scroll', () => {
-    const footer = declarations('.settings-footer');
-    // `sticky` is what the footer needed when the body scrolled; a footer
-    // outside the scroller does not need it and must not claim to be inside one.
-    expect(footer['position']).toBeUndefined();
-    expect(footer['flex']).toContain('0');
+  it('keeps the footer outside the scroller, and draws no band of its own', () => {
+    // The band — hairline, inset, pinned height, note on the left, actions on
+    // the right — belongs to `.overlay-footer`. The sheet passes its note and
+    // buttons into it. A `.settings-footer` box here was a second band: it kept
+    // its own flex and hairline while the shell already drew one, which is how
+    // the footer could be pushed out of the clipped sheet.
+    expect(css).not.toMatch(/\n\.settings-footer \{/);
+    expect(css).toMatch(
+      /\.overlay-footer-actions \.button \{\n {2}height: var\(--space-10\);/,
+    );
+    // The panel, not the sheet body, is the scroller that reaches the footer.
+    const panel = declarations('.settings-panels > .tab-panel');
+    expect(panel['overflow-y']).toBe('auto');
+    expect(declarations('.settings-body')['overflow-y']).toBeUndefined();
   });
 
   it('gives the pane header and footer one control height with the fields', () => {
@@ -168,9 +176,12 @@ describe('settings sheet: the phone layout', () => {
     expect(css).not.toMatch(/\.settings-nav-list \{[^}]*overflow-x: hidden/);
   });
 
-  it('drops the rail notes and the kicker to keep the strip one line', () => {
+  it('drops the rail notes to keep the strip one line', () => {
     expect(narrow).toMatch(/\.settings-nav-note \{[^}]*display: none/);
-    expect(narrow).toMatch(/\.settings-nav-kicker \{[^}]*display: none/);
+    // The "Settings" kicker is gone at every width, not just here: it named the
+    // dialog from inside the dialog. Nothing in the rail head may re-add a
+    // heading above the search field.
+    expect(css).not.toContain('.settings-nav-kicker');
   });
 });
 

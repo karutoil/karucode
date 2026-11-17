@@ -38,6 +38,7 @@ import { PluginInstallSection } from './PluginInstallSection';
 import { PluginToolOutputRow } from './PluginToolOutput';
 import { UpdateSettings } from './UpdateSettings';
 import { Dialog } from './Dialog';
+import { Overlay } from './Overlay';
 import {
   NotificationsDeliverySection,
   NotificationsDeviceSection,
@@ -53,6 +54,7 @@ import {
   SETTINGS_SCOPE_LABELS,
   SettingsNav,
   matchingSections,
+  paneCaption,
   searchSettings,
   settingsSection,
   type SettingsScope,
@@ -2074,9 +2076,17 @@ const SELF_SAVING: ReadonlySet<SettingsTab> = new Set<SettingsTab>([
   // restarts that plugin. The footer's "Save changes" cannot apply them, so
   // leaving this tab out would make a saved edit look discarded.
   'plugins',
+  // Same rule, same reasoning: Access commits each change the moment it is
+  // made (a password, a passkey, a tunnel), because a half-typed credential in
+  // a form would be a security state nobody asked for.
+  'access',
+  // Updates runs a check, installs a build and reports the result; there is
+  // nothing for this sheet's form to carry, and "Save changes" over it was a
+  // button that did nothing.
+  'updates',
 ]);
 
-const SELF_SAVING_NOTE = 'Every control here saves itself — Save changes does not affect this section.';
+const SELF_SAVING_NOTE = 'This section saves every change as you make it.';
 
 /**
  * Where each validated field lives: its tab, whether it sits behind that tab's
@@ -2423,20 +2433,66 @@ export function SettingsSheet(): JSX.Element | null {
   const errorTabs = [...new Set(Object.keys(errors).map(tabOf))];
 
   return (
-    <Dialog
+    <Overlay
       open
       title="Settings"
       onClose={actions.closeSettings}
-      class="dialog-sheet dialog-settings"
+      role="tall"
+      class="dialog-settings"
       labelId="settings-title"
-      // The sheet draws its own chrome: a rail with the word "Settings" and a
-      // search field, and a pane header that names the section on screen and
-      // carries the close button. A dialog header above those two would be a
-      // third band saying the same thing.
+      // The sheet draws its own chrome: a rail with the search field and a pane
+      // header that names the section on screen and carries the close button. A
+      // dialog header above those two would be a third band saying the same
+      // thing — and the rail's own kicker (the word "Settings" inside a dialog
+      // titled Settings) was that third band anyway.
       showHeader={false}
+      bodyLayout="static"
+      footer={
+        <>
+          <p class="settings-footer-note">
+            {SELF_SAVING.has(tab) ? SELF_SAVING_NOTE : SCOPE_NOTES[scope.scope]}
+          </p>
+          {/*
+           * Save is only offered where a section is committed by this form. A
+           * section that saves itself (Plugins, Access, Updates) used to show a
+           * disabled Save beside a note saying Save does nothing — the footer
+           * answering a question the pane below it had already answered. "Done"
+           * is the only honest control there.
+           */}
+          {SELF_SAVING.has(tab) ? (
+            <button type="button" class="button button-primary" onClick={actions.closeSettings}>
+              Done
+            </button>
+          ) : (
+            <>
+              <button type="button" class="button" onClick={actions.closeSettings}>
+                Cancel
+              </button>
+              <button type="submit" form="settings-form" class="button button-primary" disabled={disabled || saving}>
+                {saving ? 'Saving…' : 'Save changes'}
+              </button>
+            </>
+          )}
+        </>
+      }
+      footerNote={
+        errorCount > 0 ? (
+          // The error summary replaces the note in the same slot, so the buttons
+          // do not move between the two states.
+          <p class="settings-error-summary" role="alert">
+            <AlertIcon size={13} />
+            <span>
+              {errorCount} setting{errorCount === 1 ? '' : 's'} need
+              {errorCount === 1 ? 's' : ''} attention in{' '}
+              {errorTabs.map(tabLabel).join(', ')}.
+            </span>
+          </p>
+        ) : undefined
+      }
     >
       <div class="settings-body">
         <form
+          id="settings-form"
           class="settings-form"
           // The sheet validates every field itself and renders the message
           // inline (with aria-invalid + aria-describedby). Native constraint
@@ -2462,13 +2518,19 @@ export function SettingsSheet(): JSX.Element | null {
                 <div class="settings-pane-headings">
                   <div class="settings-pane-title-row">
                     <h2 class="settings-pane-title">{scope.label}</h2>
-                    {/* Who commits what: the one question the old sheet answered
-                      * in a single note buried in the Appearance section. */}
+                    {/* Who commits what, said once. This badge is the whole
+                      * answer; the caption under it used to repeat the same
+                      * fact in a sentence, and the footer states it a third
+                      * time next to the button that acts on it. The one tab
+                      * that keeps a line is `mixed`, where two facts are both
+                      * true at once. */}
                     <span class="badge settings-scope">
                       {SETTINGS_SCOPE_LABELS[scope.scope]}
                     </span>
                   </div>
-                  <p class="settings-pane-caption">{scope.caption}</p>
+                  {paneCaption(scope) ? (
+                    <p class="settings-pane-caption">{paneCaption(scope)}</p>
+                  ) : null}
                 </div>
                 <button
                   type="button"
@@ -3457,33 +3519,8 @@ export function SettingsSheet(): JSX.Element | null {
               </div>
             </div>
           </div>
-
-          <footer class="settings-footer">
-            {errorCount > 0 ? (
-              <p class="settings-error-summary" role="alert">
-                <AlertIcon size={13} />
-                <span>
-                  {errorCount} setting{errorCount === 1 ? '' : 's'} need
-                  {errorCount === 1 ? 's' : ''} attention in{' '}
-                  {errorTabs.map(tabLabel).join(', ')}.
-                </span>
-              </p>
-            ) : (
-              <p class="settings-footer-note">
-                {SELF_SAVING.has(tab) ? SELF_SAVING_NOTE : SCOPE_NOTES[scope.scope]}
-              </p>
-            )}
-            <div class="settings-footer-actions">
-              <button type="button" class="button" onClick={actions.closeSettings}>
-                Cancel
-              </button>
-              <button type="submit" class="button button-primary" disabled={disabled || saving}>
-                {saving ? 'Saving…' : 'Save changes'}
-              </button>
-            </div>
-          </footer>
         </form>
       </div>
-    </Dialog>
+    </Overlay>
   );
 }

@@ -30,23 +30,28 @@ export const UI_SLOT_COMPOSER_TOOLBAR = 'composer.toolbar';
 export const UI_SLOT_INSPECTOR_HEADER = 'inspector.header';
 /** The session header row above the transcript. */
 export const UI_SLOT_SESSION_HEADER = 'session.header';
-/** The workspace status bar at the bottom of the window. */
-export const UI_SLOT_STATUS_BAR = 'statusbar.item';
 /** A chip on one row of the project rail's session list. */
 export const UI_SLOT_SESSION_ROW_BADGE = 'session.row.badge';
-/** An item in a rail session row's right-click menu. */
-export const UI_SLOT_SESSION_ROW_MENU = 'session.row.menu';
 /** A chip beside the open session's title. */
 export const UI_SLOT_SESSION_HEADER_CHIP = 'session.header.chip';
 
-/** Every slot the app mounts. A button for any other slot is dropped. */
+/**
+ * Every slot the app mounts. A button for any other slot is dropped.
+ *
+ * This list and the mount sites are kept in step on purpose: a slot declared
+ * here but rendered nowhere is worse than no slot at all, because the host
+ * validates the declaration and the plugin author sees success while nothing
+ * appears. Two entries were removed for exactly that reason: `session.row.menu`
+ * (a menu entry needs the rail's own `MenuItem` rendering, which a contributed
+ * button or chip cannot provide) and `statusbar.item` (this build has no
+ * application status bar — only the file viewer's, which is not a plugin
+ * surface).
+ */
 export const UI_SLOT_IDS: readonly string[] = [
   UI_SLOT_COMPOSER_TOOLBAR,
   UI_SLOT_INSPECTOR_HEADER,
   UI_SLOT_SESSION_HEADER,
-  UI_SLOT_STATUS_BAR,
   UI_SLOT_SESSION_ROW_BADGE,
-  UI_SLOT_SESSION_ROW_MENU,
   UI_SLOT_SESSION_HEADER_CHIP,
 ];
 
@@ -94,8 +99,6 @@ export const UI_HIDE_RAIL_FOOTER = 'rail.footer';
 export const UI_HIDE_SESSION_HEADER_ACTIONS = 'session.header.actions';
 /** The notification bell and its panel. */
 export const UI_HIDE_NOTIFICATIONS = 'notifications';
-/** The workspace status bar. */
-export const UI_HIDE_STATUS_BAR = 'statusbar';
 /** The visible command-palette affordance (the chord stays bound). */
 export const UI_HIDE_COMMAND_PALETTE = 'command-palette';
 
@@ -105,6 +108,10 @@ export const UI_HIDE_COMMAND_PALETTE = 'command-palette';
  * Deliberately short and deliberately cosmetic: a plugin must not be able to
  * remove the control that stops a run or answers an approval, and a client-side
  * list is the last line of defence if a server payload names something else.
+ *
+ * Every entry here is consumed by an `isUiHidden(...)` call at its real control;
+ * `statusbar` was removed because this build has no application status bar to
+ * hide, and a target that nothing reads is a promise the app does not keep.
  */
 export const UI_HIDE_TARGETS: readonly string[] = [
   UI_HIDE_COMPOSER_ATTACH,
@@ -117,7 +124,6 @@ export const UI_HIDE_TARGETS: readonly string[] = [
   UI_HIDE_RAIL_FOOTER,
   UI_HIDE_SESSION_HEADER_ACTIONS,
   UI_HIDE_NOTIFICATIONS,
-  UI_HIDE_STATUS_BAR,
   UI_HIDE_COMMAND_PALETTE,
 ];
 
@@ -320,6 +326,14 @@ export interface ParsedPluginUi {
   keybindings: UiContribution[];
   /** Hidden built-in targets, with the plugins that asked for each. */
   hidden: Readonly<Record<string, string[]>>;
+  /**
+   * Renamed built-in labels: target → the text to draw instead.
+   *
+   * Asked for by a `replace` contribution. Consumers call `pluginText(ui, target,
+   * fallback)` rather than reading this directly, so there is one place that
+   * decides what a missing or empty replacement means.
+   */
+  replacements: Readonly<Record<string, string>>;
   /** Slots the server says it mounts (informational, for diagnostics). */
   slots: string[];
   /** Targets the server says are hideable (informational, for diagnostics). */
@@ -334,6 +348,7 @@ const EMPTY: ParsedPluginUi = {
   commands: [],
   keybindings: [],
   hidden: {},
+  replacements: {},
   slots: [],
   hideable: [],
   refused: [],
@@ -369,6 +384,11 @@ function readContribution(
   }
   const record = raw as Record<string, unknown>;
   const kind = text(record.kind);
+  if (kind === 'replace') {
+    // A `replace` is not a control: it renames a built-in label and is collected
+    // by `readReplacements`. Reaching here only means it is skipped as a control.
+    return `kind \`replace\` is not a drawable control`;
+  }
   if (kind !== 'button' && kind !== 'command' && kind !== 'keybinding') {
     // `hide` entries never arrive here (the host unions them into `hidden`), so
     // anything else is a shape this build does not draw.
@@ -472,6 +492,45 @@ function readStrings(raw: unknown): string[] {
 }
 
 /**
+ * Read the `replace` contributions into a target → text map.
+ *
+ * The host already refused any target outside the replaceable catalogue and any
+ * empty or over-long text, so this is defence in depth: a target this build does
+ * not know is dropped with a reason, and the *first* claim on a target wins in
+ * payload (discovery) order, matching the deterministic resolution every other
+ * contribution uses.
+ */
+function readReplacements(raw: unknown, refused: string[]): Record<string, string> {
+  const replacements: Record<string, string> = {};
+  if (!Array.isArray(raw)) return replacements;
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    if (text(record.kind) !== 'replace') continue;
+    const target = text(record.target);
+    const label = text(record.replace);
+    if (!UI_REPLACE_TARGETS.includes(target)) {
+      if (target !== '') refused.push(`replace target \`${target}\` is not replaceable`);
+      continue;
+    }
+    if (label === '') {
+      refused.push(`replace for \`${target}\` has no text`);
+      continue;
+    }
+    if (label.length > MAX_UI_LABEL_CHARS) {
+      refused.push(`replace for \`${target}\` is ${label.length} characters`);
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(replacements, target)) {
+      refused.push(`replace target \`${target}\` is renamed twice; the first wins`);
+      continue;
+    }
+    replacements[target] = label;
+  }
+  return replacements;
+}
+
+/**
  * Turn `plugin_ui` (or an older server's absence of it) into a render model.
  *
  * Never throws: a malformed payload yields fewer controls and a `refused` reason,
@@ -517,6 +576,7 @@ export function parsePluginUi(raw: unknown): ParsedPluginUi {
     commands,
     keybindings,
     hidden: readHidden(payload.hidden, refused),
+    replacements: readReplacements(rawContributions, refused),
     slots: readStrings(payload.slots),
     hideable: readStrings(payload.hideable),
     refused,
@@ -531,6 +591,20 @@ export function slotContributions(ui: ParsedPluginUi, slot: string): UiContribut
 /** Whether a plugin asked the app to hide one built-in control. */
 export function isUiHidden(ui: ParsedPluginUi, target: string): boolean {
   return Object.prototype.hasOwnProperty.call(ui.hidden, target);
+}
+
+/**
+ * The text to draw for a built-in label: a plugin's replacement when it asked
+ * for one, the app's own word otherwise.
+ *
+ * One function rather than reading `ui.replacements` at each call site, so
+ * "replaced", "never asked" and "asked with an empty string" can never diverge.
+ * Nothing on the replaceable catalogue states a safety property, so a rename can
+ * never change what an approval control or the sandbox warning says.
+ */
+export function pluginText(ui: ParsedPluginUi, target: string, fallback: string): string {
+  const replacement = ui.replacements[target];
+  return replacement !== undefined && replacement !== '' ? replacement : fallback;
 }
 
 /**

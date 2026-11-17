@@ -1,5 +1,5 @@
 {
-  "count": 36,
+  "count": 37,
   "generated_by": "cargo run -p kc-docs -- --write",
   "topics": [
     {
@@ -331,6 +331,29 @@
         "env"
       ],
       "title": "Change karucode's configuration"
+    },
+    {
+      "applies_to": [
+        "file:crates/kc-core/src/contrib.rs",
+        "hook:on_tool_call",
+        "hook:before_prompt",
+        "config:[[plugins]]"
+      ],
+      "path": "contribution-registry.md",
+      "slug": "contribution-registry",
+      "source": "crates/kc-core/src/contrib.rs:1",
+      "summary": "The Add / Remove / Replace / Wrap primitive behind every extensible registry in karucode, and how precedence decides a conflict.",
+      "tags": [
+        "extensibility",
+        "registry",
+        "plugins",
+        "override",
+        "remove",
+        "precedence",
+        "hooks",
+        "tools"
+      ],
+      "title": "Extend or override harness behaviour (contribution registry)"
     },
     {
       "applies_to": [

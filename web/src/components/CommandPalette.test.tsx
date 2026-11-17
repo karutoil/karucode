@@ -82,16 +82,19 @@ describe('the palette chrome', () => {
     expect(row.textContent).toContain('Open ');
   });
 
-  it('counts each group in its heading, and the whole list in the footer', async () => {
+  it('counts each group in its heading, and announces the whole list once', async () => {
     const input = openPalette();
 
     const heading = screen.getByText('Actions');
     expect(heading.querySelector('span')?.textContent).toBe('5');
-    expect(document.querySelector('.palette-count')?.textContent).toBe('5 results');
+    // The live region is the one place the total is announced. The footer used
+    // to print it a third time, beside the group counts that already carry it.
+    expect(document.querySelector('.palette-count')).toBeNull();
+    expect(document.querySelector('[aria-live="polite"]')?.textContent).toBe('5 results');
 
     fireEvent.input(input, { target: { value: 'open' } });
     await waitFor(() =>
-      expect(document.querySelector('.palette-count')?.textContent).toBe('2 of 5'),
+      expect(document.querySelector('[aria-live="polite"]')?.textContent).toBe('2 results'),
     );
     // The heading counts what is in front of the reader, not the catalog.
     expect(screen.getByText('Actions').querySelector('span')?.textContent).toBe('2');
@@ -104,7 +107,7 @@ describe('the palette chrome', () => {
     await waitFor(() => expect(document.querySelector('.palette-empty')).toBeTruthy());
     expect(screen.getByText('No matching commands')).toBeTruthy();
     expect(screen.getByText(/Nothing in a name, a group or a shortcut matched/)).toBeTruthy();
-    expect(document.querySelector('.palette-count')?.textContent).toBe('0 of 5');
+    expect(document.querySelector('[aria-live="polite"]')?.textContent).toBe('0 results');
   });
 
   it('lists a session with its age under the Sessions heading', () => {

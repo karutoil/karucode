@@ -98,9 +98,14 @@ describe('theme studio shell', () => {
     expect(store.themeStudioOpen.value).toBe(false);
   });
 
-  it('closes on Escape even when the event targets the window', () => {
+  it('closes on Escape when the key is pressed inside the drawer', () => {
+    // Escape is the shell's focus trap, not a window listener: a drawer-local
+    // fallback could never fire for a key typed inside the studio (the trap
+    // stopPropagation's it in the capture phase) and would have closed the
+    // drawer underneath the delete confirmation if it had.
     renderOpen();
-    fireEvent.keyDown(window, { key: 'Escape' });
+    const dialog = screen.getByRole('dialog', { name: 'Theme studio' });
+    fireEvent.keyDown(dialog, { key: 'Escape' });
     expect(store.themeStudioOpen.value).toBe(false);
     expect(screen.queryByTestId('theme-studio')).toBeNull();
   });
@@ -113,7 +118,8 @@ describe('theme studio shell', () => {
     act(() => {
       actions.openThemeStudio();
     });
-    const shade = document.querySelector('.theme-shade');
+    // The veil is the one the shell draws, not a private `.theme-shade`.
+    const shade = document.querySelector('.dialog-layer .dialog-backdrop');
     expect(shade).not.toBeNull();
     fireEvent.click(shade as Element);
     expect(screen.queryByTestId('theme-studio')).toBeNull();
@@ -623,7 +629,7 @@ describe('mock fidelity', () => {
       expect(screen.getByRole('heading', { name: heading })).toBeTruthy();
     }
     expect(
-      screen.getByText('Start from a look you love. Every part of the UI can be customized.'),
+      screen.getByText('Pick a preset, then adjust anything below. Changes apply as you make them.'),
     ).toBeTruthy();
     expect(
       screen.getByText('Click a swatch or enter a hex code. Changes appear instantly.'),

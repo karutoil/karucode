@@ -131,6 +131,7 @@ pub const REQUIRED_SLUGS: &[&str] = &[
     "builtin-tools",
     "central-control",
     "configuration",
+    "contribution-registry",
     "deployment",
     "documentation",
     "ephemeral-sessions",

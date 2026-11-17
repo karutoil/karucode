@@ -6,6 +6,8 @@ import { copyText } from '../lib/clipboard';
 import { modKey } from '../lib/platform';
 import type { SessionAnnotation, SessionSummary } from '../api/types';
 import { formatCount, relativeTime } from '../lib/format';
+import { PluginSlot } from './PluginSlot';
+import { pluginText, UI_REPLACE_NEW_SESSION_LABEL, UI_SLOT_SESSION_ROW_BADGE } from './uiContributions';
 import { contextUsage, sessionStatusView } from '../state/selectors';
 import * as store from '../state/store';
 import * as actions from '../state/actions';
@@ -263,6 +265,10 @@ function SessionRow({
                 {chip.text}
               </span>
             ))}
+            {/* Controls a plugin contributed for this row. Mounted so the
+              * `session.row.badge` slot declared by the catalogue is real; an
+              * empty slot renders nothing and costs no space. */}
+            <PluginSlot slot={UI_SLOT_SESSION_ROW_BADGE} />
           </span>
           <span class="session-meta">
             {session.running ? <span class="sr-only">Running. </span> : null}
@@ -426,7 +432,8 @@ export function SessionList({
             .
           </p>
           <button type="button" class="button button-primary" onClick={onCreate}>
-            <PlusIcon size={14} /> New session
+            <PlusIcon size={14} />{' '}
+            {pluginText(store.pluginUi.value, UI_REPLACE_NEW_SESSION_LABEL, 'New session')}
           </button>
           <p class="rail-hint">
             Create with <kbd>{modKey()}</kbd> + <kbd>N</kbd>, or pick one from the command palette{' '}
@@ -447,7 +454,8 @@ export function SessionList({
             )}
           </p>
           <button type="button" class="button" onClick={onCreate}>
-            <PlusIcon size={14} /> New session
+            <PlusIcon size={14} />{' '}
+            {pluginText(store.pluginUi.value, UI_REPLACE_NEW_SESSION_LABEL, 'New session')}
           </button>
         </div>
       ) : (
@@ -1031,7 +1039,8 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
             aria-label={`New session (${modKey()} + N)`}
           >
             <span class="new-left">
-              <PlusIcon size={15} /> New session
+              <PlusIcon size={15} />{' '}
+              {pluginText(store.pluginUi.value, UI_REPLACE_NEW_SESSION_LABEL, 'New session')}
             </span>
             <span class="shortcut">{modKey()} N</span>
           </button>

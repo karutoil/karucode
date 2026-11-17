@@ -9,8 +9,10 @@
  */
 
 .notification-center {
-  width: min(560px, calc(100vw - 32px));
-  max-height: min(78dvh, 720px);
+  /* A list to read: the wide measure. The shell caps the height; this keeps it
+   * off the full screen so the workspace stays in view behind the veil. */
+  width: min(var(--overlay-w-wide), 100%);
+  max-height: min(78dvh, var(--overlay-h-tall));
 }
 
 .notification-toolbar {

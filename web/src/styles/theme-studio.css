@@ -1,69 +1,25 @@
 /* Theme Studio drawer.
  *
- * Every colour, radius, font and border here comes from the live theme tokens,
- * so the studio repaints itself while you edit it. Layout is a fixed right-hand
- * drawer that becomes near-full-width on phones.
+ * A drawer on the one modal shell: `Overlay role="drawer"` supplies the layer,
+ * the veil, the portal, the focus trap and the slide; this file owns the
+ * drawer's own content — the theme gallery, the colour cells, the interface
+ * controls and the footer.
+ *
+ * It used to be a second implementation of all of that. `.theme-studio-layer`
+ * restated the dialog layer's `z-index`, `.theme-shade` re-pointed at the one
+ * scrim, `@keyframes theme-studio-slide` repeated the slide, and
+ * `overlays.css` had to name `.theme-studio-layer` in its one-veil-per-stack
+ * rule — four pieces of duplication whose only cause was that the drawer was
+ * written before the shell existed. Every colour, radius, font and border here
+ * still comes from the live theme tokens, so the studio repaints itself while
+ * you edit it.
  */
 
-.theme-studio-layer {
-  position: fixed;
-  inset: 0;
-  /* One rung with `.dialog-layer`, and both are portalled into <body>, so the
-   * surface opened last paints on top. The drawer used to claim 110 from inside
-   * `.app-root` (a stacking context), which meant the number did nothing while
-   * the *older* dialog it was opened from stayed on top (DESIGN-AUDIT overlays
-   * B6). A proper `--z-dialog/--z-drawer/--z-toast` scale belongs in tokens.css;
-   * until it lands, both layers share this value and DOM order decides. */
-  z-index: 100;
-}
-
-.theme-shade {
-  position: absolute;
-  inset: 0;
-  /* One scrim for the whole overlay family; overlays.css owns the definition
-   * (a light mode needs a far weaker veil than a dark one). */
-  background: var(--overlay-scrim);
-  backdrop-filter: var(--overlay-blur);
-  animation: theme-studio-fade 160ms ease-out;
-}
-
 .theme-studio {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 1;
-  width: min(580px, calc(100% - 58px));
-  display: flex;
-  flex-direction: column;
-  background: var(--surface-raised);
-  border-left: 1px solid var(--line-strong);
-  box-shadow: var(--shadow-overlay);
-  color: var(--text);
-  /* The mock's global 13px/1.5 body rhythm applies to the whole drawer. */
+  /* `Overlay` already sets the surface, the border and the shadow. The drawer
+   * keeps its own type rhythm: the mock's global 13px/1.5 body. */
   font-size: var(--fs-body);
   line-height: 1.5;
-  animation: theme-studio-slide 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-@keyframes theme-studio-fade {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes theme-studio-slide {
-  from {
-    transform: translateX(25px);
-    opacity: 0.7;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
 }
 
 .theme-studio *,
@@ -101,73 +57,24 @@
 }
 
 /* ---------- header ----------------------------------------------------- */
-
-.theme-studio-top {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-7);
-  padding: var(--space-9) var(--space-10) var(--space-9);
-  border-bottom: 1px solid var(--line);
-}
+/* The heading is the shell's `.overlay-header`: one title size, one close
+ * button, one hairline, shared with every other dialog. The studio used to
+ * stack an "⚙ PERSONALIZATION" eyebrow, a "Live preview" badge, a 24px title
+ * and a subtitle before the first control — four lines of chrome, two of which
+ * carried no state (the footer's autosave line is the real liveness signal and
+ * the palette icon was decoration on a screen that *is* the palette). */
 
 .theme-studio-head {
   flex: 1;
   min-width: 0;
 }
 
-.theme-top-eyebrow {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  font-size: var(--fs-micro);
-  font-weight: var(--weight-kicker);
-  letter-spacing: var(--tracking-kicker);
-  text-transform: uppercase;
-  color: var(--accent-fill);
-}
-
-.theme-top-eyebrow svg {
-  color: var(--accent);
-}
-
-.theme-head-badge {
-  font: var(--fs-micro) var(--font-mono);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-xs);
-  /* the accent's text half on the accent tint: the fill measured 3.61:1 */
-  color: var(--accent-fill);
-  background: var(--accent-bg);
-}
-
 .theme-studio-title {
-  margin: var(--space-4) 0 var(--space-2);
-  font-size: var(--fs-hero);
-  font-weight: 700;
-  letter-spacing: -0.95px;
+  margin: 0;
 }
 
 .theme-studio-subtitle {
   margin: 0;
-  font-size: var(--fs-small);
-  line-height: 1.55;
-  color: var(--muted);
-}
-
-.theme-close {
-  flex: 0 0 auto;
-  width: 31px;
-  height: 31px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--muted);
-}
-
-.theme-close:hover {
-  color: var(--text);
-  border-color: var(--accent);
 }
 
 /* ---------- scroll region + sections ----------------------------------- */
@@ -909,20 +816,32 @@
 }
 
 /* ---------- footer ------------------------------------------------------ */
+/* The footer band is the shell's `.overlay-footer` (hairline, inset, height)
+ * and the row inside it is the shell's `.overlay-footer-actions`. This lays out
+ * what sits in that row: the autosave/contrast status, then the four actions.
+ * Both used to be studio-private — its own padding, its own hairline, its own
+ * `margin-bottom` under the status strip — so the drawer's footer and every
+ * other dialog's footer were two recipes for one band. */
 
 .theme-studio-foot {
-  flex: 0 0 auto;
-  padding: var(--space-7) var(--space-10) var(--space-8);
-  border-top: 1px solid var(--line);
-  background: transparent;
+  flex-wrap: wrap;
 }
 
-.theme-studio-foot-top {
+.theme-studio-foot-actions {
+  flex-wrap: wrap;
+  gap: var(--space-5) var(--space-6);
+}
+
+/* The status strip: what is stored, and how readable it is. It takes the slack
+ * so the four actions keep the right edge. */
+.theme-studio-status {
   display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-6);
-  margin-bottom: var(--space-6);
+  gap: var(--space-2) var(--space-6);
+  min-width: 0;
 }
 
 .theme-autosave {
@@ -1029,11 +948,8 @@
 /* ---------- motion preferences ----------------------------------------- */
 
 @media (prefers-reduced-motion: reduce) {
-  .theme-shade,
-  .theme-studio {
-    animation: none;
-  }
-
+  /* The drawer's arrival is the shell's `overlay-slide-right`; `overlays.css`
+   * already stops it, so only the studio's own hovers are turned off here. */
   .theme-preset,
   .theme-btn {
     transition: none;
@@ -1046,27 +962,13 @@
 
 /* ---------- responsive -------------------------------------------------- */
 
-/* The mock never narrows the drawer at tablet widths: it keeps the 580px
- * desktop geometry until 620px, then becomes a near-full-width sheet. */
+/* The drawer's width is the role's (`--overlay-w-drawer`, and full width below
+ * 640px on the shell's own tier). What is left at 620px is the studio's own
+ * density: two columns of preset cards and colour cells stop being readable
+ * before the panel does. */
 @media (max-width: 620px) {
-  .theme-studio {
-    width: min(580px, calc(100% - 28px));
-  }
-
-  .theme-studio-top {
-    padding: var(--space-7) var(--space-7);
-  }
-
-  .theme-studio-title {
-    font-size: var(--fs-display);
-  }
-
   .theme-studio-scroll {
     padding: 0 var(--space-7) var(--space-9);
-  }
-
-  .theme-studio-foot {
-    padding: var(--space-6) var(--space-7);
   }
 
   .theme-gallery {
@@ -1105,8 +1007,11 @@
     padding: var(--space-5) var(--space-4);
   }
 
-  .theme-studio-foot-top {
-    flex-wrap: wrap;
-    row-gap: var(--space-2);
+  .theme-studio-foot-actions {
+    width: 100%;
+  }
+
+  .theme-studio-status {
+    flex-basis: 100%;
   }
 }

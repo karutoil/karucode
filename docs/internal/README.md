@@ -22,6 +22,7 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`builtin-tools`](builtin-tools.md) | What each first-party tool does, how it is gated, and the limits and gotchas that shape its output. | `crates/kc-tools/src/lib.rs:7` |
 | [`central-control`](central-control.md) | Open as many control-plane chats as you need; each audits, steers and starts sessions under normal approvals, outside every project. | `crates/kc-server/src/control.rs:3` |
 | [`configuration`](configuration.md) | The four config layers, which settings apply live, and how secrets and invalid values are handled. | `crates/kc-server/src/settings.rs:14` |
+| [`contribution-registry`](contribution-registry.md) | The Add / Remove / Replace / Wrap primitive behind every extensible registry in karucode, and how precedence decides a conflict. | `crates/kc-core/src/contrib.rs:1` |
 | [`deployment`](deployment.md) | Install the binary and a hardened unit, keep it enabled across reboots, and upgrade or roll back without losing the paths it needs. | `crates/kc-server/src/main.rs:6` |
 | [`documentation`](documentation.md) | Doc blocks in the code compile into the built-in docs the agent reads; add, update and delete them with the code. | `crates/kc-docs/src/lib.rs:33` |
 | [`ephemeral-sessions`](ephemeral-sessions.md) | Create an ephemeral session for a program: it never appears in a session list and deletes itself once its work is over. | `crates/kc-server/src/routes/sessions.rs:3` |
@@ -52,4 +53,4 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`web-auth`](web-auth.md) | Put a password or a passkey in front of the web UI, choose the address it answers to, and understand what each sign-in method costs. | `crates/kc-server/src/routes/auth.rs:14` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-36 topic(s).
+37 topic(s).

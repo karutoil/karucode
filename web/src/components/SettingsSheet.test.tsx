@@ -1229,20 +1229,44 @@ describe('SettingsSheet controls', () => {
     expect(patches[0]?.model?.temperature).toBe(0.4);
   });
 
-  it('keeps the settings sheet on the mock’s chrome classes', async () => {
+  it('keeps the settings sheet on the shared overlay shell', async () => {
     installFetch(twoProfileConfig());
     const { container } = renderSheet(twoProfileConfig());
 
     const sheet = await screen.findByRole('dialog', { name: 'Settings' });
-    expect(sheet.className).toContain('dialog-sheet');
+    // Settings is a `tall` document on the one shell, not a right-edge drawer:
+    // `.dialog-sheet` set a 580px width that `.dialog-settings` then overrode to
+    // 960px, so the sheet was a drawer that no longer looked like one and not
+    // yet a dialog. The measure is the role's now.
+    expect(sheet.className).toContain('overlay');
+    expect(sheet.className).toContain('overlay-tall');
     expect(sheet.className).toContain('dialog-settings');
+    expect(sheet.className).not.toContain('dialog-sheet');
     // The two-pane shell: a rail with the search field and one row per section,
     // then a pane header that names the section on screen.
     expect(within(sheet).getByRole('searchbox', { name: 'Search settings' })).not.toBeNull();
     expect(within(sheet).getByRole('tablist', { name: 'Settings sections' })).not.toBeNull();
     expect(sheet.querySelector('.settings-pane-title')?.textContent).toBe('Appearance');
     expect(container.querySelectorAll('.setting-row').length).toBeGreaterThan(0);
-    expect(container.querySelector('.settings-footer')).not.toBeNull();
+    // The decision band is the shell's footer, not a box the sheet draws: the
+    // note and the buttons are passed into `.overlay-footer`.
+    expect(sheet.querySelector('.overlay-footer')).not.toBeNull();
+    expect(within(sheet).getByRole('button', { name: 'Save changes' })).not.toBeNull();
+  });
+
+  it('states the section and who commits it once, not four times', async () => {
+    installFetch(twoProfileConfig());
+    const { container } = renderSheet(twoProfileConfig());
+
+    const sheet = await screen.findByRole('dialog', { name: 'Settings' });
+    const pane = sheet.querySelector('.settings-pane-head') as HTMLElement;
+    // Appearance is stored in the browser: the badge says so and the footer
+    // says so next to the button that acts on it. The sentence between them
+    // ("How the workspace looks and how the conversation is drawn…") restated
+    // the heading it sat under, so it is gone.
+    expect(pane.querySelector('.settings-scope')?.textContent).toBe('This browser');
+    expect(pane.querySelector('.settings-pane-caption')).toBeNull();
+    expect(container.querySelector('.settings-nav-kicker')).toBeNull();
   });
 });
 
@@ -2133,10 +2157,18 @@ describe('SettingsSheet plugins', () => {
     expect(panel.querySelector('#settings-skills-switch')).not.toBeNull();
 
     // A switch that commits itself must not sit above a footer claiming Save is
-    // what keeps it.
+    // what keeps it — and the footer must not offer Save either, since pressing
+    // it would do nothing here. "Done" is the only honest control.
     const note = document.querySelector('.settings-footer-note')?.textContent ?? '';
-    expect(note).toContain('saves itself');
+    expect(note).toContain('saves every change');
     expect(note).not.toContain('press Save changes');
+    // The note and the buttons are siblings in the shell's footer, so scope the
+    // query to the buttons.
+    expect(
+      within(document.querySelector('.overlay-footer-actions') as HTMLElement).queryByRole('button', {
+        name: 'Save changes',
+      }),
+    ).toBeNull();
 
     // Searchable by what it holds, not only by its name: the synonyms reach the
     // rail even before the panel has any data to print.

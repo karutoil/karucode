@@ -17,6 +17,18 @@
 :root {
   --overlay-scrim: var(--scrim);
   --overlay-blur: blur(4px);
+  /* The modal vocabulary: one inset from the viewport edge, and one width per
+   * role. `Overlay.tsx` names the role; these are the only widths in the
+   * product. A dialog that needs a different number needs a different role. */
+  --overlay-inset: var(--space-7);
+  --overlay-w-compact: 480px;
+  --overlay-w-standard: 620px;
+  --overlay-w-wide: 860px;
+  --overlay-w-tall: 960px;
+  --overlay-h-tall: 760px;
+  --overlay-w-drawer: 620px;
+  --overlay-w-full: 1160px;
+  --overlay-w-palette: 560px;
 }
 
 /* `--scrim` is 60% of a near-black anchored to `bg`, which is a dark theme's
@@ -37,9 +49,14 @@
  * the moment the user stacked layers. Every layer shares z-index 100 and is
  * portalled into <body> in order, so the topmost one is the last sibling: it
  * owns the veil and the layers under it drop theirs. The older drawer is still
- * dimmed — by the newer veil, which covers the whole viewport. */
+ * dimmed — by the newer veil, which covers the whole viewport.
+ *
+ * This is keyed on the layer, not on a list of features: the Theme studio used
+ * to be named here a second time because it was a second implementation of the
+ * same layer. It uses `.dialog-layer` now, so a new dialog is covered by this
+ * rule the day it is written. */
 body
-  > :is(.dialog-layer, .theme-studio-layer):has(~ :is(.dialog-layer, .theme-studio-layer))
+  > .dialog-layer:has(~ .dialog-layer)
   :is(.dialog-backdrop, .theme-shade) {
   background: transparent;
   backdrop-filter: none;
@@ -63,6 +80,260 @@ body
   backdrop-filter: var(--overlay-blur);
 }
 
+/* ---------- the modal shell: one document, seven measures ---------------- */
+/* Every modal is the same three-band document (header, scrolling body, footer)
+ * and differs only in *measure* and *anchor*. Those two facts used to be
+ * re-authored per feature as `width: min(Npx, calc(100vw - Mpx))` literals in
+ * nine stylesheets — 460, 520, 560, 620, 760, 960, 1040 and 1200px with gaps of
+ * 24, 28, 32 and 48px — so Settings (a 580px right drawer overridden to 960px)
+ * and the Theme studio (a 580px drawer) were the same *kind* of surface with
+ * nothing in common. `Overlay.tsx` names the measure; this table is the only
+ * place a width is written. A new dialog picks a word, it does not pick a
+ * number. */
+
+.overlay {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  /* The cap every role inherits: one inset from the viewport edge, so a dialog
+   * never touches the chrome it covers. `--overlay-inset` is the one inset —
+   * the four that used to exist (24/28/32/48) were the same decision four
+   * times. */
+  max-width: calc(100vw - var(--overlay-inset) * 2);
+  max-height: calc(100dvh - var(--space-10) - var(--space-7));
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-overlay);
+  overflow: hidden;
+  animation: dialog-in var(--transition) ease-out;
+}
+
+/* `compact` — a question with buttons, anchored high so the eye finds it where
+ * it already is rather than travelling to the middle of the screen. */
+.overlay-compact {
+  align-self: start;
+  width: min(var(--overlay-w-compact), 100%);
+  margin-top: min(17vh, 150px);
+}
+
+/* `standard` — a form with fields. The default: centred, a readable measure. */
+.overlay-standard {
+  width: min(var(--overlay-w-standard), 100%);
+}
+
+/* `wide` — a list to read or pick from. */
+.overlay-wide {
+  width: min(var(--overlay-w-wide), 100%);
+}
+
+/* `tall` — a two-pane configuration document. A cap in `dvh` rather than a
+ * fixed height, so it is a window on a short screen and a page on a tall one. */
+.overlay-tall {
+  width: min(var(--overlay-w-tall), 100%);
+  height: min(var(--overlay-h-tall), calc(100dvh - var(--space-10) - var(--space-7)));
+}
+
+/* `drawer` — the same document slid in from the right edge. Full height, no
+ * top or bottom radius: it is a panel of the window, not a card on it. */
+.overlay-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(var(--overlay-w-drawer), calc(100% - var(--space-9)));
+  max-height: none;
+  max-width: none;
+  border: 0;
+  border-left: 1px solid var(--line-strong);
+  border-radius: 0;
+  animation: overlay-slide-right 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* The drawer's layer is a positioning context, not a centred grid. */
+.dialog-layer[data-overlay-role='drawer'] {
+  display: block;
+  padding: 0;
+}
+
+/* `full` — an object to look at: a file, an artifact, an image. It takes the
+ * screen it can get without touching the edges. */
+.overlay-full {
+  width: min(var(--overlay-w-full), 100%);
+  height: min(84dvh, calc(100dvh - var(--space-10) - var(--space-7)));
+}
+
+/* `palette` — a search field over a list. Narrow on purpose: it is a way in,
+ * not a workspace, and the list owns the height. */
+.overlay-palette {
+  align-self: start;
+  width: min(var(--overlay-w-palette), 100%);
+  max-height: min(90vh, 475px);
+  margin-top: min(12vh, 110px);
+}
+
+/* Header bands are not a third fill. The dialog's edge is its frame and a
+ * hairline is the only thing under the name, the way the file toolbar
+ * separates itself from the document it sits over (`§3.1`: a dialog may not
+ * contain a rung above its own, and `--surface` flips brightness between
+ * modes). */
+.overlay-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-6);
+  flex: 0 0 auto;
+  padding: var(--space-7) var(--space-7) var(--space-6) var(--space-8);
+  border-bottom: 1px solid var(--line);
+}
+
+.overlay-headings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* One title size for the whole family. It was 24px in the Theme studio, 16px
+ * in Settings, 11px mono in the file viewer and the default everywhere else —
+ * four answers to "what size is a dialog's name". */
+.overlay-title {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-title);
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  line-height: 1.3;
+}
+
+.overlay-description {
+  color: var(--muted);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+}
+
+/* One close button for every dialog. `31px` was the shared guess; the target is
+ * the 30px `.button` control height, so the header's one control lines up with
+ * the footer's. */
+.overlay-close {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: var(--space-10);
+  height: var(--space-10);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  transition:
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.overlay-close:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+
+.overlay-close:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* The body is the scroller. `min-height: 0` is what lets a flex child actually
+ * shrink below its content and scroll instead of pushing the footer out of the
+ * clipped dialog — the defect that clipped "Create & switch" in the branch
+ * dialog and the rewind's buttons before it. */
+.overlay-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* A body that scrolls itself, or holds panes that do: no second scroller, and
+ * no gutter reserved for one that never appears.
+ *
+ * `overflow: hidden` is load-bearing, not tidiness. A flex item's automatic
+ * minimum height is its content's, and `visible` does not override that: the
+ * Settings body measured 945px inside a 760px dialog and ran past its own
+ * footer. `hidden` takes the automatic minimum to zero, so the panel below it
+ * is the thing that scrolls — which is what "static" means here. */
+.overlay-body.is-static {
+  overflow: hidden;
+  flex: 1 1 auto;
+}
+
+/* The footer never scrolls and never shrinks: the decision stays where the eye
+ * left it. */
+.overlay-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  flex: 0 0 auto;
+  padding: var(--space-5) var(--space-7) var(--space-5) var(--space-8);
+  border-top: 1px solid var(--line);
+}
+
+.overlay-footer-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  line-height: 1.5;
+}
+
+.overlay-footer-note:empty {
+  display: none;
+}
+
+/* The row holds the note and the buttons, and the buttons keep the right edge:
+ * `margin-left: auto` on the first control would only work if the note were a
+ * sibling, and it is a leading sibling inside this row instead. The row itself
+ * is the full width of the band. */
+.overlay-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: auto;
+}
+
+/* The action controls sit at the far end; everything before them (the note, an
+ * error summary, a status strip) takes the slack. */
+.overlay-footer-actions > .button:first-of-type {
+  margin-left: auto;
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes overlay-slide-right {
+  from {
+    opacity: 0.7;
+    transform: translateX(25px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* @deprecated: the pre-`Overlay` shell. Kept compiling while call sites move to
+ * `role`; delete once `.dialog` has no call site left. Its header, title,
+ * description and actions are aliases of the rules above, not a second recipe. */
 .dialog {
   position: relative;
   display: flex;
@@ -73,18 +344,7 @@ body
   background: var(--surface-raised);
   box-shadow: var(--shadow-overlay);
   overflow: hidden;
-  animation: dialog-in 160ms ease-out;
-}
-
-@keyframes dialog-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px) scale(0.995);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
+  animation: dialog-in var(--transition) ease-out;
 }
 
 .dialog-header {
@@ -93,14 +353,14 @@ body
   justify-content: space-between;
   gap: var(--space-6);
   flex: 0 0 auto;
-  padding: var(--space-8) var(--space-7) var(--space-7) var(--space-9);
+  padding: var(--space-7) var(--space-7) var(--space-6) var(--space-8);
   border-bottom: 1px solid var(--line);
 }
 
 .dialog-headings {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
   min-width: 0;
 }
 
@@ -110,23 +370,23 @@ body
   font-family: var(--font-ui);
   font-size: var(--fs-title);
   font-weight: 700;
-  letter-spacing: -0.4px;
-  line-height: 1.25;
+  letter-spacing: -0.2px;
+  line-height: 1.3;
 }
 
 .dialog-description {
   color: var(--muted);
-  font-size: var(--fs-tiny);
-  line-height: 1.55;
+  font-size: var(--fs-small);
+  line-height: 1.5;
 }
 
 .dialog-header .icon-button {
   flex: 0 0 auto;
-  width: 31px;
-  height: 31px;
+  width: var(--space-10);
+  height: var(--space-10);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface-raised);
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--muted);
 }
 
@@ -135,15 +395,16 @@ body
   color: var(--text);
 }
 
-/* Small dialogs sit at the mock's overlay cap (17vh), like the palette. */
+/* A confirmation asks one question: it is top-anchored, at the compact
+ * measure. */
 .dialog-confirm {
   align-self: start;
-  width: min(460px, calc(100vw - 32px));
+  width: min(var(--overlay-w-compact), 100%);
   margin-top: min(17vh, 150px);
 }
 
 .confirm-body {
-  padding: var(--space-7) var(--space-9) var(--space-8);
+  padding: var(--space-6) var(--space-8) var(--space-7);
   color: var(--text-secondary);
   font-size: var(--fs-message);
   line-height: 1.7;
@@ -154,11 +415,16 @@ body
   font-weight: 600;
 }
 
+/* The action row. `flex: 0 0 auto` is the fix for a footer that could be pushed
+ * out of a clipped dialog: only two surfaces overrode it before, so every other
+ * footer was one long body away from being unreachable. */
 .dialog-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: var(--space-4);
-  margin-top: var(--space-8);
+  flex: 0 0 auto;
+  margin-top: var(--space-7);
 }
 
 /* ---------- command palette -------------------------------------------
@@ -183,8 +449,8 @@ body
 
 .dialog-palette {
   align-self: start;
-  width: min(520px, calc(100vw - 32px));
-  margin-top: min(17vh, 150px);
+  width: min(var(--overlay-w-palette), 100%);
+  margin-top: min(12vh, 110px);
   max-height: min(90vh, 475px);
   border-radius: var(--radius);
 }
@@ -192,14 +458,40 @@ body
 /* The field *is* the top bar, and it paints no fill of its own: the dialog's own
  * edge is its frame and a hairline is the only thing under it, the way the file
  * toolbar separates itself from the document it sits over. */
+/* The palette's one header band: the search field *is* the top of the
+ * document, and it paints no fill of its own — the dialog's edge is its frame
+ * and a hairline is the only thing under it, the way the file toolbar separates
+ * itself from the document it sits over. */
+.dialog-palette .dialog-header {
+  padding: 0;
+  border-bottom: 0;
+  align-items: center;
+}
+
+.dialog-palette .dialog-title {
+  align-self: center;
+  padding-left: var(--space-8);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  font-weight: 600;
+  letter-spacing: var(--tracking-kicker);
+  text-transform: uppercase;
+}
+
+.dialog-palette .dialog-header .icon-button {
+  margin-right: var(--space-5);
+  border-color: transparent;
+  background: transparent;
+}
+
 .palette-search {
   display: flex;
   align-items: center;
   gap: var(--space-6);
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
   min-height: 56px;
-  padding: 0 var(--space-8);
-  border-bottom: 1px solid var(--line-soft);
+  padding: 0 var(--space-5);
   /* The glyph is decoration (§4): `--faint` is the role for it, and it is what
    * the rail's own search field uses. */
   color: var(--faint);
@@ -224,8 +516,9 @@ body
 /* The field is the only input in the dialog and it is focused whenever the
  * palette is open, so its focus cue is the divider itself changing colour — one
  * hairline, not a second 2px rule stacked on the first. Two of those made the
- * top of the dialog read as a banner. */
-.palette-search:focus-within {
+ * top of the dialog read as a banner. The divider is the header's own
+ * `border-bottom`, so the cue is painted on the band that owns it. */
+.dialog-palette:focus-within .dialog-header {
   border-bottom-color: var(--accent);
 }
 
@@ -317,10 +610,6 @@ body
 
 .palette-item.is-active .palette-item-icon {
   color: var(--accent-on-tint);
-}
-
-.palette-esc {
-  flex: 0 0 auto;
 }
 
 .palette-label {
@@ -420,26 +709,17 @@ body
   line-height: 1.5;
 }
 
-/* One hint line, not a second bar: the keys are the shared keycaps, the words
- * after them are `--fs-tiny` prose, and the match count holds the right edge in
- * mono. It used to be three groups spread across the full width, which read as
- * three separate controls. The horizontal inset is the search field's, so the
- * two rows of the dialog share one left and one right edge. */
-.palette-footer {
-  display: flex;
-  align-items: center;
-  gap: var(--space-6);
-  flex: 0 0 auto;
-  padding: var(--space-4) var(--space-8);
-  border-top: 1px solid var(--line-soft);
-  color: var(--muted);
-  font-size: var(--fs-tiny);
-}
-
+/* The footer's keys ride the shell's own footer band: the dialog's footer owns
+ * the hairline, the inset and the height, and this only lays the hint groups
+ * out. The match count is *not* here — it is announced once by the live region
+ * above and read off the group headings, so printing it a third time was the
+ * dialog saying the same thing in two places. */
 .palette-keys {
   display: inline-flex;
   align-items: center;
   gap: var(--space-6);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
 }
 
 .palette-keys > span {
@@ -448,77 +728,17 @@ body
   gap: var(--space-2);
 }
 
-.palette-count {
-  margin-left: auto;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
 /* ---------- settings sheet -------------------------------------------- */
-
-.dialog-sheet {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: min(580px, 100vw);
-  height: 100dvh;
-  max-height: none;
-  border: 0;
-  border-left: 1px solid var(--line-strong);
-  border-radius: 0;
-  background: var(--surface-raised);
-  box-shadow: var(--shadow-overlay);
-  animation: slide-in-right 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-@keyframes slide-in-right {
-  from {
-    opacity: 0.7;
-    transform: translateX(25px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-.dialog-sheet .dialog-header {
-  padding: var(--space-9) var(--space-7) var(--space-8) var(--space-9);
-  border-bottom: 1px solid var(--line);
-}
-
-.dialog-sheet .dialog-title {
-  font-family: var(--font-ui);
-  font-size: var(--fs-title);
-  font-weight: 700;
-  letter-spacing: 0;
-}
-
-.dialog-sheet .dialog-description {
-  margin-top: var(--space-1);
-  font-size: var(--fs-tiny);
-  line-height: 1.55;
-}
+/* `.dialog-sheet` (the pre-`Overlay` right drawer) is deleted. Its two users
+ * have moved onto the role table: the Theme studio is `role="drawer"` and
+ * Settings is `role="tall"`, so a `580px` drawer that Settings then overrode to
+ * `960px` no longer exists — the third way a dialog could be sized is gone. */
 
 /* ---------- file viewer ------------------------------------------------ */
 
 .dialog-file {
-  width: min(1040px, calc(100vw - 48px));
-  height: min(84vh, 900px);
-}
-
-.dialog-file .dialog-header {
-  padding: var(--space-6) var(--space-6);
-}
-
-.dialog-file .dialog-title {
-  color: var(--text-user);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  font-weight: 500;
-  letter-spacing: 0;
+  width: min(var(--overlay-w-full), 100%);
+  height: min(84dvh, calc(100dvh - var(--space-10) - var(--space-7)));
 }
 
 .file-viewer {
@@ -1096,28 +1316,71 @@ body
     padding: 0;
   }
 
-  .dialog:not(.dialog-sheet) {
+  /* A phone has no room for "a dialog on a page": every role except the two
+   * deliberately small ones becomes the whole screen, with the header and the
+   * footer pinned and the body scrolling between them. The drawer joins them,
+   * because a 620px drawer is a full screen at 390px anyway — and it keeps the
+   * document's own shadow and edge instead of losing them. */
+  .overlay:not(.overlay-compact):not(.overlay-palette) {
     width: 100%;
+    max-width: 100%;
     height: 100dvh;
     max-height: 100dvh;
     border: 0;
     border-radius: 0;
   }
 
+  .overlay-drawer {
+    width: 100%;
+    max-width: 100%;
+    border-left: 0;
+  }
+
+  /* The pre-`Overlay` shell takes the same phone treatment, so a surface that
+   * has not migrated yet is not the one dialog that keeps its desktop measure
+   * on a 390px screen. */
+  .dialog {
+    width: 100%;
+    max-width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+
+  /* A drawer's own header and footer are inset for a desktop panel; at full
+   * width they take the same insets as the centred roles above, so every
+   * dialog on a phone has one edge. */
+  .overlay-drawer .overlay-header {
+    padding: var(--space-6) var(--space-5) var(--space-5) var(--space-6);
+  }
+
+  .overlay-drawer .overlay-footer {
+    padding: var(--space-5) var(--space-6);
+  }
+
   /* Keep command search compact on phones so the current workspace remains
-   * visible around the modal and the list owns the scroll. */
-  .dialog.dialog-palette {
+   * visible around the modal and the list owns the scroll. The palette is the
+   * one role that stays a floating box instead of becoming the screen. */
+  .overlay-palette {
     align-self: center;
     width: calc(100vw - 28px);
     height: auto;
+    max-width: calc(100vw - 28px);
     max-height: 82dvh;
     margin-top: 0;
     border: 1px solid var(--line-strong);
     border-radius: var(--radius);
   }
 
-  .dialog-palette .dialog-header {
-    padding: var(--space-6) var(--space-6) var(--space-6) var(--space-8);
+  .overlay-palette .dialog-header,
+  .overlay-palette .overlay-header {
+    padding: var(--space-2) var(--space-1) var(--space-2) var(--space-6);
+  }
+
+  .overlay-palette .dialog-title,
+  .overlay-palette .overlay-title {
+    font-size: var(--fs-micro);
   }
 
   .palette-item {
@@ -1130,7 +1393,7 @@ body
    * way. Measured at 320x700: without this the footer's count ran 13px past the
    * dialog's edge. */
   @media (max-width: 374px) {
-    .palette-count {
+    .palette-keys > span:nth-child(2) {
       display: none;
     }
   }
@@ -1146,13 +1409,21 @@ body
     overflow-y: auto;
   }
 
-  .dialog-confirm {
+  /* A confirmation is a question, not a page: it keeps its measure and its
+   * top anchor on a phone so the answer stays in the thumb's reach. */
+  .dialog-confirm,
+  .overlay-compact {
     width: calc(100vw - 28px);
     height: auto;
+    max-height: calc(100dvh - var(--space-10) - var(--space-7));
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
   }
 
-  .dialog-file {
+  .dialog-file,
+  .overlay-full {
     height: 100dvh;
+    max-height: 100dvh;
   }
 
   /* The file panel's single bar carries a toggle and four actions. On a phone
@@ -1175,6 +1446,7 @@ body
 
 @media (prefers-reduced-motion: reduce) {
   .dialog,
+  .overlay,
   .dialog-sheet,
   .toast {
     animation: none;
@@ -1183,7 +1455,7 @@ body
 /* ---------- rewind dialog ---------------------------------------------- */
 
 .dialog-rewind {
-  width: min(620px, calc(100vw - 32px));
+  width: min(var(--overlay-w-standard), 100%);
 }
 
 .rewind-body {

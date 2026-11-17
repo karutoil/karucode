@@ -1,8 +1,5 @@
 import type { ComponentChildren } from 'preact';
-import { useId, useRef } from 'preact/hooks';
-import { createPortal } from 'preact/compat';
-import { useFocusTrap } from '../lib/dom';
-import { CloseIcon } from './icons';
+import { Overlay, type OverlayRole } from './Overlay';
 
 export interface DialogProps {
   open: boolean;
@@ -31,6 +28,14 @@ export interface DialogProps {
  * the screen. Portalling out of the transcript fixes that for every dialog, and
  * keeps working for any future ancestor that adds `filter`, `transform` or
  * `contain` for its own reasons.
+ *
+ * @deprecated Use `Overlay` with a `role`, which names the dialog's measure
+ * instead of leaving each caller to author a width. This wrapper is the same
+ * shell, the same portal and the same trap under the old props, kept so the call
+ * sites that predate the role table keep compiling while they migrate. It does
+ * not scroll its own body: callers that manage a scroller (Settings, the Theme
+ * studio, the palette, the file viewer) keep doing so, which is exactly what
+ * `Overlay scrollBody={false}` expresses.
  */
 export function Dialog({
   open,
@@ -42,60 +47,31 @@ export function Dialog({
   labelId,
   description,
 }: DialogProps): ComponentChildren {
-  const ref = useRef<HTMLDivElement>(null);
-  const generatedId = useId();
-  const titleId = labelId ?? `dialog-title-${generatedId}`;
-  const descriptionId = description ? `dialog-description-${labelId ?? generatedId}` : undefined;
-  useFocusTrap(ref, open, onClose);
-  if (!open) return null;
-
-  const layer = (
-    <div class="dialog-layer">
-      <div class="dialog-backdrop" aria-hidden="true" onClick={onClose} />
-      <div
-        class={`dialog ${className}`.trim()}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={descriptionId}
-        ref={ref}
-        data-testid="dialog"
-      >
-        {showHeader ? (
-          <header class="dialog-header">
-            <div class="dialog-headings">
-              <h2 id={titleId} class="dialog-title">
-                {title}
-              </h2>
-              {description ? (
-                <p id={descriptionId} class="dialog-description">
-                  {description}
-                </p>
-              ) : null}
-            </div>
-            <button type="button" class="icon-button" onClick={onClose} aria-label="Close dialog">
-              <CloseIcon />
-            </button>
-          </header>
-        ) : (
-          <>
-            <h2 id={titleId} class="sr-only">
-              {title}
-            </h2>
-            {description ? (
-              <p id={descriptionId} class="sr-only">
-                {description}
-              </p>
-            ) : null}
-          </>
-        )}
-        {children}
-      </div>
-    </div>
+  // The role is derived from the caller's class so the shell picks the right
+  // measure for surfaces that have not migrated yet: a file or artifact is full,
+  // a question or a rewind is compact, the palette has its own, and everything
+  // else is the standard measure.
+  const role: OverlayRole =
+    className.includes('dialog-file') || className.includes('dialog-artifact')
+      ? 'full'
+      : className.includes('dialog-confirm') || className.includes('dialog-rewind')
+        ? 'compact'
+        : className.includes('dialog-palette')
+          ? 'palette'
+          : 'standard';
+  return (
+    <Overlay
+      open={open}
+      title={title}
+      onClose={onClose}
+      role={role}
+      class={className}
+      showHeader={showHeader}
+      labelId={labelId}
+      description={description}
+      bodyLayout="contents"
+    >
+      {children}
+    </Overlay>
   );
-
-  // `document` is absent in a server render and in the `node`-environment test
-  // suites, where there is nothing to portal into and nothing to lay out either.
-  if (typeof document === 'undefined') return layer;
-  return createPortal(layer, document.body);
 }

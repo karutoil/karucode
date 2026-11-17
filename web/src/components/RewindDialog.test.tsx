@@ -209,7 +209,10 @@ describe('RewindDialog', () => {
     render(<RewindDialog apply={apply} />);
 
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('The rewind preview could not be loaded');
+    expect(alert.textContent).toContain('The file changes after this message could not be read');
+    // The status line above it must not contradict this one by telling the
+    // reader to close the dialog, when the transcript half is still offered.
+    expect(screen.queryByText(/Close this dialog/)).toBeNull();
     expect(request).toHaveBeenCalledTimes(1);
     expect(screen.getByText(/Whether any files changed is unknown/)).toBeTruthy();
     expect(screen.queryByText(/No file was changed/)).toBeNull();

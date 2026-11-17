@@ -8,6 +8,7 @@ pub mod approval;
 pub mod checkpoint;
 pub mod cidr;
 pub mod config;
+pub mod contrib;
 pub mod error;
 pub mod events;
 pub mod hooks;

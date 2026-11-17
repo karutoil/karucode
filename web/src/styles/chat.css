@@ -1328,16 +1328,18 @@
   margin: 0;
 }
 
-/* The lightbox: the chat column is too narrow to judge a screenshot in a card. */
+/* The lightbox: the chat column is too narrow to judge a screenshot in a card.
+ * It is the `full` role now — one measure for "an object to look at" — instead
+ * of a private 92vw/1100px. */
 .image-dialog {
-  width: min(92vw, 1100px);
-  max-width: min(92vw, 1100px);
+  width: min(var(--overlay-w-full), 100%);
+  max-width: min(var(--overlay-w-full), 100%);
 }
 
 .dialog-image {
   display: block;
   max-width: 100%;
-  max-height: 78vh;
+  max-height: 78dvh;
   margin: 0 auto;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);

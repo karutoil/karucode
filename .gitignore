@@ -80,6 +80,10 @@ node_modules/
 # artifacts, not product source. The written verification report stays versioned.
 /docs/mockups/
 /docs/internal/design-verify/screens/
+# `scripts/verify_modal_family.py` writes one capture per sheet at each viewport
+# into this directory on every run; they are cheap to regenerate and identical in
+# intent to the `screens/` captures above.
+/docs/internal/design-verify/modal-family/screens/
 /docs/internal/design-verify/appearance-matrix.json
 
 # The production-readiness audit is an internal review artifact: it enumerates

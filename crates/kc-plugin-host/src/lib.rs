@@ -136,9 +136,13 @@ pub struct UiContributionSummary {
     /// For `keybinding`: the canonical shortcut (`mod+shift+f`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keys: Option<String>,
-    /// For `hide`: the built-in element to hide.
+    /// For `hide`: the built-in element to hide. For `replace`: the element whose
+    /// text is being renamed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// For `replace`: the text to draw in place of the built-in label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace: Option<String>,
 }
 
 /// A built-in element one or more plugins asked the app to hide, and who asked.
@@ -2163,6 +2167,10 @@ fn ui_of(plugins: &[Arc<PluginShared>]) -> PluginUi {
                 bound.insert(keys.clone(), shared.name.clone());
             }
             seen.insert(hosted_id.clone(), shared.name.clone());
+            // A `replace` contribution keeps its target and its text: the client
+            // uses `target` to pick which built-in label to draw and `replace` as
+            // the text. Every other kind leaves both empty.
+            let is_replace = contribution.kind == kc_core::plugin::UI_KIND_REPLACE;
             out.contributions.push(UiContributionSummary {
                 plugin: shared.name.clone(),
                 version: version.clone(),
@@ -2176,7 +2184,16 @@ fn ui_of(plugins: &[Arc<PluginShared>]) -> PluginUi {
                 action: contribution.action,
                 message: contribution.message,
                 keys: contribution.keys,
-                target: None,
+                target: if is_replace {
+                    contribution.target
+                } else {
+                    None
+                },
+                replace: if is_replace {
+                    contribution.replace
+                } else {
+                    None
+                },
             });
         }
     }

@@ -267,6 +267,10 @@ struct PendingGuard<'a> {
 impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
         self.shared.lock().pending.remove(&self.id);
+        // Safe on every path, including calls that never registered a context:
+        // `retain` is a no-op when the id is absent. This is what stops a
+        // finished call's session from being adopted by a later state request.
+        self.shared.end_call(self.id);
     }
 }
 
@@ -310,6 +314,19 @@ pub(crate) struct PluginShared {
     /// The operator's tool-output grants, shared with the host. Read on every
     /// tool call, so an answer applies at once; a plugin has no path to it.
     grants: Arc<Grants>,
+    /// The call contexts of `tools/call` requests currently in flight, keyed by
+    /// the host's request id.
+    ///
+    /// `plugin/state/*` arrives on the stdout reader with nothing but the frame,
+    /// so a plugin that sends `{"scope":"session","session_id":"s_someone_else"}`
+    /// used to name its own owner and read another conversation's rows - the
+    /// documented isolation did not exist. The owner is now derived from the
+    /// context of the call that is actually running, never from the plugin's
+    /// params. A map rather than one slot because requests to a single plugin
+    /// carry independent ids and may overlap; a state call adopts the most
+    /// recently started live context, which is the call whose handler is
+    /// executing when the plugin asks.
+    live_contexts: std::sync::Mutex<Vec<(u64, kc_core::plugin::ToolCallContext)>>,
 }
 
 /// One notification a plugin asked for, already validated by the host.
@@ -406,6 +423,7 @@ impl PluginShared {
                 last_refill_ms: 0,
                 warned: false,
             }),
+            live_contexts: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -553,6 +571,32 @@ impl PluginShared {
         self.lock().pending.len()
     }
 
+    /// Record a `tools/call` context for as long as the call is in flight, so a
+    /// `plugin/state/*` request from inside that handler can name its owner
+    /// without the plugin being able to choose it.
+    pub(crate) fn begin_call(&self, id: u64, context: kc_core::plugin::ToolCallContext) {
+        let mut guard = self.live_contexts.lock().unwrap_or_else(|e| e.into_inner());
+        guard.push((id, context));
+    }
+
+    /// Drop a call context once its request is answered, timed out or cancelled.
+    pub(crate) fn end_call(&self, id: u64) {
+        let mut guard = self.live_contexts.lock().unwrap_or_else(|e| e.into_inner());
+        guard.retain(|(call_id, _)| *call_id != id);
+    }
+
+    /// The most recently started live call context, if any.
+    ///
+    /// A state request has no id linking it to a `tools/call`, so the newest
+    /// live context is the closest thing to "the handler that is running now" -
+    /// which is the only moment a plugin legitimately reads its own session
+    /// state. With no live call there is no owner, and the scoped read is
+    /// refused rather than guessed.
+    pub(crate) fn live_context(&self) -> Option<kc_core::plugin::ToolCallContext> {
+        let guard = self.live_contexts.lock().unwrap_or_else(|e| e.into_inner());
+        guard.last().map(|(_, context)| context.clone())
+    }
+
     pub(crate) fn diagnostics(&self) -> PluginDiagnostics {
         let inner = self.lock();
         PluginDiagnostics {
@@ -621,6 +665,34 @@ impl PluginShared {
         timeout: Duration,
         cancel: Option<&CancellationToken>,
     ) -> Result<Value, RpcError> {
+        self.request_cancellable_inner(method, params, timeout, cancel, None)
+            .await
+    }
+
+    /// [`Self::request_cancellable`], but recording a tool call's context for the
+    /// lifetime of the request so a `plugin/state/*` frame raised from inside the
+    /// handler is attributed to the session the host is serving rather than to
+    /// whatever id the plugin chose to write.
+    pub(crate) async fn request_cancellable_in_context(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        cancel: Option<&CancellationToken>,
+        context: kc_core::plugin::ToolCallContext,
+    ) -> Result<Value, RpcError> {
+        self.request_cancellable_inner(method, params, timeout, cancel, Some(context))
+            .await
+    }
+
+    async fn request_cancellable_inner(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        cancel: Option<&CancellationToken>,
+        context: Option<kc_core::plugin::ToolCallContext>,
+    ) -> Result<Value, RpcError> {
         // The retirement path itself still needs to send `shutdown`; every tool,
         // hook and panel request is refused before it can reach the old process.
         if self.is_retired() && method != methods::SHUTDOWN {
@@ -652,6 +724,13 @@ impl PluginShared {
                 inner.pending.remove(&id);
                 return Err(queue_error(&self.name, e));
             }
+        }
+
+        // Registered before the guard below so both are released on every exit
+        // path: an answered, timed-out or cancelled call leaves no context behind
+        // that a later state request could be attributed to.
+        if let Some(context) = context {
+            self.begin_call(id, context);
         }
 
         // From here on the entry is removed by the guard, whatever happens.
@@ -1615,25 +1694,25 @@ impl PluginShared {
                 kc_core::plugin::MAX_STATE_KEY_BYTES
             ));
         }
-        // The owner is supplied by the host, never by the plugin: a session-scoped
-        // key belongs to the session the host was told about, so a plugin cannot
-        // read another conversation's rows.
+        // The owner comes from the call that is running, never from the frame a
+        // plugin wrote. `plugin/state/*` carries no call identity of its own, so
+        // an id in `params` is only ever a plugin naming its own owner: trusting
+        // it let a plugin read another conversation's rows, which is exactly what
+        // the scope contract says cannot happen. `live_context()` holds the
+        // contexts of in-flight `tools/call` requests; a state call outside any
+        // of them (a hook, an unsolicited frame) has no owner and is refused.
+        let live = self.live_context();
         let owner = match scope {
-            state_scope::SESSION => params
-                .get("session_id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            state_scope::PROJECT => params
-                .get("project_id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            _ => String::new(),
+            state_scope::SESSION => live.as_ref().map(|c| c.session_id.clone()),
+            state_scope::PROJECT => live.as_ref().and_then(|c| c.project.clone()),
+            _ => Some(String::new()),
         };
+        let owner = owner.unwrap_or_default();
         if scope != state_scope::INSTALL && owner.is_empty() {
             return Err(format!(
-                "a `{scope}`-scoped state call needs its id; the host did not supply one"
+                "a `{scope}`-scoped state call needs a running tool call to \
+                 identify the owner; the host did not supply one and will not \
+                 take it from the plugin"
             ));
         }
         match method {
@@ -3026,5 +3105,233 @@ mod notify_tests {
             "notify",
             "the SDK and the host must agree on the spelling"
         );
+    }
+}
+
+#[cfg(test)]
+mod state_owner_tests {
+    //! `plugin/state/*` owner attribution, exercised without a subprocess.
+    //!
+    //! The scope contract says a plugin reads and writes only its own rows: "the
+    //! owner id is filled in by the host from the session the call belongs to,
+    //! never chosen by the plugin". Before this was enforced the owner came
+    //! straight from the plugin's own `session_id`/`project_id` params, so a
+    //! plugin could name another conversation and read its rows. These tests pin
+    //! the two halves of the fix: the plugin's id is ignored, and a state call
+    //! with no live tool call has no owner at all.
+
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    /// Records every (plugin, scope, owner, key) a state call asked for.
+    #[derive(Default)]
+    struct RecordingBackend {
+        seen: StdMutex<Vec<(String, String, String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl kc_core::plugin::PluginStateBackend for RecordingBackend {
+        async fn get(
+            &self,
+            plugin: &str,
+            scope: &str,
+            owner: &str,
+            key: &str,
+        ) -> kc_core::Result<Option<String>> {
+            self.seen.lock().unwrap().push((
+                plugin.to_string(),
+                scope.to_string(),
+                owner.to_string(),
+                key.to_string(),
+            ));
+            Ok(None)
+        }
+
+        async fn set(
+            &self,
+            plugin: &str,
+            scope: &str,
+            owner: &str,
+            key: &str,
+            _value: &str,
+        ) -> kc_core::Result<i64> {
+            self.seen.lock().unwrap().push((
+                plugin.to_string(),
+                scope.to_string(),
+                owner.to_string(),
+                key.to_string(),
+            ));
+            Ok(1)
+        }
+
+        async fn delete(
+            &self,
+            plugin: &str,
+            scope: &str,
+            owner: &str,
+            key: &str,
+        ) -> kc_core::Result<bool> {
+            self.seen.lock().unwrap().push((
+                plugin.to_string(),
+                scope.to_string(),
+                owner.to_string(),
+                key.to_string(),
+            ));
+            Ok(false)
+        }
+
+        async fn list(
+            &self,
+            plugin: &str,
+            scope: &str,
+            owner: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> kc_core::Result<Vec<(String, String)>> {
+            self.seen.lock().unwrap().push((
+                plugin.to_string(),
+                scope.to_string(),
+                owner.to_string(),
+                String::new(),
+            ));
+            Ok(Vec::new())
+        }
+
+        async fn bytes(
+            &self,
+            plugin: &str,
+            scope: &str,
+            owner: &str,
+        ) -> kc_core::Result<i64> {
+            self.seen.lock().unwrap().push((
+                plugin.to_string(),
+                scope.to_string(),
+                owner.to_string(),
+                String::new(),
+            ));
+            Ok(0)
+        }
+    }
+
+    fn slot_with(backend: Arc<RecordingBackend>) -> Arc<PluginShared> {
+        let config = PluginConfig {
+            name: "p".into(),
+            enabled: true,
+            command: vec!["true".into()],
+            env: Default::default(),
+            permissions: Vec::new(),
+            settings: Default::default(),
+            tool_output_bytes: None,
+        };
+        PluginShared::new(
+            config,
+            Arc::new(TimeoutRefs::default()),
+            Arc::new(Grants::new()),
+            PluginStatus::Ready,
+            Some(backend),
+        )
+    }
+
+    fn context(session: &str, project: Option<&str>) -> kc_core::plugin::ToolCallContext {
+        kc_core::plugin::ToolCallContext {
+            session_id: session.into(),
+            run_id: "r_1".into(),
+            agent_id: None,
+            workspace: "/w".into(),
+            project: project.map(|p| p.to_string()),
+            depth: 0,
+            args: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_owner_comes_from_the_running_call_not_the_plugins_params() {
+        let backend = Arc::new(RecordingBackend::default());
+        let slot = slot_with(Arc::clone(&backend));
+        // The plugin is serving s_real and tries to name s_victim.
+        slot.begin_call(7, context("s_real", None));
+        slot.state_call(
+            kc_core::plugin::methods::STATE_GET,
+            &json!({"scope": "session", "session_id": "s_victim", "key": "leak"}),
+        )
+        .await
+        .expect("allowed while a call is live");
+        let seen = backend.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].2, "s_real",
+            "the owner must be the live call's session, never the plugin's id"
+        );
+        slot.end_call(7);
+    }
+
+    #[tokio::test]
+    async fn a_project_owner_comes_from_the_running_call() {
+        let backend = Arc::new(RecordingBackend::default());
+        let slot = slot_with(Arc::clone(&backend));
+        slot.begin_call(9, context("s_1", Some("prj_real")));
+        slot.state_call(
+            kc_core::plugin::methods::STATE_SET,
+            &json!({"scope": "project", "project_id": "prj_victim", "key": "k", "value": 1}),
+        )
+        .await
+        .expect("allowed while a call is live");
+        let seen = backend.seen.lock().unwrap().clone();
+        assert_eq!(seen[0].2, "prj_real");
+        slot.end_call(9);
+    }
+
+    #[tokio::test]
+    async fn a_scoped_state_call_with_no_live_call_is_refused() {
+        let backend = Arc::new(RecordingBackend::default());
+        let slot = slot_with(Arc::clone(&backend));
+        // No begin_call: an unsolicited frame (or one from a hook) has no owner.
+        let error = slot
+            .state_call(
+                kc_core::plugin::methods::STATE_GET,
+                &json!({"scope": "session", "session_id": "s_anyone", "key": "k"}),
+            )
+            .await
+            .expect_err("a scoped read with no owner must be refused");
+        assert!(
+            error.contains("running tool call"),
+            "the refusal must explain the requirement: {error}"
+        );
+        assert!(
+            backend.seen.lock().unwrap().is_empty(),
+            "a refused call must not reach the store"
+        );
+    }
+
+    #[tokio::test]
+    async fn ending_a_call_stops_its_session_being_adopted() {
+        let backend = Arc::new(RecordingBackend::default());
+        let slot = slot_with(Arc::clone(&backend));
+        slot.begin_call(1, context("s_finished", None));
+        slot.end_call(1);
+        // The finished call's session must not be reused by the next frame.
+        assert!(
+            slot.state_call(
+                kc_core::plugin::methods::STATE_GET,
+                &json!({"scope": "session", "key": "k"}),
+            )
+            .await
+            .is_err(),
+            "a completed call must leave no owner behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_scope_needs_no_call() {
+        let backend = Arc::new(RecordingBackend::default());
+        let slot = slot_with(Arc::clone(&backend));
+        slot.state_call(
+            kc_core::plugin::methods::STATE_SET,
+            &json!({"scope": "install", "key": "k", "value": 1}),
+        )
+        .await
+        .expect("install scope is not session-owned");
+        let seen = backend.seen.lock().unwrap().clone();
+        assert_eq!(seen[0].2, "", "install scope has no owner");
     }
 }

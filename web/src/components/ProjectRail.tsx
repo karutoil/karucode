@@ -21,6 +21,11 @@ import {
   SearchIcon,
   TerminalIcon,
 } from './icons';
+import {
+  isUiHidden,
+  UI_HIDE_COMMAND_PALETTE,
+  UI_HIDE_RAIL_FOOTER,
+} from './uiContributions';
 import '../styles/rail.css';
 
 /**
@@ -561,6 +566,12 @@ export function ProjectRail(): JSX.Element {
         </div>
 
         <div class="project-rail-bottom">
+          {/* A plugin may hide the footer's cosmetic tools (`rail.footer`). The
+            * settings avatar is deliberately exempt: it is the only way into the
+            * settings sheet, so hiding it would strand the operator in a
+            * deployment whose own entries live inside that sheet. */}
+          {isUiHidden(store.pluginUi.value, UI_HIDE_RAIL_FOOTER) ? null : (
+            <>
           <button
             type="button"
             class="rail-tool rail-tool-accent"
@@ -572,6 +583,7 @@ export function ProjectRail(): JSX.Element {
           >
             <PaletteIcon size={15} />
           </button>
+          {isUiHidden(store.pluginUi.value, UI_HIDE_COMMAND_PALETTE) ? null : (
           <button
             type="button"
             class="rail-tool"
@@ -583,6 +595,9 @@ export function ProjectRail(): JSX.Element {
           >
             <SearchIcon size={15} />
           </button>
+          )}
+            </>
+          )}
           <button
             type="button"
             class="rail-avatar"

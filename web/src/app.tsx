@@ -582,12 +582,40 @@
 //   invisible controls are skipped, and a sheet's search, rename field or menu
 //   can handle its own Escape before the sheet closes. Dialogs mount only while
 //   open.
+//
+//   Every one of them is the same component: `Overlay` in
+//   `components/Overlay.tsx`, portalled into `<body>`, with one focus trap, one
+//   scroll lock, one labelled `role="dialog"` and one scrim. What varies is the
+//   *role*, and a role is a word rather than a width:
+//
+//   | role | measure | used by |
+//   | --- | --- | --- |
+//   | `compact` | 480px, top-anchored | confirmations, rewind |
+//   | `standard` | 620px, centred | a form: project, branch, model edit, a skill |
+//   | `wide` | 860px, centred | a list to read: the notification centre |
+//   | `tall` | 960 x 760px max, centred | Settings |
+//   | `drawer` | 620px, full height, right edge | the Theme studio |
+//   | `full` | 1160px, 84dvh | a file, an artifact, an image |
+//   | `palette` | 560px, top-anchored | the command palette |
+//
+//   Each is the same three-band document - header (title, one supporting line,
+//   close), scrolling body, footer (a note on the left, the actions on the
+//   right) - so a dialog's name, its close button and its decision band are in
+//   the same place in all of them. Below 640px every role except `compact` and
+//   `palette` becomes a full-height sheet with the header and footer pinned.
+//   `Dialog` is the same shell under its old name for surfaces that have not
+//   migrated; no call site authors its own width.
 // * **Theme studio** (right drawer, `Ctrl/Cmd+Shift+T`, **Task actions → Theme
 //   studio**, or the project-rail palette button when that rail is present):
 //   built-in themes, per-token colours, density, transcript options and custom
 //   CSS, persisted in the browser. The `themes` topic covers the storage key and
-//   the shareable export format.
-// * **Settings sheet** (drawer): two panes. A rail of seven sections on the
+//   the shareable export format. It is one of seven dialog *roles* - the whole
+//   modal family is `Overlay` in `components/Overlay.tsx`, and `role="drawer"`
+//   is the measure (a 620px panel slid in from the right edge, full width below
+//   640px).
+// * **Settings sheet**: two panes at the `tall` measure (960px, capped in
+//   `dvh`), so it is a window on a short screen and a page on a tall one - not
+//   the right-edge drawer it used to be. A rail of seven sections on the
 //   left — each with an icon, a name and a line saying what it holds — and the
 //   settings beside it under a header that names the section, says who owns its
 //   values (**This browser**, **This install**, **Install + browser**) and
@@ -613,6 +641,11 @@
 //   button is shared, so the error could otherwise be off-screen. Panels stay
 //   mounted (merely `hidden`) so switching sections never discards what was
 //   typed, and the footer says what Save commits for the section you are on.
+//   A section whose switches commit themselves as you flip them (Plugins,
+//   Access, Updates) offers **Done** there instead of a **Save changes** that
+//   would do nothing; Skills saves per row too. The rail's own "Settings"
+//   kicker is gone - the dialog is already titled Settings - so the search field
+//   is the head of the rail.
 //   Inside a section, every option is a bordered tile — a labelled field, a
 //   switch row and a "name + control" row all draw the same edge — and a
 //   subheading inside one is a kicker rather than a heavier field label, so a
@@ -623,9 +656,13 @@
 //   its age and whether it is running) and **Plugins** (every command a plugin
 //   contributed, under its plugin's name). Each group heading carries the number
 //   of rows under it, a row whose label matched the query shows the matched run,
-//   and the footer holds the keys and the match count. ArrowUp/ArrowDown/Home/End
+//   and the footer holds the keys. The match count is announced once, by an
+//   `aria-live` region, and read off the group headings - it is not printed in
+//   the footer as well. ArrowUp/ArrowDown/Home/End
 //   move the cursor, Enter runs the row, Escape closes; the cursor row is the only
-//   one that shows the trailing arrow.
+//   one that shows the trailing arrow. The palette is the `palette` role: a 560px
+//   box anchored near the top, and the one role that stays a floating box on a
+//   phone instead of becoming the screen.
 //
 // # Notifications
 //

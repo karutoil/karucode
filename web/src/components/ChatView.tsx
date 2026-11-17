@@ -27,7 +27,7 @@ import { ContextDrawer } from './ContextDrawer';
 import { WorkbenchTaskMenu } from './WorkbenchTaskMenu';
 import { LiveAnnouncer } from './LiveAnnouncer';
 import { PluginSlot } from './PluginSlot';
-import { isUiHidden, UI_HIDE_CONTEXT_BUTTON, UI_SLOT_SESSION_HEADER } from './uiContributions';
+import { isUiHidden, UI_HIDE_CONTEXT_BUTTON, UI_HIDE_NOTIFICATIONS, UI_HIDE_COMMAND_PALETTE, UI_SLOT_SESSION_HEADER, UI_SLOT_SESSION_HEADER_CHIP } from './uiContributions';
 import { Tabs, type TabItem } from './Tabs';
 import { TerminalTab } from './TerminalTab';
 import {
@@ -335,12 +335,17 @@ function SessionHeader({
         {/* Controls plugins contributed to the session header. Before the
          * built-in chips so they never push the bell or Context out of reach. */}
         <PluginSlot slot={UI_SLOT_SESSION_HEADER} />
+        {/* A chip contributed for the header, beside the title. Badge slots are
+         * chips (text + tone) the app draws itself, so a plugin can surface
+         * per-session state without shipping markup. */}
+        <PluginSlot slot={UI_SLOT_SESSION_HEADER_CHIP} />
         <BranchChip onShowChanges={onShowChanges} />
         {/* The notification centre's way in. It lives in the header rather than on
          * the project rail because it is the one place a bell is reachable in every
          * layout: the rail is collapsed by Ctrl+B on a desktop and hidden entirely
          * on a phone. The counter is the same derived unread total the tab title
          * shows, so the two can never disagree. */}
+        {isUiHidden(store.pluginUi.value, UI_HIDE_NOTIFICATIONS) ? null : (
         <button
           type="button"
           class={`head-btn head-icon notifications-head${unreadNotifications > 0 ? ' has-unread' : ''}`}
@@ -365,6 +370,7 @@ function SessionHeader({
             </span>
           ) : null}
         </button>
+        )}
         {!controlPlane && !contextHidden ? (
           <button
             type="button"
@@ -399,6 +405,7 @@ function SessionHeader({
             <PanelIcon size={15} />
           </button>
         ) : null}
+        {isUiHidden(store.pluginUi.value, UI_HIDE_COMMAND_PALETTE) ? null : (
         <button
           type="button"
           class="head-btn head-icon command-head-btn"
@@ -410,6 +417,7 @@ function SessionHeader({
         >
           <SearchIcon size={15} />
         </button>
+        )}
         <WorkbenchTaskMenu
           canCopy={store.chat.value.items.length > 0 && view === 'chat'}
           onCopy={copyConversation}

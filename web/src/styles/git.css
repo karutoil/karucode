@@ -974,14 +974,29 @@
 /* ---------- branch dialog & confirm ------------------------------------ */
 
 .gitm-branch-dialog {
-  width: min(560px, calc(100vw - 24px));
+  /* The standard measure: a form with fields. Was 560px with a 24px inset — a
+   * ninth width and a fifth gap for the same decision. */
+  width: min(var(--overlay-w-standard), 100%);
 }
 
+/* The body is the scroller.
+ *
+ * `.dialog`/`.overlay` caps its height and clips (`overflow: hidden`), and on a
+ * phone it is the whole `100dvh`. This body holds a filter field, a list capped
+ * at `min(46vh, 360px)` and a create form; on a short or landscape viewport it
+ * exceeded the dialog and "Create & switch" was clipped with nothing to scroll
+ * — the same defect the rewind dialog fixed this way. `min-height: 0` is what
+ * lets a flex child shrink below its content and scroll instead of pushing the
+ * form out of the frame. */
 .gitm-branch-body {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: var(--space-5);
-  padding: 2px var(--space-7) 16px;
+  min-height: 0;
+  padding: var(--space-6) var(--space-7);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .gitm-input {
@@ -1115,7 +1130,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
-  padding: 2px var(--space-7) 16px;
+  padding: var(--space-6) var(--space-7);
 }
 
 .gitm-confirm-note {
@@ -1133,7 +1148,9 @@
 }
 
 .gitm-confirm-dialog {
-  width: min(460px, calc(100vw - 24px));
+  /* A question with buttons: the compact measure, the same as every other
+   * confirmation in the product. */
+  width: min(var(--overlay-w-compact), 100%);
 }
 
 /* ---------- responsive ------------------------------------------------- */

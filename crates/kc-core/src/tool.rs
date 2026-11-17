@@ -1049,6 +1049,45 @@ impl ToolRegistry {
         self.tools.remove(name)
     }
 
+    /// Apply plugin contributions to the built-in set.
+    ///
+    /// This is what makes "a plugin may remove or replace a built-in tool" true
+    /// rather than aspirational. `builtins` is the first-party set in the order
+    /// it was registered; each contribution names a tool:
+    ///
+    /// * `Add` — contributes a tool under a name nothing else uses;
+    /// * `Remove` — takes a tool (built-in or plugin) out of the registry, so the
+    ///   model never sees it in a request;
+    /// * `Replace` — swaps a tool's implementation, keeping the name;
+    /// * `Wrap` — recorded but not applied here: a tool is a trait object, so
+    ///   wrapping means implementing the trait, which only the caller can do.
+    ///   It is returned so the caller can build the wrapper against the original.
+    ///
+    /// Precedence and conflict reporting are [`kc_core::contrib`]'s: the highest
+    /// priority claim on a name decides, and every losing claim is returned in
+    /// `conflicts` so the host can put it in the plugin's diagnostics instead of
+    /// leaving an author guessing why their tool vanished.
+    pub fn apply_contributions(
+        &mut self,
+        builtins: &[Arc<dyn Tool>],
+        contributions: Vec<crate::contrib::Contribution<Arc<dyn Tool>>>,
+    ) -> Vec<crate::contrib::Conflict> {
+        use crate::contrib::ContributionRegistry;
+        let mut registry: ContributionRegistry<Arc<dyn Tool>> = ContributionRegistry::new("tools");
+        for tool in builtins {
+            registry.builtin(tool.spec().name, Arc::clone(tool));
+        }
+        for contribution in contributions {
+            registry.contribute(contribution);
+        }
+        let view = registry.resolve();
+        self.tools = view
+            .iter()
+            .map(|(name, entry)| (name.clone(), Arc::clone(&entry.value)))
+            .collect();
+        view.conflicts
+    }
+
     pub fn remove_prefix(&mut self, prefix: &str) {
         self.tools.retain(|k, _| !k.starts_with(prefix));
     }
@@ -1933,6 +1972,111 @@ mod tests {
         assert_eq!(reg.names(), vec!["a".to_string(), "b".to_string()]);
         reg.register(mk("a"));
         assert_eq!(reg.len(), 2);
+    }
+
+    /// A plugin may REMOVE a built-in tool, and the removal is real: the name is
+    /// gone from the registry, so the model never sees it in a request.
+    #[test]
+    fn a_plugin_can_remove_a_builtin_tool() {
+        use crate::contrib::{Contribution, Op};
+        struct Dummy(String);
+        #[async_trait]
+        impl Tool for Dummy {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: self.0.clone(),
+                    description: String::new(),
+                    parameters: serde_json::json!({}),
+                    origin: ToolOrigin::Builtin,
+                }
+            }
+            async fn invoke(&self, _r: ToolCallRequest, _c: ToolCtx) -> ToolOutcome {
+                ToolOutcome::ok("")
+            }
+        }
+        let builtins: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(Dummy("read_file".into())),
+            Arc::new(Dummy("run_command".into())),
+        ];
+        let mut reg = ToolRegistry::new();
+        reg.register_all(builtins.clone());
+        assert_eq!(reg.len(), 2);
+
+        let conflicts = reg.apply_contributions(
+            &builtins,
+            // `Contribution::remove` needs `T: Default`, and a trait object is
+            // not; the value is ignored for `Remove` anyway.
+            vec![Contribution::new(
+                "guard",
+                Op::Remove,
+                "run_command",
+                Arc::new(Dummy("unused".into())) as Arc<dyn Tool>,
+                0,
+            )],
+        );
+        assert_eq!(
+            reg.names(),
+            vec!["read_file".to_string()],
+            "run_command must be gone"
+        );
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        assert!(
+            reg.get("run_command").is_none(),
+            "the removed tool must not resolve"
+        );
+    }
+
+    /// A plugin may REPLACE a built-in tool's implementation while keeping the
+    /// name, which is how an organisation swaps in its own guarded version.
+    #[test]
+    fn a_plugin_can_replace_a_builtin_tool_implementation() {
+        use crate::contrib::{Contribution, Op};
+        struct Tagged {
+            name: String,
+            tag: String,
+        }
+        #[async_trait]
+        impl Tool for Tagged {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: self.name.clone(),
+                    description: self.tag.clone(),
+                    parameters: serde_json::json!({}),
+                    origin: ToolOrigin::Builtin,
+                }
+            }
+            async fn invoke(&self, _r: ToolCallRequest, _c: ToolCtx) -> ToolOutcome {
+                ToolOutcome::ok(&self.tag)
+            }
+        }
+        let builtins: Vec<Arc<dyn Tool>> = vec![Arc::new(Tagged {
+            name: "run_command".into(),
+            tag: "first-party".into(),
+        })];
+        let mut reg = ToolRegistry::new();
+        reg.register_all(builtins.clone());
+
+        let replacement: Arc<dyn Tool> = Arc::new(Tagged {
+            name: "run_command".into(),
+            tag: "org-guarded".into(),
+        });
+        let conflicts = reg.apply_contributions(
+            &builtins,
+            vec![Contribution::new(
+                "org",
+                Op::Replace,
+                "run_command",
+                replacement,
+                0,
+            )],
+        );
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        let tool = reg.get("run_command").expect("replaced tool is present");
+        assert_eq!(
+            tool.spec().description,
+            "org-guarded",
+            "the replacement's implementation must be in effect"
+        );
     }
 
     fn read_file_spec() -> ToolSpec {

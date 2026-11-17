@@ -81,7 +81,6 @@ import {
   CloseIcon,
   CopyIcon,
   DownloadIcon,
-  PaletteIcon,
   PlusIcon,
   RefreshIcon,
   TrashIcon,
@@ -265,19 +264,13 @@ export function ThemeStudio(): JSX.Element | null {
 
   useFocusTrap(panelRef, open, actions.closeThemeStudio);
 
-  // The focus trap handles Escape for events that originate inside the drawer.
-  // Keep a window-level fallback so Escape still closes the drawer when focus is
-  // on <body> (or an event is dispatched at the window, as tests do).
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return;
-      event.stopPropagation();
-      actions.closeThemeStudio();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open]);
+  // Escape is the trap's job (`lib/dom.ts` intercepts it in the capture phase on
+  // `document`, defers to a `[data-escape-local]` control and closes only the
+  // topmost surface). A window-level fallback used to sit here; it could never
+  // fire for a key pressed inside the drawer — the trap stopPropagation's it
+  // first — and if it had, it would have closed the drawer underneath the delete
+  // confirmation instead of the confirmation. Removed rather than re-gated: the
+  // trap already covers the one case it claimed to.
 
   useEffect(() => {
     if (!open) return;
@@ -426,38 +419,34 @@ export function ThemeStudio(): JSX.Element | null {
   };
 
   const layer = (
-    <div class="theme-studio-layer">
-      <div class="theme-shade" aria-hidden="true" onClick={actions.closeThemeStudio} />
+    <div class="dialog-layer" data-overlay-role="drawer">
+      <div class="dialog-backdrop" aria-hidden="true" onClick={actions.closeThemeStudio} />
       <div
-        class="theme-studio"
+        class="overlay overlay-drawer theme-studio"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={subtitleId}
         ref={panelRef}
         data-testid="theme-studio"
+        data-role="drawer"
       >
-        <header class="theme-studio-top">
-          <div class="theme-studio-head">
-            <div class="theme-top-eyebrow">
-              <PaletteIcon size={14} />
-              Personalization
-              <span class="theme-head-badge">Live preview</span>
-            </div>
-            <h2 class="theme-studio-title" id={titleId}>
+        <header class="overlay-header theme-studio-top">
+          <div class="overlay-headings theme-studio-head">
+            <h2 class="overlay-title theme-studio-title" id={titleId}>
               Theme studio
             </h2>
-            <p class="theme-studio-subtitle" id={subtitleId}>
+            <p class="overlay-description theme-studio-subtitle" id={subtitleId}>
               Make the whole workspace feel like yours.
             </p>
           </div>
           <button
             type="button"
-            class="theme-close"
+            class="overlay-close theme-close"
             onClick={actions.closeThemeStudio}
             aria-label="Close theme studio"
           >
-            <CloseIcon />
+            <CloseIcon size={14} />
           </button>
         </header>
 
@@ -471,7 +460,7 @@ export function ThemeStudio(): JSX.Element | null {
               </button>
             </div>
             <p class="theme-description">
-              Start from a look you love. Every part of the UI can be customized.
+              Pick a preset, then adjust anything below. Changes apply as you make them.
             </p>
 
             {naming ? (
@@ -852,97 +841,99 @@ export function ThemeStudio(): JSX.Element | null {
           </section>
         </div>
 
-        <footer class="theme-studio-foot">
-          <div class="theme-studio-foot-top">
-            <span class="theme-autosave" role="status" data-testid="theme-autosave">
-              <span class="theme-dot" aria-hidden="true" />
-              {saveError ? (
-                saveError
-              ) : (
-                <>
-                  Autosaved in this browser · <strong data-testid="theme-current-name">{activeLabel}</strong>
-                </>
-              )}
-            </span>
-            <span
-              class={`theme-contrast${contrast < 4.5 ? ' warning' : ''}`}
-              data-testid="theme-contrast"
-            >
-              Contrast {contrast.toFixed(1)}:1 {contrast >= 4.5 ? '✓' : '· Low'}
-            </span>
-          </div>
-
-          {confirmDelete ? (
-            <div class="theme-delete-confirm" role="alertdialog" aria-labelledby={deleteLabelId}>
-              <p id={deleteLabelId}>
-                Delete “{theme.name}”? This removes it from this browser and cannot be undone.
-              </p>
-              <div class="theme-delete-actions">
-                <button
-                  ref={confirmRef}
-                  type="button"
-                  class="theme-btn danger"
-                  onClick={confirmDeleteNow}
-                  data-testid="theme-delete-confirm"
-                >
-                  Delete theme
-                </button>
-                <button type="button" class="theme-btn" onClick={() => setConfirmDelete(false)}>
-                  Keep theme
-                </button>
-              </div>
+        <footer class="overlay-footer theme-studio-foot">
+          <div class="overlay-footer-actions theme-studio-foot-actions">
+            <div class="theme-studio-status">
+              <span class="theme-autosave" role="status" data-testid="theme-autosave">
+                <span class="theme-dot" aria-hidden="true" />
+                {saveError ? (
+                  saveError
+                ) : (
+                  <>
+                    Autosaved in this browser · <strong data-testid="theme-current-name">{activeLabel}</strong>
+                  </>
+                )}
+              </span>
+              <span
+                class={`theme-contrast${contrast < 4.5 ? ' warning' : ''}`}
+                data-testid="theme-contrast"
+              >
+                Contrast {contrast.toFixed(1)}:1 {contrast >= 4.5 ? '✓' : '· Low'}
+              </span>
             </div>
-          ) : null}
 
-          <div class="theme-foot-buttons">
-            <button
-              type="button"
-              class="theme-btn"
-              onClick={() => fileRef.current?.click()}
-              data-testid="theme-import"
-            >
-              <UploadIcon size={14} />
-              Import
-            </button>
-            <button
-              type="button"
-              class="theme-btn"
-              onClick={onExport}
-              data-testid="theme-export"
-            >
-              <DownloadIcon size={14} />
-              Export
-            </button>
-            <button
-              type="button"
-              class="theme-btn"
-              onClick={requestDelete}
-              disabled={!isCustom}
-              aria-label="Delete the current custom theme"
-              title={isCustom ? 'Delete this custom theme' : 'Built-in themes cannot be deleted'}
-              data-testid="theme-delete"
-            >
-              <TrashIcon size={14} />
-            </button>
-            <button
-              type="button"
-              class="theme-btn primary spacer"
-              onClick={openNaming}
-              data-testid="theme-save-as-new"
-            >
-              {dirty ? 'Save theme' : 'Save as new'}
-            </button>
+            {confirmDelete ? (
+              <div class="theme-delete-confirm" role="alertdialog" aria-labelledby={deleteLabelId}>
+                <p id={deleteLabelId}>
+                  Delete “{theme.name}”? This removes it from this browser and cannot be undone.
+                </p>
+                <div class="theme-delete-actions">
+                  <button
+                    ref={confirmRef}
+                    type="button"
+                    class="theme-btn danger"
+                    onClick={confirmDeleteNow}
+                    data-testid="theme-delete-confirm"
+                  >
+                    Delete theme
+                  </button>
+                  <button type="button" class="theme-btn" onClick={() => setConfirmDelete(false)}>
+                    Keep theme
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            <div class="theme-foot-buttons">
+              <button
+                type="button"
+                class="theme-btn"
+                onClick={() => fileRef.current?.click()}
+                data-testid="theme-import"
+              >
+                <UploadIcon size={14} />
+                Import
+              </button>
+              <button
+                type="button"
+                class="theme-btn"
+                onClick={onExport}
+                data-testid="theme-export"
+              >
+                <DownloadIcon size={14} />
+                Export
+              </button>
+              <button
+                type="button"
+                class="theme-btn"
+                onClick={requestDelete}
+                disabled={!isCustom}
+                aria-label="Delete the current custom theme"
+                title={isCustom ? 'Delete this custom theme' : 'Built-in themes cannot be deleted'}
+                data-testid="theme-delete"
+              >
+                <TrashIcon size={14} />
+              </button>
+              <button
+                type="button"
+                class="theme-btn primary spacer"
+                onClick={openNaming}
+                data-testid="theme-save-as-new"
+              >
+                {dirty ? 'Save theme' : 'Save as new'}
+              </button>
+            </div>
+
+            <input
+              ref={fileRef}
+              class="theme-studio-import"
+              type="file"
+              accept="application/json,.json,.theme.json"
+              aria-label="Import a theme JSON file"
+              data-testid="theme-import-file"
+              onChange={(event) => void onImportFile(event)}
+            />
           </div>
-
-          <input
-            ref={fileRef}
-            class="theme-studio-import"
-            type="file"
-            accept="application/json,.json,.theme.json"
-            aria-label="Import a theme JSON file"
-            data-testid="theme-import-file"
-            onChange={(event) => void onImportFile(event)}
-          />
         </footer>
       </div>
     </div>

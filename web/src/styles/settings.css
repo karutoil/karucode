@@ -22,10 +22,16 @@
  * the section while its settings scroll beneath it.
  */
 
+/* Settings is an `Overlay role="tall"`: a two-pane document at the shared tall
+ * measure, capped in `dvh` by the shell. It used to be `.dialog-sheet` — a
+ * right-edge drawer whose own rule set a 580px width that this rule then
+ * overrode to 960px, so the sheet was a drawer that no longer looked like one
+ * and not yet a dialog. The measure lives in `overlays.css` now (one width per
+ * role); this file owns only the sheet's own two panes. */
 .dialog-settings {
   /* Two panes plus a readable measure of content. At 680px the rail left the
    * form 380px wide, which is why the sheet was one column of tiny controls. */
-  width: min(960px, 100vw);
+  width: min(var(--overlay-w-tall), 100%);
 }
 
 /* The sheet's bands: the shell (rail + content) and the footer. `min-height: 0`
@@ -86,21 +92,14 @@
   padding: var(--space-8) var(--space-5) var(--space-5);
 }
 
-/* "⚙ SETTINGS": the one place the sheet names itself. The dialog's own header
- * is suppressed (`showHeader={false}`) because the pane header below already
- * carries the section's title and the close button. */
-.settings-nav-kicker {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin: 0;
-  color: var(--accent-fill);
-  font-size: var(--fs-micro);
-  font-weight: var(--weight-kicker);
-  letter-spacing: var(--tracking-kicker);
-  line-height: 1.4;
-  text-transform: uppercase;
-}
+/* The rail's own name for itself is gone.
+ *
+ * It read "⚙ SETTINGS" in 10px tracked caps — inside a `<nav aria-label="Settings">`,
+ * inside a dialog whose accessible name is "Settings", three rows under the
+ * button that opened it. On a phone it was already hidden for exactly that
+ * reason (`(max-width: 780px)` below), which is the tell: a label that costs a
+ * row on desktop and nothing on mobile was decoration. The search field is the
+ * rail's head now, which is what a reader uses it for. */
 
 /* `.side-search` is the shared search field (layout.css). Only its placement is
  * overridden here: its margins belong to the sessions rail's gutter, and this
@@ -1112,8 +1111,8 @@
 /* ---------- models.dev picker ----------------------------------------- */
 
 .dialog-model-edit {
-  width: min(620px, calc(100vw - 32px));
-  max-height: calc(100dvh - 64px);
+  width: min(var(--overlay-w-standard), 100%);
+  max-height: calc(100dvh - var(--space-10) - var(--space-7));
 }
 
 .dialog-model-edit > .field-hint {
@@ -1212,8 +1211,8 @@
 }
 
 .dialog-catalog {
-  width: min(560px, calc(100vw - 32px));
-  max-height: min(80vh, 720px);
+  width: min(var(--overlay-w-standard), 100%);
+  max-height: min(var(--overlay-h-tall), calc(100dvh - var(--space-10) - var(--space-7)));
 }
 
 .catalog-body {
@@ -1633,17 +1632,10 @@
 
 /* ---------- footer ----------------------------------------------------- */
 
-.settings-footer {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--space-4) var(--space-6);
-  padding: var(--space-6) var(--space-9);
-  border-top: 1px solid var(--line);
-  background: transparent;
-}
+/* The footer band is the shell's `.overlay-footer` (hairline, inset, pinned
+ * height, note on the left, actions on the right) and the sheet passes its
+ * note and buttons to the shell. Nothing here draws a band: a second padding
+ * and hairline was how the footer could be pushed out of a clipped sheet. */
 
 /* What the shared Save button does to the section on screen. It takes the row
  * when there is no error, so the buttons stay put between the two states. */
@@ -1673,18 +1665,20 @@
   flex: 0 0 auto;
 }
 
-.settings-footer-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  margin-left: auto;
+/* One control height in the sheet: every field, panel action and footer button
+ * is the 32px an `.input` is. The footer pair used to be `.button`'s 30px, so
+ * the two things the user commits with sat 2px shorter than the controls they
+ * had just edited. Scoped to the shell's footer-actions slot, which is where
+ * they render now. */
+.overlay-footer-actions .button {
+  height: var(--space-10);
 }
 
-/* One control height in the sheet: every field, panel action and footer button
- * is 32px. The footer pair were `.button`'s 30px, so the two things the user
- * commits with sat 2px shorter than the controls they just edited. */
-.settings-footer .button {
-  height: var(--space-10);
+/* The two things a reader commits with are never narrower than a word: "Save
+ * changes" and "Cancel" hold a 96px floor so they do not jump when the note
+ * beside them changes length between "This section saves every change" and the
+ * per-scope sentence. */
+.overlay-tall .overlay-footer-actions .button {
   min-width: 96px;
 }
 
@@ -1714,12 +1708,8 @@
     padding: var(--space-4) var(--space-5) 0;
   }
 
-  /* The pane header names the section on the row below; a second "Settings" in
-   * a 390px column is a row spent on nothing. */
-  .settings-nav-kicker {
-    display: none;
-  }
-
+  /* The pane header names the section on the row below; the rail keeps its
+   * search field, which is the only thing in its head worth a row. */
   .settings-nav-list {
     flex: 0 0 auto;
     flex-direction: row;
@@ -1790,23 +1780,19 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .settings-footer {
-    padding-bottom: calc(13px + env(safe-area-inset-bottom, 0px));
-    padding-right: var(--space-7);
-    padding-left: var(--space-7);
-  }
-
-  .settings-footer-note,
-  .settings-error-summary {
+  /* The footer band is the shell's, so the phone rule targets its note and
+   * actions slots rather than a `.settings-footer` that no longer draws a box. */
+  .overlay-tall .overlay-footer-note,
+  .overlay-tall .overlay-footer-actions {
     flex-basis: 100%;
   }
 
-  .settings-footer-actions {
+  .overlay-tall .overlay-footer-actions {
     flex: 1 1 auto;
     margin-left: 0;
   }
 
-  .settings-footer-actions .button {
+  .overlay-tall .overlay-footer-actions .button {
     flex: 1 1 auto;
   }
 

@@ -3352,3 +3352,71 @@ async fn the_turn_does_not_reorder_two_plugins_contributions() {
     host.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A `replace` contribution must reach the browser with its target *and* its new
+/// text.
+///
+/// The host validated `replace` and then dropped both fields when building the
+/// payload (`target: None` for every kind), so a plugin could declare a rename,
+/// get no error, and see nothing change — the client had nothing to apply. This
+/// pins the wire shape the frontend's `readReplacements` consumes.
+#[tokio::test]
+async fn replace_contributions_carry_their_target_and_text_to_the_client() {
+    let dir = temp_dir("ui-replace");
+    let script = r#"
+import json, sys
+
+MANIFEST = {
+    "name": "brand", "version": "1.0.0", "protocol": "1",
+    "capabilities": ["tools", "ui"], "permissions": [], "hooks": [],
+    "ui": [
+        {"kind": "replace", "target": "label.new-session", "replace": " New thread "},
+        {"kind": "replace", "target": "approval.approve", "replace": "Go"},
+    ],
+}
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": MANIFEST})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": []}})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": rid, "result": None})
+        break
+    elif rid is not None:
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "unknown"}})
+"#;
+    let mut host = PluginHost::discover(&[script_plugin(&dir, "brand", script)], &dir);
+    host.start_all().await;
+
+    let ui = host.ui();
+    // Only the replaceable target survives; the safety control is refused.
+    assert_eq!(ui.contributions.len(), 1, "{:?}", ui.contributions);
+    let rename = &ui.contributions[0];
+    assert_eq!(rename.kind, "replace");
+    assert_eq!(
+        rename.target.as_deref(),
+        Some("label.new-session"),
+        "the client needs the target to know what to rename"
+    );
+    assert_eq!(
+        rename.replace.as_deref(),
+        Some("New thread"),
+        "trimmed, and carried through instead of dropped"
+    );
+
+    // The refusal is reported, not swallowed.
+    let notes = host.diagnostics()[0].error.clone().unwrap_or_default();
+    assert!(
+        notes.contains("approval.approve"),
+        "a refused replace target must be explained: {notes}"
+    );
+}

@@ -196,9 +196,19 @@ impl Tool for PluginTool {
         // Cancellation is handled inside `request_cancellable`, which removes the
         // pending entry on every exit path. Dropping the future from outside
         // (as `tokio::select!` here used to) left a dead waiter in the map.
+        //
+        // The call context goes with the request so a `plugin/state/*` frame this
+        // handler raises is attributed to *this* session instead of an id the
+        // plugin supplied.
         let reply = self
             .shared
-            .request_cancellable(methods::TOOLS_CALL, params, budget, Some(&ctx.cancel))
+            .request_cancellable_in_context(
+                methods::TOOLS_CALL,
+                params,
+                budget,
+                Some(&ctx.cancel),
+                call_context(&ctx),
+            )
             .await;
         match reply {
             Ok(value) => match serde_json::from_value::<PluginToolResult>(value) {

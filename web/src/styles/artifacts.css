@@ -342,8 +342,10 @@
 /* ---------- full screen ---------- */
 
 .dialog-artifact {
-  width: min(1200px, 94vw);
-  max-height: 92vh;
+  /* An object to look at: the full measure, and `dvh` rather than `vh` so the
+   * expanded artifact does not sit under a phone's browser chrome. */
+  width: min(var(--overlay-w-full), 100%);
+  max-height: min(92dvh, calc(100dvh - var(--space-10) - var(--space-7)));
 }
 
 .artifact-expanded {

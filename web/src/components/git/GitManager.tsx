@@ -168,6 +168,13 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
   };
 
   const requestDeleteBranch = (target: GitBranch): void => {
+    // One modal at a time. The branch dialog stayed open underneath the
+    // confirmation, so two `aria-modal="true"` dialogs (and two body scroll
+    // locks) were live at once and assistive tech was told twice that everything
+    // outside was inert. The confirmation takes the screen; cancelling or
+    // confirming the delete returns to a closed branch dialog, which is where
+    // the reader already was when they asked for the delete.
+    setBranchesOpen(false);
     setConfirm({
       title: `Delete branch ${target.name}?`,
       description: `The branch ref is removed. Commits that no other branch contains become unreachable.`,

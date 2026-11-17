@@ -470,13 +470,17 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-* kinds are `button`, `command`, `keybinding` and `hide`; a control is activated
-  either by `action` (the plugin answers `ui/action`) or by `message` (the text
-  is posted as a user turn). Exactly one of the two, and two controls may share
-  one action;
-* slots are a closed list: `composer.toolbar` (the composer's action row),
-  `inspector.header` (beside **Context**) and `session.header`. A button naming
-  another slot is skipped with a note in the diagnostics;
+* kinds are `button`, `command`, `keybinding`, `hide` and `replace`; a control
+  is activated either by `action` (the plugin answers `ui/action`) or by
+  `message` (the text is posted as a user turn). Exactly one of the two, and two
+  controls may share one action;
+* slots are a closed list and **every entry is mounted in the app**:
+  `composer.toolbar` (the composer's action row), `inspector.header` (beside
+  **Context**), `session.header` (the header's button row),
+  `session.row.badge` (a chip on a rail session row) and `session.header.chip`
+  (a chip beside the open session's title). The two `session.*` chip slots take
+  `text` + `tone` instead of a label and icon. A button naming another slot is
+  skipped with a note in the diagnostics;
 * a `keybinding` needs a modifier — `mod` (Ctrl on Windows/Linux, Cmd on macOS),
   `ctrl` or `alt` — then one key. A bare key is typing, so it is refused; so is
   any chord the app already uses (`mod+k` palette, `mod+b` rail, `mod+n` new
@@ -491,11 +495,26 @@ fn main() -> std::io::Result<()> {
   model and cannot change the tool registry. Its answer is a toast (`message`),
   panels to re-read (`refresh`) and at most one `http`/`https` URL to open
   (`open_url`);
-* `hide` is an allowlist and app-wide: `composer.attach`, `inspector.tab.workspace`,
-  `inspector.tab.changes`, `inspector.tab.session`, `inspector.tab.agents`,
-  `inspector.context`. Anything else — including every control that stops a run
-  or answers an approval — is refused, and the inspector will not hide its last
-  remaining tab;
+* `hide` is an allowlist and app-wide: `composer.attach`, `composer.model`,
+  `inspector.tab.workspace`, `inspector.tab.changes`, `inspector.tab.session`,
+  `inspector.tab.agents`, `inspector.context`, `rail.footer`,
+  `session.header.actions`, `notifications` and `command-palette`. Every entry
+  is consumed by a real control, so asking for one always does something.
+  Anything else — including every control that stops a run or answers an
+  approval — is refused, the inspector will not hide its last remaining tab, and
+  the settings avatar in the rail footer stays reachable;
+* `replace` renames a built-in label instead of hiding it, which is how a
+  deployment makes the app speak its own vocabulary ("Session" → "Thread"):
+
+  ```rust
+  .replace("label.new-session", "New thread")
+  ```
+
+  The targets are `app.name`, `label.session`, `label.project`,
+  `label.new-session` and `empty.greeting`. Nothing that states a safety
+  property is replaceable — a plugin cannot relabel an approval control or
+  rewrite the unsandboxed-shell warning. The first plugin to claim a target
+  wins, in discovery order;
 * the person on the other side has the last word: Settings → Plugins & MCP →
   **Controls in the interface** switches a contributed control off or puts a
   hidden built-in back, per browser, without disabling the plugin;
@@ -552,12 +571,16 @@ These four calls keep data instead:
 
 `scope` is `session` (one conversation), `project` (every session in one
 project) or `install` (this server). The **owner id is filled in by the host**
-from the session the call belongs to, never chosen by the plugin, so a plugin
-cannot read another conversation's rows. Keys are `[a-z0-9._-]`, a value is at
-most 64 KiB of JSON, and a plugin holds at most 4 096 keys and 8 MiB per scope —
-the write that would cross a limit is refused *before* it lands, with a message
-naming it. Use `HostClient::global().state_set(state_scope::SESSION, &id, "", "k", json!(…))`
-and `state_get`/`state_list`/`state_delete` from any handler.
+from the tool call that is running when the request arrives, never chosen by
+the plugin: whatever `session_id` or `project_id` a plugin writes in `params`
+is ignored, so one conversation's rows cannot be reached from another. A
+`session`- or `project`-scoped call made with no tool call in flight (from a
+hook, say) has no owner and is refused rather than guessed. Keys are
+`[a-z0-9._-]`, a value is at most 64 KiB of JSON, and a plugin holds at most
+4 096 keys and 8 MiB per scope — the write that would cross a limit is refused
+*before* it lands, with a message naming it. Use
+`HostClient::global().state_set(state_scope::SESSION, &id, "", "k", json!(…))`
+and `state_get`/`state_list`/`state_delete` from a tool handler.
 
 ## Slash commands and chips
 

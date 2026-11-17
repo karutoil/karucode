@@ -11,14 +11,17 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const cssSource = readFileSync(new URL('./theme-studio.css', import.meta.url), 'utf8');
+// The drawer's measure and its header/footer bands belong to the shell now, so
+// geometry questions are answered against `overlays.css`.
+const shellCss = readFileSync(new URL('./overlays.css', import.meta.url), 'utf8');
 
-/** Declarations of a single, non-nested rule in `theme-studio.css`. */
-function cssDeclarations(selector: string): Record<string, string> {
-  const start = cssSource.indexOf(`\n${selector} {`);
-  expect(start, `${selector} is defined in theme-studio.css`).toBeGreaterThan(-1);
-  const end = cssSource.indexOf('\n}', start);
+/** Declarations of a single, non-nested rule in a stylesheet. */
+function cssDeclarations(selector: string, css = cssSource): Record<string, string> {
+  const start = css.indexOf(`\n${selector} {`);
+  expect(start, `${selector} is defined in the stylesheet`).toBeGreaterThan(-1);
+  const end = css.indexOf('\n}', start);
   const declarations: Record<string, string> = {};
-  for (const line of cssSource.slice(start, end).split('\n')) {
+  for (const line of css.slice(start, end).split('\n')) {
     const match = /^\s*([a-z-]+):\s*(.+);\s*$/.exec(line);
     if (match?.[1] !== undefined && match[2] !== undefined) declarations[match[1]] = match[2];
   }
@@ -26,8 +29,15 @@ function cssDeclarations(selector: string): Record<string, string> {
 }
 
 describe('theme studio stylesheet fidelity', () => {
+  const cssWithoutComments = cssSource.replace(/\/\*[\s\S]*?\*\//g, '');
+
   it('keeps a narrow scrim gutter around the drawer', () => {
-    expect(cssSource).toMatch(/\.theme-studio\s*\{[\s\S]*?width:\s*min\(580px, calc\(100% - 28px\)\)/);
+    // The drawer's measure is the role's, not a literal: one width for
+    // "a panel slid in from the right" lives in overlays.css.
+    expect(cssDeclarations('.overlay-drawer', shellCss)['width']).toBe(
+      'min(var(--overlay-w-drawer), calc(100% - var(--space-9)))',
+    );
+    expect(cssWithoutComments).not.toContain('.theme-studio-layer');
   });
 
   it('keeps the drawer on the mock line rhythm and a neutral scrim', () => {
@@ -38,14 +48,18 @@ describe('theme studio stylesheet fidelity', () => {
     expect(cssSource).toMatch(/\.theme-studio :is\(h1, h2, h3, h4\) \{\s*line-height: 1\.5;/);
     // The scrim dims the app (mock: #0007) instead of tinting it with --theme-bg.
     // One scrim and one blur for the whole overlay family, defined once in
-    // overlays.css and mode-derived there (DESIGN-AUDIT overlays B2).
-    expect(cssDeclarations('.theme-shade')['background']).toBe('var(--overlay-scrim)');
-    expect(cssDeclarations('.theme-shade')['backdrop-filter']).toBe('var(--overlay-blur)');
+    // overlays.css and mode-derived there (DESIGN-AUDIT overlays B2). The
+    // drawer used to alias it through a private `.theme-shade`; it now uses the
+    // shell's `.dialog-backdrop`, so a second veil cannot come back.
+    const overlays = readFileSync(new URL('./overlays.css', import.meta.url), 'utf8');
+    expect(overlays).toMatch(
+      /\.dialog-backdrop \{[^}]*background: var\(--overlay-scrim\);[^}]*backdrop-filter: var\(--overlay-blur\);/,
+    );
+    expect(cssWithoutComments).not.toContain('.theme-shade');
   });
 
   it('renders secondary copy with the muted role', () => {
     for (const selector of [
-      '.theme-studio-subtitle',
       '.theme-description',
       '.theme-preset-mode',
       '.theme-color-hex',
@@ -56,23 +70,20 @@ describe('theme studio stylesheet fidelity', () => {
     ]) {
       expect(cssDeclarations(selector)['color'], selector).toBe('var(--muted)');
     }
+    // The subtitle is the shell's `.overlay-description` now — one muted line
+    // under every dialog title in the product, not a per-drawer recipe.
+    expect(cssDeclarations('.overlay-description', shellCss)['color']).toBe('var(--muted)');
     // Primary labels keep the brighter secondary-text role (mock `--text2`).
     expect(cssDeclarations('.theme-color-name')['color']).toBe('var(--text-secondary)');
     expect(cssDeclarations('.theme-field-label')['color']).toBe('var(--text-secondary)');
   });
 
-  it('matches the mock header and scroll geometry', () => {
-    expect(cssDeclarations('.theme-studio')['width']).toBe('min(580px, calc(100% - 58px))');
-    expect(cssDeclarations('.theme-studio-top')['padding']).toBe(
-      'var(--space-9) var(--space-10) var(--space-9)',
-    );
-    expect(cssDeclarations('.theme-studio-top')['gap']).toBe('var(--space-7)');
-    expect(cssDeclarations('.theme-studio-title')['font-size']).toBe('var(--fs-hero)');
-    expect(cssDeclarations('.theme-studio-title')['margin']).toBe('var(--space-4) 0 var(--space-2)');
-    expect(cssDeclarations('.theme-studio-subtitle')['font-size']).toBe('var(--fs-small)');
-    expect(cssDeclarations('.theme-close')['width']).toBe('31px');
-    expect(cssDeclarations('.theme-close')['height']).toBe('31px');
-
+  it('matches the mock header geometry', () => {
+    // The header band is the shell's `.overlay-header`: one title size and one
+    // close button shared with every other dialog, so the drawer no longer sets
+    // its own 24px hero title, 31px close button or header padding. What is
+    // still the drawer's own is the body rhythm inside the panel.
+    expect(cssDeclarations('.theme-studio')['width']).toBeUndefined();
     expect(cssDeclarations('.theme-studio-scroll')['padding']).toBe(
       '0 var(--space-10) var(--space-9)',
     );
@@ -82,6 +93,9 @@ describe('theme studio stylesheet fidelity', () => {
     expect(cssDeclarations('.theme-section-title')['margin-bottom']).toBe('var(--space-3)');
     expect(cssDeclarations('.theme-description')['margin']).toBe('0 0 var(--space-7)');
     expect(cssDeclarations('.theme-description')['font-size']).toBe('var(--fs-tiny)');
+    // The eyebrow and the "Live preview" badge carried no state and are gone.
+    expect(cssSource).not.toContain('theme-top-eyebrow');
+    expect(cssSource).not.toContain('theme-head-badge');
   });
 
   it('matches the mock gallery geometry', () => {
@@ -156,10 +170,8 @@ describe('theme studio stylesheet fidelity', () => {
   });
 
   it('matches the mock footer geometry and button set', () => {
-    expect(cssDeclarations('.theme-studio-foot')['padding']).toBe(
-      'var(--space-7) var(--space-10) var(--space-8)',
-    );
-    expect(cssDeclarations('.theme-studio-foot-top')['margin-bottom']).toBe('var(--space-6)');
+    // The band is the shell's `.overlay-footer`; the studio owns the status strip
+    // and the four actions inside it.
     expect(cssDeclarations('.theme-autosave')['font-size']).toBe('var(--fs-tiny)');
     expect(cssDeclarations('.theme-autosave .theme-dot')['width']).toBe('6px');
     expect(cssDeclarations('.theme-foot-buttons')['gap']).toBe('var(--space-4)');
@@ -174,12 +186,18 @@ describe('theme studio stylesheet fidelity', () => {
     expect(cssDeclarations('.theme-studio-import')['display']).toBe('none');
   });
 
-  it('keeps the desktop drawer at tablet widths and only shrinks at 620px', () => {
+  it('leaves the drawer width to the role, so no breakpoint re-declares it', () => {
+    // 620px is a *density* breakpoint (two columns of presets stop reading);
+    // the panel's width belongs to `.overlay-drawer`, which the shell's 640px
+    // tier already takes to full width.
     expect(cssSource).not.toMatch(/max-width:\s*800px/);
     expect(cssSource).not.toMatch(/max-width:\s*430px/);
-    expect(cssSource).toMatch(
-      /@media \(max-width: 620px\) \{[\s\S]*?\.theme-studio \{[\s\S]*?width: min\(580px, calc\(100% - 28px\)\);/,
-    );
+    for (const match of cssSource.matchAll(/\.theme-studio \{[^}]*\}/g)) {
+      expect(match[0]).not.toContain('width:');
+    }
+    const narrow = cssSource.slice(cssSource.indexOf('@media (max-width: 620px)'));
+    expect(narrow).not.toMatch(/\.theme-studio-top \{/);
+    expect(narrow).not.toMatch(/\.theme-studio-foot \{\s*padding/);
   });
 
   it('keeps the mock button reset from out-specifying component styles', () => {

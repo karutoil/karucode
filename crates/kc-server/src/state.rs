@@ -385,6 +385,36 @@ impl Hooks for PluginHooks {
             .await
     }
 
+    // The four *gate* hooks below change what a run does, rather than observing
+    // it. They are the whole policy-plugin surface (`on_tool_call` blocks or
+    // rewrites a call, `on_tool_result_gate` replaces output, `on_model_request`
+    // appends to the system prompt, `on_stop` keeps a run alive), and they were
+    // silently absent from this adapter: `kc_plugin_host::PluginHooks` implements
+    // them, but bootstrap wires *this* wrapper as the runtime's hooks object, so
+    // every gate fell through to the trait's no-op default and no plugin could
+    // affect a run. Forward them, for the same reason as the observers above.
+    async fn on_tool_call(
+        &self,
+        call: &kc_core::hooks::ToolCallGate,
+    ) -> kc_core::hooks::GateDecision {
+        self.handle().await.on_tool_call(call).await
+    }
+
+    async fn on_tool_result_gate(&self, result: &kc_core::hooks::ToolResultGate) -> Option<String> {
+        self.handle().await.on_tool_result_gate(result).await
+    }
+
+    async fn on_model_request(&self, request: &kc_core::hooks::ModelRequestGate) -> Option<String> {
+        self.handle().await.on_model_request(request).await
+    }
+
+    async fn on_stop(
+        &self,
+        stop: &kc_core::hooks::StopGate,
+    ) -> Option<kc_core::hooks::StopDecision> {
+        self.handle().await.on_stop(stop).await
+    }
+
     fn notifier(&self) -> Option<Arc<dyn kc_core::hooks::NotificationObserver>> {
         Some(Arc::new(PluginNotificationForwarder {
             host: Arc::clone(&self.host),
