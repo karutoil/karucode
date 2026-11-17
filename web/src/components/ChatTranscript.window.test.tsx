@@ -117,6 +117,25 @@ describe('windowed transcript', () => {
     expect(parseFloat(transcript.style.paddingTop || '0')).toBeGreaterThan(0);
   });
 
+  it('renders a short conversation whole, with no window padding', async () => {
+    // Windowing a short conversation buys nothing and costs the one thing that
+    // can move the content under the reader: the window's padding is rewritten
+    // on every scroll. Below `VIRTUAL_MIN_ENTRIES` every row is mounted for
+    // real, so there is no padding to rewrite (reported, and fixed, in PR #16).
+    const items = conversation(40);
+    const { container } = render(<Harness items={items} />);
+    await waitFor(() => expect(rows(container).length).toBeGreaterThan(0));
+    // 80 messages, plus the day marker the transcript inserts above them.
+    expect(rows(container).length).toBe(items.length + 1);
+    const transcript = container.querySelector('.transcript') as HTMLElement;
+    expect(transcript.classList.contains('is-windowed')).toBe(false);
+    expect(transcript.style.paddingTop || '').toBe('');
+    expect(transcript.style.paddingBottom || '').toBe('');
+    // Both ends are on screen, not padding: the head is mounted, not estimated.
+    expect(container.textContent).toContain('question 0');
+    expect(container.textContent).toContain('answer 39');
+  });
+
   it('moves the window to the head when the reader scrolls to the top', async () => {
     const { container } = render(<Harness items={conversation(100)} />);
     const viewport = container.querySelector('#probe-viewport') as HTMLElement;
@@ -244,7 +263,7 @@ describe('windowed transcript', () => {
     }
 
     try {
-      const { container, rerender } = render(<AnchorHarness items={conversation(50)} />);
+      const { container, rerender } = render(<AnchorHarness items={conversation(100)} />);
       const viewport = container.querySelector('#anchor-viewport') as HTMLElement;
       viewport.scrollTop = 4_000;
       fireEvent.scroll(viewport);
@@ -256,7 +275,7 @@ describe('windowed transcript', () => {
       // pass without changing any mounted row's height, so the correction below
       // is the only thing that can move the scroll.
       layout.shift = 300;
-      rerender(<AnchorHarness items={[...conversation(50), message({ id: 'tail', content: 'tail' })]} />);
+      rerender(<AnchorHarness items={[...conversation(100), message({ id: 'tail', content: 'tail' })]} />);
       await waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(before + 200));
       // Exactly the shift: the reader's row stays where it was on screen.
       expect(Math.abs(viewport.scrollTop - (before + 300))).toBeLessThanOrEqual(1);

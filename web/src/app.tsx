@@ -187,14 +187,22 @@
 //   reloaded - including a turn that only thought and then called a tool, which
 //   has no prose of its own.
 // * **Long transcripts**: opening a session, scrolling a history of thousands of
-//   rows and keeping up with a live run are all bounded. The transcript is
-//   **windowed**: only the rows around the viewport are mounted, with padding
-//   standing in for the rest, so a fully loaded conversation does not mount
-//   thousands of Markdown blocks at once (see `web/src/lib/virtualWindow.ts`).
+//   rows and keeping up with a live run are all bounded. Above 150 rows the
+//   transcript is **windowed**: only the rows around the viewport are mounted,
+//   with padding standing in for the rest, so a fully loaded conversation does
+//   not mount thousands of Markdown blocks at once (see
+//   `web/src/lib/virtualWindow.ts`). At or below 150 rows every row is mounted
+//   instead (`VIRTUAL_MIN_ENTRIES`, `web/src/components/ChatTranscript.tsx`):
+//   the window's padding is rewritten on every scroll, and a padding change
+//   moves the content under the reader however the scroll is corrected after
+//   it, which a conversation that short gains nothing from. No message row is
+//   skipped by the browser either (`content-visibility: visible` on `.msg`): a
+//   row laid out at its `contain-intrinsic-size` and then re-laid out for real
+//   as it scrolls in moves everything below it.
 //   Scrolling it is meant to be *still*: the window is sized from measured row
-//   **extents** (border box plus the row's own bottom margin, with
-//   `content-visibility` off inside the window so every mounted row - the
-//   overscan included - reports the box it really has), and when a measurement
+//   **extents** (border box plus the row's own bottom margin, so every mounted
+//   row - the overscan included - reports the box it really has), and when a
+//   measurement
 //   does move the layout the scroll is moved by exactly that shift, anchored on
 //   the row at the top of the viewport. What it must never do is derive the
 //   correction from the *estimate* it is replacing: Chromium had already laid the

@@ -23,7 +23,7 @@ CDP against a real kc-server, samples the scroller *every frame* while a real
     it stops (`preview`, `collapsed` — see `--thinking`).
 
 Run: cargo build -p kc-server --bin karucode && (cd web && npm run build)
-     python3 scripts/verify_transcript_scroll.py [--thinking preview] [--keep] [--quiet]
+     python3 scripts/verify_transcript_scroll.py [--thinking preview] [--rows N] [--keep] [--quiet]
 """
 
 from __future__ import annotations
@@ -141,10 +141,26 @@ class Provider(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------------------
-# Seeded history: long enough to window, tall enough to scroll
+# Seeded history: tall enough to scroll, either side of the window's threshold
 # ---------------------------------------------------------------------------
 
+# The default seed is the *short* conversation the transcript no longer windows
+# (see `VIRTUAL_MIN_ENTRIES`): 60 rows, every one mounted, no padding. `--rows
+# 200` runs the windowed path instead - the tail mounted with padding standing
+# in for 42,000px of history.
+#
+# The windowed stress seed reports one ~20px movement *down* the screen during
+# one upward gesture, at a frame where the window swapped padding for rows and a
+# row was measured taller: the measurement correction wrote 58 of the 78px and
+# 20px was left over. Measured identically on the code before the short-
+# conversation rule landed, so it is not that rule's doing; it is left visible
+# rather than tuned away, and every gesture in the short run is 0px.
 SEED_ROWS = 60
+# Mirrors `VIRTUAL_MIN_ENTRIES` in `web/src/components/ChatTranscript.tsx`: below
+# this many rows the transcript mounts every row instead of windowing. The
+# default seed sits below it, so the run asserts the short-conversation path;
+# `--rows 200` takes the seed above it to assert the windowed one.
+VIRTUAL_MIN_ENTRIES = 150
 NEWEST = "SEED-NEWEST-MARKER"
 
 
@@ -488,6 +504,11 @@ def analyse(recording: dict, direction: str = "down") -> dict:
                     "pad": [previous["padTop"], current["padTop"]],
                     "rows": [previous["rows"], current["rows"]],
                     "first": [previous["first"], current["first"]],
+                    # The row the reader is looking at, relative to the top of the
+                    # scroller: what the *reader* saw, as opposed to what
+                    # `scrollTop` did (which can include a correction the app wrote
+                    # to keep this number still).
+                    "firstTop": [previous.get("firstTop"), current.get("firstTop")],
                     "jump": [previous["jump"], current["jump"]],
                 }
             )
@@ -526,7 +547,8 @@ def dump(summary: dict, limit: int = 6) -> None:
     """Print the evidence for one failing gesture: geometry + who wrote the scroll."""
     for step in summary["backsteps"][:limit]:
         print(f"       backstep {step['delta']:+.0f}px @t{step['t']} "
-              f"h {step['h']} pad {step['pad']} rows {step['rows']} first {step['first']}", flush=True)
+              f"h {step['h']} pad {step['pad']} rows {step['rows']} first {step['first']} "
+              f"firstTop {step.get('firstTop')}", flush=True)
     for write in summary["against"][:limit]:
         print(f"       write {write['delta']:+.0f}px ({write['from']}→{write['to']}) {write['stack'][:300]}", flush=True)
     for write in summary.get("biggest", [])[:limit]:
@@ -676,6 +698,9 @@ def wait_settled(session: Session, quiet_ms: int = 250, timeout_ms: int = 3000) 
           viewport: node.clientHeight,
           rows: document.querySelectorAll('.transcript > *').length,
           total: {SEED_ROWS},
+          padTop: parseFloat(document.querySelector('.transcript').style.paddingTop || '0'),
+          padBottom: parseFloat(document.querySelector('.transcript').style.paddingBottom || '0'),
+          windowed: document.querySelector('.transcript').classList.contains('is-windowed'),
         }};
         """
     )
@@ -702,6 +727,9 @@ def gesture(session: Session, direction: str, distance: int, x: int | None = Non
 
 
 def main() -> int:
+    # The seed size is read by `seed_transcript` and by the geometry check, so
+    # `--rows` rebinds the module-level constant both of them read.
+    global SEED_ROWS
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep", action="store_true", help="leave the server and browser running")
     parser.add_argument("--quiet", action="store_true")
@@ -727,7 +755,22 @@ def main() -> int:
             "and narrower text makes each of them taller."
         ),
     )
+    parser.add_argument(
+        "--rows",
+        type=int,
+        default=SEED_ROWS,
+        metavar="N",
+        help=(
+            "seeded transcript rows. Above 150 the run exercises the window; at or "
+            "below it, the short-conversation path, where every row is mounted and no "
+            "window padding exists (PR #16)."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.rows < 4:
+        raise SystemExit("--rows must be at least 4 (a marker, a question, an answer)")
+    SEED_ROWS = args.rows
 
     binary = ROOT / "target/debug/karucode"
     if not binary.exists():
@@ -1078,7 +1121,24 @@ def main() -> int:
         geometry = wait_settled(session)
         print(f"       geometry {geometry}", flush=True)
         check("opening lands on the newest content", geometry["distance"] <= 2, json.dumps(geometry))
-        check("the transcript is windowed", 0 < geometry["rows"] < SEED_ROWS, str(geometry["rows"]))
+        if SEED_ROWS > VIRTUAL_MIN_ENTRIES:
+            check(
+                "the transcript is windowed",
+                0 < geometry["rows"] < SEED_ROWS and geometry["windowed"] and geometry["padTop"] > 0,
+                str(geometry["rows"]),
+            )
+        else:
+            # The other half of the same rule: a short conversation mounts every
+            # row and writes no window padding at all, so there is no padding to
+            # rewrite under the reader while it scrolls (PR #16).
+            check(
+                "a short transcript is not windowed",
+                geometry["rows"] >= SEED_ROWS
+                and not geometry["windowed"]
+                and geometry["padTop"] == 0
+                and geometry["padBottom"] == 0,
+                json.dumps(geometry),
+            )
 
         # ---- 0. idle: nothing running, nobody touching it ------------------
         # Reported from a screen recording of a *still* conversation: the
@@ -1160,7 +1220,13 @@ def main() -> int:
 
         # ---- 2. can the reader reach the bottom at all? --------------------
         reaches = []
-        for attempt in range(8):
+        # One gesture is a fixed 1200px, so how many a document needs depends on
+        # how tall it is (a 60-row seed is ~14k, a 200-row one ~44k). Ask the
+        # scroller how much is left rather than assuming a count: the check is
+        # that the bottom is *reachable*, not that eight gestures happen to cross
+        # it. The cap only stops a genuinely stuck scroller from looping forever.
+        MAX_BOTTOM_ATTEMPTS = 60
+        for attempt in range(MAX_BOTTOM_ATTEMPTS):
             session.evaluate("return window.__probe.start();")
             gesture(session, "down", 1200)
             session.evaluate("await new Promise((r) => setTimeout(r, 800)); return 1;")
@@ -1179,6 +1245,8 @@ def main() -> int:
             )
             if summerised["backsteps"] and attempt == 0:
                 dump(summerised)
+            if reaches[-1]["distance"] <= 2:
+                break
         print(f"       bottom attempts {json.dumps(reaches)}", flush=True)
         check(
             "repeated downward gestures reach the bottom",

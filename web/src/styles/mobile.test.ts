@@ -276,23 +276,22 @@ describe('phone transcript: a card does not fill the screen', () => {
   });
 });
 
-describe('transcript row cost: off-screen rows skip layout and paint', () => {
+describe('transcript row cost: every row is laid out', () => {
   const row = declarations(chatCss, '.msg');
 
-  it('opts the message row into content-visibility', () => {
-    // A session can hold thousands of rows and a run streams a token at a time;
-    // without this the browser lays out and paints the whole conversation on
-    // every one of them. `auto` (not `hidden`) keeps the row focusable, findable
-    // by find-in-page, and reachable by `scrollIntoView`.
-    expect(row['content-visibility']).toBe('auto');
+  it('lays every message row out for real', () => {
+    // `content-visibility: auto` would skip off-screen rows, but a skipped row
+    // is laid out at its intrinsic size and re-laid out when it scrolls in, and
+    // that difference moves everything below it - the jump a reader sees when a
+    // tall turn comes into view. A stable scroll position wins over the saving;
+    // the window (or, below 150 rows, rendering every row) is what bounds work.
+    expect(row['content-visibility']).toBe('visible');
   });
 
-  it('reserves a plausible height for a row it has not measured yet', () => {
-    // `auto 160px` remembers each row's last measured height and falls back to
-    // 160px the first time. Without the fallback the scrollbar jumps as rows are
-    // skipped and re-measured; `contain-intrinsic-size: none` would collapse
-    // every off-screen row to zero and make the scrollbar meaningless.
-    expect(row['contain-intrinsic-size']).toBe('auto 160px');
+  it('declares no intrinsic size, because no row is skipped', () => {
+    // `contain-intrinsic-size` only matters while a row is skipped; with every
+    // row laid out, the browser measures the real box.
+    expect(row['contain-intrinsic-size']).toBeUndefined();
   });
 
   it('leaves the date marker and the cards outside the containment', () => {

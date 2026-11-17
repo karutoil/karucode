@@ -83,6 +83,20 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Fixed
 
+- **A short conversation is no longer windowed, and no message row skips its own
+  layout.** Below 150 rows the transcript mounts every row and writes no window
+  padding, so the padding rewrite that used to happen under the reader on every
+  scroll - the one thing that could still move the content after the scroll was
+  corrected - is gone. `content-visibility: auto` came off `.msg` for the same
+  reason: a row laid out at its `contain-intrinsic-size` and then re-laid out for
+  real as it scrolls in shifts everything below it. Reported, and first fixed,
+  in PR #16 by Dana Hanna; the window above 150 rows stays, because that is what
+  keeps a 150k-row session mountable. `scripts/verify_transcript_scroll.py`
+  gained `--rows`: its default seed is now the short conversation (every row
+  mounted, no padding, 24/24 checks) and `--rows 200` still runs the windowed
+  path (23/24, the one failure a pre-existing ~20px measurement residual that
+  the run reports rather than hides).
+
 - **Compaction checkpoints are rebuilt once, on upgrade.** The checkpoint's
   watermark is a count of model-visible messages, so it has to exclude the
   command receipts (`/compact` replies and friends) that the repaired window drops

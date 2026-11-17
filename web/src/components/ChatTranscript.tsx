@@ -838,6 +838,17 @@ function estimateEntryHeight(entry: Entry): number {
   return clampEstimate(height);
 }
 
+/**
+ * Below this many rows the transcript renders every row instead of windowing.
+ *
+ * A window is only worth its padding above this size: the padding changes on
+ * every scroll, and a padding change moves the content under the reader no
+ * matter how the scroll is corrected afterwards. A short conversation has
+ * nothing to gain from it, and `content-visibility` is off for every row now
+ * (see `styles/chat.css`), so an unwindowed short transcript lays out its rows
+ * for real either way. Reported, and first fixed, in PR #16.
+ */
+const VIRTUAL_MIN_ENTRIES = 150;
 /** Kept mounted above and below the viewport, so a wheel tick never reveals a hole. */
 const OVERSCAN_MIN_PX = 480;
 /** How long a row that just joined the conversation keeps its entry animation. */
@@ -1077,8 +1088,13 @@ export function ChatTranscript({
   // yet); it still windows the tail so a long session never mounts every row.
   // A measured zero (jsdom, or a hidden panel) renders everything, because a
   // window without a viewport would hide most of the transcript for good.
-  const virtual = viewportRef !== undefined && viewportHeight !== null && viewportHeight > 0;
-  const pending = viewportRef !== undefined && viewportHeight === null;
+  //
+  // A short conversation is not windowed at all: windowing it buys nothing and
+  // its padding is rewritten on every scroll, which is the one thing that can
+  // move the content under the reader (see `VIRTUAL_MIN_ENTRIES`).
+  const windowed = entries.length > VIRTUAL_MIN_ENTRIES;
+  const virtual = windowed && viewportRef !== undefined && viewportHeight !== null && viewportHeight > 0;
+  const pending = windowed && viewportRef !== undefined && viewportHeight === null;
   const bandHeight = viewportHeight !== null && viewportHeight > 0 ? viewportHeight : FALLBACK_VIEWPORT_PX;
   const bandTop = windowTop ?? geometry.total;
   const overscan = Math.max(bandHeight, OVERSCAN_MIN_PX);
@@ -1088,10 +1104,10 @@ export function ChatTranscript({
 
   // Measure the mounted rows after every commit that can have changed one.
   //
-  // Every mounted row is measured, not just the ones in view. A windowed
-  // transcript turns `content-visibility` off for its rows (see `.is-windowed`
-  // in `styles/chat.css`), so each mounted row has a real box to read; measuring
-  // them all means the window's arithmetic matches the DOM for the whole window,
+  // Every mounted row is measured, not just the ones in view. No message row is
+  // skipped by the browser any more (`content-visibility: visible` on `.msg`),
+  // so each mounted row has a real box to read; measuring them all means the
+  // window's arithmetic matches the DOM for the whole window,
   // including the overscan the reader is about to reach. Measuring only the
   // visible rows left the rest at their estimate, and the difference is what the
   // reader saw as a jump every time the window moved over an unmeasured row.

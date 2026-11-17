@@ -150,30 +150,21 @@
 /* ---------- message rows ---------- */
 
 /* A conversation can be thousands of rows long, and only a screenful is ever
- * visible. `content-visibility: auto` lets the browser skip layout and paint for
- * the rows that are scrolled out, instead of laying out the whole transcript on
- * every streamed token. `contain-intrinsic-size` keeps the scrollbar honest while
- * a row is skipped: `auto 160px` remembers each row's last measured height and
- * falls back to 160px (an avatar row plus a couple of lines) the first time. The
- * fallback is what stops a jump when a skipped row is measured again. */
+ * visible. `content-visibility: auto` would let the browser skip layout and paint
+ * for the rows that are scrolled out, but a skipped row is laid out at its
+ * `contain-intrinsic-size` and then re-laid out for real when it comes into view,
+ * and that difference moves everything below it with no render to compensate -
+ * the jump a reader sees when a tall turn scrolls in. So every row is laid out
+ * for real: a chat transcript is a scrolling list, and a stable scroll position
+ * is worth more than the skipped layout. The window is what bounds the work now
+ * (a transcript under `VIRTUAL_MIN_ENTRIES` renders every row, and an embedded
+ * renderer has no window at all), so no row may be skipped here. */
 .msg {
   display: flex;
   gap: var(--space-7);
   min-width: 0;
   margin: 0 0 var(--space-10);
   padding: 0;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 160px;
-}
-
-/* A windowed transcript measures every row it mounts, and `content-visibility:
- * auto` makes that measurement a lie: an off-screen row is laid out at its
- * `contain-intrinsic-size`, and then the browser re-lays it out for real as it
- * comes into view, shifting everything below it by the difference with no render
- * to compensate (rows are already few - the window is the bound - so there is
- * nothing left for content-visibility to save here). The unwindowed transcript
- * (an embedded renderer, the test environment) still gets the optimisation. */
-.transcript.is-windowed .msg {
   content-visibility: visible;
 }
 
