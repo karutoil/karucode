@@ -248,4 +248,53 @@ describe('stream recovery', () => {
     // rather than showing the previous conversation's fill.
     expect(recallPromptTokens('s_cd34')).toBeNull();
   });
+
+  it('keeps the frames a second read of the same session queued while the first is in flight', async () => {
+    // A resync calls `openSession` again for the session it is already reading.
+    // Clearing the queue for it threw away the live answer the *silent* snapshot
+    // cannot contain (the server persists an assistant turn only when it ends),
+    // so the words on screen vanished until the run finished.
+    const pending: Array<(detail: SessionDetail) => void> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.startsWith('/api/events')) return Promise.resolve(sseStream());
+        if (url === '/api/sessions/s_ab12') {
+          return new Promise<Response>((resolve) => {
+            pending.push((detail) => resolve(jsonResponse(detail)));
+          });
+        }
+        return Promise.resolve(jsonResponse({ sessions: [summaryFixture] }));
+      }),
+    );
+
+    await vi.waitFor(() => expect(typeof push).toBe('function'), { timeout: 3000 });
+    const first = actions.openSession('s_ab12', { silent: true });
+    await vi.waitFor(() => expect(pending).toHaveLength(1), { timeout: 3000 });
+
+    emit({ seq: 1, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'run_started', prompt: 'Go' });
+    emit({
+      seq: 2,
+      ts_ms: NOW,
+      session_id: 's_ab12',
+      run_id: 'r_x',
+      type: 'text_delta',
+      delta: 'still here',
+    });
+    // The frames reach `handleRawEvent` a task after `push()` writes them into the
+    // response body, so wait for the queue to actually hold them before the second
+    // read starts - that ordering is the whole point of this test.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // The same session again, while the first read is still outstanding.
+    const second = actions.openSession('s_ab12', { silent: true, preserveLive: true });
+    await vi.waitFor(() => expect(pending).toHaveLength(2), { timeout: 3000 });
+    pending[0]?.(runningDetail());
+    pending[1]?.(runningDetail());
+    await Promise.all([first, second]);
+
+    expect(transcriptText()).toContain('still here');
+  });
 });

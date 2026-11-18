@@ -174,15 +174,20 @@ matters to an operator says which behaviour changed, not which number.
   * **Smaller truths:** a failed boot can no longer leave the skeleton up with no
     message (it names the failure and offers Retry); a mid-run `error` that the
     provider recovered from no longer leaves a "Run failed" banner on the finished
-    run; a replayed frame can no longer double a paragraph (`seq` watermark); a
-    dead terminal socket says so once instead of only changing a status word; a
-    dialog that loses its opener focuses a landmark instead of `<body>`, and does
-    not scroll the page back to where it was restored; Tab inside the transcript
-    no longer stops follow-the-tail; two identical tool completions announce
-    twice; the subagent feed and the composer's per-session form map are bounded
-    (a long-lived tab used to grow without limit); and a running tool card paints
-    its first 300 output lines instead of 2 000 per streamed delta, splitting an
-    unchanged body once, with the rest shown when the call settles.
+    run; a resync that re-reads the session it is already reading no longer throws
+    away the live deltas it had queued (the silent snapshot cannot contain a turn
+    the server has not persisted, so the answer on screen was truncated until the
+    run ended); a replayed frame can no longer double a paragraph (`seq`
+    watermark); Escape that cancelled a rename or a menu inside the collapsed
+    rail's fly-out no longer closes the fly-out as well; a dead terminal socket
+    says so once instead of only changing a status word; a dialog that loses its
+    opener focuses a landmark instead of `<body>`, and does not scroll the page
+    back to where it was restored; Tab inside the transcript no longer stops
+    follow-the-tail; two identical tool completions announce twice; the subagent
+    feed and the composer's per-session form map are bounded (a long-lived tab
+    used to grow without limit); and a running tool card paints its first 300
+    output lines instead of 2 000 per streamed delta, splitting an unchanged body
+    once, with the rest shown when the call settles.
 
 - **A short conversation is no longer windowed, and no message row skips its own
   layout.** Below 150 rows the transcript mounts every row and writes no window

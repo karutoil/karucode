@@ -1316,8 +1316,14 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
     store.sessionInfoError.value = null;
   }
 
+  // Only a *different* session starts a fresh queue. A second read of the same
+  // session - the resync path does exactly this while the first read is still in
+  // flight - must not throw away the frames the queue is holding: they are the
+  // live answer, and the silent snapshot it is about to apply cannot contain a
+  // turn the server has not persisted yet. Whichever read settles first drains
+  // them, and the `generation` guard still discards a stale snapshot.
+  if (refreshingSessionId !== id) refreshQueue = [];
   refreshingSessionId = id;
-  refreshQueue = [];
 
   let applied = false;
   // Whether the snapshot closes the book on every turn it contains.

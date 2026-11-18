@@ -973,7 +973,10 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') railPeek.closePeek();
+      // A rename or a menu inside the fly-out consumes its own Escape (they mark
+      // the event `defaultPrevented`); tearing the panel down as well would cancel
+      // the edit *and* close the list behind it, so the reader loses both.
+      if (event.key === 'Escape' && !event.defaultPrevented) railPeek.closePeek();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);

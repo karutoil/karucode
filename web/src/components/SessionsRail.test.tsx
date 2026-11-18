@@ -1203,6 +1203,25 @@ describe('the collapsed rail’s fly-out (RailPeek)', () => {
     draft.mockRestore();
   });
 
+  it('closes on Escape unless something inside already consumed it', () => {
+    railPeek.peekProjectId.value = 'p_karucode';
+    const { container } = render(<SessionsRail />);
+    const peek = container.querySelector('.rail-peek');
+    if (!peek) throw new Error('the fly-out did not render');
+
+    // A rename field or a menu inside the fly-out prevents the default and
+    // consumes its own Escape; the panel must not tear itself down as well, or
+    // the reader loses the edit *and* the list behind it.
+    const swallow = (event: Event): void => event.preventDefault();
+    peek.addEventListener('keydown', swallow);
+    fireEvent.keyDown(peek as HTMLElement, { key: 'Escape' });
+    peek.removeEventListener('keydown', swallow);
+    expect(railPeek.peekProjectId.value).toBe('p_karucode');
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(railPeek.peekProjectId.value).toBeNull();
+  });
+
   it('switches to the peeked project before drafting in it', async () => {
     // A draft belongs to the *open* project. An empty preview of another project
     // offered "New session" that would silently start the conversation somewhere
