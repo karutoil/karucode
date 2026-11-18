@@ -47,7 +47,7 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository &&
        github.actor != 'dependabot[bot]')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 75
     steps:
       - name: Require a pinned reviewer commit
         env:
@@ -114,12 +114,16 @@ jobs:
           [llm]
           base_url = "${BASE_URL}"
           api_key_env = "ZERO_LOOP_LLM_API_KEY"
-          timeout_secs = 60
+          timeout_secs = 600
           max_retries = 2
 
           [model]
           primary = "${MODEL}"
-          reasoning_effort = "low"
+          reasoning_effort = "high"
+          triage_reasoning_effort = "low"
+          probe_reasoning_effort = "medium"
+          monitor_reasoning_effort = "medium"
+          max_tokens = 65536
           triage = "${MODEL}"
           security = "${MODEL}"
           probe = "${MODEL}"
@@ -127,9 +131,9 @@ jobs:
           monitor = "${MODEL}"
 
           [review]
-          deadline_secs = 240
-          stage2_timeout_secs = 60
-          max_model_tokens = 128000
+          deadline_secs = 3600
+          stage2_timeout_secs = 180
+          max_model_tokens = 500000
           max_findings = 3
           probe_attempts = 3
 
