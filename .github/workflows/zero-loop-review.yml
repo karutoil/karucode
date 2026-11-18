@@ -87,11 +87,12 @@ jobs:
           [llm]
           base_url = "${BASE_URL}"
           api_key_env = "ZERO_LOOP_LLM_API_KEY"
-          timeout_secs = 120
-          max_retries = 1
+          timeout_secs = 60
+          max_retries = 2
 
           [model]
           primary = "${MODEL}"
+          reasoning_effort = "low"
           triage = "${MODEL}"
           security = "${MODEL}"
           probe = "${MODEL}"
