@@ -134,7 +134,7 @@ jobs:
           deadline_secs = 3600
           stage2_timeout_secs = 180
           max_model_tokens = 500000
-          max_findings = 3
+          max_findings = 10
           probe_attempts = 3
 
           [sandbox]
