@@ -132,6 +132,7 @@ jobs:
 
           [review]
           deadline_secs = 3600
+          decomposition = true
           stage2_timeout_secs = 180
           max_model_tokens = 500000
           max_findings = 0
