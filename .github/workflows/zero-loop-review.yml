@@ -92,6 +92,9 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Fetch Rust dependencies for sandbox probes
+        run: cargo fetch --locked
+
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -149,6 +152,7 @@ jobs:
           rust_image = "docker.io/library/rust:1.89-slim"
           node_image = "docker.io/library/node:22-alpine"
           go_image = "docker.io/library/golang:1.23-alpine"
+          extra_args = "--uts=host --volume=/home/runner/.cargo/registry:/usr/local/cargo/registry:ro --volume=/home/runner/.cargo/git:/usr/local/cargo/git:ro"
           timeout_secs = 180
 
           [sast]
