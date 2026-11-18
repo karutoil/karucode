@@ -55,6 +55,15 @@
 // | `/tools` | every tool the agent can call |
 // | `/agents` | this session's subagents |
 // | `/docs <query>` | search karucode's own documentation |
+// | `/report <what went wrong>` | save a redacted karucode bug report and print the way to file it |
+//
+// `/report` is the one command that writes a file: it builds the same redacted
+// diagnostics bundle the agent files with `report_karucode_issue`, saves it under
+// the data directory and answers with the path, a prefilled GitHub link and the
+// `gh issue create` command. It never sends anything - a command answers in place
+// with no approval prompt, so filing from here would be a network action nobody
+// agreed to. It exists for the case where the agent itself is what is broken; the
+// `issue-report` topic covers the bundle and the agent path.
 //
 // # Skills are commands too
 //
@@ -339,6 +348,13 @@ const BUILTINS: &[Builtin] = &[
         category: Category::Inspect,
     },
     Builtin {
+        name: "report",
+        title: "Save a karucode bug report",
+        summary: "Write a redacted diagnostics bundle to disk and give you the link or command to file it",
+        args: "<what went wrong>",
+        category: Category::Meta,
+    },
+    Builtin {
         name: "docs",
         title: "Search karucode's documentation",
         summary: "Find the built-in page about a config key, a route, a tool or a plugin",
@@ -589,6 +605,7 @@ pub async fn run(
         "tools" => commands::tools(state, session, invocation).await,
         "agents" => commands::agents(state, session, invocation).await,
         "docs" => commands::docs(invocation).await,
+        "report" => commands::report(state, session, invocation).await,
         // Everything else that resolved in the catalog is a skill invoked by its
         // own id: `/release` is `/skill release` with nothing before the task.
         _ => match find(catalog, &invocation.name).map(|entry| entry.source) {

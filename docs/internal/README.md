@@ -27,6 +27,7 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`documentation`](documentation.md) | Doc blocks in the code compile into the built-in docs the agent reads; add, update and delete them with the code. | `crates/kc-docs/src/lib.rs:33` |
 | [`ephemeral-sessions`](ephemeral-sessions.md) | Create an ephemeral session for a program: it never appears in a session list and deletes itself once its work is over. | `crates/kc-server/src/routes/sessions.rs:3` |
 | [`http-api`](http-api.md) | Authenticate, send the CSRF header, and find the endpoint for sessions, config, approvals, files, git, plugins, MCP and the event stream. | `crates/kc-server/src/lib.rs:21` |
+| [`issue-report`](issue-report.md) | A user asking to report a problem to karucode gets a redacted diagnostics bundle filed as a GitHub issue — with their words, no secrets, and an approval prompt showing the exact body. | `crates/kc-server/src/issue_report.rs:26` |
 | [`mcp`](mcp.md) | Add stdio or streamable-HTTP MCP servers to the config and use their tools through the same approval policy. | `crates/kc-mcp/src/lib.rs:18` |
 | [`mcp-hot-reload`](mcp-hot-reload.md) | Apply an added, removed or edited [[mcp_servers]] entry with a reload route or the mcp_watch timer instead of restarting karucode. | `crates/kc-mcp/src/lib.rs:141` |
 | [`missions`](missions.md) | Group explicitly started project-local sessions across projects in durable missions. | `crates/kc-server/src/routes/missions.rs:3` |
@@ -53,4 +54,4 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`web-auth`](web-auth.md) | Put a password or a passkey in front of the web UI, choose the address it answers to, and understand what each sign-in method costs. | `crates/kc-server/src/routes/auth.rs:14` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-37 topic(s).
+38 topic(s).

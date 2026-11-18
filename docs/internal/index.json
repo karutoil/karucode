@@ -1,5 +1,5 @@
 {
-  "count": 37,
+  "count": 38,
   "generated_by": "cargo run -p kc-docs -- --write",
   "topics": [
     {
@@ -139,6 +139,7 @@
         "tool:git_log",
         "tool:karucode_docs",
         "tool:skill",
+        "tool:report_karucode_issue",
         "tool:spawn_agent",
         "tool:spawn_agents",
         "tool:send_message",
@@ -629,6 +630,32 @@
         "endpoints"
       ],
       "title": "Call the HTTP API"
+    },
+    {
+      "applies_to": [
+        "tool:report_karucode_issue",
+        "cmd:/report",
+        "env:KARUCODE_ISSUE_REPO",
+        "env:KARUCODE_ISSUE_SEND",
+        "file:crates/kc-server/src/issue_report.rs",
+        "file:docs/internal/issue-report.md",
+        "dir:data_dir/issue-reports",
+        "config:approvals.mode"
+      ],
+      "path": "issue-report.md",
+      "slug": "issue-report",
+      "source": "crates/kc-server/src/issue_report.rs:26",
+      "summary": "A user asking to report a problem to karucode gets a redacted diagnostics bundle filed as a GitHub issue — with their words, no secrets, and an approval prompt showing the exact body.",
+      "tags": [
+        "issue",
+        "bug report",
+        "github",
+        "diagnostics",
+        "logs",
+        "privacy",
+        "support"
+      ],
+      "title": "Report an issue to karucode"
     },
     {
       "applies_to": [

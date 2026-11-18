@@ -1047,6 +1047,7 @@ pub mod bootstrap;
 pub mod catalog;
 pub mod error;
 pub mod host;
+pub mod issue_report;
 pub mod mcp_watch;
 pub mod metrics;
 mod mission_coordinator;

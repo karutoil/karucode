@@ -10,6 +10,34 @@ matters to an operator says which behaviour changed, not which number.
 
 ## [Unreleased]
 
+### Added
+
+- **"Report this issue to karucode" is now a thing the agent can act on.** A new
+  built-in tool, `report_karucode_issue`, files a GitHub issue in
+  `karutoil/karucode` with the user's own description above a diagnostics block
+  the server collects itself: the build, channel, target, platform and kernel, the
+  approval mode, uptime, tool count, the effective provider/endpoint/model (never
+  the key), the limits that shape behaviour, every plugin and MCP server with its
+  status, and this session's last run and error. The agent may only call it when
+  the user asked for the problem to be reported **to karucode** and said what the
+  problem is; a summary under 24 characters is refused with what to ask for, and
+  the system prompt carries the same rule. Message text, project files,
+  environment values, workspace paths and hostnames are never attached, and the
+  rendered body is swept against every configured secret before it is written.
+  Nothing leaves the machine until the approval prompt shows the complete body
+  (`read_only` refuses, `auto` proceeds, every other mode asks). Filing uses the
+  server user's own `gh` login — karucode stores no GitHub token — and the report
+  is always written to `<data_dir>/issue-reports/` first, so a missing or
+  unauthenticated `gh` leaves a saved copy plus the exact `gh issue create`
+  command instead of losing the text. `KARUCODE_ISSUE_REPO` points a fork's
+  reports at its own repository and `KARUCODE_ISSUE_SEND=0` keeps the feature but
+  files nothing. When the agent is what is broken, `/report <what went wrong>`
+  builds the same bundle without a model turn and answers with the saved path and
+  the link to file it; it never sends, because a slash command has no approval
+  prompt. New `issue-report` doc topic; the tool is registered by the server
+  (`crates/kc-server/src/issue_report.rs`) like the control tools, so `kc-tools`
+  stays stateless.
+
 ### Changed
 
 - **The `auto` approval mode is called "Approve All" in the UI.** The stored

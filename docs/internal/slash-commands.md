@@ -61,6 +61,15 @@ curl -s -X POST localhost:8787/api/sessions/s_abc/messages \
 | `/tools` | every tool the agent can call |
 | `/agents` | this session's subagents |
 | `/docs <query>` | search karucode's own documentation |
+| `/report <what went wrong>` | save a redacted karucode bug report and print the way to file it |
+
+`/report` is the one command that writes a file: it builds the same redacted
+diagnostics bundle the agent files with `report_karucode_issue`, saves it under
+the data directory and answers with the path, a prefilled GitHub link and the
+`gh issue create` command. It never sends anything - a command answers in place
+with no approval prompt, so filing from here would be a network action nobody
+agreed to. It exists for the case where the agent itself is what is broken; the
+`issue-report` topic covers the bundle and the agent path.
 
 ## Skills are commands too
 

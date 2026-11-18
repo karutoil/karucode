@@ -29,11 +29,16 @@ const MAX_TITLE_CHARS: usize = 300;
 const MAX_BODY_CHARS: usize = 64_000;
 const MAX_REPO_NAME_CHARS: usize = 120;
 
-struct GhOutput {
-    installed: bool,
-    success: bool,
-    stdout: String,
-    stderr: String,
+/// One finished `gh` run.
+///
+/// `pub(crate)` because the issue reporter (`crate::issue_report`) files its
+/// report through the same runner: one place owns the argv shape, the bounded
+/// read and the timeout.
+pub(crate) struct GhOutput {
+    pub(crate) installed: bool,
+    pub(crate) success: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -867,7 +872,11 @@ async fn run_gh_required(
     Ok(out)
 }
 
-async fn run_gh(root: &FsPath, args: &[&str]) -> ApiResult<GhOutput> {
+/// Run one `gh` command in `root`, bounded and time-limited.
+///
+/// `pub(crate)`: the issue reporter files its report through this same runner, so
+/// the argv shape, the output bound and the timeout have one owner.
+pub(crate) async fn run_gh(root: &FsPath, args: &[&str]) -> ApiResult<GhOutput> {
     let mut command = tokio::process::Command::new("gh");
     command
         .args(args)

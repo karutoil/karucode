@@ -30,6 +30,7 @@ Prompt hints (in the user message):
   [tool:plugin]          call the example-hello plugin tool
   [tool:notify]          call a plugin tool that raises a `notify` frame
   [tool:mcp]             call an MCP tool from the mock MCP server
+  [tool:report]          call report_karucode_issue with a plausible report
   [text]                 reply with plain text only (no tools)
   [die]                  first time: stream a reasoning delta and half an
                          answer, then cut the connection mid-body (the shape of
@@ -256,6 +257,26 @@ def decide(messages):
         )
     if "[tool:mcp]" in last_user:
         return ("tools", [call("call_mcp_1", "mcp__mock__echo", {"text": "hi"})])
+    if "[tool:report]" in last_user:
+        # The issue reporter: the real bundle is collected by the server, so the
+        # assertions are about the saved file and the honest "not sent" answer.
+        return (
+            "tools",
+            [
+                call(
+                    "call_report_1",
+                    "report_karucode_issue",
+                    {
+                        "summary": (
+                            "The run stopped after the tool call and never finished. It said "
+                            "limit reached but there was no limit configured."
+                        ),
+                        "steps": "1. send a prompt that calls a tool\n2. wait for the answer",
+                        "expected": "The run finishes and the answer arrives.",
+                    },
+                )
+            ],
+        )
 
     # Default: exercise the loop with a real read of the workspace listing.
     return ("tools", [call("call_default_1", "list_dir", {"path": "."})])

@@ -918,6 +918,52 @@ pub(super) async fn docs(invocation: &Invocation) -> ApiResult<Reply> {
 }
 
 // ---------------------------------------------------------------------------
+// /report
+// ---------------------------------------------------------------------------
+
+/// `/report <what went wrong>`: the fallback that works when the agent does not.
+///
+/// The tool path needs a working model turn; this one needs only the server, which
+/// is exactly the state a broken install is in when someone wants to complain about
+/// it. It builds the same redacted bundle and writes it, and never sends: a slash
+/// command has no approval prompt, so filing from here would be a network action
+/// nobody agreed to.
+pub(super) async fn report(
+    state: &AppState,
+    session: &Session,
+    invocation: &Invocation,
+) -> ApiResult<Reply> {
+    if !invocation.has_args() {
+        return Ok(Reply::fail(
+            "`/report` needs to know what went wrong, e.g. `/report the run stopped after a tool \
+             call and never finished`. Saying \"report this issue to karucode\" works too - the \
+             agent builds and files the same report.",
+        ));
+    }
+    let text = invocation.args_trimmed();
+    match crate::issue_report::save_from_command(state, &session.id, text).await {
+        Ok(saved) => Ok(Reply::ok(format!(
+            "### Report saved\n\n\
+             Nothing was sent. The report is at `{}`.\n\n\
+             - Open: {}\n\
+             - Or run: `gh issue create --repo {} --title {} --body-file {}`\n\n\
+             It carries the build, platform, approval mode, provider (never the key), limits, \
+             plugin and MCP status and this session's last run; no message text, project file or \
+             secret is in it. The agent files it for you when you ask: \"report this issue to \
+             karucode\".",
+            escape(&saved.path.to_string_lossy()),
+            saved.prefill,
+            saved.repo,
+            escape(&crate::issue_report::shell_quote(&saved.title)),
+            escape(&crate::issue_report::shell_quote(
+                &saved.path.to_string_lossy()
+            )),
+        ))),
+        Err(refusal) => Ok(Reply::fail(refusal)),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 

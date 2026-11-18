@@ -8,7 +8,7 @@
 // @kc-title: The built-in tools the agent can call
 // @kc-summary: What each first-party tool does, how it is gated, and the limits and gotchas that shape its output.
 // @kc-tags: tools, agent, files, search, shell, git
-// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:glob, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:git_log, tool:karucode_docs, tool:skill, tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, route:POST /api/sessions/:id/rewind, config:[limits], config:limits.max_file_read_bytes, config:limits.max_command_output_bytes, config:limits.search_max_results, config:limits.max_tool_output_bytes, config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:limits.parallel_tool_calls, env:KARUCODE_PARALLEL_TOOL_CALLS, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:RIPGREP_CONFIG_PATH
+// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:glob, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:git_log, tool:karucode_docs, tool:skill, tool:report_karucode_issue, tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, route:POST /api/sessions/:id/rewind, config:[limits], config:limits.max_file_read_bytes, config:limits.max_command_output_bytes, config:limits.search_max_results, config:limits.max_tool_output_bytes, config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:limits.parallel_tool_calls, env:KARUCODE_PARALLEL_TOOL_CALLS, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:RIPGREP_CONFIG_PATH
 //
 // | Tool | Class | Approval | What it does |
 // | --- | --- | --- | --- |
@@ -39,6 +39,15 @@
 // the whole built-in surface. Plugin tools are namespaced
 // `plugin__<plugin>__<tool>` and MCP tools `mcp__<server>__<tool>`, so a collision
 // with a first-party name is impossible.
+//
+// `report_karucode_issue` is registered by the **server**
+// (`crates/kc-server/src/issue_report.rs`) for the same reason the delegate family
+// is registered by the runtime: the bundle it files needs the live build number,
+// settings, plugin host, MCP manager and run history, none of which a stateless
+// tool can reach. It is class `external` - the approval policy is consulted before
+// the report leaves the machine, and `read_only` refuses it - and the
+// `issue-report` topic is its page: the trigger, the bundle, what is never
+// attached, and how it is filed.
 //
 // # Examples the model is expected to use
 //

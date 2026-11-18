@@ -811,6 +811,10 @@ impl AppState {
         }
         registry.register(crate::mission_coordinator::tool(self.clone()));
         registry.register(crate::mission_coordinator::revise_tool(self.clone()));
+        // Registered here rather than in `kc-tools` because the bundle needs the
+        // live version, settings, plugin host, MCP manager and store, none of
+        // which a stateless tool can reach.
+        registry.register(crate::issue_report::tool(self.clone()));
         self.inner.runtime.set_tools(Arc::new(registry));
     }
 

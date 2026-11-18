@@ -311,6 +311,8 @@ pub struct HarnessBuilder {
     titles: Option<TitlesConfig>,
     /// `[approvals] mode`. `None` keeps the shipped default, `ask`.
     approval_mode: Option<ApprovalMode>,
+    /// Effective provider key (`model.api_key`), which the redaction sweep knows.
+    model_api_key: Option<String>,
 }
 
 impl HarnessBuilder {
@@ -336,6 +338,7 @@ impl HarnessBuilder {
             strict_root: false,
             titles: None,
             approval_mode: None,
+            model_api_key: None,
         }
     }
 
@@ -426,6 +429,20 @@ impl HarnessBuilder {
     /// Run with `approvals.mode = auto`, so a mutating tool call is not parked.
     pub fn auto_approvals(mut self) -> Self {
         self.approval_mode = Some(ApprovalMode::Auto);
+        self
+    }
+
+    /// Set `[approvals] mode` outright, for a test that needs `read_only`.
+    pub fn approval_mode(mut self, mode: ApprovalMode) -> Self {
+        self.approval_mode = Some(mode);
+        self
+    }
+
+    /// Configure the effective provider key, which is also what
+    /// [`kc_server::settings::SettingsHandle::secrets`] redacts. A test that
+    /// asserts redaction needs a secret the server actually knows about.
+    pub fn model_api_key(mut self, key: &str) -> Self {
+        self.model_api_key = Some(key.to_string());
         self
     }
 
@@ -554,7 +571,7 @@ impl HarnessBuilder {
             model: ModelConfig {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 model: "test-model".into(),
-                api_key: None,
+                api_key: self.model_api_key.clone(),
                 ..ModelConfig::default()
             },
             ..Config::default()
