@@ -102,8 +102,12 @@ jobs:
       - name: Install web dependencies for the TypeScript parse check
         run: npm ci --prefix web --no-audit --no-fund
 
-      - name: Pull the probe image
-        run: docker pull docker.io/library/python:3.12-alpine
+      - name: Pull the probe images
+        run: |
+          docker pull docker.io/library/python:3.12-alpine
+          docker pull docker.io/library/rust:1.89-slim
+          docker pull docker.io/library/node:22-alpine
+          docker pull docker.io/library/golang:1.23-alpine
 
       - name: Write the reviewer configuration
         env:
@@ -141,7 +145,10 @@ jobs:
           [sandbox]
           runtime = "docker"
           image = "docker.io/library/python:3.12-alpine"
-          timeout_secs = 90
+          rust_image = "docker.io/library/rust:1.89-slim"
+          node_image = "docker.io/library/node:22-alpine"
+          go_image = "docker.io/library/golang:1.23-alpine"
+          timeout_secs = 180
 
           [sast]
           semgrep_bin = "semgrep"
