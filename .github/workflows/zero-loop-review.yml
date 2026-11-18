@@ -37,7 +37,15 @@ env:
 jobs:
   review:
     name: zero-loop
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    # Fork and Dependabot pull_request runs do not receive repository secrets,
+    # so they cannot reach the model.  Do not turn that into a red check: skip
+    # the job (a same-repo branch can be reviewed normally), and never fall back
+    # to pull_request_target, which would expose the model key to PR code.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.draft == false &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.actor != 'dependabot[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -133,7 +141,6 @@ jobs:
           ZERO_LOOP_LLM_API_KEY: ${{ secrets.ZERO_LOOP_LLM_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head }}
-          IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           set +e
           if [ -z "${ZERO_LOOP_LLM_API_KEY:-}" ]; then
@@ -146,12 +153,6 @@ jobs:
           args=(--config "$RUNNER_TEMP/zero-loop.toml" --workspace "$GITHUB_WORKSPACE" --out-dir "$RUNNER_TEMP/zero-loop-out" --state-dir "$RUNNER_TEMP/zero-loop-state")
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             args=(ci --payload "$GITHUB_EVENT_PATH" --provider github --head-sha "$HEAD_SHA" "${args[@]}")
-            if [ "$IS_FORK" = "true" ]; then
-              # A pull_request token from a fork is read-only.  Review anyway and
-              # keep the receipt; posting from forks needs pull_request_target,
-              # which would expose the model key to untrusted code.
-              args+=(--no-post)
-            fi
           else
             args=(review --base "$base_sha" --head "$HEAD_SHA" --json "${args[@]}")
           fi
