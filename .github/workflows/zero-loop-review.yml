@@ -154,7 +154,7 @@ jobs:
           else
             args=(review --base "$base_sha" --head "$HEAD_SHA" --json "${args[@]}")
           fi
-          python "$ZERO_LOOP_PLUGIN_PATH/kc-zero-loop-reviewer/bin/zero-loop-reviewer" "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/zero-loop-review.txt"
+          "$ZERO_LOOP_PLUGIN_PATH/kc-zero-loop-reviewer/bin/zero-loop-reviewer" "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/zero-loop-review.txt"
           code=${PIPESTATUS[0]}
           {
             echo "### Zero-loop review"
