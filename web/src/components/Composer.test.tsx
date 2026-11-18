@@ -97,6 +97,35 @@ describe('Composer', () => {
     );
   });
 
+  it('describes steering while a run is in flight without naming the queue chord', () => {
+    // This used to read "type to steer it, or press Ctrl+Enter to queue", which
+    // offered a choice that does not exist: the draft only leaves the box through
+    // the chord or the Steer button, and while a steer is armed both of those
+    // steer. The foot hint one row below already names the chord, so the
+    // placeholder says what the message will do instead of repeating the key.
+    const { textarea } = renderComposer({
+      running: true,
+      status: { kind: 'streaming', label: 'Streaming' },
+    });
+    const hint = textarea.getAttribute('placeholder') ?? '';
+    expect(hint).toBe('The agent is working — send a message to steer it at its next step…');
+    // The foot hint below the box is the one place that names the chord.
+    expect(hint).not.toMatch(/Ctrl|Cmd|Command|Enter/);
+  });
+
+  it('describes a follow-up in the placeholder when that mode is chosen', () => {
+    const { textarea } = renderComposer({
+      running: true,
+      status: { kind: 'streaming', label: 'Streaming' },
+    });
+    // The toggle only appears once there is a message for it to describe.
+    fireEvent.input(textarea, { target: { value: 'then run the tests' } });
+    fireEvent.click(screen.getByRole('radio', { name: 'Follow-up' }));
+    expect(textarea.getAttribute('placeholder')).toBe(
+      'The agent is working — type the next thing to do once it finishes…',
+    );
+  });
+
   it('sends with Cmd/Ctrl+Enter and clears the draft on success', async () => {
     const { props, textarea } = renderComposer();
     fireEvent.input(textarea, { target: { value: 'Explain the build' } });

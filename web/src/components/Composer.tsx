@@ -1008,7 +1008,7 @@ export function Composer({
           ? 'Steer the run…'
           : 'Queue a follow-up…'
         : queueMode === 'steer'
-          ? `The agent is working — type to steer it, or press ${enterSends ? 'Enter' : 'Ctrl+Enter'} to queue…`
+          ? 'The agent is working — send a message to steer it at its next step…'
           : 'The agent is working — type the next thing to do once it finishes…'
       : narrowViewport
         ? 'Ask karucode anything…'
