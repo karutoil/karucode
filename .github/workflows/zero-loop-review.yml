@@ -49,24 +49,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Require a pinned reviewer commit
+        env:
+          PLUGIN_REF: ${{ vars.ZERO_LOOP_PLUGIN_REF }}
+        run: |
+          if ! printf '%s' "$PLUGIN_REF" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::ZERO_LOOP_PLUGIN_REF must be a full 40-character commit SHA (got '${PLUGIN_REF:-<unset>}')"
+            exit 1
+          fi
+
       - name: Check out the pull request head
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha || inputs.head }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Check out the reviewer
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: ${{ env.ZERO_LOOP_PLUGIN_REPO }}
-          ref: ${{ vars.ZERO_LOOP_PLUGIN_REF || 'main' }}
+          ref: ${{ vars.ZERO_LOOP_PLUGIN_REF }}
           path: ${{ env.ZERO_LOOP_PLUGIN_PATH }}
           fetch-depth: 1
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: pip
@@ -79,9 +88,19 @@ jobs:
       # CIVER syntax-checks Rust repairs with rustfmt; the language is installed
       # anyway because this repository is a Rust workspace.
       - name: Install Rust syntax checker
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           components: rustfmt
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies for the TypeScript parse check
+        run: npm ci --prefix web --no-audit --no-fund
 
       - name: Pull the probe image
         run: docker pull docker.io/library/python:3.12-alpine
@@ -169,7 +188,7 @@ jobs:
 
       - name: Upload review receipts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zero-loop-receipts
           path: |
