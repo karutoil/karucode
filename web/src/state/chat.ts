@@ -229,6 +229,15 @@ export interface ChatState {
    */
   lastPromptTokens: number | null;
   iteration: number;
+  /**
+   * Highest event `seq` folded into this transcript - the replay watermark.
+   *
+   * `applyEventToChat` drops a frame at or below it, because `api/events.ts` only
+   * de-duplicates the reconnects of its own handle: the refresh-queue replay and a
+   * second stream handle after `restartStream` both hand frames over again, and a
+   * duplicated `text_delta` appends. `seq` is monotonic per server process, which
+   * is the only reason a duplicate is recognisable at all.
+   */
   lastSeq: number;
   /**
    * Messages the user sent while a run was working, oldest first.
@@ -910,6 +919,10 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
     lastPromptTokens:
       sameSession && previous.runId === lastRunId ? previous.lastPromptTokens : null,
     iteration: sameSession && previous.runId === lastRunId ? previous.iteration : 0,
+    // The snapshot is authoritative for the transcript, not for the frame cursor:
+    // it carries no `seq`, so the watermark restarts here. Keeping an old value
+    // would make `applyEventToChat` swallow the frames `drainRefreshQueue` replays
+    // right after this snapshot - the ones collected while the read was in flight.
     lastSeq: 0,
     // The snapshot is authoritative for the queues: the runtime keeps them in
     // memory and reports them here, so this is what a reload (or a second tab)

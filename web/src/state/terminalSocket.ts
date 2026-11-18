@@ -1,5 +1,6 @@
 import { getAuthToken } from '../api/client';
 import type { TerminalControlFrame } from '../api/types';
+import { pushToast } from './store';
 
 /**
  * How long to wait before reconnecting after the socket drops.
@@ -11,6 +12,18 @@ import type { TerminalControlFrame } from '../api/types';
  * stopped server from being hammered.
  */
 const RECONNECT_DELAYS_MS = [250, 500, 1000, 2000, 5000, 10_000];
+
+/**
+ * How many consecutive failed attempts mean "not a blip", and so earn a notice.
+ *
+ * The terminal only ever reported this in the status chip and its `title`
+ * tooltip, so a user watching a dead pane typed into it and saw nothing happen.
+ * Three attempts is roughly two seconds of retrying - long enough that a Wi-Fi
+ * handover clears it, short enough to explain the silence.
+ */
+const NOTICE_AFTER_FAILURES = 3;
+/** ... or one failure that has already lasted this long (a suspended laptop). */
+const NOTICE_AFTER_FAILING_MS = 10_000;
 
 /** How long to wait for the shell to answer a ping before treating it as gone. */
 const PING_TIMEOUT_MS = 20_000;
@@ -69,6 +82,12 @@ export class TerminalSocket {
   private timer: number | null = null;
   private pingTimer: number | null = null;
   private disposed = false;
+  /** Consecutive failed attempts since the last healthy open. */
+  private failures = 0;
+  /** When the current run of failures began, or null between outages. */
+  private failingSince: number | null = null;
+  /** A notice was already raised for this outage; one is enough. */
+  private noticed = false;
   private readonly options: TerminalSocketOptions;
   /** The most recent size, so a reconnect starts the new shell at the right one. */
   private cols: number;
@@ -112,6 +131,11 @@ export class TerminalSocket {
 
     socket.onopen = () => {
       this.attempt = 0;
+      // A healthy connection ends the outage: the next drop starts counting
+      // again, so one long outage cannot silently swallow a later one.
+      this.failures = 0;
+      this.failingSince = null;
+      this.noticed = false;
       this.setStatus('open');
       // Send the real size immediately: the URL carried the size at connect
       // time, and the browser may have been resized between.
@@ -205,13 +229,40 @@ export class TerminalSocket {
 
   private scheduleReconnect(detail?: string): void {
     if (this.disposed) return;
+    // The ladder never gives up and its last step is the ceiling: a restarted
+    // server has to be picked up on its own, without the user doing anything.
+    // The notice below is what keeps that silence from looking like a freeze.
     const delay = RECONNECT_DELAYS_MS[Math.min(this.attempt, RECONNECT_DELAYS_MS.length - 1)];
     this.attempt += 1;
+    this.failures += 1;
+    const now = Date.now();
+    if (this.failingSince === null) this.failingSince = now;
     this.setStatus('reconnecting', detail);
+    this.noticeIfStuck(now);
     this.timer = window.setTimeout(() => {
       this.timer = null;
       this.openSocket();
     }, delay);
+  }
+
+  /**
+   * Explain a terminal that is not coming back, once per outage.
+   *
+   * The pane already shows a `reconnecting` chip whose only detail is a `title`
+   * tooltip, so a PTY that died under the socket (a server restart, a reaped
+   * shell, a throttled tab) left the user typing keystrokes into nothing: `send`
+   * drops them while the socket is closed. A toast is the channel the rest of the
+   * app uses for "this is not working", and it names the two ways out.
+   */
+  private noticeIfStuck(now: number): void {
+    if (this.noticed) return;
+    const failingFor = this.failingSince === null ? 0 : now - this.failingSince;
+    if (this.failures < NOTICE_AFTER_FAILURES && failingFor < NOTICE_AFTER_FAILING_MS) return;
+    this.noticed = true;
+    pushToast(
+      'The terminal stopped answering. Keystrokes are not reaching a shell - press Reconnect, or start a new terminal.',
+      'error',
+    );
   }
 
   /** Send raw keystrokes as a binary frame. */
@@ -237,6 +288,12 @@ export class TerminalSocket {
   reconnect(): void {
     if (this.disposed) return;
     this.attempt = 0;
+    // A deliberate retry starts a fresh count: if this one also fails, the user
+    // has to be told again rather than being met with the silence they just
+    // dismissed.
+    this.failures = 0;
+    this.failingSince = null;
+    this.noticed = false;
     this.clearTimers();
     this.closeSocket();
     this.openSocket();

@@ -442,7 +442,7 @@
 //   left edge, with the same keys, the same saved project width and the same
 //   ceiling, so the two layouts never disagree about how much conversation stays
 //   visible.
-// * **Context drawer** (`Ctrl/Cmd+J`): a transient sibling overlay driven by
+// * **Context drawer** (`Ctrl/Cmd+Shift+X`): a transient sibling overlay driven by
 //   `state/workbench.ts`, with **Now**, **Usage** and **Access**. It does not replace
 //   or unmount the Inspector, conversation, full Git or terminal below it. **Now**
 //   reports the actual project/session/workspaces, connection and activity, labels
@@ -617,7 +617,7 @@
 //   `palette` becomes a full-height sheet with the header and footer pinned.
 //   `Dialog` is the same shell under its old name for surfaces that have not
 //   migrated; no call site authors its own width.
-// * **Theme studio** (right drawer, `Ctrl/Cmd+Shift+T`, **Task actions → Theme
+// * **Theme studio** (right drawer, `Ctrl/Cmd+Shift+L`, **Task actions → Theme
 //   studio**, or the project-rail palette button when that rail is present):
 //   built-in themes, per-token colours, density, transcript options and custom
 //   CSS, persisted in the browser. The `themes` topic covers the storage key and
@@ -1020,14 +1020,26 @@
 // | --- | --- |
 // | `Ctrl/Cmd+K` | command palette |
 // | `Ctrl/Cmd+N` | new conversation (a draft until its first message) |
-// | `Ctrl/Cmd+B` | collapse/restore the task rail; collapsed desktop keeps project peeking |
-// | `Ctrl/Cmd+J` | open/close Workbench Context (Now / Usage / Access), outside the control plane |
-// | `Ctrl/Cmd+Shift+T` | open or close the Theme studio |
+// | `Ctrl/Cmd+\` | collapse/restore the task rail; collapsed desktop keeps project peeking |
+// | `Ctrl/Cmd+Shift+X` | open/close Workbench Context (Now / Usage / Access), outside the control plane |
+// | `Ctrl/Cmd+Shift+L` | open or close the Theme studio |
 // | `/` | focus the session search |
 // | `Enter` / `Ctrl/Cmd+Enter` | send (or queue) the draft - which of the two sends is the **Composer send key** setting; the other starts a new line, and `Shift+Enter` always does |
 // | `Up`/`Down` | move through the `@`-mention suggestions |
 // | `Enter`/`Tab` | insert the highlighted mention |
 // | `Escape` | dismiss the local editor, menu, popped-out Results, drawer or sheet first; only otherwise stop a running turn |
+//
+// The chords the browser keeps for itself are avoided: `Mod+Shift+T` (reopen the
+// closed tab), `Mod+B` (bookmarks bar, or the bookmarks sidebar in Gecko) and
+// `Mod+J` (Downloads) belong to the browser, and neither Gecko nor Blink reliably
+// lets a page intercept them. `Mod+N` is the one kept from earlier releases, so a
+// Firefox reader who presses it also gets a new window.
+//
+// Inside a text field the shell takes only its own modifier: `⌘` on Apple
+// platforms, `Ctrl` elsewhere. So `⌘K` opens the palette from the composer,
+// while a bare `Ctrl+K` on macOS stays kill-to-end-of-line and never reaches a
+// command. `Mod+N` is the exception: it starts a new conversation, so it never
+// fires from a field on any platform.
 //
 // # Mobile
 //
@@ -1182,9 +1194,12 @@
 // six open tabs held the whole pool and the seventh could not boot (`Could not
 // reach karucode - the server did not answer within 30s` on `/api/health`) while
 // the server was answering in 1.6 ms. When the leading tab closes or is discarded
-// its lock is released and the next waiting tab opens the stream. A browser
-// without Web Locks or `BroadcastChannel` - and the test environment - falls back
-// to a stream per tab.
+// its lock is released and the next waiting tab opens the stream. Web Locks only
+// exists in a secure context, so on the plain-HTTP LAN address documented for
+// remote access - where no browser has it - the tabs elect the same leader over
+// that BroadcastChannel instead: a claim answered by a live leader wins, the
+// lower tab id breaks a tie, and a leader that says nothing for 30 s loses the
+// role. Only a browser without `BroadcastChannel` falls back to a stream per tab.
 //
 // The stream watches itself so live updates never need a page reload: 45 s without
 // a byte (keepalives included) means the connection is dead and it reconnects with
@@ -1239,6 +1254,25 @@ import { SettingsSheet } from './components/SettingsSheet';
 import { matchUiKeybinding } from './components/uiContributions';
 import { ThemeStudio } from './components/ThemeStudio';
 import { ToastRegion } from './components/ToastRegion';
+import { isApplePlatform } from './lib/platform';
+
+/**
+ * Is the caret somewhere a modifier chord still belongs to the field?
+ *
+ * A modifier does not make a shortcut safe. With `mod = metaKey || ctrlKey`, a
+ * macOS reader types Ctrl+B (cursor-left), Ctrl+K (kill-to-end-of-line) and
+ * Ctrl+J (newline in some editors) *as text-editing keys*, and Windows/Linux
+ * readers have their own chords there. The shell's own shortcuts and the
+ * plugin-contributed ones ask the same question, so they must ask it in one
+ * place rather than drifting apart.
+ */
+function caretInEditable(event: Event): boolean {
+  const target = event.target;
+  return (
+    target instanceof HTMLElement &&
+    target.closest('input, textarea, select, [contenteditable="true"]') !== null
+  );
+}
 
 function isDialogOpen(): boolean {
   return (
@@ -1323,7 +1357,25 @@ export function App(): JSX.Element {
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
 
-      if (mod && event.shiftKey && key === 't') {
+      // The caret's own keys. On Apple platforms the app's chords are ⌘-based, so
+      // a bare Ctrl+letter inside a field is the field's emacs binding - Ctrl+B
+      // cursor-left, Ctrl+K kill-to-end-of-line, Ctrl+J next line - and taking it
+      // would move the caret *and* run a command. A ⌘ chord, or any Ctrl chord on
+      // Windows/Linux where Ctrl *is* the app modifier, stays the app's even while
+      // typing: Ctrl+K from the composer opening the palette is the only reason
+      // anyone learns that chord. Nothing below runs `preventDefault()` before
+      // this point, so an ignored chord reaches the field and the browser intact.
+      if (event.ctrlKey && !event.metaKey && isApplePlatform() && caretInEditable(event)) return;
+
+      // The one chord that is never a field's business on any platform: `Mod+N`
+      // starts a new conversation, so it must not fire while the reader is
+      // mid-sentence in the composer or an inline editor.
+      if (mod && key === 'n' && caretInEditable(event)) return;
+
+      // The Theme Studio used to sit on `Mod+Shift+T`, which every browser owns
+      // for "reopen the closed tab" and does not reliably hand to the page. The
+      // browser keeps that chord; the studio moved to `Mod+Shift+L`.
+      if (mod && event.shiftKey && key === 'l') {
         event.preventDefault();
         actions.toggleThemeStudio();
         return;
@@ -1354,29 +1406,23 @@ export function App(): JSX.Element {
         return;
       }
 
-      if (mod && key === 'b') {
+      // `Mod+B` is the bookmarks bar (and, in Gecko, the bookmarks sidebar) in
+      // every browser, so the rail owns `Mod+\` instead. A peek is a stand-in for
+      // the rail: collapsing or restoring it is over.
+      if (mod && key === '\\') {
         event.preventDefault();
-        // A peek is a stand-in for the rail: collapsing or restoring it is over.
         railPeek.closePeek();
         actions.toggleRail();
         return;
       }
-      if (mod && key === 'j') {
+      // `Mod+J` is Downloads in Gecko and cannot be counted on to reach the page;
+      // the Context drawer answers to `Mod+Shift+X`.
+      if (mod && event.shiftKey && key === 'x') {
         event.preventDefault();
         if (!controlPlaneOpen.value) workbench.toggleContext();
         return;
       }
       if (mod && key === 'n') {
-        // Unlike the other shortcuts this one starts a new conversation, so it
-        // must not fire while the user is typing: `Ctrl+N` is a text-editing key
-        // in the composer and in every inline editor.
-        const target = event.target;
-        if (
-          target instanceof HTMLElement &&
-          target.closest('input, textarea, select, [contenteditable="true"]')
-        ) {
-          return;
-        }
         event.preventDefault();
         actions.startDraftSession();
         return;
@@ -1432,13 +1478,7 @@ export function App(): JSX.Element {
     const onPluginKeyDown = (event: KeyboardEvent): void => {
       if (store.boot.value !== 'ready') return;
       if (event.defaultPrevented || isDialogOpen()) return;
-      const target = event.target;
-      if (
-        target instanceof HTMLElement &&
-        target.closest('input, textarea, select, [contenteditable="true"]')
-      ) {
-        return;
-      }
+      if (caretInEditable(event)) return;
       const binding = matchUiKeybinding(store.pluginUi.value.keybindings, event);
       if (!binding) return;
       event.preventDefault();

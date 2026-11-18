@@ -1,8 +1,13 @@
-import { describe, expect, it } from 'vitest';
-import { hasSvgElement, sanitizeSvg } from './svg';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import DOMPurify from 'dompurify';
+import { hasSvgElement, prepareSvg, resetSvgCache, sanitizeSvg } from './svg';
 
 const SVG = (inner: string): string =>
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 40">${inner}</svg>`;
+
+afterEach(() => {
+  resetSvgCache();
+});
 
 describe('sanitizeSvg', () => {
   it('keeps what a diagram is made of', () => {
@@ -53,5 +58,48 @@ describe('hasSvgElement', () => {
     expect(hasSvgElement(SVG('<rect width="1" height="1"/>'))).toBe(true);
     expect(hasSvgElement('just words')).toBe(false);
     expect(hasSvgElement('')).toBe(false);
+  });
+});
+
+describe('prepareSvg', () => {
+  it('sanitises and probes one document once, however often it is mounted', () => {
+    resetSvgCache();
+    const sanitize = vi.spyOn(DOMPurify, 'sanitize');
+    const source = SVG('<circle cx="5" cy="5" r="4" />');
+
+    const first = prepareSvg(source);
+    const again = prepareSvg(source);
+
+    // The same prepared object, so a remount reuses the shadow root's markup too.
+    expect(again).toBe(first);
+    expect(sanitize).toHaveBeenCalledTimes(1);
+    expect(first).toEqual({ html: sanitizeSvg(source), ok: true });
+  });
+
+  it('prepares a document with nothing to draw once, and remembers the answer', () => {
+    resetSvgCache();
+    const sanitize = vi.spyOn(DOMPurify, 'sanitize');
+    const source = '<script>steal()</script>';
+    expect(prepareSvg(source)).toEqual({ html: '', ok: false });
+    expect(prepareSvg(source).ok).toBe(false);
+    expect(sanitize).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a handful of documents, dropping the oldest', () => {
+    resetSvgCache();
+    const sanitize = vi.spyOn(DOMPurify, 'sanitize');
+    // Four is the cap: five distinct drawings must not all stay prepared.
+    const sources = Array.from({ length: 5 }, (_, index) =>
+      SVG(`<text>${index}</text>`),
+    );
+    for (const source of sources) prepareSvg(source);
+    expect(sanitize).toHaveBeenCalledTimes(5);
+
+    for (const source of sources.slice(1)) prepareSvg(source);
+    expect(sanitize).toHaveBeenCalledTimes(5);
+
+    // The first one was evicted, so asking for it again is a real parse.
+    prepareSvg(sources[0] ?? '');
+    expect(sanitize).toHaveBeenCalledTimes(6);
   });
 });

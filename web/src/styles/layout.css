@@ -517,6 +517,18 @@
   text-align: left;
 }
 
+/* `.session-nav` is a scrollport with no horizontal padding and no top padding,
+ * so a row's box touches its top, left and right edges. The global
+ * `:focus-visible` ring is painted 2px + 2px *outside* that box, which the
+ * scrollport then clips: measured in Firefox 160, the first row's top is 252.0
+ * and the scrollport's top is 252.0, so half the ring is gone when a keyboard
+ * user tabs into the list. Inset it instead — the same one-line answer
+ * `.workspace-tab` (layout.css), `.model-switcher-option` (below) and
+ * `.settings-nav-item` (settings.css) already use. */
+.session-open:focus-visible {
+  outline-offset: calc(-1 * var(--focus-ring-offset));
+}
+
 :root[data-density='compact'] .session-open {
   padding: var(--space-2) calc(var(--space-9) + var(--space-2)) var(--space-2) var(--space-3);
 }

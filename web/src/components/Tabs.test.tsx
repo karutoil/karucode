@@ -44,6 +44,33 @@ describe('Tabs', () => {
     expect(tabs.map((tab) => tab.tabIndex)).toEqual([-1, 0, -1]);
   });
 
+  it('never closes a tab from Backspace or Delete', () => {
+    // No browser's tab strip closes on Backspace, and Backspace is what a reader
+    // presses reaching for "go back": the close path used to take both keys, so a
+    // clean file vanished with no prompt (only a dirty one asked first).
+    const onClose = vi.fn();
+    render(
+      <Tabs
+        items={[{ id: 't0', label: 'README.md', closable: true }]}
+        active="t0"
+        onChange={() => undefined}
+        onClose={onClose}
+        label="Files"
+      />,
+    );
+    const list = screen.getByRole('tablist');
+
+    // `true` means the strip left the key alone, which is the whole fix.
+    expect(fireEvent.keyDown(list, { key: 'Backspace' })).toBe(true);
+    expect(fireEvent.keyDown(list, { key: 'Delete' })).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getAllByRole('tab')).toHaveLength(1);
+
+    // The ✕ is still the way to close it.
+    fireEvent.click(screen.getByRole('button', { name: 'Close README.md' }));
+    expect(onClose).toHaveBeenCalledWith('t0');
+  });
+
   it('moves the selection with the arrow keys and wraps at the ends', () => {
     const onChange = vi.fn();
     render(<Tabs items={items(3)} active="t2" onChange={onChange} label="Sections" />);

@@ -4,6 +4,7 @@ import { useFocusTrap } from '../lib/dom';
 import { contextMenuProps, Menu, MenuItem, useMenu } from '../lib/menu';
 import { copyText } from '../lib/clipboard';
 import { modKey } from '../lib/platform';
+import { isImeComposing } from '../lib/keyboard';
 import type { SessionAnnotation, SessionSummary } from '../api/types';
 import { formatCount, relativeTime } from '../lib/format';
 import { PluginSlot } from './PluginSlot';
@@ -122,6 +123,8 @@ function SessionRow({
   const menu = useMenu();
   const inputRef = useRef<HTMLInputElement>(null);
   const skipBlur = useRef(false);
+  /** Open IME composition in the rename field; see the form's `onSubmit`. */
+  const composing = useRef(false);
 
   useEffect(() => {
     if (editing) {
@@ -145,6 +148,9 @@ function SessionRow({
 
   const startRename = (): void => {
     skipBlur.current = false;
+    // A composition that was still open when the field went away must not make
+    // the next rename uncommittable.
+    composing.current = false;
     menu.close();
     setDraft(session.title);
     setEditing(true);
@@ -211,6 +217,12 @@ function SessionRow({
           class="session-rename"
           onSubmit={(event) => {
             event.preventDefault();
+            // A title is typed in the reader's own language, and an IME's Enter
+            // both commits its candidate and implicitly submits this form - the
+            // title at that instant is half a word. The `onKeyDown` below stops
+            // the submit at the key; this is the second net for engines that
+            // have already ended the composition by then.
+            if (composing.current) return;
             commitRename();
           }}
         >
@@ -223,9 +235,26 @@ function SessionRow({
             aria-label={`Rename session ${session.title}`}
             maxLength={200}
             data-escape-local
+            onCompositionStart={() => {
+              composing.current = true;
+            }}
+            onCompositionEnd={() => {
+              composing.current = false;
+            }}
             onInput={(event) => setDraft(event.currentTarget.value)}
             onBlur={commitRename}
             onKeyDown={(event) => {
+              // While an IME is composing, Enter is its candidate-commit key and
+              // Firefox spells it `keyCode === 229` with `isComposing` false.
+              // Only Enter is claimed: this is the form's only field, so an
+              // unclaimed Enter is the browser's implicit submit, which would
+              // rename the session to half a word. Claiming every composition
+              // keydown instead can stop the IME's own text from arriving - the
+              // app's other three IME guards return bare for that reason.
+              if (isImeComposing(event)) {
+                if (event.key === 'Enter') event.preventDefault();
+                return;
+              }
               if (event.key === 'Escape') {
                 event.preventDefault();
                 cancelRename();
@@ -908,7 +937,7 @@ function connectionTone(): string {
 /**
  * The collapsed rail's fly-out: one project's sessions, over the chat.
  *
- * `Ctrl/Cmd+B` gives the sessions rail zero width, which is right for a wide
+ * `Ctrl/Cmd+\` gives the sessions rail zero width, which is right for a wide
  * conversation and a dead end when all you want is to open a session. Hovering a
  * project tile while the rail is collapsed shows this instead: the same rows, the
  * same rename and delete menus, positioned against the project rail and out of flow

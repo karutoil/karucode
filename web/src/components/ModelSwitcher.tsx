@@ -2,6 +2,7 @@ import type { JSX } from 'preact';
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import type { Config } from '../api/types';
 import { formatContextWindow } from '../lib/format';
+import { isImeComposing } from '../lib/keyboard';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import type { ModelSelection } from '../state/store';
@@ -479,6 +480,10 @@ export function ModelSwitcher(): JSX.Element | null {
    * they never land on a row the query hid.
    */
   const onMenuKeyDown = (event: KeyboardEvent): void => {
+    // An IME's Enter commits a candidate in the filter; taking it as "pick the
+    // first match" pinned a model the reader had not chosen and closed the sheet
+    // under them. Escape and the arrows belong to the candidate list too.
+    if (isImeComposing(event)) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     const onRow = target?.getAttribute('role') === 'option';
     const onFilter = target === search.current;

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { ModelControls, ModelSwitcher, REASONING_OPTIONS, ReasoningSelector, effortOptions, filterModelOptions, modelOptions } from './ModelSwitcher';
 import type { Config, SessionModelSelection, SessionSummary } from '../api/types';
 import { jsonResponse, resetAppState, summaryFixture } from '../test/fixtures';
@@ -376,6 +376,33 @@ describe('ModelSwitcher picker: search, facts and grouping', () => {
     await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(1));
     fireEvent.keyDown(filter, { key: 'Enter' });
 
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]?.body).toEqual({ provider: 'gateway', model: 'model-a' });
+  });
+
+  it('leaves the Enter that commits a composition to the IME', async () => {
+    // The filter is where a reader types with an IME, and Enter commits the
+    // candidate there. The picker took it and pinned the first match - a model
+    // the reader had not looked at - closing the sheet behind them.
+    const { calls } = installModelFetch();
+    openSession();
+    render(<ModelSwitcher />);
+    fireEvent.click(screen.getByRole('button', { name: /Model for this session/ }));
+    const filter = screen.getByRole('searchbox', { name: 'Filter models' });
+
+    fireEvent.input(filter, { target: { value: 'model-a' } });
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(1));
+
+    const composing = createEvent.keyDown(filter, { key: 'Enter', isComposing: true });
+    fireEvent(filter, composing);
+    expect(composing.defaultPrevented).toBe(false);
+    // Firefox reports the same commit as keyCode 229 with `isComposing` false.
+    expect(fireEvent.keyDown(filter, { key: 'Enter', keyCode: 229 })).toBe(true);
+    expect(calls).toHaveLength(0);
+    expect(screen.getByRole('listbox')).not.toBeNull();
+
+    // A finished composition still takes the first match.
+    fireEvent.keyDown(filter, { key: 'Enter' });
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0]?.body).toEqual({ provider: 'gateway', model: 'model-a' });
   });

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { configFixture, resetAppState } from '../test/fixtures';
 import * as store from '../state/store';
 import { CommandPalette } from './CommandPalette';
@@ -100,6 +100,17 @@ describe('the palette chrome', () => {
     expect(screen.getByText('Actions').querySelector('span')?.textContent).toBe('2');
   });
 
+  it('hints the chord the rail actually answers to, not the one the browser owns', async () => {
+    // `Mod+B` is the bookmarks bar in every browser (and Gecko's bookmarks
+    // sidebar), so the rail moved to `Mod+\`. The palette hint is where a reader
+    // learns that, and a hint for a chord that does nothing is worse than none.
+    const input = openPalette();
+    fireEvent.input(input, { target: { value: 'sessions rail' } });
+
+    const row = await waitFor(() => screen.getByRole('option', { name: /sessions rail/ }));
+    expect(row.querySelector('.palette-hint')?.textContent).toBe('Cmd/Ctrl+\\');
+  });
+
   it('explains an empty result instead of showing a bare line', async () => {
     const input = openPalette();
     fireEvent.input(input, { target: { value: 'zzzz' } });
@@ -129,6 +140,51 @@ describe('the palette chrome', () => {
     // The age is the row's trailing meta; `just now` is what a fresh session is.
     expect(row.textContent).toContain('just now');
     expect(screen.getByText('Sessions').querySelector('span')?.textContent).toBe('1');
+  });
+});
+
+describe('the palette and an IME', () => {
+  /* Enter is two keys in one: the key that runs the highlighted row for a Latin
+   * keyboard, and the key that commits a candidate for Japanese, Chinese and
+   * Korean input. The palette used to take both, so a reader still composing a
+   * word ran the first match - often "jump to another session" - and lost the
+   * query with it. */
+
+  beforeEach(() => {
+    resetAppState();
+  });
+
+  afterEach(() => {
+    cleanup();
+    resetAppState();
+  });
+
+  it('leaves the Enter that commits a composition to the IME', async () => {
+    const collapsed = store.railCollapsed.value;
+    store.paletteOpen.value = true;
+    render(<CommandPalette />);
+    const input = screen.getByRole('combobox', { name: 'Search commands' });
+    fireEvent.input(input, { target: { value: 'rail' } });
+    await waitFor(() =>
+      expect(screen.getByRole('option', { name: /sessions rail/ })).toBeTruthy(),
+    );
+
+    const composing = createEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    fireEvent(input, composing);
+    // Not prevented: the key is the IME's, and it has to reach it.
+    expect(composing.defaultPrevented).toBe(false);
+    expect(store.railCollapsed.value).toBe(collapsed);
+    expect(store.paletteOpen.value).toBe(true);
+
+    // Firefox reports the same commit as keyCode 229 with `isComposing` false.
+    expect(fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 })).toBe(true);
+    expect(store.railCollapsed.value).toBe(collapsed);
+    expect(store.paletteOpen.value).toBe(true);
+
+    // A commit that is over still runs the highlighted row.
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(store.railCollapsed.value).toBe(!collapsed);
+    expect(store.paletteOpen.value).toBe(false);
   });
 });
 

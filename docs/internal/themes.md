@@ -18,7 +18,7 @@ Three entry points, all opening the same right-hand drawer:
 
 * the palette button at the bottom of the project rail;
 * the theme button in the workspace header (it shows the active theme name);
-* `Ctrl/Cmd+Shift+T`, or Settings → **Appearance**.
+* `Ctrl/Cmd+Shift+L`, or Settings → **Appearance**.
 
 The drawer edits a live preview: colours, density and custom CSS apply to the
 whole workspace immediately, before you save anything.

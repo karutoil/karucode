@@ -105,12 +105,14 @@
   overscroll-behavior-x: contain;
   scroll-padding-inline: var(--space-6);
   /* Keyboard users can reach overflowed tabs; keep focused tabs in view. */
-  /* base.css sets `scrollbar-width: thin` on `html`; leaving it in force here
-   * draws the platform's 16px bar with arrow buttons, which is far too heavy
-   * under a 44px strip. These two lines hand the bar back to the app's own 8px
-   * `::-webkit-scrollbar` thumb, exactly as `.theme-studio-scroll` does. */
-  scrollbar-width: auto;
-  scrollbar-color: auto;
+  /* The bar has to stay visible (see above), but it must not be the platform's
+   * own: base.css's `@supports (-moz-appearance: none)` universal rule gives
+   * Gecko `thin` in the thumb's own `--faint`, and Chromium keeps the 8px
+   * `::-webkit-scrollbar` thumb, which is the 44px strip's actual budget. The
+   * `scrollbar-width: auto; scrollbar-color: auto` this used to carry was meant
+   * to hand the bar back to that pseudo-element — true in Blink only, since
+   * `auto` is the default there and Gecko ignores the pseudo-element entirely
+   * and reads `auto` as the 12px platform bar. Do not re-add it. */
 }
 
 .tab {

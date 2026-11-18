@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { render } from '@testing-library/preact';
 import { LiveAnnouncer } from './LiveAnnouncer';
 import { emptyChatState, type ChatItem, type ChatState } from '../state/chat';
@@ -154,5 +154,54 @@ describe('LiveAnnouncer', () => {
       <LiveAnnouncer chat={chat({ running: true, runStatus: 'running', items: [approval()] })} />,
     );
     expect(liveRegion().textContent).toBe('Waiting for approval: Run cargo test.');
+  });
+});
+
+/** Let a `setTimeout(0)` and the observer's delivery run. */
+const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe('LiveAnnouncer: the same sentence twice', () => {
+  let observer: MutationObserver | null = null;
+
+  afterEach(() => {
+    observer?.disconnect();
+    observer = null;
+  });
+
+  it('re-announces an identical tool completion instead of silently swallowing it', async () => {
+    const { rerender } = render(<LiveAnnouncer chat={chat({ running: true, runStatus: 'running' })} />);
+    const region = liveRegion();
+
+    let records = 0;
+    observer = new MutationObserver((mutations) => {
+      records += mutations.length;
+    });
+    // Scoped to the region itself: the number that matters is how many times the
+    // announced text changed, not how the renderer wrote it.
+    observer.observe(region, { characterData: true, childList: true, subtree: true });
+
+    // Two different `read_file` calls finishing in a row say the same sentence.
+    const finished = (id: string): ChatState =>
+      chat({
+        running: true,
+        runStatus: 'running',
+        items: [tool({ id: `tool:${id}`, callId: id, status: 'ok', output: 'done' })],
+      });
+
+    rerender(<LiveAnnouncer chat={finished('a')} />);
+    await flush();
+    expect(region.textContent).toBe('read_file finished.');
+
+    records = 0;
+    rerender(<LiveAnnouncer chat={finished('b')} />);
+    // A polite live region speaks on a *change*: the sentence has to leave the
+    // region and come back, or the second completion is announced to nobody.
+    // Pre-fix the second render left the identical text in place and said it once.
+    expect(region.textContent).toBe('');
+    await flush();
+    expect(region.textContent).toBe('read_file finished.');
+    // Blank, then repaint: two changes to this region, whatever Preact did to the
+    // text node underneath.
+    expect(records).toBeGreaterThanOrEqual(2);
   });
 });

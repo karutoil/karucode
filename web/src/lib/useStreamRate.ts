@@ -49,6 +49,11 @@ export function useStreamRate(
     }
 
     const take = (): void => {
+      // A hidden tab's badge is not on screen, so nothing there is worth a wake
+      // up: browsers throttle a background interval to ~1/s rather than to zero,
+      // and every tick still estimates, samples and can re-render. Several
+      // streaming blocks each held one of these timers.
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       const now = clock();
       const tokens = estimateTokens(latestChars.current);
       const next = withSample(samples.current, { at: now, tokens });
@@ -61,11 +66,34 @@ export function useStreamRate(
       );
     };
 
+    /**
+     * Coming back into view starts a new window rather than continuing the old
+     * one.
+     *
+     * The samples from before the tab was hidden are a minute old, and dividing
+     * however much arrived since by that gap reports the average of a stretch
+     * nobody was watching: 100 tokens that trickled in while backgrounded for a
+     * minute would read "1.7 t/s" while the stream is really producing thousands.
+     * The count is taken again immediately; the rate follows one tick later, when
+     * there are two samples 250 ms apart to compare.
+     */
+    const resume = (): void => {
+      if (typeof document === 'undefined' || document.visibilityState === 'hidden') return;
+      samples.current = [];
+      take();
+    };
+
     // One sample now, so a turn that is already mid-answer when this mounts (a
     // reload during a run) shows its count immediately rather than after a tick.
     take();
     const timer = setInterval(take, RATE_SAMPLE_MS);
-    return () => clearInterval(timer);
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', resume);
+    return () => {
+      clearInterval(timer);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', resume);
+      }
+    };
   }, [enabled, clock]);
 
   return state;

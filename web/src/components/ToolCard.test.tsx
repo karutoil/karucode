@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/preact';
 import { ToolCard } from './ToolCard';
 import type { ToolItem } from '../state/chat';
@@ -204,6 +204,39 @@ describe('ToolCard', () => {
     expect(screen.getByText('image/svg+xml cannot be previewed here')).not.toBeNull();
   });
 
+  it('caps the live preview of a long-running output and shows the rest when it settles', () => {
+    // 3 000 lines mid-run: a running card is re-rendered on every streamed
+    // delta, so it paints 300 lines and says how many it is holding back.
+    const lines = Array.from({ length: 3_000 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { rerender } = render(
+      <ToolCard item={tool({ status: 'running', output: lines, durationMs: null })} defaultOpen />,
+    );
+    expect(document.querySelectorAll('.tool-line').length).toBe(300);
+    expect(screen.getByText('… 2700 more lines not shown')).not.toBeNull();
+
+    // Settled: the full 2 000-line ceiling applies and the count tells the truth.
+    rerender(<ToolCard item={tool({ output: lines })} defaultOpen />);
+    expect(document.querySelectorAll('.tool-line').length).toBe(2_000);
+    expect(screen.getByText('… 1000 more lines not shown')).not.toBeNull();
+  });
+
+  it('splits an unchanged output once, however many times it renders', () => {
+    const split = vi.spyOn(String.prototype, 'split');
+    const newlineSplits = (): number =>
+      split.mock.calls.filter((call) => (call[0] as unknown) === '\n').length;
+    const output = 'alpha\nbeta\ngamma';
+    const { rerender } = render(<ToolCard item={tool({ output, status: 'running' })} />);
+    const afterFirst = newlineSplits();
+
+    rerender(<ToolCard item={tool({ output, status: 'running' })} />);
+    rerender(<ToolCard item={tool({ output, status: 'running' })} />);
+    // The transcript hands back the same string until a delta lands, so the
+    // second and third render must not walk it again.
+    expect(afterFirst).toBeGreaterThan(0);
+    expect(newlineSplits()).toBe(afterFirst);
+    split.mockRestore();
+  });
+
   it('rates a running call on its own output and drops the badge when it settles', () => {
     const { rerender } = render(
       <ToolCard item={tool({ status: 'running', output: 'y'.repeat(4_000), durationMs: null })} />,
@@ -309,5 +342,42 @@ describe('ToolCard row variant', () => {
     render(<ToolCard item={tool({ messageId: 12 })} variant="row" onRewind={() => undefined} />);
     const element = document.querySelector('.tool-row');
     expect(element?.querySelector('.tool-row-meta .rewind-tool')).not.toBeNull();
+  });
+});
+
+describe('ToolCard argument cost', () => {
+  it('serialises the arguments once, however many times the card renders', () => {
+    const item = tool({ name: 'write_file', args: { path: 'notes.txt', content: 'x'.repeat(200) } });
+    const stringify = vi.spyOn(JSON, 'stringify');
+
+    const { rerender } = render(<ToolCard item={item} />);
+    const afterFirstRender = stringify.mock.calls.length;
+    // Each delta rebuilds the item around the same argument object, which is what
+    // the store does while a call is streaming.
+    for (let index = 0; index < 5; index += 1) {
+      rerender(<ToolCard item={{ ...item, output: 'o'.repeat(index) }} />);
+    }
+
+    // A running card renders per streamed delta; the tooltip and the summary are
+    // the same strings every time, so they are derived once per argument object.
+    expect(afterFirstRender).toBe(1);
+    expect(stringify.mock.calls.length).toBe(afterFirstRender);
+  });
+
+  it('does not serialise a 512 KB body to fill a 500-character tooltip', () => {
+    const body = 'a'.repeat(512 * 1024);
+    const item = tool({ name: 'write_file', args: { path: 'big.txt', content: body } });
+    const stringify = vi.spyOn(JSON, 'stringify');
+
+    render(<ToolCard item={item} />);
+
+    const serialised = stringify.mock.results.map((result) => String(result.value));
+    expect(serialised).toHaveLength(1);
+    // Only the head of the body is ever serialised; the tooltip is capped at 500
+    // characters, so nothing past that could have been read anyway.
+    expect(serialised[0]?.length).toBeLessThan(16 * 1024);
+    const title = document.querySelector('.tool-command')?.getAttribute('title') ?? '';
+    expect(title).toContain('big.txt');
+    expect(title.length).toBeLessThanOrEqual(501);
   });
 });

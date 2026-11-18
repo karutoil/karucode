@@ -32,6 +32,8 @@ import {
   type TreeLoader,
 } from '../lib/mentions';
 import { formatBytes } from '../lib/format';
+import { isImeComposing } from '../lib/keyboard';
+import { isApplePlatform, modKey } from '../lib/platform';
 import {
   insertCommand,
   knownCommand,
@@ -353,6 +355,33 @@ const INDEX_TTL_MS = 60_000;
 const MENTION_MENU_ID = 'composer-mention-menu';
 const SLASH_MENU_ID = 'composer-slash-menu';
 
+/**
+ * How many parked composer forms this tab keeps.
+ *
+ * A record holds the draft *and* the attachments, whose inlined file bodies are
+ * whole source files, so the map is a window over the sessions a reader
+ * alternates between - not a history of every session they have ever opened.
+ * 24 covers a rail's worth of switching back and forth.
+ */
+export const FORM_SCOPE_LIMIT = 24;
+
+/**
+ * Bound the parked-scope map, shedding the coldest scope first.
+ *
+ * `Map` iterates in insertion order and the composer re-inserts a scope every
+ * time it draws it, so the first key is the one nothing has touched the
+ * longest. `protect` is the scope on screen: it is never evicted, however cold
+ * its key looks, because throwing away the box the reader is typing in is worse
+ * than keeping one entry too many.
+ */
+export function trimFormScopes<K, V>(map: Map<K, V>, limit: number, protect: K): void {
+  for (const key of map.keys()) {
+    if (map.size <= limit) return;
+    if (key === protect) continue;
+    map.delete(key);
+  }
+}
+
 const defaultLoadTree: TreeLoader = (depth = MENTION_INDEX_DEPTH) =>
   api.getWorkspaceTree('.', depth, store.currentProjectId.value);
 
@@ -427,12 +456,22 @@ export function Composer({
     }
   }
   let scopedForm = forms.current.get(scopeKey);
-  if (!scopedForm) {
+  if (scopedForm) {
+    // Re-inserting the scope every time it is drawn *is* the LRU: a `Map`
+    // iterates in insertion order, so the first key is the scope nothing has
+    // touched for the longest time. Without this, an eviction would throw away
+    // the session the reader keeps coming back to.
+    forms.current.delete(scopeKey);
+    forms.current.set(scopeKey, scopedForm);
+  } else {
     scopedForm = {
       value: { draft: '', attachments: [], caret: 0, sending: false, announcement: '' },
     };
     forms.current.set(scopeKey, scopedForm);
   }
+  // A record holds the attachments' inlined file bodies, so browsing sessions
+  // must not accumulate them: keep the recent window, never the visible box.
+  trimFormScopes(forms.current, FORM_SCOPE_LIMIT, scopeKey);
   const form = scopedForm;
   const { draft, attachments, caret, sending, announcement } = form.value;
   const [, renderForm] = useState(0);
@@ -488,6 +527,37 @@ export function Composer({
     const pending = store.draftToSession.value;
     if (pending !== null && pending.sessionId === sessionId) store.draftToSession.value = null;
   }, [sessionId, carry]);
+
+  // A scope nothing can reach again is a record holding a draft - and whole
+  // inlined files - for no one: a session the rail no longer lists because it
+  // was deleted, or a draft replaced by the next "New session" (a sent draft has
+  // already been carried to its session above, so its old key is gone by now).
+  //
+  // Only the visible project's rows are consulted: `store.sessions` holds *that*
+  // project's sessions, and a parked draft in another project has to survive the
+  // switch, which is the reason this map exists. An empty or still-loading list
+  // is a refresh in progress, not a mass deletion, so it prunes nothing; and the
+  // visible scope is never pruned, because a session created moments ago is not
+  // in the rail's rows yet.
+  const sessionRows = store.sessions.value;
+  useEffect(() => {
+    if (store.sessionsLoading.value || sessionRows.length === 0) return;
+    const live = new Set(sessionRows.map((row) => row.id));
+    for (const key of Array.from(forms.current.keys())) {
+      if (key === scopeKey) continue;
+      const [project, session, draft] = JSON.parse(key) as [
+        string | null,
+        string | null,
+        number | null,
+      ];
+      if (project !== projectId) continue;
+      const stale =
+        session !== null
+          ? !live.has(session)
+          : draft !== null && draftId !== null && draft !== draftId;
+      if (stale) forms.current.delete(key);
+    }
+  }, [sessionRows, projectId, scopeKey, draftId]);
 
   // `store.composerDraft` is how another surface (the empty state's quick
   // prompts) hands text to the composer; it is consumed once and cleared.
@@ -856,10 +926,20 @@ export function Composer({
   // Settings applies to the very next key press with no reload - and so the hint,
   // the buttons' names and the behaviour can never disagree.
   const enterSends = store.sendKey.value === 'enter';
-  /** The sending chord, spelled the way the foot hint and the buttons spell it. */
-  const sendChord = enterSends ? 'Enter' : 'Ctrl Enter';
-  /** The same chord in a full sentence, for accessible names. */
-  const sendChordLong = enterSends ? 'Enter' : 'Command or Control + Enter';
+  /** The sending chord, spelled the way the foot hint and the buttons spell it.
+   *  The modifier is the platform's own (`⌘` on a Mac, where there is no Ctrl
+   *  key): every other hint in the app already reads `modKey()`, and a chord
+   *  nobody has on their keyboard is worse than no hint at all. */
+  const sendChord = enterSends ? 'Enter' : `${modKey()} Enter`;
+  /** The same chord in words, for accessible names and tooltips.
+   *  `⌘` is a private-use glyph: several screen readers announce it as nothing
+   *  useful, which made the send button's name "Send message (Enter)" on a Mac.
+   *  So the spoken form spells the modifier out on the platform's own terms. */
+  const sendChordLong = enterSends
+    ? 'Enter'
+    : isApplePlatform()
+      ? 'Command + Enter'
+      : 'Control + Enter';
   // While a run is in flight the same box sends into the queue instead of
   // starting one, because starting one is exactly what the API refuses with a
   // 409. `canQueue` is therefore the "running" half of `canSend`.
@@ -1124,7 +1204,15 @@ export function Composer({
             value={draft}
             placeholder={placeholder}
             disabled={!canType}
-            aria-expanded={menuOpen || slashOpen}
+            // A textarea's only role is `textbox` (HTML-ARIA, and the JSX types
+            // say the same), so the popup is described with the properties a
+            // textbox *does* support: `aria-haspopup` announces that there is a
+            // list, `aria-controls`/`aria-activedescendant` name it and the armed
+            // row, `aria-autocomplete` says the list narrows as you type. What is
+            // deliberately absent is `aria-expanded`, a combobox-only property
+            // that assistive tech drops on a plain text field: claiming it made
+            // the accessibility tree describe a control this is not.
+            aria-haspopup="listbox"
             aria-controls={
               slashOpen ? SLASH_MENU_ID : menuOpen ? MENTION_MENU_ID : undefined
             }
@@ -1154,11 +1242,32 @@ export function Composer({
             }}
             onPaste={(event) => {
               const files = event.clipboardData?.files;
-              if (canType && files && files.length > 0) {
-                void addFiles(Array.from(files));
+              if (!files || files.length === 0) return;
+              // A clipboard that carries files nearly always carries their names
+              // as text too (copy a file in a file manager and both forms
+              // arrive), so the paste has to be claimed: without this the chip
+              // *and* "shot.png" typed into the draft are the same paste twice.
+              event.preventDefault();
+              if (!canType) {
+                // A dropped paste looks exactly like a broken clipboard, so say
+                // which it is - the same live region a refused send uses.
+                setAnnouncement(
+                  `Files cannot be attached while the composer is unavailable${
+                    disabledReason ? `: ${disabledReason}` : '.'
+                  }`,
+                );
+                return;
               }
+              void addFiles(Array.from(files));
             }}
             onKeyDown={(event) => {
+              // An IME owns these keys while it is composing: Enter commits a
+              // candidate, the arrows walk the candidate list and Escape cancels
+              // the composition. Every branch below - the `/` menu, the `@` menu,
+              // send, queue, stop - would act on half a word. The guard is first
+              // because the two popovers used to sit above the send path's own
+              // check and ate the commit key before it could reach the IME.
+              if (isImeComposing(event)) return;
               // The `/` menu owns the arrows and Enter while it is open. Enter only
               // completes when a row is highlighted: with no match the key must
               // fall through and send the message, which is what a path or a
@@ -1226,8 +1335,9 @@ export function Composer({
               if (event.key === 'Enter') {
                 // An IME's Enter confirms the composition it is part of, not the
                 // message: Japanese, Chinese and Korean input all end a word this
-                // way, and sending there would submit half of one.
-                if (event.isComposing || event.keyCode === 229) return;
+                // way, and sending there would submit half of one. That guard is
+                // the first thing this handler does, so both popovers above obey
+                // it too.
                 const chord = event.metaKey || event.ctrlKey;
                 if (enterSends) {
                   // Enter sends; Shift and Alt start a line the way the browser

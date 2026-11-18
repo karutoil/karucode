@@ -111,6 +111,79 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Fixed
 
+- **The web UI now has a real Firefox gate, and the thirty-odd defects it found
+  are fixed.** `scripts/verify_firefox.py` drives headless Firefox 160 over
+  WebDriver against a private server and a scripted provider (19 checks: boot,
+  a created session, native key input, the palette chord, scrollbar widths,
+  placeholder opacity, no horizontal overflow at 1440/1024/420, a screenshot per
+  size, and zero page exceptions or `console.error`). `scripts/verify_ff_css.py`
+  does the same for the stylesheets against a fixture (8 checks). What they
+  proved:
+
+  * **Every inner scroller had a platform-thick scrollbar in Gecko.** `html {
+    scrollbar-width: thin }` was set once at the root, and `scrollbar-width`
+    does not inherit, so the rail, the session list, the transcript, the palette
+    and the Theme studio drawer each computed `auto` and reserved 12 px for a
+    bar Chromium draws in 8. Measured in Firefox: 399/411 px for `.chat-scroll`.
+    The thin, themed bar is now set for every scroll container (and the Theme
+    studio's `scrollbar-width: auto` override - the one wide, unthemed bar in the
+    app, with a 16 px gutter that shifted its grid - is gone). Now 6 px
+    everywhere, measured in both engines.
+  * **A `select` stripped by `appearance: none` had no caret**, so the Density
+    and Interface-font pickers in the Theme studio read as text inputs; they now
+    paint one from two `linear-gradient`s in `--muted`, so it is themed without
+    an image asset.
+  * **`AbortSignal.any` was called unguarded.** Firefox only shipped it in 133,
+    so on ESR 128 (and Safari before 17.4) every request that passed a signal
+    threw `AbortSignal.any is not a function` *before* the `try` that turns a
+    failure into an `ApiError`, taking down file previews, the Git panes and the
+    workspace tabs with a raw `TypeError`. It now links the signals by hand when
+    the engine lacks the combinator.
+  * **Cross-tab stream sharing silently degraded to one stream per tab.**
+    `navigator.locks` exists only in a secure context, so the documented
+    plain-HTTP LAN deployment had none: six tabs held six `/api/events`
+    connections. Tabs now elect a leader over the `BroadcastChannel` they
+    already share - a claim answered by a live leader yields, the lower tab id
+    breaks a tie, a silent leader loses the role after 30 s - verified in Firefox
+    against a plain-HTTP origin, where two tabs held one stream. The `web-ui`
+    block and `docs/internal/web-ui.md` say so.
+  * **A desktop notification could be lost behind a sound that never played.**
+    The cue was awaited before `showDesktop()`, and `AudioContext.resume()`
+    stays pending forever in a tab nobody has clicked, so a background tab
+    delivered neither the notification nor the "click to enable sounds" hint.
+    The notification no longer waits on audio, and the resume is bounded.
+  * **The clipboard fallback dropped focus to `<body>`,** killing the composer
+    until the reader clicked again - and it is the only path on plain HTTP. It
+    now focuses before selecting and restores the previous element. The Theme
+    studio's "copy CSS" and the update command's copy button bypassed it
+    entirely and failed silently on HTTP; both use it now.
+  * **An IME commit ran a command.** Enter that ends a composition executed the
+    highlighted row in the command palette, inserted a slash/`@` suggestion over
+    the composed text, picked the first model in the model filter, or committed a
+    session rename. All four ask one `isImeComposing` predicate now, and only the
+    implicit-submit sites prevent the default.
+  * **The Firefox-reserved chords are no longer claimed.** `Mod+B` (bookmarks
+    sidebar), `Mod+J` (Downloads) and `Mod+Shift+T` (reopen closed tab) are the
+    browser's and cannot be intercepted reliably, so the rail, the Context drawer
+    and the Theme studio moved to `Mod+\`, `Mod+Shift+X` and `Mod+Shift+L`; the
+    palette row, the rail tooltip and both `aria-keyshortcuts` were updated with
+    them. The shell also stops taking a bare `Ctrl`+letter inside a text field on
+    Apple platforms, where those are the field's emacs keys - while `Ctrl+K` from
+    the composer still opens the palette on the platforms where `Ctrl` is the app
+    modifier.
+  * **Smaller truths:** a failed boot can no longer leave the skeleton up with no
+    message (it names the failure and offers Retry); a mid-run `error` that the
+    provider recovered from no longer leaves a "Run failed" banner on the finished
+    run; a replayed frame can no longer double a paragraph (`seq` watermark); a
+    dead terminal socket says so once instead of only changing a status word; a
+    dialog that loses its opener focuses a landmark instead of `<body>`, and does
+    not scroll the page back to where it was restored; Tab inside the transcript
+    no longer stops follow-the-tail; two identical tool completions announce
+    twice; the subagent feed and the composer's per-session form map are bounded
+    (a long-lived tab used to grow without limit); and a running tool card paints
+    its first 300 output lines instead of 2 000 per streamed delta, splitting an
+    unchanged body once, with the rest shown when the call settles.
+
 - **A short conversation is no longer windowed, and no message row skips its own
   layout.** Below 150 rows the transcript mounts every row and writes no window
   padding, so the padding rewrite that used to happen under the reader on every

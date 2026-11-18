@@ -5,6 +5,8 @@ import { invalidateArtifact, publishArtifact, resetArtifactCache } from '../lib/
 import { renderMermaid } from '../lib/mermaid';
 import { setAuthToken } from '../api/client';
 import * as store from '../state/store';
+import DOMPurify from 'dompurify';
+import { resetSvgCache } from '../lib/svg';
 
 vi.mock('../lib/artifactPreview', () => ({
   publishArtifact: vi.fn(async () => '/api/artifacts/abc123?capability=scoped-artifact-read'),
@@ -191,6 +193,28 @@ describe('an SVG artifact', () => {
     const { container } = render(<Markdown text={fence('artifact svg', 'just words')} />);
     expect(container.querySelector('[data-testid="artifact-error"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="artifact-svg"]')).toBeNull();
+  });
+
+  it('parses the document once, so scrolling it out and back is not a second parse', () => {
+    resetSvgCache();
+    const sanitize = vi.spyOn(DOMPurify, 'sanitize');
+    const text = fence('svg', '<svg viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" /></svg>');
+
+    // The markdown pipeline sanitises the message too, so count the parses of
+    // the drawing itself, not every call into DOMPurify.
+    const parses = (): number =>
+      sanitize.mock.calls.filter(([input]) => String(input).startsWith('<svg')).length;
+
+    const first = render(<Markdown text={text} />);
+    expect(first.container.querySelector('[data-testid="artifact-svg"]')).not.toBeNull();
+    expect(parses()).toBe(1);
+    first.unmount();
+
+    // The transcript unmounts rows outside its window: this is that row coming
+    // back, and an 800 KB drawing is seconds of parse in Firefox.
+    const second = render(<Markdown text={text} />);
+    expect(second.container.querySelector('[data-testid="artifact-svg"]')).not.toBeNull();
+    expect(parses()).toBe(1);
   });
 });
 

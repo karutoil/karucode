@@ -225,6 +225,45 @@ function responseError(
   return new ApiError(`Request failed with HTTP ${response.status} (${path})`, response.status, 'unknown');
 }
 
+/**
+ * Compose the caller's signal with the request deadline.
+ *
+ * `AbortSignal.any` is Firefox 133+; ESR 128 does not have it, and an unguarded
+ * call throws a `TypeError` *before* the `try` block in `fetchResponse`, which
+ * turns every abortable request into that raw error instead of an `ApiError`.
+ * The manual link below is what `any` does: the first abort wins and carries its
+ * own reason, so a caller cancellation stays an `AbortError`.
+ */
+function linkSignals(signals: AbortSignal[]): AbortSignal {
+  const anyFn = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (typeof anyFn === 'function') return anyFn.call(AbortSignal, signals);
+
+  const controller = new AbortController();
+  const links = new Map<AbortSignal, () => void>();
+  const detach = (): void => {
+    for (const [signal, handler] of links) signal.removeEventListener('abort', handler);
+    links.clear();
+  };
+  const fire = (signal: AbortSignal): void => {
+    // One abort ends the request: drop the other listeners so a deadline that
+    // fires later cannot keep this controller (and its listeners) alive.
+    detach();
+    controller.abort(signal.reason);
+  };
+
+  for (const signal of signals) {
+    // An input that is already aborted must not be waited on.
+    if (signal.aborted) {
+      fire(signal);
+      return controller.signal;
+    }
+    const handler = (): void => fire(signal);
+    links.set(signal, handler);
+    signal.addEventListener('abort', handler, { once: true });
+  }
+  return controller.signal;
+}
+
 /** Fetch with the bearer token, the CSRF header and the request deadline. */
 async function fetchResponse(path: string, options: PerformOptions): Promise<Response> {
   const method = options.method;
@@ -238,7 +277,7 @@ async function fetchResponse(path: string, options: PerformOptions): Promise<Res
   // would keep `chatLoading` true and the skeleton up with no way out. The
   // caller's own signal still wins, so an explicit abort stays an AbortError.
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  const signal = options.signal ? linkSignals([options.signal, timeout]) : timeout;
   try {
     return await fetchImpl(path, {
       method,

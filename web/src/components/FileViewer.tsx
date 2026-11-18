@@ -36,6 +36,29 @@ export type FileViewerHost = 'dialog' | 'tab';
 /** Keep the editing textarea inside the browser's comfort zone, not the server's cap. */
 const MAX_EDITOR_CHARS = 2 * 1024 * 1024;
 
+/** The document the last split was for, and its lines. One entry: on screen is one file. */
+let splitOf: string | null = null;
+let splitInto: string[] = [];
+
+/**
+ * `content` split into its lines, worked out once per distinct document.
+ *
+ * The gutter draws one row per line and the status bar prints the count, and both
+ * read it on every render — including the render of every keystroke while the
+ * editor is open. Splitting there copied the whole loaded document and built one
+ * array element per line only to read `.length`: for a 2 MiB file that is a 2 MiB
+ * copy and a ~100 000-element array per keystroke, which is a visible hitch in
+ * Firefox. Keyed by value, so the second render of the same document is one string
+ * comparison; one entry, because the file being read is the file on screen.
+ */
+export function splitLines(content: string): string[] {
+  if (content !== splitOf) {
+    splitOf = content;
+    splitInto = content.split('\n');
+  }
+  return splitInto;
+}
+
 function isConflict(cause: unknown): boolean {
   return cause instanceof ApiError && cause.status === 409;
 }
@@ -174,7 +197,7 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
   // preview of the draft rather than of the bytes on disk.
   const previewContent = editing ? draft : (file?.content ?? '');
 
-  const lineCount = file && !file.binary ? file.content.split('\n').length : 0;
+  const lineCount = file && !file.binary ? splitLines(file.content).length : 0;
 
   /**
    * Follow a link in a rendered preview to another workspace file. The dialog

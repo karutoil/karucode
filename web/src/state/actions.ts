@@ -31,6 +31,7 @@ import type {
   UpdateApplyResponse,
   UpdateStatus,
 } from '../api/types';
+import { isAgentLive } from '../api/types';
 import { isNarrowViewport } from '../lib/dom';
 import {
   emptyChatState,
@@ -170,6 +171,18 @@ export function refreshAuthStatus(): Promise<AuthStatus | null> {
   return authStatusInFlight;
 }
 
+/**
+ * Whether the workspace gave up.
+ *
+ * A function rather than a direct read because TypeScript narrows
+ * `store.boot.value` to `'loading'` after the assignment above it and keeps that
+ * narrowing across the `await`, which would make the post-boot check below a
+ * comparison the compiler thinks cannot happen.
+ */
+function bootFailed(): boolean {
+  return store.boot.value === 'error';
+}
+
 /** Sign in with the password. Returns whether the session was established. */
 export async function signInWithPassword(password: string): Promise<boolean> {
   if (store.authPending.value) return false;
@@ -188,7 +201,10 @@ export async function signInWithPassword(password: string): Promise<boolean> {
     setAuthToken(null);
     store.boot.value = 'loading';
     await bootstrap(true);
-    return true;
+    // `bootstrap` no longer rejects (it lands on the error screen instead), so the
+    // answer has to come from the state it left behind: reporting success here
+    // would tell the caller the workspace is up when the boot screen is showing.
+    return !bootFailed();
   } catch (error) {
     store.authError.value = toErrorMessage(error);
     return false;
@@ -209,7 +225,7 @@ export async function signInWithPasskey(): Promise<boolean> {
     setAuthToken(null);
     store.boot.value = 'loading';
     await bootstrap(true);
-    return true;
+    return !bootFailed();
   } catch (error) {
     store.authError.value =
       error instanceof PasskeyError ? error.message : toErrorMessage(error);
@@ -843,8 +859,22 @@ function releaseBootstrapEvents(buffer: BootstrapEventBuffer): void {
   // Open the live gate before replaying: a handler is then indistinguishable from
   // an event that arrives immediately after this synchronous release pass.
   bootstrapEventBuffer = null;
-  for (const event of buffer.events) handleRawEvent(event);
-  if (buffer.needsResync) scheduleGapResync(0);
+  let dropped = false;
+  for (const event of buffer.events) {
+    try {
+      handleRawEvent(event);
+    } catch (error) {
+      // This runs in `bootstrap`'s `finally`, so a single frame shape the reducers
+      // do not defend against (an `approval_requested` with no approval, a field
+      // renamed by a newer server) used to throw out of the release pass and
+      // reject the whole boot: the app stayed on the skeleton with no message and
+      // no Retry. Skip that one frame, keep the rest, and let the resync below
+      // repair what it dropped.
+      dropped = true;
+      console.error('karucode: a buffered event could not be applied during boot', error);
+    }
+  }
+  if (buffer.needsResync || dropped) scheduleGapResync(0);
 }
 
 function applyChatEvent(event: KarucodeEvent): void {
@@ -909,7 +939,13 @@ function handleAgentEvent(event: KarucodeEvent): void {
   const current = store.agentActivities.value[agentId] ?? agentConsole.emptyActivity();
   const next = agentConsole.applyAgentEvent(current, event);
   if (next === current) return;
-  store.agentActivities.value = { ...store.agentActivities.value, [agentId]: next };
+  // `recordAgentActivity` (not a spread) is what bounds the map: a tab that runs
+  // subagent after subagent for a day used to hold every finished feed forever.
+  store.agentActivities.value = agentConsole.recordAgentActivity(
+    store.agentActivities.value,
+    agentId,
+    next,
+  );
 }
 
 /**
@@ -932,13 +968,19 @@ function seedAgentState(detail: SessionDetail): void {
   const next = { ...store.agentActivities.value };
   let changed = false;
   for (const agent of detail.agents) {
-    const seeded = agentConsole.activityFromMessages(detail.messages, agent.id);
+    // The snapshot says when this agent last moved and whether it is still
+    // running; without both, a running subagent's seeded feed ranks last and is
+    // evicted (then deleted) while it is still working.
+    const seeded = agentConsole.activityFromMessages(detail.messages, agent.id, false, {
+      updatedAt: agent.updated_at,
+      live: isAgentLive(agent.status),
+    });
     if (seeded.items.length === 0) continue;
     const live = next[agent.id];
     next[agent.id] = live ? agentConsole.mergeActivities(seeded, live) : seeded;
     changed = true;
   }
-  if (changed) store.agentActivities.value = next;
+  if (changed) store.agentActivities.value = agentConsole.boundAgentActivities(next);
 }
 
 function drainRefreshQueue(settled = false): void {
@@ -1056,10 +1098,24 @@ export function scheduleSessionsRefresh(): void {
   }, 450);
 }
 
+/**
+ * Which forced boot is allowed to decide the outcome.
+ *
+ * `Retry`, a sign-in and the startup call can overlap: the boot screen's Retry
+ * starts a fresh run while the first one is still in flight. Only the newest run
+ * may write `ready`/`error`/`onboarding`, otherwise the run that finishes last
+ * wins even when it started first - a stale failure would paint the error screen
+ * over a workspace that has already loaded, and a stale success would hide a
+ * real one.
+ */
+let bootstrapRun = 0;
+
 export async function bootstrap(force = false): Promise<void> {
   if (bootstrapPromise && !force) return bootstrapPromise;
   const buffer: BootstrapEventBuffer = { events: [], needsResync: false };
   bootstrapEventBuffer = buffer;
+  const run = (bootstrapRun += 1);
+  const isCurrent = (): boolean => run === bootstrapRun;
   bootstrapPromise = (async () => {
     store.boot.value = 'loading';
     store.bootError.value = null;
@@ -1104,6 +1160,8 @@ export async function bootstrap(force = false): Promise<void> {
       store.sessionAnnotations.value = annotations;
       store.sessionsLoading.value = false;
       await refreshAgents();
+      // A superseded boot must not overwrite the snapshot of the newer one.
+      if (!isCurrent()) return;
       store.authError.value = null;
       store.connection.value = {
         api: 'online',
@@ -1116,6 +1174,7 @@ export async function bootstrap(force = false): Promise<void> {
       // persists the completion marker, so an established install is never
       // interrupted by it.
       const onboardingState = await refreshOnboarding();
+      if (!isCurrent()) return;
       if (onboardingState?.needed) {
         store.boot.value = 'onboarding';
         store.onboardingStep.value = 0;
@@ -1125,6 +1184,9 @@ export async function bootstrap(force = false): Promise<void> {
       if (target) await openSession(target.id);
       else clearSelection();
     } catch (error) {
+      // A superseded boot stops at nothing: the newer run owns the stream and the
+      // boot state, and stopping its stream here would strand it.
+      if (!isCurrent()) return;
       stopStream();
       store.sessionsLoading.value = false;
       store.projectsLoading.value = false;
@@ -1144,8 +1206,30 @@ export async function bootstrap(force = false): Promise<void> {
     } finally {
       releaseBootstrapEvents(buffer);
     }
-  })().finally(() => {
-    bootstrapPromise = null;
+  })().catch((error) => {
+    // Whatever escapes the body above - a throw in the prologue, or anything the
+    // release pass still could not contain - used to reject a promise nobody
+    // awaits: `void bootstrap()` at startup, `await bootstrap(true)` inside the
+    // sign-in paths (whose `catch` writes `authError`, which the skeleton never
+    // renders), and the boot screen's Retry. The tab then sat on the loading
+    // skeleton forever. Land on the error screen instead: it has the message and
+    // the Retry button that re-runs this function.
+    if (!isCurrent()) return;
+    store.sessionsLoading.value = false;
+    store.projectsLoading.value = false;
+    store.boot.value = 'error';
+    store.bootError.value = toErrorMessage(error);
+    store.connection.value = {
+      ...store.connection.value,
+      api: 'offline',
+      lastError: toErrorMessage(error),
+      checkedAt: Date.now(),
+    };
+  }).finally(() => {
+    // Only the newest run may clear the shared slot: an older boot settling later
+    // must not make an in-flight one look like it is not running, or the next
+    // `bootstrap()` would start a third boot instead of joining it.
+    if (isCurrent()) bootstrapPromise = null;
   });
   return bootstrapPromise;
 }
@@ -1801,7 +1885,9 @@ export async function submitToken(token: string): Promise<boolean> {
     store.health.value = result;
     store.boot.value = 'loading';
     await bootstrap(true);
-    return true;
+    // The token was accepted, but the boot after it can still fail: the boot
+    // screen owns that failure, so do not report a workspace that is not there.
+    return !bootFailed();
   } catch (error) {
     store.authError.value = isUnauthorized(error)
       ? 'That token was rejected by the server.'

@@ -96,8 +96,15 @@ describe('bootstrap and the live stream interlock', () => {
 
     const booting = actions.bootstrap();
     await vi.waitFor(() => expect(sessionsReads).toBe(1));
-    expect(order[0]).toBe('events');
+    // The shared stream claims the browser-wide channel before it subscribes, so
+    // `/api/events` is opened a claim window (claimAckMs + jitter) after boot
+    // starts instead of on the same tick. Wait for the stream to attach, then
+    // check the interlock that actually matters: it is listening while the
+    // authoritative session list read is still in flight.
     await vi.waitFor(() => expect(push).not.toBeNull());
+    expect(sessionsReads).toBe(1);
+    expect(store.boot.value).toBe('loading');
+    expect(order).toContain('events');
     const emit = (event: RawEvent): void => {
       if (!push) throw new Error('event stream did not open');
       push(event);

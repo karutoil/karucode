@@ -195,6 +195,9 @@ export class SoundEngine {
    *
    * Call this from a `pointerdown`/`keydown` listener. It is idempotent and cheap
    * once the context is running, so a listener may call it on every gesture.
+   *
+   * Never waits longer than {@link RESUME_TIMEOUT_MS} on the browser: see
+   * `resumeWithin` for why that bound exists.
    */
   async arm(): Promise<boolean> {
     const context = this.ensureContext();
@@ -203,15 +206,37 @@ export class SoundEngine {
       this.blocked = false;
       return true;
     }
-    try {
-      await context.resume();
-      this.blocked = context.state !== 'running';
-      return !this.blocked;
-    } catch {
+    const resumed = await this.resumeWithin(context);
+    // The context's own state is the answer, not the promise: a resume that
+    // resolved can still leave the engine suspended (and vice versa).
+    this.blocked = !resumed || context.state !== 'running';
+    return !this.blocked;
+  }
+
+  /**
+   * `resume()`, but never for longer than {@link RESUME_TIMEOUT_MS}.
+   *
+   * While the page is autoplay-blocked Gecko keeps this promise pending until the
+   * user interacts — it neither resolves nor rejects, so `await context.resume()`
+   * is an unbounded wait. Racing it is what turns that into the `blocked` answer
+   * the UI needs. The losing side of the race is not abandoned: it already has a
+   * rejection handler, so a late rejection cannot surface as unhandled.
+   */
+  private async resumeWithin(context: AudioContextLike): Promise<boolean> {
+    let timer: number | null = null;
+    const deadline = new Promise<boolean>((resolve) => {
+      timer = this.env.setTimeout(() => resolve(false), RESUME_TIMEOUT_MS);
+    });
+    const resume = context.resume().then(
+      () => true,
       // A resume outside a gesture can reject. Not an error worth surfacing: the
       // next gesture tries again.
-      this.blocked = true;
-      return false;
+      () => false,
+    );
+    try {
+      return await Promise.race([resume, deadline]);
+    } finally {
+      if (timer !== null) this.env.clearTimeout(timer);
     }
   }
 
@@ -338,6 +363,15 @@ export class SoundEngine {
 
 /** Window in which a repeated cue of the same name is swallowed. */
 export const COALESCE_MS = 400;
+/**
+ * How long `AudioContext.resume()` may take before the cue reports `blocked`.
+ *
+ * Short enough that a notification is not delayed by it, long enough that a
+ * resume which does work is not abandoned. It only guards a promise that never
+ * settles: Gecko neither resolves nor rejects `resume()` while the page is
+ * autoplay-blocked, so waiting longer buys nothing.
+ */
+export const RESUME_TIMEOUT_MS = 300;
 /** Small lead so the first note is scheduled in the future, not "now". */
 const START_LEAD_S = 0.01;
 /** Attack time, long enough to avoid a click. */

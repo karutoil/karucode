@@ -8,7 +8,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { NotifyPayload } from '../api/types';
-import type { CueName, PlayResult, SoundEngine } from '../lib/notifySound';
+import { SoundEngine, RESUME_TIMEOUT_MS, type AudioContextLike, type CueName, type PlayResult } from '../lib/notifySound';
 import type { NotificationEnvironment, NotificationHandle } from '../lib/notifyDesktop';
 import { KIND_CUES, Notifier, cueFor, normaliseKind, type NotifierDeps } from './notifier';
 
@@ -65,7 +65,45 @@ interface Harness {
   setPermission: (permission: NotificationPermission) => void;
 }
 
-function harness(overrides: Partial<NotifyPayload> = {}): Harness {
+/**
+ * A sound engine whose AudioContext never resumes.
+ *
+ * This is not a hypothetical: Gecko keeps the `resume()` promise unresolved
+ * while the page is autoplay-blocked, which is the state of a tab nobody has
+ * clicked yet — exactly the tab a desktop notification is for.
+ */
+function stuckSoundEngine(): SoundEngine {
+  let state = 'suspended';
+  const context: AudioContextLike = {
+    get state() {
+      return state;
+    },
+    currentTime: 0,
+    destination: {},
+    resume: () => new Promise<void>(() => undefined),
+    close: async () => {
+      state = 'closed';
+    },
+    createOscillator: () => ({
+      type: 'sine',
+      frequency: { value: 0 },
+      connect: () => undefined,
+      start: () => undefined,
+      stop: () => undefined,
+    }),
+    createGain: () => ({
+      gain: { value: 0, setValueAtTime: () => undefined },
+      connect: () => undefined,
+    }),
+  };
+  return new SoundEngine({
+    createContext: () => context,
+    setTimeout: (handler, ms) => window.setTimeout(handler, ms),
+    clearTimeout: (handle) => window.clearTimeout(handle),
+  });
+}
+
+function harness(overrides: Partial<NotifyPayload> = {}, soundsOverride?: SoundEngine): Harness {
   void overrides;
   const cues: CueName[] = [];
   const toasts: { message: string; tone: string; sessionId?: string }[] = [];
@@ -106,7 +144,7 @@ function harness(overrides: Partial<NotifyPayload> = {}): Harness {
   };
 
   const deps: NotifierDeps = {
-    sounds,
+    sounds: soundsOverride ?? sounds,
     desktop,
     currentSessionId: () => currentSession,
     isVisible: () => visible,
@@ -239,6 +277,40 @@ describe('the four surfaces', () => {
     expect(outcome.badge).toBe(false);
     expect(unreadSessions(h)).toEqual([]);
     expect(outcome.toast).toBe(true);
+  });
+});
+
+describe('a blocked audio context', () => {
+  it('shows the desktop notification without waiting for the cue', async () => {
+    // Sound and the Notification API are independent; sequencing them was the
+    // bug. Gecko leaves `resume()` pending on a tab nobody has clicked, so the
+    // desktop notification — the surface that exists for that tab — used to wait
+    // for a promise that would only settle after the user found out some other
+    // way.
+    vi.useFakeTimers();
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onRejection);
+    try {
+      const h = harness({}, stuckSoundEngine());
+      h.setVisible(false);
+
+      const pending = h.notifier.handle(basePayload);
+      // Same tick, before the cue has settled.
+      expect(h.desktop.shown).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(RESUME_TIMEOUT_MS + 50);
+      const outcome = await pending;
+      expect(outcome.desktop).toBe('shown');
+      // The silence is still reported, so the "click to enable sounds" hint fires.
+      expect(outcome.sound).toBe('blocked');
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+      vi.useRealTimers();
+    }
   });
 });
 

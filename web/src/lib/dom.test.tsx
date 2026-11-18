@@ -289,6 +289,129 @@ describe('useFocusTrap: Escape belongs to the control before the surface', () =>
   });
 });
 
+describe('useFocusTrap: the page behind a surface does not pan', () => {
+  const originalScrollY = Object.getOwnPropertyDescriptor(window, 'scrollY');
+
+  afterEach(() => {
+    if (originalScrollY) Object.defineProperty(window, 'scrollY', originalScrollY);
+    document.body.style.overflow = '';
+    document.documentElement.style.overflow = '';
+    document.body.style.overscrollBehavior = '';
+    document.documentElement.style.overscrollBehavior = '';
+  });
+
+  it('locks the scroll and puts the document back where the reader left it', async () => {
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+    let scrollY = 640;
+    // jsdom has no layout: `scrollY` is the only part of the lock it can answer.
+    Object.defineProperty(window, 'scrollY', { configurable: true, get: () => scrollY });
+    document.body.style.overflow = 'auto';
+
+    const view = render(
+      <Trap label="sheet">
+        <button>Pin</button>
+      </Trap>,
+    );
+    await waitFor(() =>
+      expect(document.activeElement).toBe(document.querySelector('[aria-label="sheet"] button')),
+    );
+
+    expect(document.body.style.overflow).toBe('hidden');
+    expect(document.documentElement.style.overflow).toBe('hidden');
+    expect(document.body.style.overscrollBehavior).toBe('contain');
+    expect(document.documentElement.style.overscrollBehavior).toBe('contain');
+
+    // Some mobile browsers reset the document position when the lock is released.
+    scrollY = 0;
+    view.unmount();
+
+    expect(document.body.style.overflow).toBe('auto');
+    expect(document.documentElement.style.overflow).toBe('');
+    expect(document.body.style.overscrollBehavior).toBe('');
+    expect(document.documentElement.style.overscrollBehavior).toBe('');
+    expect(scrollTo).toHaveBeenCalledWith(0, 640);
+  });
+
+  it('keeps the lock through a nested surface and releases it once', async () => {
+    let scrollY = 240;
+    Object.defineProperty(window, 'scrollY', { configurable: true, get: () => scrollY });
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+
+    const view = render(
+      <Trap label="outer">
+        <button>Outer</button>
+      </Trap>,
+    );
+    view.rerender(
+      <>
+        <Trap label="outer">
+          <button>Outer</button>
+        </Trap>
+        <Trap label="inner">
+          <button>Inner</button>
+        </Trap>
+      </>,
+    );
+    expect(document.body.style.overflow).toBe('hidden');
+
+    // The inner one closing must not unlock the page under the outer one.
+    view.rerender(
+      <Trap label="outer">
+        <button>Outer</button>
+      </Trap>,
+    );
+    expect(document.body.style.overflow).toBe('hidden');
+
+    // The reader was at 240; whatever the browser parked the page at, it goes back.
+    scrollY = 0;
+    view.unmount();
+    expect(document.body.style.overflow).toBe('');
+    expect(scrollTo).toHaveBeenCalledWith(0, 240);
+  });
+
+  it('does not let the landmark focus undo the restored position', async () => {
+    // `Element.focus()` pans its target into view by default: focusing the
+    // landmark that stands in for a removed opener, right after putting the
+    // document back where the reader had it, moved the page a second time.
+    // jsdom does not scroll, so the argument passed to `focus` is the observable.
+    let scrollY = 800;
+    Object.defineProperty(window, 'scrollY', { configurable: true, get: () => scrollY });
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+
+    const main = document.createElement('main');
+    main.id = 'shell-main';
+    document.body.appendChild(main);
+    hosts.push(main);
+    const landmarkFocus = vi.spyOn(main, 'focus');
+
+    const opener = document.createElement('button');
+    opener.textContent = 'Open';
+    document.body.appendChild(opener);
+    hosts.push(opener);
+    opener.focus();
+
+    const { unmount } = render(
+      <Trap label="sheet">
+        <button id="inside">Inside</button>
+      </Trap>,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(document.getElementById('inside')));
+
+    // The row this surface was opened from is gone by the time it closes.
+    opener.remove();
+    scrollY = 0;
+    unmount();
+
+    expect(scrollTo).toHaveBeenCalledWith(0, 800);
+    expect(landmarkFocus).toHaveBeenCalledTimes(1);
+    expect(landmarkFocus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(scrollTo.mock.invocationCallOrder[0]!).toBeLessThan(
+      landmarkFocus.mock.invocationCallOrder[0]!,
+    );
+    scrollTo.mockRestore();
+  });
+});
+
 describe('useFocusTrap: nesting and focus restoration', () => {
   it('lets only the topmost surface handle Escape', () => {
     const outer = vi.fn();
@@ -324,6 +447,40 @@ describe('useFocusTrap: nesting and focus restoration', () => {
 
     unmount();
     await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  // Reported as: open a dialog from a transcript row, let the run stream and the
+  // window swap that row out, close with Escape — and the next Tab starts at the
+  // project rail, because focus fell to `body` with nowhere to go.
+  it('focuses a landmark when the opener was removed while the surface was open', async () => {
+    const main = document.createElement('main');
+    main.id = 'shell-main';
+    main.innerHTML = '<button id="first">First</button>';
+    document.body.appendChild(main);
+    hosts.push(main);
+
+    const opener = document.createElement('button');
+    opener.textContent = 'Open';
+    document.body.appendChild(opener);
+    hosts.push(opener);
+    opener.focus();
+
+    const { unmount } = render(
+      <Trap label="sheet">
+        <button id="inside">Inside</button>
+      </Trap>,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(document.getElementById('inside')));
+
+    // A rerender replaced the row the surface was opened from.
+    opener.remove();
+
+    unmount();
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(main);
+    // Focusable by programmatic focus only: the next Tab starts at its first
+    // control rather than at the top of the document.
+    expect(main.getAttribute('tabindex')).toBe('-1');
   });
 
   it('returns the stack to the outer surface when the inner one closes', async () => {

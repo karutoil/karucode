@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
-import { Composer, type ComposerProps } from './Composer';
+import { Composer, FORM_SCOPE_LIMIT, trimFormScopes, type ComposerProps } from './Composer';
 import type { Activity } from '../state/selectors';
-import type { WorkspaceTree } from '../api/types';
+import type { SessionSummary, WorkspaceTree } from '../api/types';
 import { configFixture, resetAppState } from '../test/fixtures';
 import { emptyChatState } from '../state/chat';
 import * as actions from '../state/actions';
@@ -551,6 +551,29 @@ describe('Composer', () => {
       expect(hint.querySelector('kbd')).toBeNull();
     });
 
+    it('names the chord the platform actually has', () => {
+      // The chord accepts ⌘ or Ctrl, but the hint read "Ctrl Enter" on a Mac,
+      // where there is no Ctrl key on the keyboard - while every other hint in
+      // the app (the rail, the palette, the header) already read `modKey()`.
+      const original = Object.getOwnPropertyDescriptor(Navigator.prototype, 'platform');
+      Object.defineProperty(Navigator.prototype, 'platform', {
+        configurable: true,
+        get: () => 'MacIntel',
+      });
+      try {
+        const { container } = renderComposer();
+        const hint = container.querySelector('.composer-hint') as HTMLElement;
+        expect(hint.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+          '⌘ Enter to send·@ reference files',
+        );
+        // The accessible name of the button says the same chord, in words: `⌘` is
+        // a private-use glyph several screen readers announce as nothing.
+        expect(screen.getByRole('button', { name: 'Send message (Command + Enter)' })).toBeTruthy();
+      } finally {
+        if (original) Object.defineProperty(Navigator.prototype, 'platform', original);
+      }
+    });
+
     it('takes a draft handed over after mount and focuses the box', () => {
       const { textarea } = renderComposer();
       // The empty state's quick prompts write the signal while the composer is
@@ -580,23 +603,57 @@ describe('Composer', () => {
       expect(props.loadMentionTree).toHaveBeenCalledWith(6);
     });
 
-    it('exposes combobox semantics while the menu is open, then closes them', async () => {
+    it('leaves the Enter that commits a composition to the IME, not the menu', async () => {
+      // The popovers used to read Enter and Tab before the send path's
+      // composition guard, so the key that confirms a Japanese/Chinese word
+      // replaced the half-composed text with a path.
+      const { props, textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'look at @main' } });
+      await screen.findByRole('listbox');
+
+      const composing = createEvent.keyDown(textarea, { key: 'Enter', isComposing: true });
+      fireEvent(textarea, composing);
+      expect(composing.defaultPrevented).toBe(false);
+      expect(textarea.value).toBe('look at @main');
+      expect(screen.getByRole('listbox')).not.toBeNull();
+
+      // Firefox reports the same commit as keyCode 229 with `isComposing` false.
+      fireEvent.keyDown(textarea, { key: 'Enter', keyCode: 229 });
+      expect(textarea.value).toBe('look at @main');
+      // Tab belongs to the candidate list too while it is open.
+      fireEvent.keyDown(textarea, { key: 'Tab', keyCode: 229 });
+      expect(textarea.value).toBe('look at @main');
+
+      // Once the composition is over the menu completes the mention again.
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      await waitFor(() => expect(textarea.value).toBe('look at @src/main.ts '));
+      expect(props.onSend).not.toHaveBeenCalled();
+    });
+
+    it('describes the mention popup on the field without claiming a role it cannot have', async () => {
       const { textarea } = renderComposer();
-      expect(textarea.getAttribute('aria-expanded')).toBe('false');
+      // A textarea's only role is `textbox` (HTML-ARIA, and the JSX types refuse
+      // anything else), so the combobox property a textbox does not support -
+      // `aria-expanded` - is not claimed here: assistive tech drops it and the
+      // tree then describes a control that is not there. What a textbox does
+      // support is enough: a popup, the list it shows, the armed row, and the
+      // list narrowing as the query is typed.
+      expect(textarea.getAttribute('role')).toBeNull();
+      expect(textarea.getAttribute('aria-haspopup')).toBe('listbox');
+      expect(textarea.getAttribute('aria-expanded')).toBeNull();
       expect(textarea.getAttribute('aria-controls')).toBeNull();
 
       fireEvent.input(textarea, { target: { value: '@src' } });
       await screen.findByRole('listbox');
-      // A textarea is a textbox, not a combobox (combobox is a single-line
-      // widget per HTML-ARIA), so the mention popup is described through
-      // aria-autocomplete/aria-expanded/aria-controls on the implicit textbox
-      // role instead of overriding it.
       expect(textarea.getAttribute('aria-autocomplete')).toBe('list');
-      expect(textarea.getAttribute('aria-expanded')).toBe('true');
       const controls = textarea.getAttribute('aria-controls');
       expect(controls).toBe('composer-mention-menu');
       expect(document.getElementById(controls as string)).not.toBeNull();
-      expect(textarea.getAttribute('aria-activedescendant')).toBe('composer-mention-menu-option-0');
+      const active = textarea.getAttribute('aria-activedescendant');
+      expect(active).toBe('composer-mention-menu-option-0');
+      // The id has to name a real option, or the active row is announced as
+      // nothing at all.
+      expect(document.getElementById(active as string)?.getAttribute('role')).toBe('option');
     });
 
     it('moves the highlight with the arrow keys and inserts that option', async () => {
@@ -856,6 +913,44 @@ describe('Composer', () => {
       expect(screen.queryByText('Drop files to attach')).toBeNull();
     });
 
+    it('claims a paste that carries files, so the text form does not also land', async () => {
+      // A file copied from a file manager carries its name as `text/plain` as
+      // well as the file itself. Without claiming the paste both representations
+      // arrived: the chip *and* "shot.png" typed into the draft.
+      const { textarea } = renderComposer({
+        uploadFile: vi.fn(async () => ({ path: '.karucode/attachments/s_1/shot.png' })),
+      });
+      const paste = createEvent.paste(textarea, {
+        clipboardData: {
+          files: [binaryFile('shot.png')],
+          types: ['Files', 'text/plain'],
+          getData: () => 'shot.png',
+        },
+      });
+      fireEvent(textarea, paste);
+
+      // Claimed: the browser would otherwise insert the copied text too.
+      expect(paste.defaultPrevented).toBe(true);
+      expect(await screen.findByText('shot.png')).not.toBeNull();
+      expect(textarea.value).toBe('');
+    });
+
+    it('says why a paste of files was refused instead of dropping it silently', async () => {
+      // A busy composer used to swallow the paste with nothing said, which is
+      // indistinguishable from a broken clipboard.
+      const { container } = renderComposer({ disabledReason: 'No model configured' });
+      fireEvent.paste(screen.getByLabelText('Message karucode'), {
+        clipboardData: { files: [binaryFile('shot.png')], types: ['Files'] },
+      });
+
+      await waitFor(() =>
+        expect(container.querySelector('.sr-only[aria-live="polite"]')?.textContent).toContain(
+          'Files cannot be attached while the composer is unavailable',
+        ),
+      );
+      expect(screen.queryByText('shot.png')).toBeNull();
+    });
+
     it('rejects a file past the upload ceiling without calling the server', async () => {
       const uploadFile = vi.fn(async () => ({ path: 'unused' }));
       const { fileInput } = renderComposer({ uploadFile });
@@ -1018,6 +1113,131 @@ describe('Composer', () => {
         store.currentSessionId.value = 's_cd34';
       });
       expect(textarea.value).toBe('draft B');
+    });
+  });
+
+  describe('parked form records', () => {
+    /* One record per (project, session, draft) is what lets a half-written
+     * message and its chips survive a project switch. The record also holds the
+     * attachments' inlined file bodies, so the map is bounded and pruned: a
+     * reader who browses 30 sessions must not keep 30 drafts and 30 copies of
+     * whatever they attached. */
+
+    function row(id: string): SessionSummary {
+      return {
+        id,
+        title: id,
+        workspace: '/home/me/project',
+        project_id: null,
+        created_at: 1,
+        updated_at: 2,
+        message_count: 0,
+        last_run_status: null,
+        running: false,
+      };
+    }
+
+    beforeEach(() => {
+      store.currentProjectId.value = null;
+      store.currentSessionId.value = null;
+      store.draftSession.value = null;
+      store.sessions.value = [];
+      store.sessionsLoading.value = true;
+    });
+
+    afterEach(() => {
+      store.currentProjectId.value = null;
+      store.currentSessionId.value = null;
+      store.draftSession.value = null;
+      store.sessions.value = [];
+      store.sessionsLoading.value = true;
+    });
+
+    it('bounds the map at the cap, shedding the coldest scope first', () => {
+      const map = new Map<string, { draft: string }>();
+      for (let index = 0; index < 200; index += 1) {
+        const key = `${index}`;
+        // The composer re-inserts the scope it draws, which is the LRU touch.
+        map.delete(key);
+        map.set(key, { draft: '' });
+        trimFormScopes(map, FORM_SCOPE_LIMIT, key);
+      }
+
+      expect(map.size).toBe(FORM_SCOPE_LIMIT);
+      expect(map.has('199')).toBe(true);
+      expect(map.has('0')).toBe(false);
+    });
+
+    it('never sheds the scope on screen, even when it is the coldest', () => {
+      const map = new Map<string, { draft: string }>();
+      for (let index = 0; index <= FORM_SCOPE_LIMIT; index += 1) map.set(`k${index}`, { draft: '' });
+
+      // The visible scope is the last entry the composer draws; the eviction
+      // loop must not be able to reach it even if its key sorts first.
+      trimFormScopes(map, FORM_SCOPE_LIMIT, 'k0');
+
+      expect(map.has('k0')).toBe(true);
+      expect(map.size).toBe(FORM_SCOPE_LIMIT);
+    });
+
+    it('does not grow a record for every session ever opened', async () => {
+      store.currentSessionId.value = 's_live';
+      const { textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'typed in the oldest one' } });
+
+      for (let index = 0; index < 200; index += 1) {
+        await act(async () => {
+          store.currentSessionId.value = `s_${index}`;
+        });
+      }
+
+      // The scope opened before those 200 is gone with everything in it...
+      await act(async () => {
+        store.currentSessionId.value = 's_live';
+      });
+      expect(textarea.value).toBe('');
+
+      // ...while a session inside the window still has its own draft.
+      await act(async () => {
+        store.currentSessionId.value = 's_197';
+      });
+      fireEvent.input(textarea, { target: { value: 'recent' } });
+      await act(async () => {
+        store.currentSessionId.value = 's_198';
+      });
+      await act(async () => {
+        store.currentSessionId.value = 's_197';
+      });
+      expect(textarea.value).toBe('recent');
+    });
+
+    it('releases the record of a session that no longer exists', async () => {
+      store.sessions.value = [row('s_a'), row('s_b')];
+      store.sessionsLoading.value = false;
+      store.currentSessionId.value = 's_a';
+      const { textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'for A' } });
+
+      await act(async () => {
+        store.currentSessionId.value = 's_b';
+      });
+      fireEvent.input(textarea, { target: { value: 'for B' } });
+
+      // Deleted here or in another tab: nothing can open that session again, so
+      // its draft (and any inlined file body behind a chip) is released.
+      await act(async () => {
+        store.sessions.value = [row('s_b')];
+      });
+      await act(async () => {
+        store.currentSessionId.value = 's_a';
+      });
+      expect(textarea.value).toBe('');
+
+      // The session that still exists kept its own box.
+      await act(async () => {
+        store.currentSessionId.value = 's_b';
+      });
+      expect(textarea.value).toBe('for B');
     });
   });
 

@@ -293,6 +293,42 @@ export function elementAtBottom(element: HTMLElement): boolean {
   return isPinnedToBottom(readMetrics(element));
 }
 
+/**
+ * The keys that scroll a container by themselves. Nothing else is a scroll
+ * decision, whatever else bubbles out of the transcript.
+ */
+const SCROLL_INTENT_KEYS = new Set([
+  'ArrowUp',
+  'ArrowDown',
+  'PageUp',
+  'PageDown',
+  'Home',
+  'End',
+  ' ',
+  'Spacebar',
+]);
+
+/**
+ * A control inside the transcript owns its keys: Space is "activate", Enter is
+ * "open", arrows move a caret. Those arrive at the scroller as a `keydown` too,
+ * so the scroll-intent listener has to tell a reader scrolling from a reader
+ * operating the thing that happens to live in the transcript.
+ */
+const TRANSCRIPT_CONTROL_SELECTOR = [
+  'button',
+  'a[href]',
+  'input',
+  'select',
+  'textarea',
+  'summary',
+  '[contenteditable="true"]',
+  '[role="button"]',
+  '[role="menuitem"]',
+  '[role="tab"]',
+  '[role="checkbox"]',
+  '[role="switch"]',
+].join(',');
+
 export interface StickyBottomOptions {
   /** Conversation identity. A change jumps to the newest content without animation. */
   sessionKey: string | null;
@@ -586,9 +622,27 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
       // already scrolled away from is history, and it may not re-pin them.
       clearOwnScroll(element);
     };
+
+    /**
+     * The keyboard half of that gesture, narrowed twice.
+     *
+     * Only the keys that move a scroller by themselves count — a keystroke is not
+     * a scroll decision. And a focused control inside the transcript owns its own
+     * keys: Space activates an approval button, Enter opens a card, Tab moves to
+     * the next card. Following the run used to end on any of those, silently, just
+     * because the key bubbled out of the scroller.
+     */
+    const onKeyScrollIntent = (event: KeyboardEvent): void => {
+      if (!SCROLL_INTENT_KEYS.has(event.key)) return;
+      if (event.target instanceof Element && event.target.closest(TRANSCRIPT_CONTROL_SELECTOR)) {
+        return;
+      }
+      onUserScrollIntent();
+    };
+
     element.addEventListener('wheel', onUserScrollIntent, { passive: true });
     element.addEventListener('touchstart', onUserScrollIntent, { passive: true });
-    element.addEventListener('keydown', onUserScrollIntent);
+    element.addEventListener('keydown', onKeyScrollIntent);
     // A drag of the scrollbar is a reader decision too, and it produces no wheel
     // event to say so.
     element.addEventListener('pointerdown', onUserScrollIntent, { passive: true });
@@ -610,7 +664,7 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
       element.removeEventListener('scroll', onScroll);
       element.removeEventListener('wheel', onUserScrollIntent);
       element.removeEventListener('touchstart', onUserScrollIntent);
-      element.removeEventListener('keydown', onUserScrollIntent);
+      element.removeEventListener('keydown', onKeyScrollIntent);
       element.removeEventListener('pointerdown', onUserScrollIntent);
       resizeObserver?.disconnect();
       mutationObserver?.disconnect();

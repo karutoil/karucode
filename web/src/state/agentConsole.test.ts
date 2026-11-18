@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentSummary, KarucodeEvent, SessionSummary, StoredMessage } from '../api/types';
 import {
+  AGENT_ACTIVITY_AGENTS,
+  AGENT_ACTIVITY_LIMIT,
   activityFromMessages,
   agentEventId,
   applyAgentEvent,
@@ -8,6 +10,8 @@ import {
   emptyActivity,
   mergeActivities,
   mergeAgentList,
+  recordAgentActivity,
+  type AgentActivity,
 } from './agentConsole';
 
 const NOW = 1_700_000_000_000;
@@ -502,5 +506,83 @@ describe('stored agent transcripts', () => {
     expect(merged.items).toHaveLength(2);
     const tool = merged.items.find((item) => item.kind === 'tool');
     expect(tool?.kind === 'tool' ? tool.output : '').toBe('live');
+  });
+
+  it('bounds how many subagent feeds the page keeps, and keeps a live one on one line', () => {
+    // The bug: nothing ever dropped an agent's feed. A tab that ran subagent after
+    // subagent for a day held 400 items of up to 60 000 characters for every one of
+    // them, and the Agents tab spread that growing map on every frame.
+    const at = (agentId: string, ts: number, type: KarucodeEvent['type'], fields = {}): KarucodeEvent =>
+      ({ seq: ts, ts_ms: ts, session_id: 's_ab12', run_id: 'r_x', agent_id: agentId, type, ...fields }) as KarucodeEvent;
+
+    // One settled agent first: it must be dropped outright, not placeholdered.
+    let map: Record<string, AgentActivity> = {};
+    let done = applyAgentEvent(emptyActivity(), at('a_done', NOW - 100, 'text_delta', { delta: 'finished work' }));
+    done = applyAgentEvent(done, at('a_done', NOW - 99, 'agent_finished', { status: 'completed', summary: 'ok' }));
+    map = recordAgentActivity(map, 'a_done', done);
+
+    for (let index = 0; index < 50; index += 1) {
+      const agentId = `a_${index}`;
+      const ts = NOW + index * 10;
+      // Two items, so an evicted feed visibly collapses to one line.
+      let activity = applyAgentEvent(emptyActivity(), at(agentId, ts, 'text_delta', { delta: 'x'.repeat(2000) }));
+      activity = applyAgentEvent(
+        activity,
+        at(agentId, ts + 1, 'tool_call_started', { call_id: `call_${agentId}`, name: 'read_file', arguments: '{}' }),
+      );
+      map = recordAgentActivity(map, agentId, activity);
+    }
+
+    expect(Object.keys(map).length).toBeLessThanOrEqual(AGENT_ACTIVITY_AGENTS * 2);
+    // The agent that streamed last keeps its whole feed ...
+    expect(map.a_49?.items).toHaveLength(2);
+    // ... the oldest are gone ...
+    expect(map.a_0).toBeUndefined();
+    // ... a finished agent's tail is not kept at all ...
+    expect(map.a_done).toBeUndefined();
+    // ... and an agent that is still running keeps one line saying where the rest
+    // went, instead of losing its row from the Agents tab.
+    const evicted = map.a_37;
+    expect(evicted?.live).toBe(true);
+    expect(evicted?.items).toHaveLength(1);
+    expect(evicted?.items[0]?.kind === 'message' ? evicted.items[0].content : '').toContain('released');
+    for (const activity of Object.values(map)) {
+      expect(activity.items.length).toBeLessThanOrEqual(AGENT_ACTIVITY_LIMIT);
+    }
+  });
+
+  it('keeps a seeded running subagent’s row when twelve others stream past it', () => {
+    // The bug: a feed rebuilt from the snapshot carried no `live` and no
+    // `lastActivityAt`, so `boundAgentActivities` ranked it at 0, evicted it
+    // first, and then deleted it outright - a subagent that was still running
+    // vanished from the Agents tab until its next frame. The snapshot knows both
+    // facts (`status`, `updated_at`), so seeding must pass them on.
+    const messages: StoredMessage[] = [
+      message({ id: 1, role: 'user', agent_id: 'a_running', content: 'long running task' }),
+      message({ id: 2, role: 'assistant', agent_id: 'a_running', content: 'still working' }),
+    ];
+    const seeded: AgentActivity = activityFromMessages(messages, 'a_running', false, {
+      updatedAt: NOW - 60_000,
+      live: true,
+    });
+    expect(seeded.live).toBe(true);
+    expect(seeded.lastActivityAt).toBe(NOW - 60_000);
+
+    let map: Record<string, AgentActivity> = { a_running: seeded };
+    for (let index = 0; index < AGENT_ACTIVITY_AGENTS; index += 1) {
+      const agentId = `a_${index}`;
+      const ts = NOW + index * 10;
+      let activity = applyAgentEvent(emptyActivity(), agentEvent(index + 1, 'text_delta', agentId, { delta: 'live now' }));
+      activity = { ...activity, lastActivityAt: ts };
+      map = recordAgentActivity(map, agentId, activity);
+    }
+
+    // Twelve others have streamed, so the seeded feed is out of the full set ...
+    const kept = map.a_running;
+    expect(kept).toBeDefined();
+    // ... and it is still there as the one-line placeholder, not deleted.
+    expect(kept?.items).toHaveLength(1);
+    expect(kept?.items[0]?.kind === 'message' ? kept.items[0].content : '').toContain('still running');
+    expect(kept?.live).toBe(true);
   });
 });

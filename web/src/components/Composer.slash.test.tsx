@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { createEvent, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { Composer, type ComposerProps } from './Composer';
 import type { Activity } from '../state/selectors';
 import type { CommandSpec } from '../api/types';
@@ -102,6 +102,33 @@ describe('the composer slash menu', () => {
     expect(props.onSend).not.toHaveBeenCalled();
     expect(props.onCommand).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
+  });
+
+  it('leaves the Enter that commits a composition to the IME, not the menu', async () => {
+    // The popover read Enter and Tab before the send path's composition guard,
+    // so the key that confirms a Japanese/Chinese word replaced the half-typed
+    // command with a whole one.
+    const { props, textarea } = renderComposer();
+    fireEvent.input(textarea, { target: { value: '/mo' } });
+    await screen.findByRole('listbox');
+
+    const composing = createEvent.keyDown(textarea, { key: 'Enter', isComposing: true });
+    fireEvent(textarea, composing);
+    expect(composing.defaultPrevented).toBe(false);
+    expect(textarea.value).toBe('/mo');
+
+    // Firefox reports the same commit as keyCode 229 with `isComposing` false,
+    // and Tab is a completion key of the popover too.
+    fireEvent.keyDown(textarea, { key: 'Enter', keyCode: 229 });
+    fireEvent.keyDown(textarea, { key: 'Tab', keyCode: 229 });
+    expect(textarea.value).toBe('/mo');
+    expect(props.onSend).not.toHaveBeenCalled();
+    expect(props.onCommand).not.toHaveBeenCalled();
+    expect(screen.getByRole('listbox')).not.toBeNull();
+
+    // A finished composition completes the command again.
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    await waitFor(() => expect(textarea.value).toBe('/model '));
   });
 
   it('walks the list with the arrow keys', async () => {

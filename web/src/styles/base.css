@@ -56,7 +56,11 @@ body,
 
 html {
   background: var(--bg);
-  scrollbar-color: var(--line-strong) transparent;
+  /* The same token the `::-webkit-scrollbar-thumb` below paints, so the two
+   * engines show one colour: `--faint` is an object colour that clears the
+   * decorative floor in both modes (4.47:1 Ember / 3.97:1 Daybreak), while
+   * `--line-strong` is a *line* tone and read as a scratch on the edge. */
+  scrollbar-color: var(--faint) transparent;
   scrollbar-width: thin;
 }
 
@@ -165,6 +169,29 @@ kbd,
   color: var(--text);
 }
 
+/* Firefox's own placeholders.
+ *
+ * `::placeholder` is UA-styled text, not author text, and the UA styles it
+ * quieter than the field's ink. The documented shape of that (MDN, and every
+ * Gecko before ~2024) is the element's colour at 54% *opacity*, which is why a
+ * rule that sets only a quiet `color` — `.palette-input::placeholder{color:
+ * var(--text-subtle)}` — used to land around 1.5–2.5:1 in Firefox while
+ * Chromium painted the same colour at full strength. Current Gecko bakes the
+ * dimming into the *colour* instead (`color(srgb … / 0.54)`), so an author
+ * `color` already replaces it; `opacity: 1` is kept as the pin, because it is
+ * the one declaration that makes both mechanisms agree and it costs nothing on
+ * a property the UA never sets to anything else. Measured in Firefox 160 with
+ * scripts/verify_ff_css.py: an unstyled input's placeholder is
+ * `color(srgb 0.949 0.941 0.933 / 0.54)` at opacity 1, and `.palette-input`'s
+ * is `var(--text-subtle)` at opacity 1.
+ *
+ * Per-component rules keep their own `color` (that is the theming); the one
+ * local `opacity` that survives on purpose is `.theme-studio ::placeholder`,
+ * which dims further to 0.85 for its own reason. */
+::placeholder {
+  opacity: 1;
+}
+
 :focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
@@ -196,6 +223,39 @@ kbd,
    * `--line-hair` first, which in light mode made hover *lighter* than rest. */
   background: color-mix(in srgb, var(--faint) 60%, var(--muted));
   background-clip: padding-box;
+}
+
+/* The same scrollbar for Gecko.
+ *
+ * `::-webkit-scrollbar` above is Chromium syntax: Firefox ignores it entirely,
+ * and its own `scrollbar-width` is **not inherited** — the UA applies the root's
+ * value to the viewport and to nothing inside it — so with `thin` declared on
+ * `html` alone every inner scroller in the app (the rail's session list, the
+ * transcript, every `pre`, the palette, the settings panes, the theme drawer)
+ * fell back to the platform width: 12px on this host against Chromium's 8px.
+ * That is a layout fact, not a cosmetic one: the panes that reserve their gutter
+ * (`scrollbar-gutter: stable`) hand 4px more of the content column to the bar, a
+ * `nowrap`+ellipsis label loses a character, and a horizontal `pre` grows a
+ * 12px-tall bar.
+ *
+ * `*` is the cheap way to reach every scroller there is and every one added
+ * later: specificity 0, so a component that wants no bar (`.workspace-tabs`,
+ * `.rail`'s strips) or its own (`terminal.css`'s `thin`) still wins.
+ *
+ * The `@supports` gate is not decoration: Blink *ignores* `::-webkit-scrollbar`
+ * on any element whose computed `scrollbar-width` is not `auto`, so an
+ * unconditional `thin` here would buy Firefox its 12px→thin bar by taking
+ * Chromium's rounded 8px padding-box thumb away. `-moz-appearance` is unknown to
+ * Blink and WebKit, so this block is dead in both and Chromium keeps the pseudo
+ * -element styling above. `scrollbar-color` *does* inherit and is not gated, but
+ * it is restated here with the thumb's own `--faint` so no descendant can be
+ * left on the root's line tone. Measured in Firefox 160: 12px → thin (see
+ * scripts/verify_ff_css.py). */
+@supports (-moz-appearance: none) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--faint) transparent;
+  }
 }
 
 .sr-only {

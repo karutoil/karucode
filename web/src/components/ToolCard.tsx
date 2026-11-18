@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useEffect, useId, useRef, useState } from 'preact/hooks';
+import { useEffect, useId, useMemo, useRef, useState } from 'preact/hooks';
 import type { ImageAttachment } from '../api/types';
 import { formatDuration, jsonSummary } from '../lib/format';
 import { imageDataUrl, imageLabel } from '../lib/images';
@@ -39,6 +39,41 @@ export interface ToolCardProps {
 /** Above this the numbered preview stops rendering lines; the tool was truncated anyway. */
 const MAX_RENDERED_LINES = 2000;
 
+/**
+ * How much of one argument value is kept for the tooltip and the summary.
+ *
+ * `write_file` and `edit_file` carry the whole document body in their arguments,
+ * and this card re-renders on every streamed delta — 30–60 a second — so a 512 KB
+ * body cost ~1 MB of `JSON.stringify` plus a 512 KB `\s+` pass in `jsonSummary`
+ * per delta. The tooltip stops at 500 characters and the summary at 110: nothing
+ * past the first few kilobytes could ever be read.
+ */
+const ARGS_HEAD_CHARS = 4096;
+
+/**
+ * The argument values with every long string cut down to its head.
+ *
+ * The head is kept rather than replaced by a byte count, because the first
+ * characters of a `write_file` body are exactly what the row shows; a value
+ * shorter than [`ARGS_HEAD_CHARS`] is returned untouched, so a small call's
+ * tooltip and summary are byte-for-byte what they always were.
+ */
+function boundedArgs(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return value.length > ARGS_HEAD_CHARS ? `${value.slice(0, ARGS_HEAD_CHARS)}…` : value;
+  }
+  if (Array.isArray(value)) return value.map(boundedArgs);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+        key,
+        boundedArgs(entry),
+      ]),
+    );
+  }
+  return value;
+}
+
 /** Picks a symbol for the tool by name, so a glance tells you what ran. */
 function ToolSymbol({ name }: { name: string }): JSX.Element {
   const normalised = name.toLowerCase();
@@ -73,6 +108,35 @@ function outputLines(output: string): string[] {
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   return lines;
 }
+
+/**
+ * `outputLines` for a render, remembering the last string it split.
+ *
+ * A running call's output grows by a delta at a time and the card is the one
+ * live-preview surface, so this runs on every streamed token and again in the
+ * header for `hasOutput`. Splitting a 400 KB body twice per delta is a
+ * megabyte of string work per frame for an answer that has not changed: the
+ * transcript hands the same string back until a delta actually lands.
+ */
+let lastSplit: { output: string; lines: string[] } | null = null;
+
+function cachedOutputLines(output: string): string[] {
+  if (lastSplit !== null && lastSplit.output === output) return lastSplit.lines;
+  const lines = outputLines(output);
+  lastSplit = { output, lines };
+  return lines;
+}
+
+/**
+ * How many output lines a card paints.
+ *
+ * Settled calls may paint 2000: the reader opened the body to read it. A
+ * *running* call paints 300, because that body is re-rendered on every streamed
+ * delta and 2000 line nodes per delta is the difference between a live preview
+ * and a frozen tab - Firefox especially. The rest arrives the moment the call
+ * settles, and the hidden count is spelled out either way.
+ */
+const MAX_RUNNING_LINES = 300;
 
 /**
  * The images a tool attached for the model.
@@ -142,8 +206,9 @@ function ToolOutput({
   open: boolean;
   bodyId: string;
 }): JSX.Element {
-  const lines = outputLines(item.output);
-  const rendered = lines.slice(0, MAX_RENDERED_LINES);
+  const lines = cachedOutputLines(item.output);
+  const limit = item.status === 'running' ? MAX_RUNNING_LINES : MAX_RENDERED_LINES;
+  const rendered = lines.slice(0, limit);
   const hiddenLines = lines.length - rendered.length;
   const waiting = item.status === 'running' && lines.length === 0;
   const width = String(Math.max(rendered.length, 10)).length;
@@ -210,10 +275,25 @@ export function ToolCard({
     if (item.status === 'error' && previous !== 'error') setOpen(true);
   }, [item.status]);
 
-  const detail = typeof item.args === 'string' ? item.args : JSON.stringify(item.args);
-  const summary = jsonSummary(item.args, variant === 'row' ? 90 : 110);
+  /**
+   * The tooltip text and the summary, derived once per argument value rather than
+   * once per render: both are operations over the whole argument object, and a
+   * running card renders per streamed delta.
+   */
+  const args = useMemo(() => {
+    const bounded = boundedArgs(item.args);
+    return {
+      detail: typeof item.args === 'string' ? (bounded as string) : JSON.stringify(bounded),
+      value: bounded,
+    };
+  }, [item.args]);
+  const detail = args.detail;
+  const summary = useMemo(
+    () => jsonSummary(args.value, variant === 'row' ? 90 : 110),
+    [args, variant],
+  );
   const duration = formatDuration(item.durationMs);
-  const lines = outputLines(item.output);
+  const lines = cachedOutputLines(item.output);
   const hasOutput = lines.length > 0;
 
   if (variant === 'row') {

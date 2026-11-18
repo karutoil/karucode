@@ -554,6 +554,37 @@ describe('FileViewer', () => {
     await waitFor(() => expect(screen.getByRole('tab', { name: /preview/i })).toBeTruthy());
   });
 
+  it('splits a large document into lines once, not once per keystroke', async () => {
+    const content = Array.from({ length: 4_000 }, (_, index) => `line ${index} of it`).join('\n');
+    installFetch({ content, size: content.length, language: 'text', path: 'logs/big.log' });
+    store.fileViewerPath.value = 'logs/big.log';
+
+    // The memo is a one-entry cache keyed by value, so two equal strings are the
+    // same key: only counting the splits of *this* document can tell a cached
+    // render from a re-split one.
+    const split = vi.spyOn(String.prototype, 'split');
+    const splits = (): number =>
+      split.mock.calls.filter((_, index) => split.mock.contexts[index] === content).length;
+
+    render(<FileViewer />);
+    await waitFor(() => expect(document.querySelector('.file-code')).not.toBeNull());
+    const afterLoad = splits();
+    expect(afterLoad).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }));
+    const editor = await waitFor(() => {
+      const found = document.querySelector<HTMLTextAreaElement>('.file-editor');
+      if (!found) throw new Error('no editor yet');
+      return found;
+    });
+    // Every keystroke re-renders the viewer, gutter and status bar included.
+    fireEvent.input(editor, { target: { value: `${content}!` } });
+    fireEvent.input(editor, { target: { value: `${content}!!` } });
+
+    expect(splits()).toBe(afterLoad);
+    expect(document.querySelector('.file-statusbar')?.textContent).toContain('4000 lines');
+  });
+
   it('makes the file-view tabs keyboard-operable, with one tab-in-tablist', async () => {
     // The strip used to be two plain buttons with `role="tab"`: no `tabIndex={-1}`
     // on the inactive one, no arrow-key model, no ids for `aria-controls`. `Tabs`

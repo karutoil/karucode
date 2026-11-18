@@ -288,9 +288,25 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
   // deliberately survives reconnects of this handle but is never shared globally.
   let eventEpoch: string | null = null;
 
+  /** Run a caller-supplied handler without letting it kill the stream. */
+  const safely = (handler: () => void): void => {
+    try {
+      handler();
+    } catch (error) {
+      // A reducer bug must not take the reconnect loop down with it.
+      console.error('karucode: event handler threw', error);
+    }
+  };
+
   const setState = (next: ConnectionState, detail?: EventStreamStatusDetail): void => {
     state = next;
-    options.onStatus?.(next, detail);
+    // Guarded like every other consumer callback. This used to be called bare and
+    // the first call of each loop iteration sits outside the `try` below, so a
+    // status handler that threw (a failed signal write, a plugin patch, a future
+    // refactor in `actions.ts`'s onStatus) rejected `run()`, which `void run()`
+    // swallowed: the stream was then neither reconnecting nor stopped, the badge
+    // kept saying "Live", and no event ever arrived again.
+    safely(() => options.onStatus?.(next, detail));
   };
 
   const backoffDelay = (attempt: number): number => {
@@ -333,16 +349,6 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
     } finally {
       clearTimeout(timer);
       controller.signal.removeEventListener('abort', relay);
-    }
-  };
-
-  /** Run a caller-supplied handler without letting it kill the stream. */
-  const safely = (handler: () => void): void => {
-    try {
-      handler();
-    } catch (error) {
-      // A reducer bug must not take the reconnect loop down with it.
-      console.error('karucode: event handler threw', error);
     }
   };
 
@@ -509,7 +515,23 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
     }
   };
 
-  void run();
+  void run().catch((error: unknown) => {
+    // A rejection here means the loop itself broke, which used to be swallowed by
+    // `void run()`: `stopped` stayed false and the controller was never aborted,
+    // so the stream was neither reconnecting nor stopped - `getState()` froze at
+    // the last state, the badge kept saying "Live", and no reconnect ever came.
+    // Report it on the existing channel and say we are not connected.
+    //
+    // Unless the app closed the handle first: `stop()` already said `idle`, and
+    // re-labelling a deliberately closed stream "reconnecting" is a lie the badge
+    // would show forever.
+    if (stopped) return;
+    console.error('karucode: the event stream loop stopped', error);
+    setState('reconnecting', {
+      attempt: 0,
+      error: `the event stream stopped: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  });
 
   return {
     stop(): void {

@@ -4,6 +4,29 @@ import type { RefObject } from 'preact';
 const activeTraps: symbol[] = [];
 let scrollLocks = 0;
 let baseBodyOverflow = '';
+let baseRootOverflow = '';
+let baseBodyOverscroll = '';
+let baseRootOverscroll = '';
+/** Where the document stood when the first lock was taken. */
+let lockedScrollY = 0;
+
+/**
+ * Where focus goes when the element that opened a surface no longer exists.
+ *
+ * A transcript row the window swapped out, a menu item a rerun removed — the
+ * closer has nothing to hand focus back to, and `document.body` means the next
+ * Tab restarts at the very top of the app. The shell's landmarks are the
+ * structural answer. `tabindex="-1"` keeps a landmark out of the Tab order while
+ * still letting it take focus, so the next Tab lands on its first control.
+ */
+const FOCUS_LANDMARK_SELECTOR = 'main, .workbench';
+
+function lastResortFocusTarget(): HTMLElement | null {
+  const landmark = document.querySelector<HTMLElement>(FOCUS_LANDMARK_SELECTOR);
+  if (!landmark) return null;
+  if (!landmark.hasAttribute('tabindex')) landmark.tabIndex = -1;
+  return landmark;
+}
 
 const FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -155,9 +178,27 @@ export function useFocusTrap(
     if (!container) return;
     const trapId = Symbol('focus-trap');
     activeTraps.push(trapId);
-    if (scrollLocks === 0) baseBodyOverflow = document.body.style.overflow;
+    if (scrollLocks === 0) {
+      const body = document.body;
+      const root = document.documentElement;
+      baseBodyOverflow = body.style.overflow;
+      baseRootOverflow = root.style.overflow;
+      baseBodyOverscroll = body.style.overscrollBehavior;
+      baseRootOverscroll = root.style.overscrollBehavior;
+      // `overflow: hidden` on `body` is not a lock on iOS: Safari pans the visual
+      // viewport anyway, and some mobile browsers keep the document parked and
+      // reset the position on release. The scroll position is remembered so it can
+      // be put back, and `overscroll-behavior: contain` stops a scroller *inside*
+      // the dialog from handing its momentum to the page behind. `touch-action` is
+      // deliberately left alone — it applies to the dialog's own scrollers too and
+      // would stop them panning.
+      lockedScrollY = typeof window.scrollY === 'number' ? window.scrollY : 0;
+      body.style.overflow = 'hidden';
+      root.style.overflow = 'hidden';
+      body.style.overscrollBehavior = 'contain';
+      root.style.overscrollBehavior = 'contain';
+    }
     scrollLocks += 1;
-    document.body.style.overflow = 'hidden';
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
     const focusFirst = window.setTimeout(() => {
@@ -223,8 +264,39 @@ export function useFocusTrap(
       const index = activeTraps.lastIndexOf(trapId);
       if (index !== -1) activeTraps.splice(index, 1);
       scrollLocks = Math.max(0, scrollLocks - 1);
-      if (scrollLocks === 0) document.body.style.overflow = baseBodyOverflow;
+      if (scrollLocks === 0) {
+        const body = document.body;
+        const root = document.documentElement;
+        body.style.overflow = baseBodyOverflow;
+        root.style.overflow = baseRootOverflow;
+        body.style.overscrollBehavior = baseBodyOverscroll;
+        root.style.overscrollBehavior = baseRootOverscroll;
+        // Some mobile browsers reset the document's position when the lock that
+        // stopped it panning is released; the reader was reading here, not at the
+        // top.
+        const y = typeof window.scrollY === 'number' ? window.scrollY : 0;
+        if (y !== lockedScrollY && typeof window.scrollTo === 'function') {
+          window.scrollTo(0, lockedScrollY);
+        }
+      }
       if (previous && previous.isConnected) previous.focus();
+      else {
+        // The opener is gone: a transcript row the window swapped out, a menu
+        // item a rerun removed. Nothing focused means the next Tab restarts at
+        // the top of the document, so focus a landmark instead. Anything already
+        // focused *outside* this surface is a deliberate choice — the focus
+        // still inside it is this surface's own default and dies with it.
+        const active = document.activeElement;
+        const keepsFocus =
+          active instanceof HTMLElement &&
+          active !== document.body &&
+          active.isConnected &&
+          !container.contains(active);
+        // The restore above is only worth anything if focus does not scroll the
+        // landmark it lands on into view: `focus()` pans by default, so the
+        // position just put back would move again.
+        if (!keepsFocus) lastResortFocusTarget()?.focus({ preventScroll: true });
+      }
     };
   }, [active, ref]);
 }

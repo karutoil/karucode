@@ -205,9 +205,29 @@
   overflow: auto;
 }
 
+/* Cell content is whatever the artifact renderer emitted — links, mostly — and
+ * the table is flush with this scrollport on all four sides, so the global
+ * `:focus-visible` ring (2px outline 2px outside the box) is clipped the moment
+ * a keyboard user reaches the first or last row. Inset it here rather than on a
+ * row class the table does not have: one selector covers every focusable the
+ * cells can hold. Same answer as `.workspace-tab`, `.session-open` and
+ * `.palette-item`. */
+.artifact-table-wrap :focus-visible {
+  outline-offset: calc(-1 * var(--focus-ring-offset));
+}
+
 .artifact-table {
   width: 100%;
-  border-collapse: collapse;
+  /* Not `collapse`. With collapsed borders the border box does not belong to the
+   * cell — the borders are resolved on the table grid — so when the header row
+   * sticks, Gecko keeps painting its bottom hairline where the grid put it and
+   * the line visibly detaches from the row as the table scrolls under it (Blink
+   * has a different, equally imperfect answer). `separate` + zero spacing puts
+   * every border back on its own cell, so the sticky `th` carries its hairline
+   * with it in both engines. Nothing doubles up: the cells only paint
+   * `border-bottom`, and `border-spacing: 0` means the row pitch is unchanged. */
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: var(--fs-label);
 }
 

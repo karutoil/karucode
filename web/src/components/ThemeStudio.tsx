@@ -2,7 +2,7 @@
  *
  * Mounted once by `app.tsx`; visibility is driven by `store.themeStudioOpen`,
  * opened via `actions.openThemeStudio()` from the shell header/rail and the
- * `Ctrl/Cmd+Shift+T` shortcut (owned by `app.tsx`, next to the other global
+ * `Ctrl/Cmd+Shift+L` shortcut (owned by `app.tsx`, next to the other global
  * shortcuts, so the drawer does not race a second listener).
  *
  * Design reference: `karucode-v3-themes.html`. Unlike the mock, nothing here
@@ -16,6 +16,7 @@ import { createPortal } from 'preact/compat';
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import type { TargetedEvent } from 'preact';
 import { useFocusTrap } from '../lib/dom';
+import { copyText } from '../lib/clipboard';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import {
@@ -396,12 +397,14 @@ export function ThemeStudio(): JSX.Element | null {
       .map((property) => `  ${property}: ${tokens[property]} !important;`)
       .join('\n');
     const code = `/* !important lets Custom CSS replace the engine's inline token values. */\n/* ${theme.name} — ${theme.mode} */\n:root {\n${variables}\n}\n${theme.customCSS}`;
-    try {
-      await navigator.clipboard.writeText(code);
-      store.pushToast('Theme variables copied.', 'success');
-    } catch {
-      store.pushToast('Clipboard is unavailable in this browser.', 'error');
-    }
+    // Through the shared helper, which has the legacy `execCommand` fallback:
+    // this is the only path on a plain-HTTP LAN origin, where the Clipboard API
+    // does not exist at all.
+    const copied = await copyText(code);
+    store.pushToast(
+      copied ? 'Theme variables copied.' : 'Clipboard is unavailable in this browser.',
+      copied ? 'success' : 'error',
+    );
   };
 
   const onHexInput = (key: ThemeColorKey, raw: string): void => {

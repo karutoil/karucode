@@ -35,3 +35,65 @@ export function hasSvgElement(sanitized: string): boolean {
   probe.innerHTML = sanitized;
   return probe.querySelector('svg') !== null;
 }
+
+/** What a card needs to draw one SVG document, computed together. */
+export interface PreparedSvg {
+  /** The sanitised document, ready for `innerHTML`. */
+  html: string;
+  /** Whether anything drawable survived the sanitiser. */
+  ok: boolean;
+}
+
+/**
+ * How many prepared documents stay cached.
+ *
+ * One mount costs three parses of the document (the sanitise, the
+ * `hasSvgElement` probe's own `innerHTML`, and the shadow root's), and the
+ * transcript unmounts rows that leave its window - so scrolling a diagram out and
+ * back used to re-do all three for an 800 KB drawing. Four is enough for the
+ * diagrams one screen of transcript holds; each entry keeps the source and the
+ * sanitised copy, so the cache stays small.
+ */
+const MAX_CACHED = 4;
+
+/** Past this the cache holds the newest document only: a huge mock is not worth four. */
+const MAX_CACHED_CHARS = 4 * 1024 * 1024;
+
+const cache = new Map<string, PreparedSvg>();
+let cachedChars = 0;
+
+/**
+ * Sanitise one SVG document and report whether it still draws, once per source.
+ *
+ * Keyed by the source itself (a string compare, and Preact hands back the same
+ * instance across re-renders) because a hash of an 800 KB document would cost as
+ * much as the parse it replaces. Text is immutable, so a hit can share the
+ * prepared object between the two cards showing the same drawing.
+ */
+export function prepareSvg(source: string): PreparedSvg {
+  const cached = cache.get(source);
+  if (cached !== undefined) return cached;
+  const html = sanitizeSvg(source);
+  const prepared: PreparedSvg = { html, ok: hasSvgElement(html) };
+  // A document that alone exceeds the budget is drawn but not remembered: keeping
+  // it would evict every other entry and be evicted again on the next one.
+  if (source.length + html.length <= MAX_CACHED_CHARS) {
+    cache.set(source, prepared);
+    cachedChars += source.length + html.length;
+    while (cache.size > MAX_CACHED || cachedChars > MAX_CACHED_CHARS) {
+      const oldest = cache.keys().next();
+      // The entry just inserted always stays, even when it is the only one left.
+      if (oldest.done || cache.size === 1) break;
+      const entry = cache.get(oldest.value);
+      cache.delete(oldest.value);
+      cachedChars -= oldest.value.length + (entry?.html.length ?? 0);
+    }
+  }
+  return prepared;
+}
+
+/** Drop everything prepared. Used by the tests, which must not leak state. */
+export function resetSvgCache(): void {
+  cache.clear();
+  cachedChars = 0;
+}

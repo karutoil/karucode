@@ -41,7 +41,7 @@ export interface TabsProps<T extends string> {
   items: readonly TabItem<T>[];
   active: T;
   onChange: (id: T) => void;
-  /** Called by a `closable` item's close button (and by Delete/Backspace). */
+  /** Called by a `closable` item's close button, and by nothing else. */
   onClose?: (id: T) => void;
   label: string;
   idPrefix?: string;
@@ -101,15 +101,11 @@ export function Tabs<T extends string>({
   const onKeyDown = (event: TargetedKeyboardEvent<HTMLDivElement>): void => {
     const index = items.findIndex((item) => item.id === active);
     if (index === -1) return;
-    // Delete/Backspace closes the selected tab, the way a browser's own tab strip
-    // does. Only for a tab that offers a close button, so the built-in views can
-    // never be removed with a stray keystroke.
-    const current = items[index];
-    if ((event.key === 'Delete' || event.key === 'Backspace') && current?.closable && onClose) {
-      event.preventDefault();
-      onClose(current.id);
-      return;
-    }
+    // Delete/Backspace used to close the selected tab "the way a browser's own
+    // strip does". No browser's strip does that, and Backspace is the key people
+    // press when they mean "go back" (or when nothing has focus): a clean tab
+    // disappeared with no prompt and no undo, since only a dirty buffer asks.
+    // Closing stays with the ✕ button and the tab's own menu item.
     let next = index;
     if (event.key === 'ArrowRight') next = (index + 1) % items.length;
     else if (event.key === 'ArrowLeft') next = (index - 1 + items.length) % items.length;

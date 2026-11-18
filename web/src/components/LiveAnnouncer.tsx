@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import type { ChatState, CommandItem, ToolItem } from '../state/chat';
 import { pendingApprovals, runStatusLabel } from '../state/selectors';
 
@@ -45,6 +45,45 @@ function runSentence(status: ChatState['runStatus']): string {
  */
 export function LiveAnnouncer({ chat }: LiveAnnouncerProps): JSX.Element {
   const [announcement, setAnnouncement] = useState('');
+  /** The sentence the region is currently showing, whether or not it was painted yet. */
+  const spoken = useRef('');
+  /** Which attempt is current, so a deferred re-say cannot overwrite a newer sentence. */
+  const attempt = useRef(0);
+  const resayTimer = useRef(0);
+
+  /**
+   * Put a sentence in the region, including when it is the one already there.
+   *
+   * A polite live region speaks on a *change*: rendering `read_file finished.`
+   * twice in a row mutates nothing, so two identical tool completions announced
+   * once. The region is blanked and painted empty first, and the sentence is put
+   * back in the next task — two mutations, so the second completion is spoken.
+   */
+  const announce = useCallback((text: string): void => {
+    const seq = attempt.current + 1;
+    attempt.current = seq;
+    if (spoken.current !== text) {
+      spoken.current = text;
+      setAnnouncement(text);
+      return;
+    }
+    if (resayTimer.current !== 0) window.clearTimeout(resayTimer.current);
+    spoken.current = '';
+    setAnnouncement('');
+    resayTimer.current = window.setTimeout(() => {
+      resayTimer.current = 0;
+      if (attempt.current !== seq) return;
+      spoken.current = text;
+      setAnnouncement(text);
+    }, 0);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (resayTimer.current !== 0) window.clearTimeout(resayTimer.current);
+    },
+    [],
+  );
 
   const tool = lastTool(chat);
   const toolKey = tool ? `${tool.id}:${tool.status}` : null;
@@ -71,21 +110,21 @@ export function LiveAnnouncer({ chat }: LiveAnnouncerProps): JSX.Element {
     if (!before) return;
 
     if (next.running && !before.running) {
-      setAnnouncement('karucode is working.');
+      announce('karucode is working.');
       return;
     }
     if (!next.running && before.running) {
-      setAnnouncement(runSentence(next.runStatus));
+      announce(runSentence(next.runStatus));
       return;
     }
     if (approval && next.approval !== before.approval) {
-      setAnnouncement(`Waiting for approval: ${approval.title}.`);
+      announce(`Waiting for approval: ${approval.title}.`);
       return;
     }
     if (tool && next.tool !== before.tool) {
-      setAnnouncement(toolSentence(tool));
+      announce(toolSentence(tool));
     }
-  }, [chat.running, chat.runStatus, toolKey, approvalKey]);
+  }, [chat.running, chat.runStatus, toolKey, approvalKey, announce]);
 
   return (
     <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
