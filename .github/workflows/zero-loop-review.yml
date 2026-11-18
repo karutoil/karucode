@@ -141,6 +141,7 @@ jobs:
           max_model_tokens = 500000
           max_findings = 0
           probe_attempts = 3
+          probe_workers = 4
 
           [sandbox]
           runtime = "docker"
