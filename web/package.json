@@ -9,6 +9,7 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "audit": "node scripts/audit-gate.mjs",
     "test:watch": "vitest",
     "preview": "vite preview",
     "preview:api": "echo \"Run the Rust server with KARUCODE_WEB_DIR=$PWD/dist on :8787, then open http://127.0.0.1:8787\""

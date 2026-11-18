@@ -302,7 +302,10 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
-      - run: npm audit --audit-level=moderate
+      # The gate is a script, not a bare `npm audit`: it fails at `moderate` like
+      # the old command did, but an advisory with no release to upgrade to is
+      # recorded there with its reason instead of turning every commit red.
+      - run: npm run audit
       - run: npm run typecheck
       - run: npm test
 

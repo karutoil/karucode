@@ -1729,6 +1729,8 @@
         "config:model.supports_images",
         "cmd:npm run dev",
         "cmd:npm run build",
+        "cmd:npm run audit",
+        "file:web/scripts/audit-gate.mjs",
         "file:web/dist",
         "env:KARUCODE_WEB_DIR",
         "ui:GitManager",

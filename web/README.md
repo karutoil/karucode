@@ -40,11 +40,19 @@ npm install
 npm run dev        # http://127.0.0.1:5173, proxies /api to http://127.0.0.1:8787
 npm run typecheck
 npm test
-npm audit --audit-level=moderate  # reject vulnerable dev/build dependencies too
+npm run audit      # dependency gate: npm audit at `moderate`, dev/build deps included
 npm run build      # writes dist/index.html + hashed assets
 npm run preview    # static preview; also proxies /api to 8787
 npm run preview:api  # prints the KARUCODE_WEB_DIR hint for serving the Rust binary
 ```
+
+`npm run audit` is `scripts/audit-gate.mjs`, not a bare `npm audit`: it runs the
+audit, fails on any advisory at `moderate` or above, and keeps the few we have
+looked at in its `ACCEPTED` map with a reason, the scope that can reach the
+vulnerable code, and the release that retires the entry. Adding one is a reviewed
+diff, like `[advisories] ignore` in the root `deny.toml` for the Rust graph; an
+entry nothing reports any more is printed so it gets deleted. This is what CI runs
+in `web (checks)`, and `scripts/audit-gate.test.mjs` covers the gate itself.
 
 `cargo build` does the `npm run build` for you: `crates/kc-server/build.rs`
 rebuilds `dist/` when these sources are newer than it, and the result is embedded
