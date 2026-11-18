@@ -57,3 +57,9 @@ pub use tool::{
     ToolCallRequest, ToolClass, ToolCtx, ToolOrigin, ToolOutcome, ToolRegistry, ToolSpec,
     FAILURE_HINT_MAX_BYTES,
 };
+
+/// Temporary zero-loop reviewer demonstration.  Do not merge: this function
+/// deliberately unwraps an Option so the patch-caused Rust rule has a target.
+pub fn zero_loop_demo_parse(raw: Option<i32>) -> i32 {
+    raw.unwrap()
+}
