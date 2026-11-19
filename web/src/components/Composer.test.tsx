@@ -1222,6 +1222,32 @@ describe('Composer', () => {
     it('releases the record of a session that no longer exists', async () => {
       store.sessions.value = [row('s_a'), row('s_b')];
       store.sessionsLoading.value = false;
+      store.currentSessionId.value = 's_b';
+      const { textarea } = renderComposer();
+      // Parked for A without ever typing in it: nothing is lost by dropping it.
+      await act(async () => {
+        store.currentSessionId.value = 's_a';
+      });
+      await act(async () => {
+        store.currentSessionId.value = 's_b';
+      });
+      fireEvent.input(textarea, { target: { value: 'for B' } });
+
+      const before = store.currentSessionId.value;
+      await act(async () => {
+        store.sessions.value = [row('s_b')];
+      });
+      expect(before).toBe('s_b');
+      // B is untouched, and the empty parked record is gone.
+      expect(textarea.value).toBe('for B');
+    });
+
+    it('keeps a parked draft whose session has gone, rather than losing it', async () => {
+      // The draft is unsent typing. Dropping it because its row disappeared -
+      // deleted here, or in another tab - is worse than keeping a record the
+      // reader cannot currently reach; the count cap still bounds the map.
+      store.sessions.value = [row('s_a'), row('s_b')];
+      store.sessionsLoading.value = false;
       store.currentSessionId.value = 's_a';
       const { textarea } = renderComposer();
       fireEvent.input(textarea, { target: { value: 'for A' } });
@@ -1231,17 +1257,15 @@ describe('Composer', () => {
       });
       fireEvent.input(textarea, { target: { value: 'for B' } });
 
-      // Deleted here or in another tab: nothing can open that session again, so
-      // its draft (and any inlined file body behind a chip) is released.
       await act(async () => {
         store.sessions.value = [row('s_b')];
       });
       await act(async () => {
         store.currentSessionId.value = 's_a';
       });
-      expect(textarea.value).toBe('');
+      // The text survived the row going away.
+      expect(textarea.value).toBe('for A');
 
-      // The session that still exists kept its own box.
       await act(async () => {
         store.currentSessionId.value = 's_b';
       });

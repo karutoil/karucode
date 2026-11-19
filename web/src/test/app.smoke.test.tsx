@@ -354,6 +354,27 @@ describe('Shell shortcuts', () => {
     vi.unstubAllGlobals();
   });
 
+  it('leaves the Shift chords to a field that has the caret', async () => {
+    // `Mod+Shift+L` and `Mod+Shift+X` are text chords in both engines; firing
+    // them from the composer swallowed the keystroke and opened a panel.
+    installFetch();
+    render(<App />);
+    await waitFor(() => expect(store.boot.value).toBe('ready'));
+    await flushEffects();
+
+    const field = document.querySelector('textarea') as HTMLTextAreaElement | null;
+    expect(field).not.toBeNull();
+    field!.focus();
+
+    const studio = fireEvent.keyDown(field!, { key: 'L', ctrlKey: true, shiftKey: true });
+    expect(store.themeStudioOpen.value).toBe(false);
+    // Not claimed: the field still gets the key.
+    expect(studio).toBe(true);
+
+    fireEvent.keyDown(field!, { key: 'X', ctrlKey: true, shiftKey: true });
+    expect(store.themeStudioOpen.value).toBe(false);
+  });
+
   it('opens and closes the Theme Studio with Ctrl/Cmd+Shift+L', async () => {
     installFetch();
     render(<App />);

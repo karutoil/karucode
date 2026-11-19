@@ -1374,8 +1374,11 @@ export function App(): JSX.Element {
 
       // The Theme Studio used to sit on `Mod+Shift+T`, which every browser owns
       // for "reopen the closed tab" and does not reliably hand to the page. The
-      // browser keeps that chord; the studio moved to `Mod+Shift+L`.
+      // browser keeps that chord; the studio moved to `Mod+Shift+L`. It is a
+      // *Shift* chord, so the Apple-only Ctrl guard above does not cover it, and
+      // both engines treat it as a text chord: it does not fire from a field.
       if (mod && event.shiftKey && key === 'l') {
+        if (caretInEditable(event)) return;
         event.preventDefault();
         actions.toggleThemeStudio();
         return;
@@ -1416,10 +1419,12 @@ export function App(): JSX.Element {
         return;
       }
       // `Mod+J` is Downloads in Gecko and cannot be counted on to reach the page;
-      // the Context drawer answers to `Mod+Shift+X`.
+      // the Context drawer answers to `Mod+Shift+X`. When the control plane owns
+      // that drawer the chord belongs to the reader: do not swallow it.
       if (mod && event.shiftKey && key === 'x') {
+        if (caretInEditable(event) || controlPlaneOpen.value) return;
         event.preventDefault();
-        if (!controlPlaneOpen.value) workbench.toggleContext();
+        workbench.toggleContext();
         return;
       }
       if (mod && key === 'n') {

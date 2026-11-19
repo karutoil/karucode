@@ -549,6 +549,12 @@ export function Composer({
   useEffect(() => {
     if (store.sessionsLoading.value || sessionRows.length === 0) return;
     const live = new Set(sessionRows.map((row) => row.id));
+    // Only an *empty* unreachable record is dropped. A parked draft is unsent
+    // typing: losing it because its session was deleted is worse than keeping a
+    // record the reader cannot reach, and the count cap above still bounds the
+    // map (it sheds the coldest). A record with text, attachments or a send in
+    // flight is therefore kept and left to that cap.
+    const unreachable: string[] = [];
     for (const key of Array.from(forms.current.keys())) {
       if (key === scopeKey) continue;
       const [project, session, draft] = JSON.parse(key) as [
@@ -561,7 +567,17 @@ export function Composer({
         session !== null
           ? !live.has(session)
           : draft !== null && draftId !== null && draft !== draftId;
-      if (stale) forms.current.delete(key);
+      if (stale) unreachable.push(key);
+    }
+    const isEmpty = (key: string): boolean => {
+      const value = forms.current.get(key)?.value;
+      return (
+        value === undefined ||
+        (value.draft.trim() === '' && value.attachments.length === 0 && !value.sending)
+      );
+    };
+    for (const key of unreachable) {
+      if (isEmpty(key)) forms.current.delete(key);
     }
   }, [sessionRows, projectId, scopeKey, draftId]);
 
