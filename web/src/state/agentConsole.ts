@@ -34,15 +34,120 @@ export interface AgentActivity {
   items: AgentActivityItem[];
   /** Highest event `seq` applied, so a replayed frame cannot duplicate work. */
   lastSeq: number;
+  /**
+   * When the newest frame landed, as the server stamped it.
+   *
+   * The map of feeds is bounded by evicting the least recently active agents, and
+   * `lastSeq` cannot order two different agents: every agent counts its own
+   * sequence from its own first frame.
+   */
+  lastActivityAt?: number;
+  /**
+   * The agent had not finished when its newest frame arrived.
+   *
+   * `applyAgentEvent` is the only writer: any frame except `agent_finished`
+   * proves the loop was alive, and `agent_finished` is what settles it. Eviction
+   * uses it to keep a placeholder for a live agent and to drop a finished one
+   * outright, instead of keeping either forever.
+   */
+  live?: boolean;
 }
 
 /** A running subagent can stream for hours; keep the tail, not the whole run. */
 export const AGENT_ACTIVITY_LIMIT = 400;
+/**
+ * How many subagents' feeds the page keeps.
+ *
+ * A long-lived tab runs subagent after subagent, and one feed is up to
+ * `AGENT_ACTIVITY_LIMIT` items of up to 60 000 characters: a project that spawns
+ * ten of them over a day used to hold every finished tail for the life of the
+ * tab, so the heap only ever grew and every new frame spread a bigger object.
+ * Twelve covers what a reader can plausibly follow in the Agents tab at once.
+ */
+export const AGENT_ACTIVITY_AGENTS = 12;
 /** One assistant message or tool result cannot grow past this in memory. */
 const MAX_TEXT_CHARS = 60_000;
 
 export function emptyActivity(): AgentActivity {
   return { items: [], lastSeq: 0 };
+}
+
+/**
+ * The one line left behind for a live agent whose feed was evicted.
+ *
+ * Deleting the entry outright is what loses the row: the Agents tab reads this
+ * map for the "what is it doing right now" label of every running agent, and a
+ * vanished feed made a working subagent look like it had never started. A single
+ * message item keeps the entry cheap (a few hundred bytes, not megabytes) and
+ * says where the rest went. It is an assistant bubble only because that is the
+ * cheapest item the tab already renders; the words make clear it is not speech.
+ */
+function trimmedActivity(activity: AgentActivity, agentId: string): AgentActivity {
+  return {
+    items: [
+      {
+        kind: 'message',
+        id: `trimmed:${agentId}`,
+        at: activity.lastActivityAt ?? 0,
+        role: 'assistant',
+        content:
+          '(Earlier activity was released to keep this page light. The subagent is still running; its transcript is on the server.)',
+        reasoning: '',
+        streaming: false,
+        runId: null,
+        agentId,
+      },
+    ],
+    lastSeq: activity.lastSeq,
+    lastActivityAt: activity.lastActivityAt,
+    live: true,
+  };
+}
+
+/**
+ * Keep at most `limit` full feeds, plus one-line placeholders for live agents.
+ *
+ * Returns the same object when nothing has to go, so a steady stream of frames
+ * for the agents that stay does not re-create the map on every event. Finished
+ * agents are dropped first-to-last by inactivity: their tail is a history the
+ * server still has, and re-opening the agent re-reads it from the snapshot.
+ * Placeholders are capped at the same number, so the map can never exceed
+ * `2 × limit` entries however many subagents a project runs.
+ */
+export function boundAgentActivities(
+  activities: Record<string, AgentActivity>,
+  limit = AGENT_ACTIVITY_AGENTS,
+): Record<string, AgentActivity> {
+  const ids = Object.keys(activities);
+  if (ids.length <= limit) return activities;
+  const ranked = ids
+    .map((id) => ({ id, at: activities[id]?.lastActivityAt ?? 0 }))
+    .sort((left, right) => right.at - left.at);
+  const next: Record<string, AgentActivity> = {};
+  for (const { id } of ranked.slice(0, limit)) {
+    const activity = activities[id];
+    if (activity) next[id] = activity;
+  }
+  let placeholders = 0;
+  for (const { id } of ranked.slice(limit)) {
+    const activity = activities[id];
+    if (!activity?.live) continue;
+    if (placeholders >= limit) break;
+    // Already a placeholder (an evicted agent that streamed again): keep the one
+    // line rather than rewriting the same content on every frame.
+    next[id] = activity.items.length <= 1 ? activity : trimmedActivity(activity, id);
+    placeholders += 1;
+  }
+  return next;
+}
+
+/** Store one agent's newest feed, trimming the map back to its bound. */
+export function recordAgentActivity(
+  activities: Record<string, AgentActivity>,
+  agentId: string,
+  next: AgentActivity,
+): Record<string, AgentActivity> {
+  return boundAgentActivities({ ...activities, [agentId]: next });
 }
 
 function clampText(text: string): string {
@@ -166,6 +271,21 @@ function upsertByCallId(
  * hand every frame it sees to this reducer.
  */
 export function applyAgentEvent(activity: AgentActivity, event: KarucodeEvent): AgentActivity {
+  const next = applyAgentEventItems(activity, event);
+  // Identity is the caller's "nothing changed" test, so it has to survive this
+  // bookkeeping layer: a frame for another agent must not bump the LRU clock of
+  // an agent it does not touch.
+  if (next === activity) return activity;
+  return {
+    ...next,
+    lastActivityAt: event.ts_ms,
+    // `agent_finished` is the only frame that settles an agent. Everything else -
+    // prose, a thought, a note, a pause - proves the loop existed when it landed.
+    live: event.type !== 'agent_finished',
+  };
+}
+
+function applyAgentEventItems(activity: AgentActivity, event: KarucodeEvent): AgentActivity {
   const agentId = agentEventId(event);
   if (!agentId) return activity;
   const runId = event.run_id ?? null;
@@ -671,6 +791,21 @@ function toolArgs(raw: string | null | undefined): JsonValue {
 }
 
 /**
+ * What the snapshot knows about the agent whose stored transcript is being rebuilt.
+ *
+ * The messages carry their own timestamps, but not whether the agent is still
+ * running, and `boundAgentActivities` ranks and keeps feeds on exactly those two
+ * facts. Without them a seeded feed sits at rank `0`, is the first thing evicted,
+ * and is then dropped outright rather than kept as a placeholder.
+ */
+export interface ActivitySeed {
+  /** `AgentRecord.updated_at`: when this agent last did anything. */
+  updatedAt: number;
+  /** The agent had not finished when the snapshot was written. */
+  live: boolean;
+}
+
+/**
  * Build an activity feed from the messages already stored for one agent.
  *
  * The session snapshot contains every message (subagent rows included, marked
@@ -681,6 +816,7 @@ export function activityFromMessages(
   messages: StoredMessage[],
   agentId: string,
   uncapped = false,
+  seed?: ActivitySeed,
 ): AgentActivity {
   const items: AgentActivityItem[] = [];
   const calls = new Map<string, number>();
@@ -783,7 +919,16 @@ export function activityFromMessages(
     }
   }
 
-  return { items: uncapped ? items : trimItems(items), lastSeq: 0 };
+  return {
+    items: uncapped ? items : trimItems(items),
+    lastSeq: 0,
+    // The snapshot is the only word on this agent until it streams again, so it
+    // supplies the facts eviction ranks on. Without them a seeded feed sat at
+    // rank `0`, was the first thing evicted, and was then deleted outright: a
+    // working subagent's row vanished while it was still running.
+    lastActivityAt: seed?.updatedAt,
+    live: seed?.live,
+  };
 }
 
 /**
@@ -802,5 +947,9 @@ export function mergeActivities(base: AgentActivity, overlay: AgentActivity, unc
   return {
     items: uncapped ? items : trimItems(items),
     lastSeq: Math.max(base.lastSeq, overlay.lastSeq),
+    // The merge is a read of both halves, not new activity, so the clock keeps
+    // whichever half was newer and the feed stays "live" if either half was.
+    lastActivityAt: Math.max(base.lastActivityAt ?? 0, overlay.lastActivityAt ?? 0) || undefined,
+    live: (base.live ?? false) || (overlay.live ?? false),
   };
 }

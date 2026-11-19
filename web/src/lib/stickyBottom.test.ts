@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { fireEvent, render } from '@testing-library/preact';
+import { createElement } from 'preact';
+import { useStickyBottom } from './stickyBottom';
 import {
   distanceFromBottom,
   followingNewest,
@@ -238,5 +241,93 @@ describe('followingNewest', () => {
   it('records the position it followed to', () => {
     const element = panel(800);
     expect(noteFollow(asElement(element))).toEqual({ scrollTop: 800, scrollHeight: 1200, clientHeight: 400 });
+  });
+});
+
+/**
+ * jsdom lays nothing out, so the three numbers the follow rules read are stubbed
+ * on the node itself.
+ */
+function setGeometry(node: HTMLDivElement, next: Partial<ScrollMetrics>): void {
+  for (const [property, value] of Object.entries(next)) {
+    Object.defineProperty(node, property, { configurable: true, writable: true, value });
+  }
+}
+
+/** A transcript the follow hook owns: 1200px of rows in a 400px viewport. */
+function mountTranscript(): { node: HTMLDivElement; unmount: () => void } {
+  let element: HTMLDivElement | null = null;
+
+  function Transcript() {
+    const sticky = useStickyBottom({ sessionKey: 's_1', contentKey: 'rows:20', sentMessageTick: 0 });
+    return createElement(
+      'div',
+      {
+        ref: (node: HTMLDivElement | null) => {
+          if (node) sticky.scrollRef.current = node;
+          element = node;
+        },
+      },
+      createElement('button', { id: 'approve' }, 'Approve'),
+    );
+  }
+
+  const view = render(createElement(Transcript, {}));
+  const node = element as unknown as HTMLDivElement;
+  setGeometry(node, { scrollHeight: 1200, clientHeight: 400, scrollTop: 800 });
+  return { node, unmount: () => view.unmount() };
+}
+
+/**
+ * A follow that is only visible through the growth it has not caught up with:
+ * rows arrived below the viewport after the follow and `scrollTop` is where the
+ * follow left it. `followingNewest` answers from the recorded anchor, so it
+ * changes the moment a gesture forgets it — which is the thing under test.
+ */
+function armFollow(node: HTMLDivElement): void {
+  setGeometry(node, { scrollHeight: 1200, scrollTop: 800 });
+  noteFollow(node);
+  setGeometry(node, { scrollHeight: 2100 });
+  expect(followingNewest(node)).toBe(true);
+}
+
+describe('useStickyBottom: a keystroke is not a scroll', () => {
+  it('keeps following on Tab, and on a key the transcript control owns', () => {
+    const { node, unmount } = mountTranscript();
+    try {
+      armFollow(node);
+
+      // Tab moves to the next card; it does not move the view.
+      fireEvent.keyDown(node, { key: 'Tab' });
+      expect(followingNewest(node)).toBe(true);
+
+      // Space and Enter belong to the focused approval button, not to the
+      // scrolling of the transcript it happens to live in.
+      const approve = node.querySelector('#approve') as HTMLElement;
+      fireEvent.keyDown(approve, { key: ' ' });
+      expect(followingNewest(node)).toBe(true);
+      fireEvent.keyDown(approve, { key: 'Enter' });
+      expect(followingNewest(node)).toBe(true);
+      // Nor is a character key a reason to stop following the run.
+      fireEvent.keyDown(approve, { key: 'a' });
+      expect(followingNewest(node)).toBe(true);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('ends following when the reader presses a key that scrolls the transcript', () => {
+    const { node, unmount } = mountTranscript();
+    try {
+      armFollow(node);
+      fireEvent.keyDown(node, { key: 'ArrowUp' });
+      expect(followingNewest(node)).toBe(false);
+
+      armFollow(node);
+      fireEvent.keyDown(node, { key: 'PageUp' });
+      expect(followingNewest(node)).toBe(false);
+    } finally {
+      unmount();
+    }
   });
 });

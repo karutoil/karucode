@@ -4,6 +4,40 @@ import type { RefObject } from 'preact';
 const activeTraps: symbol[] = [];
 let scrollLocks = 0;
 let baseBodyOverflow = '';
+let baseRootOverflow = '';
+let baseBodyOverscroll = '';
+let baseRootOverscroll = '';
+/** Where the document stood when the first lock was taken. */
+let lockedScrollY = 0;
+
+/**
+ * Where focus goes when the element that opened a surface no longer exists.
+ *
+ * A transcript row the window swapped out, a menu item a rerun removed — the
+ * closer has nothing to hand focus back to, and `document.body` means the next
+ * Tab restarts at the very top of the app. The shell's landmarks are the
+ * structural answer. `tabindex="-1"` keeps a landmark out of the Tab order while
+ * still letting it take focus, so the next Tab lands on its first control.
+ *
+ * `closing` is the surface being torn down. A landmark *inside* it would be
+ * removed with it, and handing focus to something about to disappear puts it
+ * right back on `body` — the bug this exists to fix. So the candidates a surface
+ * nested in a landmark rules out are its descendants, not its ancestors: when
+ * `Inspector` or `ContextDrawer` renders inside `<main id="chat-main">`, that
+ * `<main>` is exactly the landmark to fall back to; it outlives the surface.
+ */
+const FOCUS_LANDMARK_SELECTOR = 'main, .workbench';
+
+function lastResortFocusTarget(closing?: HTMLElement | null): HTMLElement | null {
+  const candidates = document.querySelectorAll<HTMLElement>(FOCUS_LANDMARK_SELECTOR);
+  for (const landmark of candidates) {
+    if (!closing) return landmark;
+    // The surface itself, or a landmark the surface contains: both die with it.
+    if (landmark === closing || closing.contains(landmark)) continue;
+    return landmark;
+  }
+  return null;
+}
 
 const FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -155,9 +189,27 @@ export function useFocusTrap(
     if (!container) return;
     const trapId = Symbol('focus-trap');
     activeTraps.push(trapId);
-    if (scrollLocks === 0) baseBodyOverflow = document.body.style.overflow;
+    if (scrollLocks === 0) {
+      const body = document.body;
+      const root = document.documentElement;
+      baseBodyOverflow = body.style.overflow;
+      baseRootOverflow = root.style.overflow;
+      baseBodyOverscroll = body.style.overscrollBehavior;
+      baseRootOverscroll = root.style.overscrollBehavior;
+      // `overflow: hidden` on `body` is not a lock on iOS: Safari pans the visual
+      // viewport anyway, and some mobile browsers keep the document parked and
+      // reset the position on release. The scroll position is remembered so it can
+      // be put back, and `overscroll-behavior: contain` stops a scroller *inside*
+      // the dialog from handing its momentum to the page behind. `touch-action` is
+      // deliberately left alone — it applies to the dialog's own scrollers too and
+      // would stop them panning.
+      lockedScrollY = typeof window.scrollY === 'number' ? window.scrollY : 0;
+      body.style.overflow = 'hidden';
+      root.style.overflow = 'hidden';
+      body.style.overscrollBehavior = 'contain';
+      root.style.overscrollBehavior = 'contain';
+    }
     scrollLocks += 1;
-    document.body.style.overflow = 'hidden';
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
     const focusFirst = window.setTimeout(() => {
@@ -223,8 +275,60 @@ export function useFocusTrap(
       const index = activeTraps.lastIndexOf(trapId);
       if (index !== -1) activeTraps.splice(index, 1);
       scrollLocks = Math.max(0, scrollLocks - 1);
-      if (scrollLocks === 0) document.body.style.overflow = baseBodyOverflow;
-      if (previous && previous.isConnected) previous.focus();
+      if (scrollLocks === 0) {
+        const body = document.body;
+        const root = document.documentElement;
+        body.style.overflow = baseBodyOverflow;
+        root.style.overflow = baseRootOverflow;
+        body.style.overscrollBehavior = baseBodyOverscroll;
+        root.style.overscrollBehavior = baseRootOverscroll;
+        // Put the position back only when the browser reset it. A page that is
+        // still where it was needs nothing, and a page the reader moved (a mobile
+        // browser lets the page behind pan while `overflow: hidden` is in force)
+        // must be left alone.
+        const y = typeof window.scrollY === 'number' ? window.scrollY : 0;
+        const wasReset = y === 0 && lockedScrollY !== 0;
+        if (wasReset && typeof window.scrollTo === 'function') {
+          window.scrollTo(0, lockedScrollY);
+        }
+        // This lock is over: a later one records its own position rather than
+        // inheriting this one's and "restoring" the reader to where an older
+        // surface happened to be opened.
+        lockedScrollY = 0;
+      }
+      if (previous && previous.isConnected && previous !== document.body) previous.focus();
+      else {
+        // The opener is gone: a transcript row the window swapped out, a menu
+        // item a rerun removed. Nothing focused means the next Tab restarts at
+        // the top of the document, so focus a landmark instead. Anything already
+        // focused *outside* this surface is a deliberate choice — the focus
+        // still inside it is this surface's own default and dies with it.
+        // `<body>` is not an opener: it is what "nothing was focused" looks like,
+        // and handing focus back to it is the very thing being avoided.
+        const active = document.activeElement;
+        const keepsFocus =
+          active instanceof HTMLElement &&
+          active !== document.body &&
+          active.isConnected &&
+          !container.contains(active);
+        // The restore above is only worth anything if focus does not scroll the
+        // landmark it lands on into view: `focus()` pans by default, so the
+        // position just put back would move again.
+        if (!keepsFocus) {
+          const landmark = lastResortFocusTarget(container);
+          if (landmark) {
+            // `tabindex="-1"` is left in place rather than removed afterwards.
+            // In Blink, removing it while the element is focused hands focus back
+            // to `body` - on the next task, on a timer, on a frame, every way
+            // (measured); only keeping it keeps the focus. And on a landmark it is
+            // exactly the right state: programmatically focusable, out of the Tab
+            // order. `main#chat-main` already carries it, so this adds nothing
+            // there and only gives the same property to a landmark that lacked it.
+            if (!landmark.hasAttribute('tabindex')) landmark.tabIndex = -1;
+            landmark.focus({ preventScroll: true });
+          }
+        }
+      }
     };
   }, [active, ref]);
 }

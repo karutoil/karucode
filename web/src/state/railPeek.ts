@@ -1,7 +1,7 @@
 /**
  * Hovering a project while the session list is collapsed peeks at its sessions.
  *
- * `Ctrl/Cmd+B` hides the sessions rail by giving it zero width, which is the right
+ * `Ctrl/Cmd+\` hides the sessions rail by giving it zero width, which is the right
  * default for a wide conversation but a dead end when all you want is to open a
  * session or rename one: the only way back was to restore the rail, do the thing,
  * and collapse it again. So hovering a project's tile while the rail is collapsed

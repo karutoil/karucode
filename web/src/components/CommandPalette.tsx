@@ -1,6 +1,7 @@
 import { Fragment, type JSX } from 'preact';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { relativeTime } from '../lib/format';
+import { isImeComposing } from '../lib/keyboard';
 import { matchSegments } from '../lib/paletteMatch';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
@@ -78,7 +79,7 @@ export function CommandPalette(): JSX.Element | null {
             ? 'Show sessions rail'
             : 'Hide sessions rail',
         group: 'Actions',
-        hint: 'Cmd/Ctrl+B',
+        hint: 'Cmd/Ctrl+\\',
         icon: <SidebarIcon size={15} />,
         run: actions.toggleRail,
       },
@@ -237,6 +238,12 @@ export function CommandPalette(): JSX.Element | null {
           aria-label="Search commands"
           onInput={(event) => setQuery(event.currentTarget.value)}
           onKeyDown={(event) => {
+            // The keys an IME uses to compose are not the palette's: Enter there
+            // commits a candidate, and running the first match on it would jump
+            // to another session (or a plugin's command) over a word the reader
+            // had not finished. Guarded before the arrow branches for the same
+            // reason - the candidate list walks with the arrows.
+            if (isImeComposing(event)) return;
             if (event.key === 'ArrowDown') {
               event.preventDefault();
               setActiveIndex((current) => Math.max(0, Math.min(filtered.length - 1, current + 1)));

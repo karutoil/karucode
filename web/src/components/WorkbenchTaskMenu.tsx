@@ -80,7 +80,7 @@ export function WorkbenchTaskMenu({
           menu={menu}
           action={{
             label: 'Theme studio',
-            keyshortcuts: 'Control+Shift+T Meta+Shift+T',
+            keyshortcuts: 'Control+Shift+L Meta+Shift+L',
             onSelect: actions.openThemeStudio,
           }}
         />

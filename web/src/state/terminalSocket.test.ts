@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TerminalSocket, type TerminalSocketStatus } from './terminalSocket';
 import type { TerminalControlFrame } from '../api/types';
+import * as store from './store';
 
 /**
  * A stand-in for the browser's `WebSocket`.
@@ -86,11 +87,42 @@ function harness(options: { token?: string | null } = {}) {
 describe('TerminalSocket', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    // Toasts outlive one test otherwise, and their 7s TTL is on the same clock.
+    store.resetToastTimers();
   });
 
   afterEach(() => {
+    store.resetToastTimers();
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it('keeps retrying when the socket factory throws', () => {
+    // A factory that threw reported `failed` and returned: nothing counted the
+    // failure and nothing scheduled a retry, so the terminal stayed dead for the
+    // rest of the session.
+    (globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeSocket;
+    const statuses: TerminalSocketStatus[] = [];
+    let attempts = 0;
+    const socket = new TerminalSocket({
+      id: 't_abc',
+      cols: 80,
+      rows: 24,
+      token: null,
+      createSocket: () => {
+        attempts += 1;
+        throw new Error('bad url');
+      },
+      handlers: { onData: vi.fn(), onControl: vi.fn(), onStatus: (s) => statuses.push(s) },
+    });
+
+    socket.connect();
+    expect(attempts).toBe(1);
+    expect(statuses).toContain('failed');
+
+    // The reconnect ladder still runs, so the next step tries again.
+    vi.advanceTimersByTime(30_000);
+    expect(attempts).toBeGreaterThan(1);
   });
 
   it('builds the documented url with the window size and the token', () => {
@@ -295,5 +327,63 @@ describe('TerminalSocket', () => {
     expect(controls).toEqual([{ type: 'lagged', missed: 10 }]);
     vi.advanceTimersByTime(10_000);
     expect(sockets[0]!.readyState).toBe(FakeSocket.CLOSED);
+  });
+
+  it('explains a terminal that stopped answering, once per outage, and re-arms after a healthy open', () => {
+    // The bug: a PTY that dies under the socket is retried forever and only
+    // reported in the `reconnecting` chip, whose detail lives in a `title`
+    // tooltip. The user typed into a dead pane and nothing ever said so.
+    const { socket, sockets } = harness();
+    const notices = (): string[] =>
+      store.toasts.value.map((toast) => toast.message).filter((message) => message.includes('terminal'));
+    socket.connect();
+    sockets[0]!.open();
+
+    sockets[0]!.drop(1006, '');
+    vi.advanceTimersByTime(250);
+    sockets[1]!.drop(1006, '');
+    vi.advanceTimersByTime(500);
+    // Two failures are still a blip (a Wi-Fi handover clears them).
+    expect(notices()).toHaveLength(0);
+    sockets[2]!.drop(1006, '');
+    expect(notices()).toHaveLength(1);
+    expect(notices()[0]).toContain('stopped answering');
+
+    // A fourth failure must not raise a second notice for the same outage.
+    vi.advanceTimersByTime(1000);
+    sockets[3]!.drop(1006, '');
+    expect(notices()).toHaveLength(1);
+    // ... and the reconnect ladder keeps running: a restarted server has to be
+    // picked up without the user doing anything.
+    vi.advanceTimersByTime(2000);
+    expect(sockets).toHaveLength(5);
+    sockets[4]!.open();
+    expect(socket.currentStatus).toBe('open');
+
+    // A healthy connection resets the count, so the next outage is reported
+    // again instead of inheriting the old "already told them".
+    store.resetToastTimers();
+    sockets[4]!.drop(1006, '');
+    vi.advanceTimersByTime(250);
+    sockets[5]!.drop(1006, '');
+    vi.advanceTimersByTime(500);
+    expect(notices()).toHaveLength(0);
+    sockets[6]!.drop(1006, '');
+    expect(notices()).toHaveLength(1);
+  });
+
+  it('also notices one outage that has already lasted a long time', () => {
+    // A suspended laptop skips the fast rungs: the wall clock, not the attempt
+    // count, is what says the shell is gone.
+    const { socket, sockets } = harness();
+    socket.connect();
+    sockets[0]!.open();
+    sockets[0]!.drop(1006, '');
+    // Time passes while the browser is asleep; the retry timer fires late.
+    vi.setSystemTime(Date.now() + 11_000);
+    sockets[0]!.onclose?.({ code: 1006, reason: '' });
+    expect(store.toasts.value.map((toast) => toast.message)).toEqual([
+      expect.stringContaining('terminal stopped answering'),
+    ]);
   });
 });

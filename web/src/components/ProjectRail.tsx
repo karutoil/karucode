@@ -582,10 +582,10 @@ export function ProjectRail(): JSX.Element {
           <button
             type="button"
             class="rail-tool rail-tool-accent"
-            data-tip={`Theme studio · ${modKey()} Shift T`}
+            data-tip={`Theme studio · ${modKey()} Shift L`}
             aria-label="Open theme studio"
             aria-haspopup="dialog"
-            aria-keyshortcuts="Control+Shift+T Meta+Shift+T"
+            aria-keyshortcuts="Control+Shift+L Meta+Shift+L"
             onClick={actions.openThemeStudio}
           >
             <PaletteIcon size={15} />

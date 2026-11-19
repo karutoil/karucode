@@ -233,12 +233,20 @@ describe('theme studio stylesheet fidelity', () => {
     );
   });
 
-  it('keeps the drawer scroll region on the mock 8px scrollbar', () => {
-    // base.css sets `thin` + `scrollbar-color`, which supersedes the 8px
-    // ::-webkit-scrollbar and would reserve ~15px of the drawer's content width.
+  it('keeps the drawer scroll region on the app-wide thin scrollbar', () => {
+    // This rule used to re-declare `scrollbar-width: auto; scrollbar-color: auto`
+    // to hold the mock's 8px bar: `thin` supersedes an 8px `::-webkit-scrollbar`
+    // in Chromium, and the drawer's grid was measured against 8px. The override
+    // only ever held in Chromium. `::-webkit-scrollbar` is ignored by Gecko, so
+    // `auto` there means the platform's 12px bar in platform colours, and
+    // `scrollbar-gutter: stable` then reserves 12px instead of 8px — the exact
+    // drawer-width divergence it was meant to prevent. `auto` is also Blink's
+    // default, so deleting both declarations is a no-op in Chromium and lets
+    // base.css's `@supports (-moz-appearance: none)` universal `thin` reach the
+    // drawer like every other pane. Measured in Firefox 160: 12px → 8px.
     expect(cssDeclarations('.theme-studio-scroll')['scrollbar-gutter']).toBe('stable');
-    expect(cssDeclarations('.theme-studio-scroll')['scrollbar-width']).toBe('auto');
-    expect(cssDeclarations('.theme-studio-scroll')['scrollbar-color']).toBe('auto');
+    expect(cssDeclarations('.theme-studio-scroll')['scrollbar-width']).toBeUndefined();
+    expect(cssDeclarations('.theme-studio-scroll')['scrollbar-color']).toBeUndefined();
   });
 
   it('keeps the mock native height for the interface selects', () => {

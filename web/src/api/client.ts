@@ -158,9 +158,16 @@ function toBodyInit(body: PerformOptions['body']): BodyInit | undefined {
 }
 
 async function performRequest<T>(path: string, options: PerformOptions): Promise<T> {
-  const response = await fetchResponse(path, options);
+  const { response, release } = await fetchResponse(path, options);
 
-  const text = await response.text();
+  // The body is still covered by the deadline and by the caller's abort: the
+  // listeners are handed back only once it has been read.
+  let text: string;
+  try {
+    text = await response.text();
+  } finally {
+    release();
+  }
   let parsed: unknown = undefined;
   if (text.trim() !== '') {
     try {
@@ -188,7 +195,7 @@ async function performRequest<T>(path: string, options: PerformOptions): Promise
  * `ApiError` with the server's message rather than an opaque blob.
  */
 export async function apiRequestBlob(path: string, options: RequestOptions = {}): Promise<Blob> {
-  const response = await fetchResponse(path, {
+  const { response, release } = await fetchResponse(path, {
     method: options.method ?? 'GET',
     headers: options.headers ?? {},
     signal: options.signal,
@@ -197,18 +204,30 @@ export async function apiRequestBlob(path: string, options: RequestOptions = {})
     skipAuthHandler: options.skipAuthHandler,
   });
   if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    let parsed: unknown = undefined;
-    if (text.trim() !== '') {
-      try {
-        parsed = JSON.parse(text) as unknown;
-      } catch {
-        // A non-JSON error body is handled by `responseError` below.
+    // One `finally` for the whole branch: the error body read must not be the
+    // thing that decides whether the caller's signal keeps two listeners for the
+    // life of the app (that is the whole reason `release` exists).
+    try {
+      const text = await response.text().catch(() => '');
+      let parsed: unknown = undefined;
+      if (text.trim() !== '') {
+        try {
+          parsed = JSON.parse(text) as unknown;
+        } catch {
+          // A non-JSON error body is handled by `responseError` below.
+        }
       }
+      throw responseError(response, parsed, path, options.skipAuthHandler);
+    } finally {
+      release();
     }
-    throw responseError(response, parsed, path, options.skipAuthHandler);
   }
-  return response.blob();
+  // The blob body is the one place the deadline still has to cover.
+  try {
+    return await response.blob();
+  } finally {
+    release();
+  }
 }
 
 /** The documented error for a failed response, from its JSON body when there is one. */
@@ -225,8 +244,57 @@ function responseError(
   return new ApiError(`Request failed with HTTP ${response.status} (${path})`, response.status, 'unknown');
 }
 
+/**
+ * Compose the caller's signal with the request deadline.
+ *
+ * `AbortSignal.any` is Firefox 133+; ESR 128 does not have it, and an unguarded
+ * call throws a `TypeError` *before* the `try` block in `fetchResponse`, which
+ * turns every abortable request into that raw error instead of an `ApiError`.
+ * The manual link below is what `any` does: the first abort wins and carries its
+ * own reason, so a caller cancellation stays an `AbortError`.
+ */
+function linkSignals(signals: AbortSignal[]): { signal: AbortSignal; release: () => void } {
+  const anyFn = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (typeof anyFn === 'function') {
+    // `AbortSignal.any` detaches its own listeners once it aborts, and the
+    // composite is garbage once the request is over.
+    return { signal: anyFn.call(AbortSignal, signals), release: () => undefined };
+  }
+
+  const controller = new AbortController();
+  const links = new Map<AbortSignal, () => void>();
+  const detach = (): void => {
+    for (const [signal, handler] of links) signal.removeEventListener('abort', handler);
+    links.clear();
+  };
+  const fire = (signal: AbortSignal): void => {
+    // One abort ends the request: drop the other listeners so a deadline that
+    // fires later cannot keep this controller (and its listeners) alive.
+    detach();
+    controller.abort(signal.reason);
+  };
+
+  for (const signal of signals) {
+    // An input that is already aborted must not be waited on.
+    if (signal.aborted) {
+      fire(signal);
+      return { signal: controller.signal, release: detach };
+    }
+    const handler = (): void => fire(signal);
+    links.set(signal, handler);
+    signal.addEventListener('abort', handler, { once: true });
+  }
+  // A request that completes normally never fires `abort`, so without this the
+  // caller's signal keeps a listener for the life of the page - one per request,
+  // on a signal the app reuses. The caller releases when the request settles.
+  return { signal: controller.signal, release: detach };
+}
+
 /** Fetch with the bearer token, the CSRF header and the request deadline. */
-async function fetchResponse(path: string, options: PerformOptions): Promise<Response> {
+async function fetchResponse(
+  path: string,
+  options: PerformOptions,
+): Promise<{ response: Response; release: () => void }> {
   const method = options.method;
   const headers: Record<string, string> = { Accept: 'application/json', ...options.headers };
   if (method !== 'GET') headers['X-Karucode-Client'] = 'web';
@@ -238,16 +306,23 @@ async function fetchResponse(path: string, options: PerformOptions): Promise<Res
   // would keep `chatLoading` true and the skeleton up with no way out. The
   // caller's own signal still wins, so an explicit abort stays an AbortError.
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  const linked = options.signal ? linkSignals([options.signal, timeout]) : null;
+  const signal = linked ? linked.signal : timeout;
   try {
-    return await fetchImpl(path, {
+    const response = await fetchImpl(path, {
       method,
       headers,
       body: toBodyInit(options.body),
       signal,
       credentials: 'same-origin',
     });
+    // Released by the caller *after* the body is read: a stalled body is exactly
+    // what the deadline is for, and on an engine without `AbortSignal.any` the
+    // composed signal is fed only by this link.
+    return { response, release: linked ? linked.release : () => undefined };
   } catch (error) {
+    // A failed request has no body to cover, so the listeners go back here.
+    linked?.release();
     // The caller's own abort is a deliberate cancellation, not a failure: let it
     // through untouched so callers can keep ignoring it.
     if (options.signal?.aborted) throw error;

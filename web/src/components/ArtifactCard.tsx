@@ -13,7 +13,7 @@ import { copyText } from '../lib/clipboard';
 import { downloadText, safeFilename } from '../lib/download';
 import { renderCodeBlock, renderMarkdown } from '../lib/markdown';
 import { renderMermaid } from '../lib/mermaid';
-import { hasSvgElement, sanitizeSvg } from '../lib/svg';
+import { hasSvgElement, prepareSvg, sanitizeSvg } from '../lib/svg';
 import * as store from '../state/store';
 import { activeTheme } from '../theme';
 import { Dialog } from './Dialog';
@@ -274,10 +274,10 @@ function ShadowSvg({
 
 /** An SVG artifact, sanitised and drawn inline so it can use the page's theme. */
 function SvgPreview({ spec }: { spec: ArtifactSpec }): JSX.Element {
-  const { html, ok } = useMemo(() => {
-    const sanitized = sanitizeSvg(spec.source);
-    return { html: sanitized, ok: hasSvgElement(sanitized) };
-  }, [spec.source]);
+  // Sanitising and probing is cached per source (see `prepareSvg`), so a row that
+  // scrolls out of the transcript's window and back reuses the parse instead of
+  // doing all three again.
+  const { html, ok } = prepareSvg(spec.source);
 
   if (!ok) {
     return (

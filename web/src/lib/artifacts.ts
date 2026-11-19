@@ -376,7 +376,37 @@ function looksLikeMermaid(head: string): boolean {
   );
 }
 
+/**
+ * The size above which a body is cheap-checked before it is parsed.
+ *
+ * [`isJson`] uses it one way only: a longer body whose first character cannot
+ * open a JSON value is *rejected* without a parse. Everything else is parsed in
+ * full, because a truncated parse of a valid document always fails and so can
+ * never answer the question. The cheap rejection is what keeps the common long
+ * documents (markdown, CSV, logs) off the parser at all.
+ */
+const JSON_HEAD_CHARS = 4096;
+
+/** What a JSON value can start with, right after its opening bracket. */
+const JSON_VALUE_START = /^[[{]\s*(?:"|\[|\{|\]|\}|-|\d|true\b|false\b|null\b)/;
+
+/**
+ * Does this document parse as JSON?
+ *
+ * Below {@link JSON_HEAD_CHARS} one `JSON.parse` answers it exactly. Above it, a
+ * parse of the whole body is the megabytes this exists to avoid, and the head
+ * alone cannot answer the question: a head that ends mid-string or mid-array
+ * always fails whatever the document is. So a long body is *rejected* on the
+ * cheap evidence — a first character that cannot open a JSON value — and
+ * otherwise judged by what the preview will actually do with it: the full parse.
+ * That keeps a bracketed log dump (`[2024-01-01] started`, `{name} is required`)
+ * out of the JSON pane, which would otherwise show a parse error instead of the
+ * text view it belongs in, and it hands the sniffer the non-json answer cheaply
+ * for the overwhelming majority of long documents (they do not start with a
+ * bracket at all).
+ */
 function isJson(text: string): boolean {
+  if (text.length > JSON_HEAD_CHARS && !JSON_VALUE_START.test(text)) return false;
   try {
     JSON.parse(text);
     return true;
@@ -504,12 +534,104 @@ export type TableRow = string[];
  * contain the delimiter, a doubled quote (`""`) is one quote character, and a
  * quoted field may span several lines. CRLF is handled. Nothing here is
  * sanitised for HTML — the table component builds DOM nodes, not markup.
+ *
+ * `maxRows` is how many rows the caller will show: past it, rows are counted
+ * rather than built (see [`scanTable`]).
  */
-export function parseTable(source: string, delimiter = ','): TableRow[] {
+export function parseTable(
+  source: string,
+  delimiter = ',',
+  maxRows = Number.POSITIVE_INFINITY,
+): TableRow[] {
+  return scanTable(source, delimiter, maxRows).rows;
+}
+
+/** What one pass over a delimited source found. */
+interface TableScan {
+  /** The rows that were built: at most the caller's limit. */
+  rows: TableRow[];
+  /** Every row the source holds, built or only counted. */
+  totalRows: number;
+  /** The widest row in fields, header included, built or only counted. */
+  columns: number;
+}
+
+/**
+ * Count the rows after the ones that were worth building.
+ *
+ * A quoted field may hold newlines, so the remainder cannot be counted by
+ * counting `\n`: this is the same state machine as [`scanTable`]'s loop with the
+ * field and row arrays left out, which is where the cost was (one cons string per
+ * character, one array per row).
+ */
+function countTableTail(
+  source: string,
+  from: number,
+  delimiter: string,
+): { rows: number; columns: number } {
+  let rows = 0;
+  let fields = 0;
+  let columns = 0;
+  let quoted = false;
+  // `field === ''` in the building loop: a quote only opens a quoted field at the
+  // start of one.
+  let atFieldStart = true;
+
+  for (let index = from; index < source.length; index += 1) {
+    const char = source[index] ?? '';
+    if (quoted) {
+      if (char === '"') {
+        if (source[index + 1] === '"') {
+          index += 1;
+          atFieldStart = false;
+        } else {
+          quoted = false;
+        }
+      } else {
+        atFieldStart = false;
+      }
+      continue;
+    }
+    if (char === '"' && atFieldStart) {
+      quoted = true;
+      continue;
+    }
+    if (char === delimiter) {
+      fields += 1;
+      atFieldStart = true;
+      continue;
+    }
+    if (char === '\n' || char === '\r') {
+      if (char === '\r' && source[index + 1] === '\n') index += 1;
+      columns = Math.max(columns, fields + 1);
+      rows += 1;
+      fields = 0;
+      atFieldStart = true;
+      continue;
+    }
+    atFieldStart = false;
+  }
+  // The same "a trailing newline is not an empty row" rule as the building loop.
+  if (fields > 0 || !atFieldStart) {
+    columns = Math.max(columns, fields + 1);
+    rows += 1;
+  }
+  return { rows, columns };
+}
+
+/**
+ * One pass over delimited text: build the first `maxRows` rows, count the rest.
+ *
+ * `buildTable` shows 200 rows and reports how many it hid. A 10 000-row CSV used
+ * to build all 10 000 row arrays before 9 800 of them were thrown away, so the
+ * tail is now counted without ever materialising a field.
+ */
+function scanTable(source: string, delimiter: string, maxRows: number): TableScan {
   const rows: TableRow[] = [];
   let row: string[] = [];
   let field = '';
   let quoted = false;
+  let columns = 0;
 
   for (let index = 0; index < source.length; index += 1) {
     const char = source[index] ?? '';
@@ -539,8 +661,17 @@ export function parseTable(source: string, delimiter = ','): TableRow[] {
       if (char === '\r' && source[index + 1] === '\n') index += 1;
       row.push(field);
       rows.push(row);
+      columns = Math.max(columns, row.length);
       row = [];
       field = '';
+      if (rows.length >= maxRows) {
+        const tail = countTableTail(source, index + 1, delimiter);
+        return {
+          rows,
+          totalRows: rows.length + tail.rows,
+          columns: Math.max(columns, tail.columns),
+        };
+      }
       continue;
     }
     field += char;
@@ -548,8 +679,9 @@ export function parseTable(source: string, delimiter = ','): TableRow[] {
   if (field !== '' || row.length > 0) {
     row.push(field);
     rows.push(row);
+    columns = Math.max(columns, row.length);
   }
-  return rows;
+  return { rows, totalRows: rows.length, columns };
 }
 
 /** The delimiter a `csv`/`tsv` artifact actually uses. */
@@ -582,14 +714,18 @@ export interface ArtifactTable {
  * past the caps is counted rather than dropped silently.
  */
 export function buildTable(spec: ArtifactSpec, delimiter?: string): ArtifactTable {
-  const rows = parseTable(spec.source, delimiter ?? tableDelimiter(spec.kind, spec.source));
-  const [first = [], ...rest] = rows;
-  let columns = first.length;
-  for (const row of rest) columns = Math.max(columns, row.length);
+  // One row past the display cap: the header plus the rows that are drawn, and
+  // the rest is counted instead of built.
+  const scan = scanTable(
+    spec.source,
+    delimiter ?? tableDelimiter(spec.kind, spec.source),
+    MAX_TABLE_ROWS + 1,
+  );
+  const [first = [], ...rest] = scan.rows;
   return {
     header: first.slice(0, MAX_TABLE_COLUMNS),
     rows: rest.slice(0, MAX_TABLE_ROWS).map((row) => row.slice(0, MAX_TABLE_COLUMNS)),
-    hiddenRows: Math.max(0, rest.length - MAX_TABLE_ROWS),
-    hiddenColumns: Math.max(0, columns - MAX_TABLE_COLUMNS),
+    hiddenRows: Math.max(0, scan.totalRows - 1 - MAX_TABLE_ROWS),
+    hiddenColumns: Math.max(0, scan.columns - MAX_TABLE_COLUMNS),
   };
 }

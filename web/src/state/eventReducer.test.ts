@@ -829,3 +829,188 @@ describe('queued messages', () => {
     expect(other).toBe(seeded);
   });
 });
+
+/**
+ * The three ways the transcript used to lie about a run's state:
+ * a warning that read as a failed run, a stray frame that re-armed the spinner,
+ * and a frame applied twice. Each test states the user-visible symptom, not the
+ * reducer field, so a future refactor cannot quietly reintroduce it.
+ */
+describe('applyEventToChat — state truthfulness', () => {
+  it('drops the failed-run banner when the run that warned then succeeded', () => {
+    // `Event::Error` is not terminal: the runtime raised this one for a steering
+    // message it could not persist (crates/kc-runtime/src/agent.rs:1273) and kept
+    // working. The old reducer left the banner up, so a successful answer sat
+    // under a red "Run failed" until the user dismissed it by hand.
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(
+      current,
+      event(2, 'error', {
+        message: 'could not persist a steering message: database is locked',
+        kind: 'store',
+      }),
+    );
+    expect(current.runError?.kind).toBe('store');
+
+    current = applyEventToChat(current, event(3, 'run_finished', { status: 'completed' }));
+
+    expect(current.runError).toBeNull();
+    expect(current.running).toBe(false);
+    expect(current.runStatus).toBe('completed');
+  });
+
+  it('keeps the run_finished message when the run really did fail', () => {
+    // The mid-run warning is superseded, not merged: the terminal frame is the
+    // only one that knows why the run died.
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(
+      current,
+      event(2, 'error', { message: 'stream hiccup', kind: 'provider' }),
+    );
+    current = applyEventToChat(
+      current,
+      event(3, 'run_finished', { status: 'failed', error: 'provider exploded' }),
+    );
+
+    expect(current.runError).toEqual({ runId: 'r_x', message: 'provider exploded', kind: null });
+  });
+
+  it('does not carry a banner from a cancelled run into the next one', () => {
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(
+      current,
+      event(2, 'error', { message: 'could not persist a delivered message', kind: 'store' }),
+    );
+    // The (fake) cancelled run. The cancel is the truth about how this run ended;
+    // a banner naming it would outlive the reason for it.
+    current = applyEventToChat(current, event(3, 'run_cancelled', { run_id: 'r_x' }));
+    expect(current.runError).toBeNull();
+
+    current = applyEventToChat(current, event(4, 'run_started', { prompt: 'Again' }));
+    expect(current.runError).toBeNull();
+    expect(current.running).toBe(true);
+  });
+
+  it('leaves a banner from another run alone', () => {
+    // Two tabs, one session: run r_y's failure is not something run r_x ending
+    // can declare settled.
+    let current: ChatState = {
+      ...state(),
+      running: true,
+      runId: 'r_x',
+      runError: { runId: 'r_y', message: 'the other tab failed', kind: null },
+    };
+    current = applyEventToChat(current, event(1, 'run_finished', { run_id: 'r_x', status: 'completed' }));
+    expect(current.runError?.message).toBe('the other tab failed');
+  });
+
+  it('ignores a delta that arrives after its own run finished', () => {
+    // A duplicated frame, or a late delivery on a second stream handle, used to
+    // append a second answer bubble and set `running: true` again - with no
+    // terminal frame left to lower it, so the chat said "Streaming" and the
+    // composer queued instead of sending until the next resync.
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(current, event(2, 'text_delta', { delta: 'the answer' }));
+    current = applyEventToChat(current, event(3, 'run_finished', { status: 'completed' }));
+    const settled = current;
+
+    current = applyEventToChat(current, event(4, 'text_delta', { delta: 'late' }));
+
+    expect(current.running).toBe(false);
+    expect(current.runStatus).toBe('completed');
+    expect(current.items).toHaveLength(settled.items.length);
+    const answers = current.items.filter(
+      (item) => item.kind === 'message' && item.role === 'assistant',
+    );
+    expect(answers).toHaveLength(1);
+    expect(answers[0]?.kind === 'message' ? answers[0].content : '').toBe('the answer');
+  });
+
+  it('ignores a reasoning delta that arrives after its own run finished', () => {
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(current, event(2, 'run_finished', { status: 'completed' }));
+    const settled = current;
+
+    current = applyEventToChat(current, event(3, 'reasoning_delta', { delta: 'still thinking' }));
+
+    expect(current.items).toBe(settled.items);
+    expect(current.running).toBe(false);
+  });
+
+  it('applies a duplicated frame once', () => {
+    // `text_delta` appends, so a replayed frame doubles the words. `seq` is
+    // monotonic per server process, which is what makes the copy recognisable.
+    const frame = event(7, 'text_delta', { delta: 'once' });
+    let current = applyEventToChat(state(), event(6, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(current, frame);
+    current = applyEventToChat(current, frame);
+
+    const answers = current.items.filter(
+      (item) => item.kind === 'message' && item.role === 'assistant',
+    );
+    expect(answers).toHaveLength(1);
+    expect(answers[0]?.kind === 'message' ? answers[0].content : '').toBe('once');
+
+    // And an older frame than the watermark is a replay too, not a rewind.
+    const before = current;
+    const older = applyEventToChat(current, event(5, 'notice', { level: 'info', message: 'stale' }));
+    expect(older).toBe(before);
+  });
+
+  it('keeps the dedupe working after a frame that carries no cursor', () => {
+    // A frame with no usable `seq` is deliberately applied (losing a real event
+    // is worse than drawing one twice), but it must not advance the watermark:
+    // `Math.max(lastSeq, undefined)` is `NaN`, and every later `seq <= NaN` is
+    // false, so one cursorless frame silently switched the dedupe off for good.
+    const cursorless = {
+      ts_ms: NOW,
+      session_id: 's_ab12',
+      run_id: 'r_x',
+      type: 'notice',
+      level: 'info',
+      message: 'from an older server',
+    } as unknown as KarucodeEvent;
+
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(current, cursorless);
+    expect(
+      current.items.some((item) => item.kind === 'notice' && item.message === 'from an older server'),
+    ).toBe(true);
+    expect(current.lastSeq).toBe(1);
+
+    current = applyEventToChat(current, event(5, 'text_delta', { delta: 'once' }));
+    const settled = current;
+    expect(settled.lastSeq).toBe(5);
+    current = applyEventToChat(current, event(5, 'text_delta', { delta: 'once' }));
+
+    expect(current).toBe(settled);
+    const answers = current.items.filter(
+      (item) => item.kind === 'message' && item.role === 'assistant',
+    );
+    expect(answers).toHaveLength(1);
+    expect(answers[0]?.kind === 'message' ? answers[0].content : '').toBe('once');
+  });
+
+  it('still applies the replay paths that are exempt from the watermark', () => {
+    let current = applyEventToChat(state(), event(9, 'run_started', { prompt: 'Hi' }));
+
+    // `stream_lagged` is stamped with the last *dropped* seq, so its cursor can be
+    // older than what is applied - `api/events.ts` deliberately lets it past its
+    // own dedupe, and the hole it reports must reach the transcript.
+    current = applyEventToChat(current, event(5, 'stream_lagged', { skipped: 3 }));
+    expect(current.items.some((item) => item.kind === 'notice')).toBe(true);
+
+    // A frame with no usable cursor is never dropped: an older server that sends
+    // `seq: 0` would otherwise lose every event after the first.
+    const noCursor = applyEventToChat(current, event(0, 'notice', { level: 'info', message: 'old server' }));
+    expect(noCursor.items.length).toBe(current.items.length + 1);
+
+    // The snapshot reseeds the watermark, so the frames `drainRefreshQueue`
+    // replays after it (collected while the read was in flight) still apply even
+    // though the stream had already moved past them.
+    const seeded = seedChatState(detailFixture);
+    expect(seeded.lastSeq).toBe(0);
+    const replayed = applyEventToChat(seeded, event(4, 'notice', { level: 'info', message: 'queued while reading' }));
+    expect(replayed.items.some((item) => item.kind === 'notice' && item.message === 'queued while reading')).toBe(true);
+  });
+});

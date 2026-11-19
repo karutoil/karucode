@@ -4,7 +4,14 @@ import { emptyUsage } from '../lib/sessionInfo';
 import * as actions from './actions';
 import * as store from './store';
 import type { SessionInfo } from '../api/types';
-import { approvalFixture, detailFixture, jsonResponse, errorResponse, resetAppState } from '../test/fixtures';
+import {
+  approvalFixture,
+  detailFixture,
+  jsonResponse,
+  errorResponse,
+  resetAppState,
+  summaryFixture,
+} from '../test/fixtures';
 
 /**
  * What these cover.
@@ -87,6 +94,203 @@ afterEach(() => {
   globalThis.fetch = realFetch;
   resetAppState();
   vi.restoreAllMocks();
+});
+
+describe('bootstrap failure', () => {
+  /** A server that answers every read boot makes, and nothing else. */
+  function healthy(url: string): Response {
+    if (url === '/api/health') {
+      return jsonResponse({
+        status: 'ok',
+        version: 'test',
+        uptime_secs: 1,
+        workspace: null,
+        projects: [],
+        auth_required: false,
+        provider_configured: true,
+        db: 'ok',
+      });
+    }
+    if (url === '/api/config') return jsonResponse({});
+    if (url.startsWith('/api/projects')) return jsonResponse({ workspace: null, projects: [] });
+    if (url.startsWith('/api/sessions')) return jsonResponse({ sessions: [], annotations: [] });
+    if (url.startsWith('/api/agents')) return jsonResponse({ agents: [] });
+    if (url.startsWith('/api/onboarding')) {
+      return jsonResponse({ needed: false, completed: true, step: 0 });
+    }
+    // The event stream and the release host may fail: neither decides the boot.
+    throw new Error(`unexpected ${url}`);
+  }
+
+  it('lands on the boot error screen, and a frame the reconnect pass cannot apply does not reject the boot', async () => {
+    // Two pre-fix failures meet in this one boot. `releaseBootstrapEvents` replayed
+    // the buffered frames with no guard, so one frame shape a reducer does not
+    // defend against threw out of the `finally` and rejected `bootstrap()`; and
+    // nothing caught that rejection. The boot screen's Retry is
+    // `void actions.bootstrap(true)`, so an unhandled rejection there is exactly
+    // the permanent skeleton: no error text, no Retry, nothing but a reload.
+    //
+    // This is a Retry after the app had been up once, so a session and its
+    // transcript are already on screen and one frame is enough to reach a reducer.
+    store.sessions.value = [summaryFixture];
+    store.currentSessionId.value = summaryFixture.id;
+    store.chat.value = { ...emptyChatState(), sessionId: summaryFixture.id };
+
+    let push: ((frame: string) => void) | null = null;
+    let failHealth: (error: unknown) => void = () => undefined;
+    const healthWire = new Promise<Response>((_resolve, reject) => {
+      failHealth = reject;
+    });
+    stubFetch((url) => {
+      if (url === '/api/events') {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              push = (frame) => controller.enqueue(new TextEncoder().encode(frame));
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'text/event-stream',
+              'X-Karucode-Event-Epoch': 'boot-failure-test',
+            },
+          },
+        );
+      }
+      // The health read is what holds the boot open while the frame below lands.
+      if (url === '/api/health') return healthWire;
+      return healthy(url);
+    });
+
+    const booting = actions.bootstrap();
+    await vi.waitFor(() => expect(push).not.toBeNull());
+    // `approval_requested` with no `approval` is a shape a newer server, or a bug,
+    // can send; the reducer dereferences it and throws. While the boot is open the
+    // frame is buffered, so only the release pass below can apply it.
+    push!(
+      `id: 5\ndata: ${JSON.stringify({
+        seq: 5,
+        ts_ms: 5,
+        session_id: summaryFixture.id,
+        run_id: 'r_x',
+        type: 'approval_requested',
+      })}\n\n`,
+    );
+    // Let the stream reader hand the frame to the bootstrap buffer.
+    await new Promise((done) => setTimeout(done, 25));
+
+    failHealth(new Error('the server is down'));
+    await expect(booting).resolves.toBeUndefined();
+    expect(store.boot.value).toBe('error');
+    expect(store.bootError.value ?? '').toContain('the server is down');
+
+    // Retry while the server is still down: back to the error screen, never a
+    // skeleton with a swallowed rejection behind it.
+    await expect(actions.bootstrap(true)).resolves.toBeUndefined();
+    expect(store.boot.value).toBe('error');
+
+    // And once the server answers again, the same call boots the workspace.
+    stubFetch(healthy);
+    await actions.bootstrap(true);
+    expect(store.boot.value).toBe('ready');
+    expect(store.bootError.value).toBeNull();
+  });
+
+  it('never lets a superseded boot leave its session list behind', async () => {
+    // Ownership used to be checked once, at the end: a boot superseded while its
+    // session read was in flight still committed that list, so the newer run's
+    // transcript sat beside the older run's rows.
+    const staleRead = deferred<Response>();
+    let staleFired = false;
+    let sessionCalls = 0;
+    stubFetch((url) => {
+      if (url.startsWith('/api/sessions')) {
+        sessionCalls += 1;
+        if (!staleFired) {
+          staleFired = true;
+          return staleRead.promise;
+        }
+      }
+      return healthy(url);
+    });
+
+    const stale = actions.bootstrap(true);
+    // Wait until the stale run is parked on its session read...
+    await vi.waitFor(() => expect(sessionCalls).toBe(1));
+    // ...then supersede it. The newer run reads from the live handler.
+    const fresh = actions.bootstrap(true);
+    await fresh;
+    expect(store.boot.value).toBe('ready');
+
+    // The stale read completes last, carrying a row the current run never saw.
+    staleRead.resolve(
+      new Response(JSON.stringify({ sessions: [{ id: 'stale_row', title: 'stale' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    await stale;
+
+    expect(store.sessions.value.some((row) => row.id === 'stale_row')).toBe(false);
+    expect(store.boot.value).toBe('ready');
+  });
+
+  it('never lets a superseded boot paint its own outcome over the newer one', async () => {
+    // Retry starts a second boot while the first is still waiting on the server.
+    // The older one used to be the last writer: its failure landed after the
+    // workspace had loaded and replaced it with the error screen.
+    let failFirstHealth: (error: unknown) => void = () => undefined;
+    const firstHealth = new Promise<Response>((_resolve, reject) => {
+      failFirstHealth = reject;
+    });
+    let healthCalls = 0;
+    stubFetch((url) => {
+      if (url === '/api/health') {
+        healthCalls += 1;
+        return healthCalls === 1 ? firstHealth : healthy(url);
+      }
+      return healthy(url);
+    });
+
+    const first = actions.bootstrap(true);
+    const second = actions.bootstrap(true);
+    await second;
+    expect(store.boot.value).toBe('ready');
+
+    failFirstHealth(new Error('the server is down'));
+    await first;
+    expect(store.boot.value).toBe('ready');
+    expect(store.bootError.value).toBeNull();
+  });
+
+  it('keeps the newer boot’s failure even when the older one succeeds late', async () => {
+    // The mirror case from the same overlap: a stale success must not hide the
+    // error the current boot is showing.
+    let failSecondHealth: (error: unknown) => void = () => undefined;
+    const secondHealth = new Promise<Response>((_resolve, reject) => {
+      failSecondHealth = reject;
+    });
+    let healthCalls = 0;
+    stubFetch((url) => {
+      if (url === '/api/health') {
+        healthCalls += 1;
+        if (healthCalls === 2) return secondHealth;
+        return healthy(url);
+      }
+      return healthy(url);
+    });
+
+    const first = actions.bootstrap(true);
+    const second = actions.bootstrap(true);
+    failSecondHealth(new Error('the server is down'));
+    await second;
+    expect(store.boot.value).toBe('error');
+
+    await first;
+    expect(store.boot.value).toBe('error');
+    expect(store.bootError.value ?? '').toContain('the server is down');
+  });
 });
 
 describe('refreshSessionInfo', () => {

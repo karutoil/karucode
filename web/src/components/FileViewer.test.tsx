@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/preact';
-import { FileViewer } from './FileViewer';
+import { FileViewer, splitLines } from './FileViewer';
 import { errorResponse, jsonResponse, resetAppState } from '../test/fixtures';
 import * as store from '../state/store';
 
@@ -554,6 +554,37 @@ describe('FileViewer', () => {
     await waitFor(() => expect(screen.getByRole('tab', { name: /preview/i })).toBeTruthy());
   });
 
+  it('splits a large document into lines once, not once per keystroke', async () => {
+    const content = Array.from({ length: 4_000 }, (_, index) => `line ${index} of it`).join('\n');
+    installFetch({ content, size: content.length, language: 'text', path: 'logs/big.log' });
+    store.fileViewerPath.value = 'logs/big.log';
+
+    // The memo is a one-entry cache keyed by value, so two equal strings are the
+    // same key: only counting the splits of *this* document can tell a cached
+    // render from a re-split one.
+    const split = vi.spyOn(String.prototype, 'split');
+    const splits = (): number =>
+      split.mock.calls.filter((_, index) => split.mock.contexts[index] === content).length;
+
+    render(<FileViewer />);
+    await waitFor(() => expect(document.querySelector('.file-code')).not.toBeNull());
+    const afterLoad = splits();
+    expect(afterLoad).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }));
+    const editor = await waitFor(() => {
+      const found = document.querySelector<HTMLTextAreaElement>('.file-editor');
+      if (!found) throw new Error('no editor yet');
+      return found;
+    });
+    // Every keystroke re-renders the viewer, gutter and status bar included.
+    fireEvent.input(editor, { target: { value: `${content}!` } });
+    fireEvent.input(editor, { target: { value: `${content}!!` } });
+
+    expect(splits()).toBe(afterLoad);
+    expect(document.querySelector('.file-statusbar')?.textContent).toContain('4000 lines');
+  });
+
   it('makes the file-view tabs keyboard-operable, with one tab-in-tablist', async () => {
     // The strip used to be two plain buttons with `role="tab"`: no `tabIndex={-1}`
     // on the inactive one, no arrow-key model, no ids for `aria-controls`. `Tabs`
@@ -593,5 +624,25 @@ describe('FileViewer', () => {
     // Home goes back to the first tab, which wraps the other way round.
     fireEvent.keyDown(screen.getByRole('tab', { name: /source/i }), { key: 'Home' });
     await waitFor(() => expect(screen.getByTestId('file-preview-markdown')).toBeTruthy());
+  });
+});
+
+describe('splitLines', () => {
+  it('keeps both documents while two are read side by side', () => {
+    // An editor tab and a preview of another file render in the same commit. A
+    // one-slot memo re-split whichever file was not the last one asked for, on
+    // every keystroke - a 2 MiB copy and a ~100 000-element array each time.
+    const left = Array.from({ length: 500 }, (_, index) => `left ${index}`).join('\n');
+    const right = Array.from({ length: 500 }, (_, index) => `right ${index}`).join('\n');
+
+    const first = splitLines(left);
+    splitLines(right);
+    // Same array instance: no second split of `left`.
+    expect(splitLines(left)).toBe(first);
+  });
+
+  it('still splits a document it has never seen', () => {
+    const lines = splitLines('a\nb\nc');
+    expect(lines).toEqual(['a', 'b', 'c']);
   });
 });

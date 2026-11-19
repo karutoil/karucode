@@ -864,7 +864,7 @@ describe('ChatView workspace tabs', () => {
   it('only offers the session-list button while the rail is collapsed', () => {
     renderChat();
     const toggle = (): HTMLElement => screen.getByRole('button', { name: 'Toggle session list' });
-    // Rendered for narrow viewports and for desktop once `Ctrl+B` hides the rail;
+    // Rendered for narrow viewports and for desktop once `Ctrl/Cmd+\` hides the rail;
     // CSS hides it otherwise, and the class is what carries that rule.
     expect(toggle().classList.contains('sessions-toggle')).toBe(true);
     expect(toggle().querySelector('svg')?.getAttribute('width')).toBe('15');

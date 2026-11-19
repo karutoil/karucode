@@ -180,6 +180,50 @@ function upsertAgent(state: ChatState, agentId: string, update: (agent: AgentVie
 }
 
 /**
+ * Has this frame already been folded into the transcript?
+ *
+ * `seq` is monotonic per server process, which is the only thing that makes a
+ * duplicate frame recognisable. `api/events.ts` de-duplicates across reconnects,
+ * but it is not the only way a frame reaches this reducer: `drainRefreshQueue`
+ * replays every frame collected while a snapshot was in flight, `restartStream`
+ * hands later frames to a fresh handle, and any future path that calls
+ * `applyEventToChat` twice with the same event was applied rather than ignored.
+ * `text_delta` appends, so one duplicated frame doubles words on screen and the
+ * reader cannot tell which copy is real.
+ *
+ * Two shapes are deliberately exempt:
+ * - `stream_lagged` is a transport marker stamped with the last *dropped* seq, so
+ *   its cursor can be older than what is already applied. `api/events.ts` lets it
+ *   through its own dedupe for exactly this reason, and it must still report the
+ *   hole instead of being swallowed here as a replay.
+ * - A frame with no usable `seq` (an older server, a test seam) is never dropped:
+ *   losing a real event is a worse lie than drawing one twice.
+ */
+function isReplayedFrame(state: ChatState, event: KarucodeEvent): boolean {
+  if (event.type === 'stream_lagged') return false;
+  if (!Number.isFinite(event.seq) || event.seq <= 0) return false;
+  return event.seq <= state.lastSeq;
+}
+
+/**
+ * A delta for a run this view has already settled.
+ *
+ * `run_finished` closed the segment and set `running: false`, and only a terminal
+ * frame ever lowers the spinner again (`stopActiveWork`). So a delta that arrives
+ * behind the frame which ended its own run cannot be applied: it would open a
+ * second bubble for the answer and re-arm `running`, which makes the transcript
+ * say "Streaming" and the composer queue the next message against a run that no
+ * longer exists - with nothing left to un-arm it but a resync. A delta for a run
+ * this view has not settled (no id, or a different run) is still applied: the
+ * server emits `run_started` first, but dropping real output would be worse.
+ */
+function isLateDelta(state: ChatState, event: KarucodeEvent): boolean {
+  if (state.running) return false;
+  const runId = event.run_id ?? null;
+  return runId !== null && runId === state.runId;
+}
+
+/**
  * Pure reducer for the open session's transcript. Unknown event types, events
  * from other sessions and subagent text/tool events are ignored. Session list
  * updates live in `applyEventToSessions`.
@@ -187,11 +231,17 @@ function upsertAgent(state: ChatState, agentId: string, update: (agent: AgentVie
 export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatState {
   if (state.sessionId === null) return state;
   if (event.session_id && event.session_id !== state.sessionId) return state;
+  if (isReplayedFrame(state, event)) return state;
 
   const sessionId = state.sessionId;
   const runId = event.run_id ?? state.runId;
   const at = event.ts_ms;
-  const seen = { ...state, lastSeq: Math.max(state.lastSeq, event.seq) };
+  // The watermark only advances on a cursor it can trust. A frame without one
+  // (an older server, a test seam — exactly the case `isReplayedFrame` tolerates)
+  // must not poison it: `Math.max(lastSeq, undefined)` is `NaN`, and `seq <= NaN`
+  // is false forever, which would quietly switch the dedupe off for this session.
+  const watermark = Number.isFinite(event.seq) && event.seq > 0 ? event.seq : state.lastSeq;
+  const seen = { ...state, lastSeq: Math.max(state.lastSeq, watermark) };
 
   switch (event.type) {
     case 'run_started': {
@@ -235,6 +285,7 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
     case 'text_delta': {
       if (event.agent_id) return state;
       if (!event.delta) return seen;
+      if (isLateDelta(state, event)) return seen;
       const current = findItem(
         state,
         (item) => item.kind === 'message' && item.role === 'assistant' && item.streaming,
@@ -299,6 +350,9 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
     case 'reasoning_delta': {
       if (event.agent_id) return state;
       if (!event.delta) return seen;
+      // Same late frame as `text_delta`: a reasoning bubble opened after the run
+      // settled would stay `streaming` forever, because no terminal frame follows.
+      if (isLateDelta(state, event)) return seen;
       const current = findItem(
         state,
         (item) => item.kind === 'message' && item.role === 'assistant' && item.streaming,
@@ -609,6 +663,17 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
     case 'run_finished': {
       const status: RunStatus = event.status;
       let next = stopActiveWork(seen);
+      // `error` is not a terminal event. The runtime raises it mid-loop for
+      // secondary failures it then works around - a steered message it could not
+      // persist (crates/kc-runtime/src/agent.rs:1273), a store write, a usage row -
+      // and the run carries on and finishes normally. So the banner has to be
+      // settled by the frame that ends the run, *for that run*: otherwise a warned
+      // but successful run keeps a red "Run failed" above its own answer until the
+      // user dismisses it, because nothing else clears it before the next
+      // `run_started`.
+      const ownsError =
+        next.runError !== null &&
+        (next.runError.runId === null || next.runError.runId === event.run_id);
       if (status === 'failed') {
         next = {
           ...next,
@@ -618,7 +683,12 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
             kind: null,
           },
         };
-      } else if (status === 'cancelled') {
+      } else if (ownsError) {
+        // A run that did not fail has no failed banner; `limit_reached` and
+        // `cancelled`/`interrupted` get their own, accurate notice below.
+        next = { ...next, runError: null };
+      }
+      if (status === 'cancelled') {
         next = appendNotice(next, `cancelled:${event.run_id}`, 'info', 'Run cancelled.', at);
       } else if (status === 'interrupted') {
         next = appendInterrupted(next, event.run_id, at);
@@ -649,7 +719,16 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
     }
 
     case 'run_cancelled': {
-      const next = stopActiveWork(seen);
+      let next = stopActiveWork(seen);
+      // Same reason as `run_finished`: the cancel ends this run, so a "Run failed"
+      // banner raised by an error inside it is no longer true - the notice below
+      // is what the reader is owed.
+      if (
+        next.runError !== null &&
+        (next.runError.runId === null || next.runError.runId === event.run_id)
+      ) {
+        next = { ...next, runError: null };
+      }
       return {
         ...appendNotice(next, `cancelled:${event.run_id}`, 'info', 'Run cancelled.', at),
         running: false,

@@ -10,6 +10,7 @@ import {
 } from './fixtures';
 import type { Health } from '../api/types';
 import * as store from '../state/store';
+import * as workbench from '../state/workbench';
 import { controlPlaneOpen } from '../state/controlPlane';
 
 const healthFixture: Health = {
@@ -353,23 +354,159 @@ describe('Shell shortcuts', () => {
     vi.unstubAllGlobals();
   });
 
-  it('opens and closes the Theme Studio with Ctrl/Cmd+Shift+T', async () => {
+  it('leaves the Shift chords to a field that has the caret', async () => {
+    // `Mod+Shift+L` and `Mod+Shift+X` are text chords in both engines; firing
+    // them from the composer swallowed the keystroke and opened a panel.
     installFetch();
     render(<App />);
     await waitFor(() => expect(store.boot.value).toBe('ready'));
     await flushEffects();
 
-    fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
+    const field = document.querySelector('textarea') as HTMLTextAreaElement | null;
+    expect(field).not.toBeNull();
+    field!.focus();
+
+    const studio = fireEvent.keyDown(field!, { key: 'L', ctrlKey: true, shiftKey: true });
+    expect(store.themeStudioOpen.value).toBe(false);
+    // Not claimed: the field still gets the key.
+    expect(studio).toBe(true);
+
+    fireEvent.keyDown(field!, { key: 'X', ctrlKey: true, shiftKey: true });
+    expect(store.themeStudioOpen.value).toBe(false);
+  });
+
+  it('opens and closes the Theme Studio with Ctrl/Cmd+Shift+L', async () => {
+    installFetch();
+    render(<App />);
+    await waitFor(() => expect(store.boot.value).toBe('ready'));
+    await flushEffects();
+
+    fireEvent.keyDown(window, { key: 'L', ctrlKey: true, shiftKey: true });
     expect(store.themeStudioOpen.value).toBe(true);
 
-    fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(window, { key: 'L', ctrlKey: true, shiftKey: true });
     expect(store.themeStudioOpen.value).toBe(false);
 
-    fireEvent.keyDown(window, { key: 'T', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(window, { key: 'l', metaKey: true, shiftKey: true });
     expect(store.themeStudioOpen.value).toBe(true);
 
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(store.themeStudioOpen.value).toBe(false);
+  });
+
+  it('leaves the browser its own Mod+Shift+T instead of half-handling it', async () => {
+    installFetch();
+    render(<App />);
+    await waitFor(() => expect(store.boot.value).toBe('ready'));
+    await flushEffects();
+
+    // Reopen-closed-tab: the page is not reliably asked, so taking it would
+    // either lose the key or open the studio behind the reader's back.
+    const reopen = new KeyboardEvent('keydown', {
+      key: 'T',
+      ctrlKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(reopen);
+    expect(store.themeStudioOpen.value).toBe(false);
+    expect(reopen.defaultPrevented).toBe(false);
+  });
+
+  it('leaves a bare Ctrl+letter to the field on Apple platforms', async () => {
+    // On macOS the app's chords are meta-based, so `Ctrl+K`/`Ctrl+B`/`Ctrl+N` in
+    // a field are emacs editing keys (kill-line, cursor-left, next line) and the
+    // shell must not take them - and must not swallow the browser default either.
+    vi.stubGlobal('navigator', { ...navigator, platform: 'MacIntel', userAgent: navigator.userAgent });
+    installFetch();
+    render(<App />);
+    await waitFor(() => expect(store.boot.value).toBe('ready'));
+    await flushEffects();
+
+    const composer = screen.getByLabelText('Message karucode');
+    composer.focus();
+    const railBefore = store.railCollapsed.value;
+    for (const chord of [
+      { key: 'k', ctrlKey: true },
+      { key: 'n', ctrlKey: true },
+      { key: 'l', ctrlKey: true, shiftKey: true },
+      { key: 'x', ctrlKey: true, shiftKey: true },
+      { key: '\\', ctrlKey: true },
+    ]) {
+      const event = new KeyboardEvent('keydown', { ...chord, bubbles: true, cancelable: true });
+      composer.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(store.paletteOpen.value).toBe(false);
+    expect(store.themeStudioOpen.value).toBe(false);
+    expect(store.railCollapsed.value).toBe(railBefore);
+    expect(workbench.contextOpen.value).toBe(false);
+    expect(store.draftSession.value).toBeNull();
+  });
+
+  it('still opens the palette with the app modifier from inside the composer', async () => {
+    // Ctrl+K on Windows/Linux, ⌘K on macOS: the caret stays put and the palette
+    // opens. Nobody reaches for Ctrl+K to edit text there, and this is the chord
+    // the composer exists next to.
+    installFetch();
+    render(<App />);
+    await waitFor(() => expect(store.boot.value).toBe('ready'));
+    await flushEffects();
+
+    const composer = screen.getByLabelText('Message karucode');
+    composer.focus();
+    const event = new KeyboardEvent('keydown', {
+      key: 'k',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    composer.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(store.paletteOpen.value).toBe(true);
+    expect(document.activeElement).toBe(composer);
+  });
+
+  it('opens the palette with ⌘K from the composer on an Apple platform', async () => {
+    vi.stubGlobal('navigator', { ...navigator, platform: 'MacIntel', userAgent: navigator.userAgent });
+    installFetch();
+    render(<App />);
+    await waitFor(() => expect(store.boot.value).toBe('ready'));
+    await flushEffects();
+
+    const composer = screen.getByLabelText('Message karucode');
+    composer.focus();
+    fireEvent.keyDown(composer, { key: 'k', metaKey: true });
+    expect(store.paletteOpen.value).toBe(true);
+  });
+
+  it('runs the rail and Context chords from the workspace', async () => {
+    installFetch();
+    render(<App />);
+    await waitFor(() => expect(store.boot.value).toBe('ready'));
+    await flushEffects();
+
+    // `Mod+\` replaced `Mod+B`, which is the bookmarks bar/sidebar everywhere.
+    const railBefore = store.railCollapsed.value;
+    fireEvent.keyDown(window, { key: '\\', ctrlKey: true });
+    expect(store.railCollapsed.value).toBe(!railBefore);
+
+    // `Mod+Shift+X` replaced `Mod+J`, which Gecko keeps for Downloads.
+    fireEvent.keyDown(window, { key: 'X', ctrlKey: true, shiftKey: true });
+    expect(workbench.contextOpen.value).toBe(true);
+    fireEvent.keyDown(window, { key: 'X', ctrlKey: true, shiftKey: true });
+    expect(workbench.contextOpen.value).toBe(false);
+
+    const palette = new KeyboardEvent('keydown', {
+      key: 'k',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(palette);
+    expect(store.paletteOpen.value).toBe(true);
+    expect(palette.defaultPrevented).toBe(true);
   });
 
   it('focuses the session search on "/" but not while typing in the composer', async () => {

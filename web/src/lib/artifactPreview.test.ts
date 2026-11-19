@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createArtifact } from '../api/endpoints';
-import { invalidateArtifact, publishArtifact, resetArtifactCache } from './artifactPreview';
+import {
+  artifactCacheStats,
+  invalidateArtifact,
+  publishArtifact,
+  resetArtifactCache,
+} from './artifactPreview';
 
 vi.mock('../api/endpoints', () => ({ createArtifact: vi.fn() }));
 
@@ -79,6 +84,83 @@ describe('artifact preview URLs', () => {
     await expect(old).resolves.toContain('/old');
 
     await expect(publishArtifact('<p>overlap</p>', 'dark')).resolves.toContain('/new456');
+    expect(createArtifact).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('the artifact cache budget', () => {
+  /** A resolved publish whose URL length is realistic for a scoped capability. */
+  function publishLarge(): void {
+    vi.mocked(createArtifact).mockImplementation(async ({ html }) => ({
+      id: `${html.length}`,
+      url: `/api/artifacts/${html.length}?capability=one-artifact-only`,
+      bytes: html.length,
+      theme: 'dark',
+    }));
+  }
+
+  it('retains less than eight megabytes of source across twenty 1 MiB mocks', async () => {
+    publishLarge();
+    // A cache key *is* the source, so each entry costs its own bytes: 128 of
+    // these was ~128 MB of strings alive for the tab's whole life.
+    const megabyte = 'x'.repeat(1024 * 1024);
+    for (let index = 0; index < 20; index += 1) {
+      await publishArtifact(`${index}:${megabyte}`, 'dark');
+    }
+
+    const stats = artifactCacheStats();
+    expect(stats.bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect(stats.entries).toBeGreaterThan(0);
+    expect(stats.entries).toBeLessThan(20);
+  });
+
+  it('drops a source generation when its entry is evicted', async () => {
+    publishLarge();
+    const megabyte = 'y'.repeat(1024 * 1024);
+    const kept = `kept:${megabyte}`;
+    // Two invalidations of one source make a generation that used to live
+    // forever, whether or not the source was still cached.
+    invalidateArtifact(kept, 'dark');
+    invalidateArtifact(kept, 'dark');
+    expect(artifactCacheStats().generations).toBe(1);
+
+    await publishArtifact(kept, 'dark');
+    for (let index = 0; index < 12; index += 1) {
+      await publishArtifact(`later-${index}:${megabyte}`, 'dark');
+    }
+
+    // Its entry is gone (evicted oldest-first) and the generation went with it.
+    expect(artifactCacheStats().generations).toBe(0);
+  });
+
+  it('keeps an invalidated source from refilling the cache while its POST is running', async () => {
+    let answer!: (value: { id: string; url: string; bytes: number; theme: 'dark' }) => void;
+    vi.mocked(createArtifact)
+      .mockImplementationOnce(
+        (() => new Promise((resolve) => { answer = resolve; })) as typeof createArtifact,
+      )
+      .mockResolvedValue({
+        id: 'fresh',
+        url: '/api/artifacts/fresh?capability=new',
+        bytes: 1,
+        theme: 'dark',
+      });
+    const megabyte = 'z'.repeat(1024 * 1024);
+    const source = `flight:${megabyte}`;
+    const pending = publishArtifact(source, 'dark');
+    invalidateArtifact(source, 'dark');
+    // More invalidation than the generation record may keep, so the oldest
+    // records are pruned - except the one still guarding a running POST.
+    const padding = 'p'.repeat(64 * 1024);
+    for (let index = 0; index < 200; index += 1) {
+      invalidateArtifact(`${index}:${padding}`, 'dark');
+    }
+    answer({ id: 'old', url: '/api/artifacts/old?capability=dead', bytes: 1, theme: 'dark' });
+    await pending;
+
+    // Had that generation been pruned, the stale URL would be cached now and
+    // this would hand it back without a second POST.
+    await expect(publishArtifact(source, 'dark')).resolves.toContain('/fresh');
     expect(createArtifact).toHaveBeenCalledTimes(2);
   });
 });

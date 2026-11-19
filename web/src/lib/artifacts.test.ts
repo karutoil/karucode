@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildTable,
   describeArtifact,
@@ -100,6 +100,44 @@ describe('sniffKind', () => {
     expect(sniffKind('# Title\n\nbody')).toBe('markdown');
     expect(sniffKind('data:image/png;base64,AAA')).toBe('image');
     expect(sniffKind('   ')).toBe('unknown');
+  });
+
+  it('rejects a long body on its first character without parsing it', () => {
+    // The head alone cannot answer "is this JSON": a 4 KiB slice of a valid
+    // document ends mid-string. So a long body is *rejected* on the cheap evidence
+    // (it cannot even open a JSON value) and otherwise judged by the full parse -
+    // the same parse the preview would do. Long markdown and CSV never start with
+    // a bracket, so they cost one regex and no parse at all.
+    const markdown = Array.from({ length: 6_000 }, (_, index) => `## Heading ${index}`).join('\n');
+    const csv = Array.from({ length: 10_000 }, (_, index) => `${index},item ${index},${index % 7}`).join(
+      '\n',
+    );
+
+    const parse = vi.spyOn(JSON, 'parse');
+    expect(sniffKind(markdown)).toBe('markdown');
+    expect(sniffKind(csv)).toBe('csv');
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it('names a real long JSON body json', () => {
+    const payload = JSON.stringify(
+      Array.from({ length: 8_000 }, (_, index) => ({ id: index, name: `item-${index}` })),
+    );
+    expect(payload.length).toBeGreaterThan(200_000);
+    expect(sniffKind(payload)).toBe('json');
+  });
+
+  it('keeps a bracketed log dump out of the JSON pane', () => {
+    // This is what the head-only fallback got wrong: a 4 KiB prefix that merely
+    // *looks* like the start of a JSON value was enough to route the document to
+    // the JSON preview, which then showed a parse error instead of the text view.
+    const log = Array.from({ length: 400 }, (_, index) => `[2024-01-0${index % 9}] started`).join('\n');
+    expect(log.length).toBeGreaterThan(4_096);
+    expect(sniffKind(log)).not.toBe('json');
+
+    const template = Array.from({ length: 400 }, (_, index) => `{name} is required (${index})`).join('\n');
+    expect(template.length).toBeGreaterThan(4_096);
+    expect(sniffKind(template)).not.toBe('json');
   });
 });
 
@@ -242,6 +280,50 @@ describe('parseTable', () => {
 
   it('returns nothing for empty input', () => {
     expect(parseTable('')).toEqual([]);
+  });
+
+  it('stops building rows once it is told how many it needs', () => {
+    // The table view shows 200 rows; a 10 000-row export used to build all 10 000
+    // row arrays, one cons string per character, and throw 9 800 of them away.
+    const source = Array.from({ length: 10_000 }, (_, index) => `row${index},${index}`).join('\n');
+    const rows = parseTable(source, ',', 3);
+    expect(rows).toEqual([
+      ['row0', '0'],
+      ['row1', '1'],
+      ['row2', '2'],
+    ]);
+  });
+
+  it('still counts the rows it did not build, quoting and all', () => {
+    const source = ['a,b', '"one\ntwo",2', '"three","4"', 'x,y', 'z,w'].join('\n');
+    const spec = parseFence('artifact csv', source)!;
+    // Two visible rows, and the quoted newline does not turn into a phantom row.
+    const table = buildTable(spec);
+    expect(table.rows).toEqual([
+      ['one\ntwo', '2'],
+      ['three', '4'],
+      ['x', 'y'],
+      ['z', 'w'],
+    ]);
+    expect(table.hiddenRows).toBe(0);
+    expect(table.hiddenColumns).toBe(0);
+  });
+});
+
+describe('buildTable on a large export', () => {
+  it('draws the first rows of a 10 000-row CSV and counts the rest exactly', () => {
+    const lines = ['id,name,qty'];
+    for (let index = 0; index < 10_000; index += 1) lines.push(`${index},item ${index},${index % 7}`);
+    const spec = parseFence('artifact csv', lines.join('\n'))!;
+    expect(spec.source.length).toBeLessThan(MAX_TABLE_CHARS);
+
+    const table = buildTable(spec);
+    expect(table.header).toEqual(['id', 'name', 'qty']);
+    expect(table.rows).toHaveLength(MAX_TABLE_ROWS);
+    expect(table.rows[0]).toEqual(['0', 'item 0', '0']);
+    expect(table.rows[MAX_TABLE_ROWS - 1]).toEqual(['199', 'item 199', '3']);
+    expect(table.hiddenRows).toBe(10_000 - MAX_TABLE_ROWS);
+    expect(table.hiddenColumns).toBe(0);
   });
 });
 

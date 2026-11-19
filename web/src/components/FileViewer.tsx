@@ -36,6 +36,40 @@ export type FileViewerHost = 'dialog' | 'tab';
 /** Keep the editing textarea inside the browser's comfort zone, not the server's cap. */
 const MAX_EDITOR_CHARS = 2 * 1024 * 1024;
 
+/**
+ * `content` split into its lines, worked out once per distinct document.
+ *
+ * The gutter draws one row per line and the status bar prints the count, and both
+ * read it on every render — including the render of every keystroke while the
+ * editor is open. Splitting there copied the whole loaded document and built one
+ * array element per line only to read `.length`: for a 2 MiB file that is a 2 MiB
+ * copy and a ~100 000-element array per keystroke, which is a visible hitch in
+ * Firefox. A few entries rather than one, keyed by value: one viewer plus the
+ * preview beside it renders two documents in the same commit, and a single slot
+ * would make them evict each other on every keystroke - the exact cost this is
+ * here to avoid. Insertion order is the recency order, and a hit is re-inserted.
+ */
+const SPLIT_CACHE_SIZE = 3;
+const splitCache = new Map<string, string[]>();
+
+export function splitLines(content: string): string[] {
+  const cached = splitCache.get(content);
+  if (cached) {
+    // Move to the newest position so the file on screen is never the one evicted.
+    splitCache.delete(content);
+    splitCache.set(content, cached);
+    return cached;
+  }
+  const lines = content.split('\n');
+  splitCache.set(content, lines);
+  while (splitCache.size > SPLIT_CACHE_SIZE) {
+    const oldest = splitCache.keys().next();
+    if (oldest.done) break;
+    splitCache.delete(oldest.value);
+  }
+  return lines;
+}
+
 function isConflict(cause: unknown): boolean {
   return cause instanceof ApiError && cause.status === 409;
 }
@@ -174,7 +208,7 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
   // preview of the draft rather than of the bytes on disk.
   const previewContent = editing ? draft : (file?.content ?? '');
 
-  const lineCount = file && !file.binary ? file.content.split('\n').length : 0;
+  const lineCount = file && !file.binary ? splitLines(file.content).length : 0;
 
   /**
    * Follow a link in a rendered preview to another workspace file. The dialog

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/preact';
+import { createEvent, fireEvent, render, screen, within } from '@testing-library/preact';
 import type { SessionSummary } from '../api/types';
 import {
   PROJECTS_HOVER_CLOSE_MS,
@@ -145,6 +145,42 @@ describe('SessionList', () => {
     fireEvent.input(input, { target: { value: 'Discard this' } });
     fireEvent.keyDown(input, { key: 'Escape' });
     expect(props.onRename).not.toHaveBeenCalled();
+  });
+
+  it('leaves the Enter that commits a rename composition to the IME', () => {
+    // A rename is typed in the reader's own language. The commit key both ends
+    // the composition and implicitly submits the rename form, so the field has
+    // to claim it - otherwise the session is renamed to half a word.
+    const { props } = renderList();
+    fireEvent.dblClick(screen.getByText('Fix login bug'));
+    const input = screen.getByLabelText(/Rename session/) as HTMLInputElement;
+    fireEvent.input(input, { target: { value: '修正' } });
+
+    const composing = createEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    fireEvent(input, composing);
+    // Prevented, which is what stops the browser submitting the form for it.
+    expect(composing.defaultPrevented).toBe(true);
+    // Firefox reports the same commit as keyCode 229 with `isComposing` false.
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 });
+    expect(props.onRename).not.toHaveBeenCalled();
+
+    // Only Enter is claimed. A composition's other keys have no submit to stop,
+    // and claiming them is the one shape of this guard that can stop the IME
+    // from delivering text: `fireEvent` answers false when the default was
+    // taken, so these two say the keys still reached the field.
+    expect(fireEvent.keyDown(input, { key: 'ArrowDown', isComposing: true })).toBe(true);
+    expect(fireEvent.keyDown(input, { key: 'a', keyCode: 229 })).toBe(true);
+
+    // A submit that arrives while a composition is open is the same half word.
+    fireEvent.compositionStart(input);
+    fireEvent.submit(input.closest('form') as HTMLFormElement);
+    expect(props.onRename).not.toHaveBeenCalled();
+    fireEvent.compositionEnd(input);
+
+    // A finished composition leaves Enter to the browser: it is what submits.
+    expect(fireEvent.keyDown(input, { key: 'Enter' })).toBe(true);
+    fireEvent.submit(input.closest('form') as HTMLFormElement);
+    expect(props.onRename).toHaveBeenCalledWith('s_ab12', '修正');
   });
 
   it('asks for confirmation before deleting', () => {
@@ -1165,6 +1201,25 @@ describe('the collapsed rail’s fly-out (RailPeek)', () => {
     expect(draft).toHaveBeenCalledTimes(1);
     expect(railPeek.peekProjectId.value).toBeNull();
     draft.mockRestore();
+  });
+
+  it('closes on Escape unless something inside already consumed it', () => {
+    railPeek.peekProjectId.value = 'p_karucode';
+    const { container } = render(<SessionsRail />);
+    const peek = container.querySelector('.rail-peek');
+    if (!peek) throw new Error('the fly-out did not render');
+
+    // A rename field or a menu inside the fly-out prevents the default and
+    // consumes its own Escape; the panel must not tear itself down as well, or
+    // the reader loses the edit *and* the list behind it.
+    const swallow = (event: Event): void => event.preventDefault();
+    peek.addEventListener('keydown', swallow);
+    fireEvent.keyDown(peek as HTMLElement, { key: 'Escape' });
+    peek.removeEventListener('keydown', swallow);
+    expect(railPeek.peekProjectId.value).toBe('p_karucode');
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(railPeek.peekProjectId.value).toBeNull();
   });
 
   it('switches to the peeked project before drafting in it', async () => {

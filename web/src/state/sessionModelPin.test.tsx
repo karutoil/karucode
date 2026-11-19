@@ -99,10 +99,15 @@ function testConfig(): Config {
   };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   resetAppState();
   store.boot.value = 'ready';
   actions.startStream();
+  // `startSharedEventStream` elects the tab that owns the one stream over
+  // BroadcastChannel before it subscribes, so the subscriber is installed a claim
+  // window (claimAckMs + jitter) later rather than on this tick. Wait for it, or
+  // every `emit` below fires into a stream that does not exist yet.
+  await vi.waitFor(() => expect(streamOptions).not.toBeNull());
 });
 
 afterEach(() => {

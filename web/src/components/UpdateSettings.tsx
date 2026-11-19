@@ -23,6 +23,7 @@
 import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { ApiError, toErrorMessage } from '../api/client';
+import { copyText } from '../lib/clipboard';
 import type { UpdatesPatch } from '../api/types';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
@@ -319,10 +320,13 @@ export function UpdateSettings({ disabled }: UpdateSettingsProps): JSX.Element {
                   onClick={() => {
                     const command = status?.restart.apply_command;
                     if (!command) return;
-                    void navigator.clipboard?.writeText(command).then(
-                      () => setCopied(true),
-                      () => setCopied(false),
-                    );
+                    // Through the shared helper: `navigator.clipboard` does not
+                    // exist on a plain-HTTP origin, and the optional chain this
+                    // used to call made the button silently do nothing there.
+                    void copyText(command).then((copied) => {
+                      setCopied(copied);
+                      if (!copied) store.pushToast('Clipboard is unavailable in this browser.', 'error');
+                    });
                   }}
                 >
                   {copied ? 'Copied' : 'Copy command'}

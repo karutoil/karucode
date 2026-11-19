@@ -605,6 +605,16 @@ body
   color: var(--text);
 }
 
+/* The list's 10px padding saves the side rings, but the first and last row sit
+ * on the scrollport's top and bottom edges: the global `:focus-visible` ring is
+ * drawn 2px + 2px outside the row's box and `.palette-list` (`overflow-y: auto`)
+ * clips whatever falls outside. Inset the ring rather than pad the list, so the
+ * row keeps its full-width hit area and the same answer as `.workspace-tab`,
+ * `.session-open` and `.model-switcher-option`. */
+.palette-item:focus-visible {
+  outline-offset: calc(-1 * var(--focus-ring-offset));
+}
+
 /* The row Enter will run. `--accent-bg` is §2's one active-state tint, the label
  * stays `--text` (it is read, not decorated), and the rail carries the accent. */
 .palette-item.is-active {

@@ -85,7 +85,7 @@ describe('theme studio shell', () => {
 
   it('opens from the store action used by the shell shortcut and closes on Escape', async () => {
     render(<ThemeStudio />);
-    // `app.tsx` owns the Ctrl/Cmd+Shift+T shortcut and calls this action.
+    // `app.tsx` owns the Ctrl/Cmd+Shift+L shortcut and calls this action.
     act(() => {
       actions.toggleThemeStudio();
     });
@@ -348,6 +348,45 @@ describe('interface settings', () => {
     expect(css.match(/ !important;$/gm)).toHaveLength(declarations.length);
     expect(css).not.toContain('--kc-');
     expect(css.endsWith('/* existing custom rule */')).toBe(true);
+  });
+
+  it('copies on a plain-HTTP origin, where there is no Clipboard API', async () => {
+    // `navigator.clipboard` is a secure-context API, so the documented LAN
+    // deployment has none: the button used to report a dead clipboard instead of
+    // copying through the legacy fallback every other copy button uses.
+    const clipboard = navigator.clipboard;
+    const exec = Object.getOwnPropertyDescriptor(document, 'execCommand');
+    const copied: string[] = [];
+    try {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      expect(navigator.clipboard).toBeUndefined();
+      Object.defineProperty(document, 'execCommand', {
+        configurable: true,
+        writable: true,
+        value: vi.fn(() => {
+          // The scratch field is the direct child of <body>; the drawer's own
+          // Custom CSS textarea is nested inside the portal.
+          const field = document.querySelector('body > textarea[readonly]');
+          if (field) copied.push((field as HTMLTextAreaElement).value);
+          return true;
+        }),
+      });
+
+      renderOpen();
+      fireEvent.click(screen.getByRole('button', { name: 'Copy variables' }));
+
+      await waitFor(() =>
+        expect(store.toasts.value.at(-1)).toMatchObject({
+          message: 'Theme variables copied.',
+          tone: 'success',
+        }),
+      );
+      expect(copied[0]).toContain(`--theme-accent: ${DEFAULT_THEME.colors.accent} !important;`);
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: clipboard });
+      if (exec) Object.defineProperty(document, 'execCommand', exec);
+      else Reflect.deleteProperty(document as unknown as Record<string, unknown>, 'execCommand');
+    }
   });
 
   it('shows the live contrast status', () => {

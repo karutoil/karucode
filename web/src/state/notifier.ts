@@ -163,8 +163,12 @@ export class Notifier {
     const message = payload.body ? `${payload.title} — ${payload.body}` : payload.title;
     this.deps.toast(message, KIND_TONES[kind], sessionId || undefined);
 
-    // 2. The sound. Independent of every permission.
-    const sound = await this.playCue(cueFor(payload));
+    // 2. The sound. Independent of every permission, and deliberately not awaited
+    //    before the desktop notification: a suspended AudioContext can keep
+    //    `resume()` pending until the user interacts (Gecko does exactly that),
+    //    and the desktop notification is the surface that exists for the tab
+    //    nobody is looking at. Sequencing them lost it.
+    const pendingSound = this.playCue(cueFor(payload));
 
     // 3. The desktop notification. Suppressed when the event is about what is
     //    already on screen: the toast and the badge cover that case.
@@ -179,7 +183,7 @@ export class Notifier {
 
     // 4. The badge was synchronously recorded above: it is unread unless this
     // was already visible in the open session.
-    return { toast: true, sound, desktop, badge };
+    return { toast: true, sound: await pendingSound, desktop, badge };
   }
 
   /** How many ids are remembered; exposed for the bound test. */

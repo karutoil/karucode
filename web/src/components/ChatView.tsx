@@ -342,7 +342,7 @@ function SessionHeader({
         <BranchChip onShowChanges={onShowChanges} />
         {/* The notification centre's way in. It lives in the header rather than on
          * the project rail because it is the one place a bell is reachable in every
-         * layout: the rail is collapsed by Ctrl+B on a desktop and hidden entirely
+         * layout: the rail is collapsed by Ctrl/Cmd+\ on a desktop and hidden entirely
          * on a phone. The counter is the same derived unread total the tab title
          * shows, so the two can never disagree. */}
         {isUiHidden(store.pluginUi.value, UI_HIDE_NOTIFICATIONS) ? null : (

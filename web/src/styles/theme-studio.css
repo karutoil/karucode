@@ -86,10 +86,18 @@
   overscroll-behavior: contain;
   padding: 0 var(--space-10) var(--space-9);
   scrollbar-gutter: stable;
-  /* base.css sets `thin`/`scrollbar-color`, which supersedes the 8px
-   * ::-webkit-scrollbar width and reserves ~15px; the mock reserves 8px. */
-  scrollbar-width: auto;
-  scrollbar-color: auto;
+  /* This used to revert to `scrollbar-width: auto; scrollbar-color: auto` to
+   * keep the mock's 8px bar: `thin` supersedes an 8px `::-webkit-scrollbar`
+   * width *in Chromium*, and the drawer's grid was tuned against 8px. The
+   * reasoning only holds in one engine. `::-webkit-scrollbar` is Chromium
+   * syntax that Gecko ignores, so in Firefox `auto` means the platform's own
+   * bar — 12px on this host, in platform colours, inside a dark themed dialog —
+   * and `scrollbar-gutter: stable` then reserves 12px instead of 8px, which is
+   * exactly the 4px drawer-width divergence the override was trying to avoid.
+   * Deleted: in Chromium the computed value falls back to `auto` anyway (the
+   * 8px pseudo-element thumb is what it was before), and in Gecko base.css's
+   * `@supports (-moz-appearance: none)` universal `thin` reaches this scroller
+   * like every other, so the drawer keeps one bar language and one gutter. */
 }
 
 .theme-section {
@@ -446,6 +454,43 @@
    * line-height; the mock leaves selects on their native line box (34px). */
   line-height: normal;
   cursor: pointer;
+  /* `appearance: none` above strips the UA arrow in Gecko *and* Blink, and a
+   * <select> cannot host an `::after` in either engine, so without this the two
+   * interface selects are pixel-identical to `.theme-name-input` and nothing
+   * says "this opens a list".
+   *
+   * The caret is drawn from the element's own background rather than an SVG
+   * `data:` URL because it has to follow the theme: a data-URL image is its own
+   * document and cannot see `var(--muted)`, so it would need a colour baked in
+   * per theme (and a second copy per light mode). Two hard-stop linear gradients
+   * are enough for the two strokes of a chevron — each 4px square is filled on
+   * one side of its own diagonal, so a box at 45deg paints "\\" and the same box
+   * at 135deg paints "/", and placing them side by side joins the strokes into
+   * one 8px-wide, 4px-tall "v". `--muted` is the quiet-ink rung the field labels
+   * already use. */
+  background-image:
+    linear-gradient(
+      45deg,
+      transparent calc(50% - (var(--hairline) / 2)),
+      var(--muted) calc(50% - (var(--hairline) / 2)),
+      var(--muted) calc(50% + (var(--hairline) / 2)),
+      transparent calc(50% + (var(--hairline) / 2))
+    ),
+    linear-gradient(
+      135deg,
+      transparent calc(50% - (var(--hairline) / 2)),
+      var(--muted) calc(50% - (var(--hairline) / 2)),
+      var(--muted) calc(50% + (var(--hairline) / 2)),
+      transparent calc(50% + (var(--hairline) / 2))
+    );
+  background-position:
+    calc(100% - var(--space-7) - var(--space-2)) calc(50% - var(--space-1)),
+    calc(100% - var(--space-7)) calc(50% - var(--space-1));
+  background-size: var(--space-2) var(--space-2);
+  background-repeat: no-repeat;
+  /* The label must not run under the caret: 10px padding, the 8px caret and 10px
+   * of air to its right is what the two stops above occupy at the field's edge. */
+  padding-right: calc(var(--space-5) * 2 + var(--space-4));
 }
 
 .theme-studio ::placeholder {

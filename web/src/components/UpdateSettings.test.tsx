@@ -227,6 +227,71 @@ describe('an available update', () => {
     ).toBeTruthy();
   });
 
+  /**
+   * The `sudo` command exists to be pasted into a terminal. On a plain-HTTP LAN
+   * origin — the documented remote setup — `navigator.clipboard` is undefined,
+   * and the optional chain used to make this button do nothing at all: no copy,
+   * no feedback.
+   */
+  it('copies the privileged command on a plain-HTTP origin', async () => {
+    const clipboard = navigator.clipboard;
+    const exec = Object.getOwnPropertyDescriptor(document, 'execCommand');
+    try {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      Object.defineProperty(document, 'execCommand', {
+        configurable: true,
+        writable: true,
+        value: vi.fn(() => true),
+      });
+
+      store.updateStatus.value = status({ install: ROOT_OWNED });
+      // The panel re-reads `/api/update` on mount and re-renders with the answer,
+      // so the fixture — not only the store — has to be the root-owned install.
+      vi.mocked(api.getUpdate).mockResolvedValue(status({ install: ROOT_OWNED }));
+      renderPanel();
+      fireEvent.click(screen.getByRole('button', { name: 'Copy command' }));
+
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Copied' })).toBeTruthy());
+      expect(vi.mocked(document.execCommand)).toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: clipboard });
+      if (exec) Object.defineProperty(document, 'execCommand', exec);
+      else Reflect.deleteProperty(document as unknown as Record<string, unknown>, 'execCommand');
+    }
+  });
+
+  it('says the copy failed instead of pretending it worked', async () => {
+    const clipboard = navigator.clipboard;
+    const exec = Object.getOwnPropertyDescriptor(document, 'execCommand');
+    try {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      // No Clipboard API and no legacy fallback: this copy cannot happen.
+      Object.defineProperty(document, 'execCommand', {
+        configurable: true,
+        writable: true,
+        value: vi.fn(() => false),
+      });
+
+      store.updateStatus.value = status({ install: ROOT_OWNED });
+      vi.mocked(api.getUpdate).mockResolvedValue(status({ install: ROOT_OWNED }));
+      renderPanel();
+      fireEvent.click(screen.getByRole('button', { name: 'Copy command' }));
+
+      await waitFor(() =>
+        expect(store.toasts.value.at(-1)).toMatchObject({
+          message: 'Clipboard is unavailable in this browser.',
+          tone: 'error',
+        }),
+      );
+      // The label must not claim a copy that did not happen.
+      expect(screen.getByRole('button', { name: 'Copy command' })).toBeTruthy();
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: clipboard });
+      if (exec) Object.defineProperty(document, 'execCommand', exec);
+      else Reflect.deleteProperty(document as unknown as Record<string, unknown>, 'execCommand');
+    }
+  });
+
   it('points a build tree at packaging/update.sh', () => {
     store.updateStatus.value = status({ install: SOURCE_TREE });
     renderPanel();

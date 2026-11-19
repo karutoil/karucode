@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConnectionState, RawEvent } from './types';
 import {
+  ELECTION_TIMINGS,
   EVENT_CHANNEL_NAME,
   EVENT_LEADER_LOCK,
   startSharedEventStream,
@@ -74,15 +75,21 @@ interface OpenStream {
   response: Response;
   push: (chunk: string) => void;
   end: () => void;
+  /** True once the reader cancelled the body, i.e. the tab stopped streaming. */
+  cancelled: () => boolean;
 }
 
 /** A response body the test controls frame by frame. */
 function openSse(): OpenStream {
   const encoder = new TextEncoder();
   let controller: ReadableStreamDefaultController<Uint8Array>;
+  let cancelled = false;
   const body = new ReadableStream<Uint8Array>({
     start(c) {
       controller = c;
+    },
+    cancel() {
+      cancelled = true;
     },
   });
   return {
@@ -92,6 +99,7 @@ function openSse(): OpenStream {
     }),
     push: (chunk: string) => controller.enqueue(encoder.encode(chunk)),
     end: () => controller.close(),
+    cancelled: () => cancelled,
   };
 }
 
@@ -107,6 +115,14 @@ function frame(seq: number, delta = 'x'): string {
 }
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5));
+
+/**
+ * Advance the fake clock, which is also what delivers a channel message: the fake
+ * channel posts on a timer, exactly like a real one that is never synchronous.
+ */
+async function settle(ms = 5): Promise<void> {
+  await vi.advanceTimersByTimeAsync(ms);
+}
 
 describe('the event stream shared between tabs', () => {
   beforeEach(() => {
@@ -251,6 +267,7 @@ describe('the event stream shared between tabs', () => {
 
   it('keeps a private stream when the browser has no channels or locks', async () => {
     vi.unstubAllGlobals();
+    vi.stubGlobal('BroadcastChannel', undefined);
     Reflect.deleteProperty(navigator as unknown as Record<string, unknown>, 'locks');
     const stream = openSse();
     const fetchImpl = vi.fn(async () => stream.response);
@@ -267,5 +284,184 @@ describe('the event stream shared between tabs', () => {
   it('names the channel and the lock it coordinates on', () => {
     expect(EVENT_CHANNEL_NAME).toBe('karucode.events');
     expect(EVENT_LEADER_LOCK).toBe('karucode.event-stream');
+  });
+});
+
+/**
+ * Gecko has no `navigator.locks` (`'locks' in navigator` is false on a real
+ * Firefox), so without the election below every tab opened its own `/api/events`
+ * — the six-socket exhaustion this module exists to prevent.
+ */
+describe('the election when the browser has no Web Locks', () => {
+  beforeEach(() => {
+    FakeChannel.reset();
+    vi.stubGlobal('BroadcastChannel', FakeChannel as unknown as typeof BroadcastChannel);
+    Reflect.deleteProperty(navigator as unknown as Record<string, unknown>, 'locks');
+    // If this ever holds, every case below would silently test the Web Locks
+    // path instead of the election.
+    expect('locks' in navigator).toBe(false);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('elects the only tab and opens one stream', async () => {
+    const stream = openSse();
+    const fetchImpl = vi.fn(async () => stream.response);
+
+    const tab = startSharedEventStream({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onEvent: vi.fn(),
+    });
+    // The claim comes first: a second tab must not find the stream already taken.
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    await settle(ELECTION_TIMINGS.claimAckMs + ELECTION_TIMINGS.claimJitterMs + 400);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(tab.getState()).toBe('open');
+
+    tab.stop();
+    stream.end();
+  });
+
+  it('makes a second tab a follower that receives the relayed frames', async () => {
+    const stream = openSse();
+    const fetchImpl = vi.fn(async () => stream.response);
+    const followerFrames: RawEvent[] = [];
+
+    const leader = startSharedEventStream({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onEvent: vi.fn(),
+    });
+    await settle(ELECTION_TIMINGS.claimAckMs + ELECTION_TIMINGS.claimJitterMs + 400);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    const follower = startSharedEventStream({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onEvent: (event) => followerFrames.push(event),
+    });
+    await settle(ELECTION_TIMINGS.claimAckMs + ELECTION_TIMINGS.claimJitterMs + 400);
+
+    // The whole point: the second tab never opened a connection of its own...
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // ...but reports the leader's state.
+    expect(follower.getState()).toBe('open');
+
+    stream.push(frame(1, 'relayed'));
+    await settle();
+    expect(followerFrames.map((event) => event.delta)).toEqual(['relayed']);
+
+    leader.stop();
+    follower.stop();
+    stream.end();
+  });
+
+  it('hands the stream over when the leader closes', async () => {
+    const first = openSse();
+    const second = openSse();
+    let call = 0;
+    const fetchImpl = vi.fn(async () => {
+      call += 1;
+      return call === 1 ? first.response : second.response;
+    });
+    const frames: RawEvent[] = [];
+    const states: ConnectionState[] = [];
+
+    const leader = startSharedEventStream({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onEvent: vi.fn(),
+    });
+    await settle(ELECTION_TIMINGS.claimAckMs + ELECTION_TIMINGS.claimJitterMs + 400);
+
+    const follower = startSharedEventStream({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onEvent: (event) => frames.push(event),
+      onStatus: (state) => states.push(state),
+    });
+    await settle(ELECTION_TIMINGS.claimAckMs + ELECTION_TIMINGS.claimJitterMs + 400);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    leader.stop();
+    // The follower claimed after its own jittered delay and took the stream.
+    await settle(ELECTION_TIMINGS.claimAckMs + ELECTION_TIMINGS.claimJitterMs + 400);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(follower.getState()).toBe('open');
+
+    second.push(frame(2, 'after the handover'));
+    await settle();
+    expect(frames.map((event) => event.delta)).toEqual(['after the handover']);
+    // It said so on the way: the badge never silently keeps saying "open".
+    expect(states).toContain('connecting');
+
+    follower.stop();
+    // `first` was already closed by the leader's own `stop()`.
+    second.end();
+  });
+
+  it('converges to one leader when two tabs claim at the same time', async () => {
+    const stream = openSse();
+    const fetchImpl = vi.fn(async () => stream.response);
+    const seen: string[] = [];
+
+    // Pin the jitter to zero for both tabs so their claims land on the same tick
+    // (Math.random also names the tab, hence two different ids).
+    const random = vi.spyOn(Math, 'random');
+    for (const value of [0.1, 0, 0.2, 0]) random.mockReturnValueOnce(value);
+
+    const one = startSharedEventStream({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onEvent: (event) => seen.push(`one:${event.delta ?? ''}`),
+    });
+    const two = startSharedEventStream({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onEvent: (event) => seen.push(`two:${event.delta ?? ''}`),
+    });
+
+    await settle(ELECTION_TIMINGS.claimAckMs + ELECTION_TIMINGS.claimJitterMs + 400);
+
+    // One claim won on both tabs; the loser became a follower instead of opening
+    // a second stream, and a claim/ack exchange is all it took.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(one.getState()).toBe('open');
+    expect(two.getState()).toBe('open');
+
+    stream.push(frame(1, 'both'));
+    await settle();
+    expect(seen.sort()).toEqual(['one:both', 'two:both']);
+
+    one.stop();
+    two.stop();
+    stream.end();
+  });
+
+  it('stands down when another tab turns out to be streaming too', async () => {
+    // The split-brain case: an ack lost in flight leaves two tabs that both
+    // believe they lead. The heartbeat of the other one is a `claim-ack` with a
+    // lower id, and the id order makes exactly one of them stand down.
+    const stream = openSse();
+    const fetchImpl = vi.fn(async () => stream.response);
+
+    const tab = startSharedEventStream({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      onEvent: vi.fn(),
+    });
+    await settle(ELECTION_TIMINGS.claimAckMs + ELECTION_TIMINGS.claimJitterMs + 400);
+    expect(tab.getState()).toBe('open');
+    expect(stream.cancelled()).toBe(false);
+
+    const ghost = new FakeChannel(EVENT_CHANNEL_NAME);
+    // `-` sorts before every base36 tab id, so the ghost leads the tie-break.
+    ghost.postMessage({ kind: 'claim-ack', from: '-ghost', state: 'open' });
+    // Long enough for the handover to finish tearing the connection down.
+    await settle(1500);
+
+    // It gave up its own connection instead of holding a second one.
+    expect(stream.cancelled()).toBe(true);
+
+    ghost.close();
+    tab.stop();
   });
 });

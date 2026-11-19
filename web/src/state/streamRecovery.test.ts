@@ -12,9 +12,22 @@ import * as store from './store';
  * session without destroying what is already on screen.
  */
 
-let push: (payload: Record<string, unknown>) => void;
+let push: ((payload: Record<string, unknown>) => void) | null = null;
 let getSessionCalls = 0;
 let detailToReturn: SessionDetail;
+
+/**
+ * Send one frame on the stream *this* test opened.
+ *
+ * `startSharedEventStream` claims the browser-wide channel before it opens
+ * `/api/events`, so the response body is attached a claim window
+ * (claimAckMs + jitter) after `startStream` - and the previous test's `push`
+ * points at a body that has already been cancelled.
+ */
+function emit(payload: Record<string, unknown>): void {
+  if (!push) throw new Error('event stream did not open');
+  push(payload);
+}
 
 function sseStream(): Response {
   const stream = new ReadableStream<Uint8Array>({
@@ -96,6 +109,10 @@ beforeEach(() => {
   resetAppState();
   getSessionCalls = 0;
   detailToReturn = detailFixture;
+  // The previous test's body is cancelled by the teardown; a `push` left over
+  // from it would throw "Controller is already closed" instead of failing to
+  // find this test's stream.
+  push = null;
   installRouter();
   store.boot.value = 'ready';
   store.sessions.value = [summaryFixture];
@@ -110,9 +127,12 @@ afterEach(() => {
 });
 
 async function openRun(answer = 'the streamed answer'): Promise<void> {
+  // The shared stream claims the browser-wide channel before it opens
+  // `/api/events`, so this test's body is attached a claim window
+  // (claimAckMs + jitter) after `startStream`.
   await vi.waitFor(() => expect(typeof push).toBe('function'), { timeout: 3000 });
-  push({ seq: 1, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'run_started', prompt: 'Go' });
-  push({ seq: 2, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'text_delta', delta: answer });
+  emit({ seq: 1, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'run_started', prompt: 'Go' });
+  emit({ seq: 2, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'text_delta', delta: answer });
   await vi.waitFor(() => expect(transcriptText()).toContain(answer), { timeout: 3000 });
 }
 
@@ -122,7 +142,7 @@ describe('stream recovery', () => {
     await openRun();
     const callsBefore = getSessionCalls;
 
-    push({ seq: 6, ts_ms: NOW, session_id: null, type: 'stream_lagged', skipped: 3 });
+    emit({ seq: 6, ts_ms: NOW, session_id: null, type: 'stream_lagged', skipped: 3 });
 
     await vi.waitFor(() => expect(getSessionCalls).toBeGreaterThan(callsBefore), { timeout: 3000 });
     // The snapshot has no streaming message, so a reseed here would delete it.
@@ -139,7 +159,7 @@ describe('stream recovery', () => {
     // The run finished on the server, but `run_finished` was one of the lost frames.
     detailToReturn = detailFixture;
 
-    push({ seq: 9, ts_ms: NOW, session_id: null, type: 'stream_lagged', skipped: 2 });
+    emit({ seq: 9, ts_ms: NOW, session_id: null, type: 'stream_lagged', skipped: 2 });
 
     await vi.waitFor(() => expect(store.chat.value.running).toBe(false), { timeout: 3000 });
     // The persisted answer replaces the transcript, because no run is in flight.
@@ -148,12 +168,13 @@ describe('stream recovery', () => {
 
   it('refetches on a bare seq hole even without a marker', async () => {
     detailToReturn = detailFixture;
+    // Same claim window as `openRun`: the body attaches after the election.
     await vi.waitFor(() => expect(typeof push).toBe('function'), { timeout: 3000 });
-    push({ seq: 1, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'run_started', prompt: 'Go' });
-    push({ seq: 2, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'text_delta', delta: 'x' });
+    emit({ seq: 1, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'run_started', prompt: 'Go' });
+    emit({ seq: 2, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'text_delta', delta: 'x' });
     const callsBefore = getSessionCalls;
 
-    push({ seq: 8, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'text_delta', delta: 'y' });
+    emit({ seq: 8, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'text_delta', delta: 'y' });
 
     await vi.waitFor(() => expect(getSessionCalls).toBeGreaterThan(callsBefore), { timeout: 3000 });
   });
@@ -165,7 +186,7 @@ describe('stream recovery', () => {
     await openRun();
     const callsBefore = getSessionCalls;
 
-    push({ seq: 6, ts_ms: NOW, session_id: null, type: 'stream_lagged', skipped: 2 });
+    emit({ seq: 6, ts_ms: NOW, session_id: null, type: 'stream_lagged', skipped: 2 });
 
     await vi.waitFor(() => expect(getSessionCalls).toBeGreaterThan(callsBefore), { timeout: 3000 });
 
@@ -185,7 +206,7 @@ describe('stream recovery', () => {
     // without an explicit cache the pill went blank on every reload until the
     // next call finished. That is the one question the pill exists to answer.
     await openRun();
-    push({
+    emit({
       seq: 3,
       ts_ms: NOW,
       session_id: 's_ab12',
@@ -208,7 +229,7 @@ describe('stream recovery', () => {
 
   it('does not carry one session\u2019s prompt size into another', async () => {
     await openRun();
-    push({
+    emit({
       seq: 3,
       ts_ms: NOW,
       session_id: 's_ab12',
@@ -226,5 +247,54 @@ describe('stream recovery', () => {
     // A different session has no remembered value, so the pill stays hidden
     // rather than showing the previous conversation's fill.
     expect(recallPromptTokens('s_cd34')).toBeNull();
+  });
+
+  it('keeps the frames a second read of the same session queued while the first is in flight', async () => {
+    // A resync calls `openSession` again for the session it is already reading.
+    // Clearing the queue for it threw away the live answer the *silent* snapshot
+    // cannot contain (the server persists an assistant turn only when it ends),
+    // so the words on screen vanished until the run finished.
+    const pending: Array<(detail: SessionDetail) => void> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.startsWith('/api/events')) return Promise.resolve(sseStream());
+        if (url === '/api/sessions/s_ab12') {
+          return new Promise<Response>((resolve) => {
+            pending.push((detail) => resolve(jsonResponse(detail)));
+          });
+        }
+        return Promise.resolve(jsonResponse({ sessions: [summaryFixture] }));
+      }),
+    );
+
+    await vi.waitFor(() => expect(typeof push).toBe('function'), { timeout: 3000 });
+    const first = actions.openSession('s_ab12', { silent: true });
+    await vi.waitFor(() => expect(pending).toHaveLength(1), { timeout: 3000 });
+
+    emit({ seq: 1, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'run_started', prompt: 'Go' });
+    emit({
+      seq: 2,
+      ts_ms: NOW,
+      session_id: 's_ab12',
+      run_id: 'r_x',
+      type: 'text_delta',
+      delta: 'still here',
+    });
+    // The frames reach `handleRawEvent` a task after `push()` writes them into the
+    // response body, so wait for the queue to actually hold them before the second
+    // read starts - that ordering is the whole point of this test.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // The same session again, while the first read is still outstanding.
+    const second = actions.openSession('s_ab12', { silent: true, preserveLive: true });
+    await vi.waitFor(() => expect(pending).toHaveLength(2), { timeout: 3000 });
+    pending[0]?.(runningDetail());
+    pending[1]?.(runningDetail());
+    await Promise.all([first, second]);
+
+    expect(transcriptText()).toContain('still here');
   });
 });

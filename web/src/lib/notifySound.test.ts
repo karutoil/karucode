@@ -14,6 +14,7 @@ import {
   CUE_LABELS,
   CUE_NAMES,
   COALESCE_MS,
+  RESUME_TIMEOUT_MS,
   SoundEngine,
   browserSoundEnvironment,
   cueDuration,
@@ -55,6 +56,8 @@ function fakeEnvironment(state: string = 'running'): {
   setState: (state: string) => void;
   failCreate: () => void;
   failResume: () => void;
+  /** Make `resume()` a promise that never settles, as Gecko does when blocked. */
+  hangResume: () => void;
 } {
   const notes: StartedNote[] = [];
   /** The note whose gain has not been created yet (engine order: osc, then gain). */
@@ -65,6 +68,7 @@ function fakeEnvironment(state: string = 'running'): {
   let closed = 0;
   let createFails = false;
   let resumeFails = false;
+  let resumeHangs = false;
 
   const makeContext = (): AudioContextLike => {
     created += 1;
@@ -81,6 +85,9 @@ function fakeEnvironment(state: string = 'running'): {
       destination: {},
       resume: async () => {
         resumeCalls += 1;
+        // Gecko's autoplay block: `resume()` is neither resolved nor rejected
+        // while the context is suspended by the user.
+        if (resumeHangs) await new Promise<void>(() => undefined);
         if (resumeFails) throw new Error('NotAllowedError');
         currentState = 'running';
       },
@@ -179,6 +186,9 @@ function fakeEnvironment(state: string = 'running'): {
     },
     failResume: () => {
       resumeFails = true;
+    },
+    hangResume: () => {
+      resumeHangs = true;
     },
   };
 }
@@ -341,6 +351,45 @@ describe('everything a browser can refuse', () => {
     // Only the first arm needed to resume; the second found it running.
     expect(fake.resumeCalls).toBe(1);
     expect(engine.status()).toBe('ready');
+  });
+
+  it('gives up on a resume Gecko leaves pending instead of hanging the cue', async () => {
+    // A page nobody has interacted with is autoplay-blocked: Gecko keeps the
+    // `resume()` promise unresolved (`[[suspended by user]]`), so awaiting it is
+    // awaiting forever. The cue must report `blocked` so the UI can hint, and
+    // the notification that follows it must not be held hostage.
+    vi.useFakeTimers();
+    try {
+      const fake = fakeEnvironment('suspended');
+      fake.hangResume();
+      const engine = new SoundEngine(fake.env);
+
+      const pending = engine.play('finished');
+      await vi.advanceTimersByTimeAsync(RESUME_TIMEOUT_MS + 50);
+
+      expect(await pending).toEqual({ played: false, reason: 'blocked' });
+      expect(engine.status()).toBe('blocked');
+      expect(fake.notes).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('arm() reports blocked rather than waiting on the same pending resume', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeEnvironment('suspended');
+      fake.hangResume();
+      const engine = new SoundEngine(fake.env);
+
+      const pending = engine.arm();
+      await vi.advanceTimersByTimeAsync(RESUME_TIMEOUT_MS + 50);
+
+      expect(await pending).toBe(false);
+      expect(engine.status()).toBe('blocked');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('never throws, whatever the browser does', async () => {

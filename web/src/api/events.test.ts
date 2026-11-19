@@ -743,4 +743,96 @@ describe('startEventStream', () => {
     expect(handle.getState()).toBe('idle');
     holder.controller?.close();
   });
+
+  it('keeps reconnecting when a status handler throws', async () => {
+    // The bug: `setState` called `onStatus` bare, and the first call of every
+    // iteration sits outside the loop's `try`. A throwing status handler (a
+    // failed signal write, a plugin patch, a bad refactor in `actions.ts`) made
+    // `run()` reject; `void run()` swallowed it, so the handle was neither
+    // reconnecting nor stopped - the badge said "Live" and no event arrived again.
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      let calls = 0;
+      const fetchMock = vi.fn(async () => {
+        calls += 1;
+        // One failure, then a stream that delivers a frame: the second attempt
+        // only happens if the loop survived the throwing handler.
+        if (calls === 1) throw new Error('network down');
+        return sseResponse([framedEvent(1, 'after the throwing status handler')]);
+      });
+      const received: RawEvent[] = [];
+      let handle: ReturnType<typeof startEventStream> | null = null;
+      handle = startEventStream({
+        fetchImpl: fetchMock as unknown as typeof fetch,
+        minDelayMs: 10,
+        maxDelayMs: 40,
+        random: () => 0,
+        // No handshake deadline and no injected sleep: the backoff timer is the
+        // only clock in this test, so fake timers drive the whole loop.
+        idleTimeoutMs: 0,
+        onStatus: () => {
+          throw new Error('the status handler is broken');
+        },
+        onEvent: (event) => {
+          received.push(event);
+          handle?.stop();
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(received.map((event) => event.delta)).toEqual(['after the throwing status handler']);
+      // The failure was reported through the module's existing error channel
+      // instead of disappearing into an unhandled rejection.
+      expect(consoleError).toHaveBeenCalledWith('karucode: event handler threw', expect.any(Error));
+      handle.stop();
+    } finally {
+      consoleError.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not relabel a stopped handle when the loop rejects afterwards', async () => {
+    // `stop()` sets `stopped`, aborts and says `idle`. A rejection that lands
+    // after it - the injected sleep here stands in for any future throw inside
+    // the loop - used to call `setState('reconnecting')` anyway, so a stream the
+    // app deliberately closed went back to "reconnecting" and stayed there.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const seen: ConnectionState[] = [];
+      let handle: ReturnType<typeof startEventStream> | null = null;
+      handle = startEventStream({
+        fetchImpl: (async () => {
+          throw new Error('network down');
+        }) as unknown as typeof fetch,
+        minDelayMs: 10,
+        maxDelayMs: 40,
+        random: () => 0,
+        idleTimeoutMs: 0,
+        sleep: async () => {
+          throw new Error('the sleep seam rejected after stop');
+        },
+        onStatus: (state) => {
+          seen.push(state);
+          if (state === 'reconnecting') handle?.stop();
+        },
+        onEvent: () => undefined,
+      });
+
+      await vi.waitFor(() => expect(handle?.getState()).toBe('idle'));
+      // Let the loop's rejection reach the `.catch` above.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // The badge's last word stays `idle`; nothing announced another reconnect.
+      expect(seen).toEqual(['connecting', 'reconnecting', 'idle']);
+      expect(consoleError).not.toHaveBeenCalledWith(
+        'karucode: the event stream loop stopped',
+        expect.anything(),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 });

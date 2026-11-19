@@ -382,10 +382,38 @@
 
 /* ---------- options, journal, log ------------------------------------- */
 
+/* The other three disclosures in the app (`.thinking-summary` in chat.css,
+ * `.settings-advanced summary`, `.theme-advanced summary`) all drop the UA marker
+ * and draw their own. This one kept it, which in Gecko means a native
+ * `disclosure-closed` triangle in the platform's own ink and size — visibly a
+ * different control from the transcript's. Same pair here: `list-style: none`
+ * removes the `::marker` box in both engines (Chrome still needs the
+ * `-webkit-details-marker` rule), and the `▸` is the app's own glyph, rotating to
+ * `▾` from `[open]` exactly as the transcript's thinking block does. */
 .goals-details summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
   cursor: pointer;
+  list-style: none;
   color: var(--text-subtle);
   font-size: var(--fs-tiny);
+}
+
+.goals-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.goals-details summary::before {
+  content: '▸';
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+  transition: transform var(--transition-fast);
+}
+
+.goals-details[open] summary::before {
+  transform: rotate(90deg);
 }
 
 .goals-options {

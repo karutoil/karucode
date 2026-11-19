@@ -102,7 +102,7 @@ the frame metrics (`--rail-w`, `--header-h`, `--content-max`, …).
 properties with no React/Preact re-render.
 
 Theme Studio (Task actions → Theme studio, the project-rail palette button where
-that rail is present, `Ctrl/Cmd+Shift+T`, or Settings → Appearance → Theme and layout) ships
+that rail is present, `Ctrl/Cmd+Shift+L`, or Settings → Appearance → Theme and layout) ships
 eight built-in themes and edits 18 palette colours, mode, density, fonts, corner
 radius, the transcript view options and custom CSS. The selection, saved custom themes and
 the unsigned draft persist in `localStorage` under `karucode.theme-studio.v3`; a
@@ -272,7 +272,7 @@ Agents tab).
   or Escape before that key could reach a running turn, and opening Context closes
   the card first so the two right-hand overlays never stack. Below 1024px the
   preference changes nothing: the inspector is already a trapped slide-over sheet.
-- **Context:** `Ctrl/Cmd+J` toggles transient Now / Usage / Access state from
+- **Context:** `Ctrl/Cmd+Shift+X` toggles transient Now / Usage / Access state from
   `state/workbench.ts`. Now shows the actual session/model pin and separates the
   tool-reachable workspace from deliberately composed message content and
   attachments. Usage reuses server-backed `SessionInfoTab`; Access reuses the exact
@@ -284,8 +284,11 @@ Agents tab).
   toned calm/warn/hot, with the percentage beside it and the reading as the
   accessible name — so Context stays reachable while the results panel is docked,
   popped out or closed.
-- **Shortcuts and responsive structure:** `Ctrl/Cmd+B` preserves the task-rail
-  toggle and collapsed-desktop project peeking. Escape is handled locally first.
+- **Shortcuts and responsive structure:** `Ctrl/Cmd+\` preserves the task-rail
+  toggle and collapsed-desktop project peeking (`Ctrl/Cmd+B` is the browser's
+  bookmarks sidebar in Gecko, `Ctrl/Cmd+J` its Downloads panel, and
+  `Ctrl/Cmd+Shift+T` its reopen-closed-tab, so none of the three is claimed).
+  Escape is handled locally first.
   `styles/workbench.css` makes Conversation and Results a split view in wide
   containers, a bounded result overlay at intermediate widths, and the existing
   full-height sheets on phones. The result separator is hidden outside the split,

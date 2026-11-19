@@ -450,7 +450,7 @@ deliberately outside the parent form's dirty state.
   left edge, with the same keys, the same saved project width and the same
   ceiling, so the two layouts never disagree about how much conversation stays
   visible.
-* **Context drawer** (`Ctrl/Cmd+J`): a transient sibling overlay driven by
+* **Context drawer** (`Ctrl/Cmd+Shift+X`): a transient sibling overlay driven by
   `state/workbench.ts`, with **Now**, **Usage** and **Access**. It does not replace
   or unmount the Inspector, conversation, full Git or terminal below it. **Now**
   reports the actual project/session/workspaces, connection and activity, labels
@@ -625,7 +625,7 @@ deliberately outside the parent form's dirty state.
   `palette` becomes a full-height sheet with the header and footer pinned.
   `Dialog` is the same shell under its old name for surfaces that have not
   migrated; no call site authors its own width.
-* **Theme studio** (right drawer, `Ctrl/Cmd+Shift+T`, **Task actions → Theme
+* **Theme studio** (right drawer, `Ctrl/Cmd+Shift+L`, **Task actions → Theme
   studio**, or the project-rail palette button when that rail is present):
   built-in themes, per-token colours, density, transcript options and custom
   CSS, persisted in the browser. The `themes` topic covers the storage key and
@@ -1028,14 +1028,29 @@ like the Access tab's key management. `Stop` cancels a running job.
 | --- | --- |
 | `Ctrl/Cmd+K` | command palette |
 | `Ctrl/Cmd+N` | new conversation (a draft until its first message) |
-| `Ctrl/Cmd+B` | collapse/restore the task rail; collapsed desktop keeps project peeking |
-| `Ctrl/Cmd+J` | open/close Workbench Context (Now / Usage / Access), outside the control plane |
-| `Ctrl/Cmd+Shift+T` | open or close the Theme studio |
+| `Ctrl/Cmd+\` | collapse/restore the task rail; collapsed desktop keeps project peeking |
+| `Ctrl/Cmd+Shift+X` | open/close Workbench Context (Now / Usage / Access), outside the control plane, and not from inside a text field |
+| `Ctrl/Cmd+Shift+L` | open or close the Theme studio (not from inside a text field) |
 | `/` | focus the session search |
 | `Enter` / `Ctrl/Cmd+Enter` | send (or queue) the draft - which of the two sends is the **Composer send key** setting; the other starts a new line, and `Shift+Enter` always does |
 | `Up`/`Down` | move through the `@`-mention suggestions |
 | `Enter`/`Tab` | insert the highlighted mention |
 | `Escape` | dismiss the local editor, menu, popped-out Results, drawer or sheet first; only otherwise stop a running turn |
+
+The chords the browser keeps for itself are avoided: `Mod+Shift+T` (reopen the
+closed tab), `Mod+B` (bookmarks bar, or the bookmarks sidebar in Gecko) and
+`Mod+J` (Downloads) belong to the browser, and neither Gecko nor Blink reliably
+lets a page intercept them. `Mod+N` is the one kept from earlier releases, so a
+Firefox reader who presses it also gets a new window.
+
+Inside a text field the shell takes only its own modifier: `⌘` on Apple
+platforms, `Ctrl` elsewhere. So `⌘K` opens the palette from the composer,
+while a bare `Ctrl+K` on macOS stays kill-to-end-of-line and never reaches a
+command. Three chords are the exception and never fire while the caret is in a
+field on any platform: `Mod+N` (a new conversation), `Mod+Shift+L` (Theme
+studio) and `Mod+Shift+X` (Context drawer), all of which are text chords in the
+engines karucode runs in. `Mod+Shift+X` is also left alone when the control
+plane owns that drawer, so the keystroke is not swallowed for nothing.
 
 ## Mobile
 
@@ -1190,9 +1205,12 @@ six-connections-per-origin budget for ordinary requests: with a stream per tab,
 six open tabs held the whole pool and the seventh could not boot (`Could not
 reach karucode - the server did not answer within 30s` on `/api/health`) while
 the server was answering in 1.6 ms. When the leading tab closes or is discarded
-its lock is released and the next waiting tab opens the stream. A browser
-without Web Locks or `BroadcastChannel` - and the test environment - falls back
-to a stream per tab.
+its lock is released and the next waiting tab opens the stream. Web Locks only
+exists in a secure context, so on the plain-HTTP LAN address documented for
+remote access - where no browser has it - the tabs elect the same leader over
+that BroadcastChannel instead: a claim answered by a live leader wins, the
+lower tab id breaks a tie, and a leader that says nothing for 30 s loses the
+role. Only a browser without `BroadcastChannel` falls back to a stream per tab.
 
 The stream watches itself so live updates never need a page reload: 45 s without
 a byte (keepalives included) means the connection is dead and it reconnects with
