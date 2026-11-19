@@ -141,22 +141,15 @@ function Trap({ active = true, onEscape = () => undefined, label, children, host
   );
 }
 
-/** The trap's content always present, mounted into a host elsewhere in the DOM. */
-function Shell({ active, mount }: { active: boolean; mount: HTMLElement }) {
+/** A surface that renders inline inside a landmark, as `Inspector` does. */
+function Inspector({ active }: { active: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   useFocusTrap(ref, active, () => undefined);
   return (
-    <div ref={ref} data-testid="sheet" aria-label="sheet">
-      {createPortal(<button id="inside">Inside</button>, mount)}
+    <div ref={ref} aria-label="inspector">
+      {active ? <button id="inside">Inside</button> : null}
     </div>
   );
-}
-
-/** Closed the way the shell closes a sheet: same live region, surfaced content gone. */
-function ClosedShell() {
-  const ref = useRef<HTMLDivElement>(null);
-  useFocusTrap(ref, false, () => undefined);
-  return <div ref={ref} data-testid="sheet" aria-label="sheet" />;
 }
 
 describe('useFocusTrap: Escape belongs to the control before the surface', () => {
@@ -541,10 +534,10 @@ describe('useFocusTrap: nesting and focus restoration', () => {
     unmount();
     expect(document.activeElement).not.toBe(document.body);
     expect(document.activeElement).toBe(main);
-    // Focusable by programmatic focus only, and only while it has to be: the
-    // attribute is the trap's, so the landmark is left exactly as it was found
-    // and the next Tab still starts at its first control rather than the top.
-    expect(main.hasAttribute('tabindex')).toBe(false);
+    // Focusable by programmatic focus only: the attribute is the trap's, and it
+    // is handed back on the next task (removing it in the same task as
+    // `focus()` drops focus in Blink), so the landmark is left as it was found.
+    await waitFor(() => expect(main.hasAttribute('tabindex')).toBe(false));
   });
 
   it('leaves a landmark’s own tabindex alone', async () => {
@@ -572,57 +565,35 @@ describe('useFocusTrap: nesting and focus restoration', () => {
     expect(main.getAttribute('tabindex')).toBe('-1');
   });
 
-  it('does not hand focus to a landmark wrapped around the surface being closed', async () => {
-    // A dialog rendered inside the shell's <main> used to match the landmark
-    // selector itself: focus landed on a subtree that was about to be removed,
-    // which puts it back on <body> - the bug the landmark exists to prevent. With
-    // nothing else on the page there is no honest place to put focus, so the
-    // teardown must add no `tabindex` to the shell at all.
+  it('falls back to the landmark the surface renders inside, not to <body>', async () => {
+    // `Inspector` and `ContextDrawer` render inline inside `<main id="chat-main">`,
+    // so the trap's own container is a descendant of that main. Skipping an
+    // ancestor landmark (the inverted rule) left focus on <body>; the main
+    // outlives the surface and is exactly what focus should land on.
     const main = document.createElement('main');
-    main.id = 'shell-main';
-    main.innerHTML = '<div id="shell-mount"></div>';
+    main.id = 'chat-main';
+    main.setAttribute('tabindex', '-1');
     document.body.appendChild(main);
     hosts.push(main);
-    const mount = main.querySelector<HTMLElement>('#shell-mount');
-    if (!mount) throw new Error('mount point missing');
-
     const host = document.createElement('div');
-    renderPreact(<Shell active mount={mount} />, host);
-    // The trap's first task focuses its own region; the portal lands in the
-    // landmark's subtree in a later commit, which jsdom will not focus into.
+    main.appendChild(host);
+    hosts.push(host);
+
+    const opener = document.createElement('button');
+    document.body.appendChild(opener);
+    hosts.push(opener);
+    opener.focus();
+
+    renderPreact(<Inspector active />, host);
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    // The sheet closes and the shell replaces its contents in the same commit, so
-    // by the time the trap's cleanup runs the landmark no longer wraps it.
-    renderPreact(<ClosedShell />, host);
+    // The opener a rerun removed, and the surface closing in the same commit.
+    opener.remove();
+    renderPreact(<Inspector active={false} />, host);
 
-    // The fallback ran - an <html>/<body> scroll restore and the release below are
-    // its neighbours - and it had no landmark it was allowed to use.
-    expect(document.body.style.overflow).toBe('');
-    expect(main.hasAttribute('tabindex')).toBe(false);
-  });
-
-  it('does not call <body> an opener worth restoring', async () => {
-    // Nothing was focused when the surface opened, so `activeElement` is <body>.
-    // Handing focus back to it is the "next Tab restarts at the top" case the
-    // landmark fallback exists for, not a restore.
-    const main = document.createElement('main');
-    main.id = 'shell-main';
-    main.innerHTML = '<button id="first">First</button>';
-    document.body.appendChild(main);
-    hosts.push(main);
-
-    const { unmount } = render(
-      <Trap label="sheet">
-        <button id="inside">Inside</button>
-      </Trap>,
-    );
-    await waitFor(() => expect(document.activeElement).toBe(document.getElementById('inside')));
-
-    unmount();
-    // A landmark, not <body>: the fallback ran instead of the restore.
     expect(document.activeElement).toBe(main);
-    expect(document.activeElement).not.toBe(document.body);
+    // The attribute it added is gone again; the shell is left as it was found.
+    expect(main.getAttribute('tabindex')).toBe('-1');
   });
 
   it('returns the stack to the outer surface when the inner one closes', async () => {

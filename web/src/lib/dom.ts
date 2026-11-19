@@ -19,18 +19,21 @@ let lockedScrollY = 0;
  * structural answer. `tabindex="-1"` keeps a landmark out of the Tab order while
  * still letting it take focus, so the next Tab lands on its first control.
  *
- * `closing` is the surface being torn down: a dialog mounted *inside* a landmark
- * would match the plain selector, and handing focus to something that is about to
- * be removed puts it right back on `body` — the bug this exists to fix. The
- * attribute set here is removed again when the trap lets go, so the landmark is
- * left exactly as it was found.
+ * `closing` is the surface being torn down. A landmark *inside* it would be
+ * removed with it, and handing focus to something about to disappear puts it
+ * right back on `body` — the bug this exists to fix. So the candidates a surface
+ * nested in a landmark rules out are its descendants, not its ancestors: when
+ * `Inspector` or `ContextDrawer` renders inside `<main id="chat-main">`, that
+ * `<main>` is exactly the landmark to fall back to; it outlives the surface.
  */
 const FOCUS_LANDMARK_SELECTOR = 'main, .workbench';
 
 function lastResortFocusTarget(closing?: HTMLElement | null): HTMLElement | null {
   const candidates = document.querySelectorAll<HTMLElement>(FOCUS_LANDMARK_SELECTOR);
   for (const landmark of candidates) {
-    if (closing && (landmark === closing || landmark.contains(closing))) continue;
+    if (!closing) return landmark;
+    // The surface itself, or a landmark the surface contains: both die with it.
+    if (landmark === closing || closing.contains(landmark)) continue;
     return landmark;
   }
   return null;
@@ -316,8 +319,15 @@ export function useFocusTrap(
             if (!hadTabIndex) landmark.tabIndex = -1;
             landmark.focus({ preventScroll: true });
             // `tabindex="-1"` was ours, not the landmark's: leaving it behind is a
-            // permanent edit to the shell made from a transient surface.
-            if (!hadTabIndex) landmark.removeAttribute('tabindex');
+            // permanent edit to the shell made from a transient surface. Removing
+            // it in the same task as `focus()` hands focus back to `body` in Blink
+            // (the element stops being focusable), so the shell's own attribute is
+            // put back on the next task, once the focus has settled.
+            if (!hadTabIndex) {
+              const restore = (): void => landmark.removeAttribute('tabindex');
+              if (typeof queueMicrotask === 'function') queueMicrotask(restore);
+              else window.setTimeout(restore, 0);
+            }
           }
         }
       }

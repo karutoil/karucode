@@ -377,14 +377,13 @@ function looksLikeMermaid(head: string): boolean {
 }
 
 /**
- * Does this read as JSON?
+ * The size above which a body is cheap-checked before it is parsed.
  *
- * A body up to [`JSON_HEAD_CHARS`] is parsed for real. A larger one is judged from
- * its head instead: a truncated parse of a valid 256 KB document cannot succeed,
- * so parsing the whole thing on every render of the message (which is where
- * [`sniffKind`] runs) was the cost with no answer to show for it. The head still
- * separates JSON from markdown, CSV and markup, and both consumers of the answer
- * parse the document in full anyway when the preview is drawn.
+ * [`isJson`] uses it one way only: a longer body whose first character cannot
+ * open a JSON value is *rejected* without a parse. Everything else is parsed in
+ * full, because a truncated parse of a valid document always fails and so can
+ * never answer the question. The cheap rejection is what keeps the common long
+ * documents (markdown, CSV, logs) off the parser at all.
  */
 const JSON_HEAD_CHARS = 4096;
 
