@@ -1,0 +1,143 @@
+/* Tailwind CSS v4 — the utility layer, mapped onto karucode's own tokens.
+ *
+ * `tokens.css` stays the single source of truth for colour, radius, type size,
+ * spacing and font: this file only *names* those variables for Tailwind. So
+ * `bg-surface` compiles to `background-color: var(--surface)`, which means a
+ * Theme Studio change — or any of the eight built-in themes — repaints a utility
+ * exactly like the component CSS sitting next to it, with no rebuild and no
+ * second palette to keep in sync.
+ *
+ * The default scales are reset below on purpose: an agent that reaches for
+ * `bg-zinc-800`, `text-sm`, `p-4`, `rounded-lg` or `font-sans` gets *nothing*,
+ * instead of a value that belongs to Tailwind rather than to karucode.
+ * `src/styles/ui-contract.test.ts` fails a change that writes either a raw
+ * value or a default-palette class, so the reset has a guard as well.
+ *
+ * What is deliberately NOT mapped: `--faint`. It is a decorative object colour
+ * (scrollbar thumbs, hairline glyphs), not an ink: `text-faint` would paint text
+ * below the readable floor, so the token exists in `tokens.css` and is *not*
+ * exposed as a Tailwind colour. Muted body text is `text-muted`; secondary is
+ * `text-text-secondary`. There is no `--shadow-*` mapping either — karucode's
+ * one shadow is `--shadow-lg` and components use it directly.
+ */
+
+@import 'tailwindcss' source(none);
+
+/* Scan only the product markup. Tailwind's automatic detection walks the whole
+ * project root, which here means `README.md`, this file's own prose and the test
+ * fixtures — so a class quoted as an example in a comment would ship a real
+ * utility in the bundle. Naming the sources keeps that out: what is in
+ * `web/dist` is what a component actually renders. */
+@source '../**/*.{ts,tsx}';
+@source not '../**/*.test.ts';
+@source not '../**/*.test.tsx';
+
+@theme {
+  /* Drop Tailwind's own scales. Only the names `@theme inline` maps below
+   * exist afterwards, so every utility resolves to a karucode token. */
+  --color-*: initial;
+  --spacing-*: initial;
+  --radius-*: initial;
+  --text-*: initial;
+  --font-*: initial;
+  --shadow-*: initial;
+}
+
+/* `inline` is what makes a utility carry the token itself — `background-color:
+ * var(--surface)` — rather than a second indirection through a `--color-*`
+ * variable, so the runtime theme writer's
+ * `--theme-*` → alias indirection stays intact and nothing is frozen at build
+ * time. It also means these names are not re-declared as CSS variables, which
+ * matters for the handful whose name matches a `tokens.css` variable
+ * (`--radius-sm`, `--font-mono`, …): re-declaring them would be a self-reference
+ * and would blank every radius and mono font in the app. */
+@theme inline {
+  /* surfaces */
+  --color-bg: var(--bg);
+  --color-rail: var(--rail);
+  --color-sidebar: var(--sidebar);
+  --color-inspector: var(--inspector);
+  --color-surface: var(--surface);
+  --color-raised: var(--surface-raised);
+  --color-hover: var(--surface-hover);
+  --color-inset: var(--surface-inset);
+  --color-sunken: var(--surface-sunken);
+
+  /* lines */
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-line-strong: var(--line-strong);
+
+  /* text */
+  --color-text: var(--text);
+  --color-text-secondary: var(--text-secondary);
+  --color-muted: var(--muted);
+
+  /* accent */
+  --color-accent: var(--accent);
+  --color-accent-fill: var(--accent-fill);
+  --color-accent-hi: var(--accent-hi);
+  --color-accent-bg: var(--accent-bg);
+  --color-accent-line: var(--accent-line);
+  --color-accent-text: var(--accent-text);
+  --color-on-accent: var(--on-accent);
+
+  /* status */
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --color-info: var(--info);
+
+  /* spacing: `p-4`, `gap-2`, `mt-10` … all read the `--space-*` ladder */
+  --spacing-0: 0px;
+  --spacing-px: 1px;
+  --spacing-1: var(--space-1);
+  --spacing-2: var(--space-2);
+  --spacing-3: var(--space-3);
+  --spacing-4: var(--space-4);
+  --spacing-5: var(--space-5);
+  --spacing-6: var(--space-6);
+  --spacing-7: var(--space-7);
+  --spacing-8: var(--space-8);
+  --spacing-9: var(--space-9);
+  --spacing-10: var(--space-10);
+
+  /* radii: bare `rounded` is the app's default corner (`--radius`) */
+  --radius-none: 0px;
+  --radius-xs: var(--radius-xs);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-DEFAULT: var(--radius);
+  --radius-lg: var(--radius-lg);
+  --radius-pill: var(--radius-pill);
+  --radius-full: 9999px;
+
+  /* type sizes: the `--fs-*` ladder, no other size exists */
+  --text-micro: var(--fs-micro);
+  --text-tiny: var(--fs-tiny);
+  --text-small: var(--fs-small);
+  --text-label: var(--fs-label);
+  --text-message: var(--fs-message);
+  --text-body: var(--fs-body);
+  --text-lead: var(--fs-lead);
+  --text-title: var(--fs-title);
+  --text-heading: var(--fs-heading);
+  --text-display: var(--fs-display);
+  --text-hero: var(--fs-hero);
+
+  /* families */
+  --font-ui: var(--font-ui);
+  --font-mono: var(--font-mono);
+}
+
+/* One consequence worth knowing before writing a component. `index.css` imports
+ * every component sheet with `layer(components)`, so a utility *can* override an
+ * existing `.class` rule — that is the whole point of the layer, and
+ * `src/styles/layers.test.ts` fails a sheet that is imported without it. Six
+ * sheets are still imported by the component that owns them
+ * (`notifications.css`, `workbench-navigation.css`, the four `control-*.css`)
+ * and are therefore unlayered: an unlayered rule beats any layer, so a utility
+ * does nothing on those. Until they move, restyle them with a class rule, and
+ * put `p-*`/`gap-*` in the markup only where the cascade reaches. */

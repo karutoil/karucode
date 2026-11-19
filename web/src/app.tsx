@@ -2,7 +2,7 @@
 // @kc-title: Use the browser workspace
 // @kc-summary: Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary.
 // @kc-tags: ui, web, frontend, workbench, panels, context, shortcuts, preact, plugins, buttons
-// @kc-applies-to: ui:ProjectRail, ui:project-switcher, ui:mobile-sheet, ui:mobile-layout, ui:mobile-touch-target, ui:mobile-keyboard-inset, env:interactive-widget, route:GET /api/projects/:id/favicon, ui:SessionsRail, ui:RailPeek, ui:ChatView, ui:Composer, ui:TpsBadge, ui:ContextPill, ui:Inspector, ui:ResultResizer, route:PATCH /api/projects/:id/preferences, ui:SessionInfoTab, route:GET /api/sessions/:id/info, file:web/src/components/SessionInfoTab.tsx, file:web/src/lib/sessionInfo.ts, ui:SettingsSheet, ui:NotificationsSection, ui:ToastRegion, ui:NotificationCenter, ui:notification-bell, ui:CommandPalette, ui:FileViewer, ui:FilePreview, ui:RewindDialog, ui:plugin-panel, route:GET /api/workspace/tree, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, file:web/src/components/Dialog.tsx, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, event:session_rewound, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, route:POST /api/plugins/:name/ui/actions/:action, config:plugin_ui, config:ui, file:web/src/components/PluginSlot.tsx, file:web/src/components/uiContributions.ts, file:web/src/components/PluginControls.tsx, file:web/src/state/pluginUiPreferences.ts, file:web/src/components/PluginViews.tsx, file:web/src/components/viewPanelRegister.ts, file:web/src/styles/plugin-views.css, dir:plugins/demos, file:plugins/demos/README.md, file:scripts/verify_plugin_demos.py, cmd:python3 scripts/verify_plugin_demos.py, file:web/src/styles/plugin-slots.css, file:scripts/verify_plugin_ui.py, cmd:python3 scripts/verify_plugin_ui.py, fn:matchUiKeybinding, fn:applyUiPreferences, ui:keybinding, ui:plugin-controls, fn:registerPluginPanelRenderer, ui:PluginSlot, ui:plugin-slot-button, config:[notifications], event:usage, event:notification, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, event:queued_messages, event:steer_applied, ui:AgentsTab, route:GET /api/agents, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, event:agent_spawned, event:agent_paused, event:agent_note, event:agent_message, event:agent_finished, tool:spawn_agent, tool:report_status, file:web/src/components/AgentsTab.tsx, file:web/src/state/agentConsole.ts, file:web/src/components/pluginPanels.ts, file:web/src/state/queues.test.ts, file:web/src/styles/composer.css, file:scripts/verify_queues.py, file:web/src/components/PluginPanelView.tsx, file:web/src/components/RewindDialog.tsx, file:web/src/components/TpsBadge.tsx, file:web/src/components/NotificationsSettings.tsx, file:web/src/styles/mobile.test.ts, file:web/src/state/notifier.ts, file:web/src/state/railPeek.ts, file:web/src/state/notifications.test.ts, file:web/src/components/NotificationCenter.tsx, file:web/src/components/SessionsRail.tsx, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts, file:web/src/lib/tps.ts, file:web/src/state/promptTokens.ts, file:web/src/lib/dockHeight.ts, file:web/src/lib/viewportInset.ts, file:web/src/lib/menu.tsx, ui:context-menu, fn:registerPluginPanelRenderer, event:tool_call_finished, tool:read_file, config:model.supports_images, cmd:npm run dev, cmd:npm run build, cmd:npm run audit, file:web/scripts/audit-gate.mjs, file:web/dist, env:KARUCODE_WEB_DIR, ui:GitManager, ui:GitChanges, ui:GitCommitBox, ui:GitBranchDialog, ui:GitHistory, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, file:web/src/components/git/GitManager.tsx, file:web/src/styles/git.css, ui:WorkbenchTaskMenu, ui:ContextDrawer, file:web/src/components/WorkbenchTaskMenu.tsx, file:web/src/components/ContextDrawer.tsx, file:web/src/state/workbench.ts, file:web/src/lib/approvalCopy.ts, file:web/src/styles/workbench.css, file:web/src/styles/workbench-navigation.css, file:scripts/verify_workbench_frontend.py, cmd:python3 scripts/verify_workbench_frontend.py, ui:ControlPlane, route:GET /api/control/overview, route:GET /api/control/sessions, file:web/src/state/controlPlane.ts, file:web/src/components/control-plane/ControlPlane.tsx, file:web/src/components/control-plane/ControlRail.tsx, file:web/src/components/control-plane/ControlOverview.tsx, file:web/src/components/control-plane/ControlSession.tsx, file:web/src/components/control-plane/controlModel.ts, file:web/src/styles/control-shared.css, file:web/src/styles/control-rail.css, file:web/src/styles/control-overview.css, file:web/src/styles/control-session.css, file:web/src/lib/historyLoader.ts, file:web/src/lib/virtualWindow.ts, file:web/src/components/ChatTranscript.tsx, file:web/src/state/chat.ts, file:web/src/lib/streamingMarkdown.ts, file:web/src/components/Markdown.tsx, file:web/src/components/ThinkingBlock.tsx, ui:streaming-render, file:web/src/api/sharedStream.ts, ui:shared-event-stream, route:GET /api/events, file:web/src/components/ToolCard.tsx, file:web/src/components/CommandCard.tsx, file:scripts/verify_tps_badge.py, cmd:python3 scripts/verify_tps_badge.py, file:web/src/state/draftSession.test.ts, file:scripts/verify_draft_session.py, cmd:python3 scripts/verify_draft_session.py, ui:AuthScreen, ui:Onboarding, route:GET /api/auth/status, route:POST /api/auth/login, route:POST /api/auth/logout, route:POST /api/auth/password, route:GET /api/auth/passkeys, route:POST /api/auth/passkeys, route:POST /api/auth/passkey/options, route:POST /api/auth/passkey/login, route:GET /api/onboarding, route:POST /api/onboarding/complete, file:web/src/components/AuthScreen.tsx, file:web/src/styles/auth.css, file:web/src/components/Onboarding.tsx, file:web/src/components/AccessSettings.tsx, file:web/src/styles/access-settings.css, ui:AccessSettings, ui:access-tab, ui:PluginInstallSection, file:web/src/components/PluginInstallSection.tsx, route:POST /api/plugins/install/preview, route:POST /api/plugins/install, route:GET /api/plugins/install/:id, route:POST /api/plugins/install/:id/cancel, file:web/src/styles/plugin-install.css, ui:Updates, file:web/src/components/UpdateSettings.tsx, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, file:web/src/lib/passkey.ts, file:web/src/styles/onboarding.css, config:[access], ui:results-popout, ui:results-head-btn, ui:context-header-btn, file:scripts/verify_results_popout.py, cmd:python3 scripts/verify_results_popout.py, file:web/src/components/CommandPalette.tsx, file:web/src/lib/paletteMatch.ts, file:web/src/lib/paletteMatch.test.ts, file:web/src/styles/overlays.css, ui:ModelSwitcher, ui:model-picker, ui:project-menu-open, file:web/src/components/ModelSwitcher.tsx, file:web/src/lib/format.ts, fn:formatContextWindow, fn:filterModelOptions, storage:karucode.projectMenuOpen, storage:karucode.inspectorMode, storage:karucode.composerSendKey, ui:composer-send-key, file:scripts/verify_send_key.py, cmd:python3 scripts/verify_send_key.py, ui:SlashMenu, ui:slash-menu, ui:slash-card, ui:Composer-slash-command, route:GET /api/commands, event:command_result, file:web/src/components/SlashMenu.tsx, file:web/src/components/SlashCard.tsx, file:web/src/lib/slash.ts, file:web/src/lib/slash.test.ts, file:web/src/components/Composer.slash.test.tsx, file:web/src/state/slashCommand.test.ts, doc:slash-commands
+// @kc-applies-to: ui:ProjectRail, ui:project-switcher, ui:mobile-sheet, ui:mobile-layout, ui:mobile-touch-target, ui:mobile-keyboard-inset, env:interactive-widget, route:GET /api/projects/:id/favicon, ui:SessionsRail, ui:RailPeek, ui:ChatView, ui:Composer, ui:TpsBadge, ui:ContextPill, ui:Inspector, ui:ResultResizer, route:PATCH /api/projects/:id/preferences, ui:SessionInfoTab, route:GET /api/sessions/:id/info, file:web/src/components/SessionInfoTab.tsx, file:web/src/lib/sessionInfo.ts, ui:SettingsSheet, ui:NotificationsSection, ui:ToastRegion, ui:NotificationCenter, ui:notification-bell, ui:CommandPalette, ui:FileViewer, ui:FilePreview, ui:RewindDialog, ui:plugin-panel, route:GET /api/workspace/tree, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, file:web/src/components/Dialog.tsx, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, event:session_rewound, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, route:POST /api/plugins/:name/ui/actions/:action, config:plugin_ui, config:ui, file:web/src/components/PluginSlot.tsx, file:web/src/components/uiContributions.ts, file:web/src/components/PluginControls.tsx, file:web/src/state/pluginUiPreferences.ts, file:web/src/components/PluginViews.tsx, file:web/src/components/viewPanelRegister.ts, file:web/src/styles/plugin-views.css, dir:plugins/demos, file:plugins/demos/README.md, file:scripts/verify_plugin_demos.py, cmd:python3 scripts/verify_plugin_demos.py, file:web/src/styles/plugin-slots.css, file:scripts/verify_plugin_ui.py, cmd:python3 scripts/verify_plugin_ui.py, fn:matchUiKeybinding, fn:applyUiPreferences, ui:keybinding, ui:plugin-controls, fn:registerPluginPanelRenderer, ui:PluginSlot, ui:plugin-slot-button, config:[notifications], event:usage, event:notification, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, event:queued_messages, event:steer_applied, ui:AgentsTab, route:GET /api/agents, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, event:agent_spawned, event:agent_paused, event:agent_note, event:agent_message, event:agent_finished, tool:spawn_agent, tool:report_status, file:web/src/components/AgentsTab.tsx, file:web/src/state/agentConsole.ts, file:web/src/components/pluginPanels.ts, file:web/src/state/queues.test.ts, file:web/src/styles/composer.css, file:scripts/verify_queues.py, file:web/src/components/PluginPanelView.tsx, file:web/src/components/RewindDialog.tsx, file:web/src/components/TpsBadge.tsx, file:web/src/components/NotificationsSettings.tsx, file:web/src/styles/mobile.test.ts, file:web/src/state/notifier.ts, file:web/src/state/railPeek.ts, file:web/src/state/notifications.test.ts, file:web/src/components/NotificationCenter.tsx, file:web/src/components/SessionsRail.tsx, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts, file:web/src/lib/tps.ts, file:web/src/state/promptTokens.ts, file:web/src/lib/dockHeight.ts, file:web/src/lib/viewportInset.ts, file:web/src/lib/menu.tsx, ui:context-menu, fn:registerPluginPanelRenderer, event:tool_call_finished, tool:read_file, config:model.supports_images, cmd:npm run dev, cmd:npm run build, cmd:npm run audit, file:web/scripts/audit-gate.mjs, file:web/dist, env:KARUCODE_WEB_DIR, ui:GitManager, ui:GitChanges, ui:GitCommitBox, ui:GitBranchDialog, ui:GitHistory, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, file:web/src/components/git/GitManager.tsx, file:web/src/styles/git.css, ui:WorkbenchTaskMenu, ui:ContextDrawer, file:web/src/components/WorkbenchTaskMenu.tsx, file:web/src/components/ContextDrawer.tsx, file:web/src/state/workbench.ts, file:web/src/lib/approvalCopy.ts, file:web/src/styles/workbench.css, file:web/src/styles/workbench-navigation.css, file:scripts/verify_workbench_frontend.py, cmd:python3 scripts/verify_workbench_frontend.py, ui:ControlPlane, route:GET /api/control/overview, route:GET /api/control/sessions, file:web/src/state/controlPlane.ts, file:web/src/components/control-plane/ControlPlane.tsx, file:web/src/components/control-plane/ControlRail.tsx, file:web/src/components/control-plane/ControlOverview.tsx, file:web/src/components/control-plane/ControlSession.tsx, file:web/src/components/control-plane/controlModel.ts, file:web/src/styles/control-shared.css, file:web/src/styles/control-rail.css, file:web/src/styles/control-overview.css, file:web/src/styles/control-session.css, file:web/src/lib/historyLoader.ts, file:web/src/lib/virtualWindow.ts, file:web/src/components/ChatTranscript.tsx, file:web/src/state/chat.ts, file:web/src/lib/streamingMarkdown.ts, file:web/src/components/Markdown.tsx, file:web/src/components/ThinkingBlock.tsx, ui:streaming-render, file:web/src/api/sharedStream.ts, ui:shared-event-stream, route:GET /api/events, file:web/src/components/ToolCard.tsx, file:web/src/components/CommandCard.tsx, file:scripts/verify_tps_badge.py, cmd:python3 scripts/verify_tps_badge.py, file:web/src/state/draftSession.test.ts, file:scripts/verify_draft_session.py, cmd:python3 scripts/verify_draft_session.py, ui:AuthScreen, ui:Onboarding, route:GET /api/auth/status, route:POST /api/auth/login, route:POST /api/auth/logout, route:POST /api/auth/password, route:GET /api/auth/passkeys, route:POST /api/auth/passkeys, route:POST /api/auth/passkey/options, route:POST /api/auth/passkey/login, route:GET /api/onboarding, route:POST /api/onboarding/complete, file:web/src/components/AuthScreen.tsx, file:web/src/styles/auth.css, file:web/src/components/Onboarding.tsx, file:web/src/components/AccessSettings.tsx, file:web/src/styles/access-settings.css, ui:AccessSettings, ui:access-tab, ui:PluginInstallSection, file:web/src/components/PluginInstallSection.tsx, route:POST /api/plugins/install/preview, route:POST /api/plugins/install, route:GET /api/plugins/install/:id, route:POST /api/plugins/install/:id/cancel, file:web/src/styles/plugin-install.css, ui:Updates, file:web/src/components/UpdateSettings.tsx, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, file:web/src/lib/passkey.ts, file:web/src/styles/onboarding.css, config:[access], ui:results-popout, ui:results-head-btn, ui:context-header-btn, file:scripts/verify_results_popout.py, cmd:python3 scripts/verify_results_popout.py, file:web/src/components/CommandPalette.tsx, file:web/src/lib/paletteMatch.ts, file:web/src/lib/paletteMatch.test.ts, file:web/src/styles/overlays.css, ui:ModelSwitcher, ui:model-picker, ui:project-menu-open, file:web/src/components/ModelSwitcher.tsx, file:web/src/lib/format.ts, fn:formatContextWindow, fn:filterModelOptions, storage:karucode.projectMenuOpen, storage:karucode.inspectorMode, storage:karucode.composerSendKey, ui:composer-send-key, file:scripts/verify_send_key.py, cmd:python3 scripts/verify_send_key.py, ui:SlashMenu, ui:slash-menu, ui:slash-card, ui:Composer-slash-command, route:GET /api/commands, event:command_result, file:web/src/components/SlashMenu.tsx, file:web/src/components/SlashCard.tsx, file:web/src/lib/slash.ts, file:web/src/lib/slash.test.ts, file:web/src/components/Composer.slash.test.tsx, file:web/src/state/slashCommand.test.ts, doc:slash-commands, cmd:npm run lint, file:web/.oxlintrc.json, file:web/src/styles/tailwind.css, file:web/src/styles/ui-contract.test.ts, file:web/src/styles/scale.test.ts, file:web/src/styles/layers.test.ts, file:web/vite.config.ts, dir:web/src/ui, file:web/src/ui/index.ts, file:web/src/ui/README.md, file:web/src/ui/UiGallery.tsx, ui:ui-gallery, file:web/AGENTS.md, dir:web/src/features, dir:web/src/app, dir:web/src/state/actions, dir:web/src/api/endpoints, dir:web/src/api/types
 //
 // # Sign-in and first run
 //
@@ -1144,6 +1144,7 @@
 // npm run dev        # Vite on :5173, proxies /api to :8787
 // npm test           # vitest reducer/component tests
 // npm run typecheck
+// npm run lint       # oxlint: no `any`, no <button> without an explicit `type`
 // npm run audit      # dependency gate: npm audit at `moderate` and above
 // npm run build      # emits web/dist, embedded on the next cargo build
 // ```
@@ -1160,6 +1161,58 @@
 // HTTP, SSE and the terminal WebSocket to it (the preview proxy does the same). To
 // serve your build without rebuilding the binary, start the server with
 // `KARUCODE_WEB_DIR=web/dist`.
+//
+// `npm run lint` is oxlint, configured in `web/.oxlintrc.json`. It refuses
+// `no-explicit-any` and a `<button>` with no explicit `type` — a button inside a
+// form submits by default, which is how a "Cancel" ends up sending the form — and
+// the rule set is kept small on purpose so the output stays short enough to read.
+//
+// Styling is two layers over one token file. `web/src/styles/tokens.css` is the
+// only file with raw colour, radius, size and spacing values;
+// `web/src/styles/tailwind.css` maps those tokens onto Tailwind v4 with every
+// default scale reset, so `bg-surface` compiles to
+// `background-color: var(--surface)` and `p-4` to `padding: var(--space-4)`,
+// while a default palette class, a bracketed arbitrary size or a `text-faint`
+// resolves to nothing at all. `web/src/styles/ui-contract.test.ts` fails a TSX
+// file that writes one of those anyway, so a Theme Studio change keeps
+// repainting a utility. Cascade layers settle the order: `styles/index.css`
+// imports `tokens.css` and `tailwind.css` unlayered and every component sheet
+// with `layer(components)`, so a utility now overrides a component's `.class`
+// rule as well as the element resets in `base.css` — those sit in a nested
+// `@layer base`, which lands in `components.base`, above Tailwind's Preflight and
+// below the rest of the components layer. A sheet imported by the component that
+// owns it instead (`notifications.css`, `workbench-navigation.css`, the four
+// `control-*.css`) is still unlayered and outranks every utility; a utility there
+// does nothing, so restyle those with a class rule.
+//
+// ## Frontend structure and UI primitives
+//
+// * **UI library (`web/src/ui/`)**: first-party typed Preact 11 primitives
+//   exported from `web/src/ui/index.ts` and documented in `web/src/ui/README.md`
+//   (`Button`, `IconButton`, `LinkButton`, `ConfirmDialog`, `Field`, `Input`,
+//   `Textarea`, `Select`, `Checkbox`, `Toggle`, `Stack`, `Inline`, `Card`, `Text`,
+//   `SectionHeader`, `SettingRow`, `Badge`, `Chip`, `StatusDot`, `Keycap`,
+//   `Callout`, `Spinner`, `Skeleton`, plus graduated `Overlay`, `Dialog`, `Tabs`,
+//   `TabPanel`, `EmptyState`, `ErrorBoundary`, `icons`, and `variants()`/`cn()`).
+//   New UI imports from `src/ui` first rather than hand-rolling raw `<button>`,
+//   `<input>`, `<select>` or bespoke spacing rules; `web/AGENTS.md` holds the full
+//   frontend agent contract. In dev (`npm run dev`), `?ui-gallery=1` mounts
+//   `web/src/ui/UiGallery.tsx` (`import.meta.env.DEV`-only, excluded from
+//   `web/dist`) to inspect every primitive across themes, colour modes and
+//   densities without running a backend session.
+// * **Decomposed modules**: `web/src/app/` holds the shell layout and boot/keybinding
+//   hooks (`WorkbenchLayout`, `GlobalOverlays`, `useAppBoot`,
+//   `useGlobalKeybindings`); `web/src/features/` holds the split domain modules
+//   (`access/`, `composer/`, `rail/`, `settings/`, `transcript/`);
+//   `web/src/state/actions/` and `web/src/api/{types,endpoints}/` hold the split
+//   action, endpoint and contract-type modules behind backwards-compatible barrels
+//   (`state/actions.ts`, `api/endpoints.ts`, `api/types.ts`).
+// * **Static contracts**: `web/src/styles/ui-contract.test.ts` blocks raw colours,
+//   `text-faint`, default Tailwind palette classes and non-geometry arbitrary
+//   brackets in TSX; `web/src/styles/scale.test.ts` enforces token usage and the
+//   4px/10px CSS floor; `web/src/styles/layers.test.ts` enforces `layer(components)`
+//   ordering; and `node web/scripts/design-audit.mjs` reports any remaining
+//   stylesheet drift.
 //
 // For the focused real-browser Workbench check, first run `npm run build` in `web/`
 // and build `target/debug/karucode` with `cargo build -p kc-server --bin karucode`.
@@ -1234,283 +1287,18 @@
 // the generated `docs/internal/web-ui.md`.
 
 import type { JSX } from 'preact';
-import { useEffect } from 'preact/hooks';
-import * as actions from './state/actions';
-import * as store from './state/store';
-import * as workbench from './state/workbench';
-import * as notifyWiring from './state/notifyWiring';
+import { GlobalOverlays } from './app/GlobalOverlays';
+import { useAppBoot } from './app/useAppBoot';
+import { useGlobalKeybindings } from './app/useGlobalKeybindings';
+import { WorkbenchLayout } from './app/WorkbenchLayout';
 import { AuthScreen } from './components/AuthScreen';
-import { Onboarding } from './components/Onboarding';
 import { BootErrorScreen, BootSkeleton } from './components/BootScreens';
-import { ChatView } from './components/ChatView';
-import { CommandPalette } from './components/CommandPalette';
-import { ErrorBoundary } from './components/ErrorBoundary';
-import { FileViewer } from './components/FileViewer';
-import { NotificationCenter } from './components/NotificationCenter';
-import { ProjectRail } from './components/ProjectRail';
-import { ControlPlane } from './components/control-plane/ControlPlane';
-import { controlPlaneOpen } from './state/controlPlane';
-import * as railPeek from './state/railPeek';
-import { RewindDialog } from './components/RewindDialog';
-import { SessionsRail } from './components/SessionsRail';
-import { SettingsSheet } from './components/SettingsSheet';
-import { matchUiKeybinding } from './components/uiContributions';
-import { ThemeStudio } from './components/ThemeStudio';
-import { ToastRegion } from './components/ToastRegion';
-import { isApplePlatform } from './lib/platform';
-
-/**
- * Is the caret somewhere a modifier chord still belongs to the field?
- *
- * A modifier does not make a shortcut safe. With `mod = metaKey || ctrlKey`, a
- * macOS reader types Ctrl+B (cursor-left), Ctrl+K (kill-to-end-of-line) and
- * Ctrl+J (newline in some editors) *as text-editing keys*, and Windows/Linux
- * readers have their own chords there. The shell's own shortcuts and the
- * plugin-contributed ones ask the same question, so they must ask it in one
- * place rather than drifting apart.
- */
-function caretInEditable(event: Event): boolean {
-  const target = event.target;
-  return (
-    target instanceof HTMLElement &&
-    target.closest('input, textarea, select, [contenteditable="true"]') !== null
-  );
-}
-
-function isDialogOpen(): boolean {
-  return (
-    store.settingsOpen.value ||
-    store.paletteOpen.value ||
-    store.themeStudioOpen.value ||
-    store.notificationCenterOpen.value ||
-    store.rewindTarget.value !== null ||
-    store.fileViewerPath.value !== null ||
-    (store.narrowViewport.value && workbench.contextOpen.value)
-  );
-}
+import { Onboarding } from './components/Onboarding';
+import * as store from './state/store';
 
 export function App(): JSX.Element {
-  useEffect(() => {
-    const unregisterAuth = actions.registerAuthHandler();
-    void actions.bootstrap();
-
-    // Sound needs one interaction before a browser will let it play. Attaching the
-    // listener is all this does; it removes itself after the first gesture.
-    const disarmSound = notifyWiring.armSoundOnFirstGesture();
-    // Keep the engine in step with the persisted preferences, and with a change
-    // made in another tab.
-    notifyWiring.syncSoundPreferences();
-    const onStorage = (event: StorageEvent): void => {
-      if (event.key === null || event.key.startsWith('karucode.notify.')) {
-        store.soundEnabled.value = store.readSoundEnabled();
-        store.soundVolume.value = store.readSoundVolume();
-        store.desktopEnabled.value = store.readDesktopEnabled();
-        notifyWiring.syncSoundPreferences();
-      }
-    };
-    window.addEventListener('storage', onStorage);
-
-    const clockTimer = window.setInterval(() => {
-      store.clock.value = Date.now();
-    }, 20_000);
-    const healthTimer = window.setInterval(() => {
-      void actions.checkHealth();
-    }, 20_000);
-
-    const media =
-      typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 1023px)') : null;
-    const phoneMedia =
-      typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 640px)') : null;
-    const updateViewport = (): void => {
-      store.narrowViewport.value = media ? media.matches : false;
-      store.phoneViewport.value = phoneMedia ? phoneMedia.matches : false;
-      if (media && !media.matches) store.mobileSheet.value = null;
-    };
-    updateViewport();
-    if (media) {
-      if (typeof media.addEventListener === 'function') media.addEventListener('change', updateViewport);
-      else if (typeof media.addListener === 'function') media.addListener(updateViewport);
-    }
-    if (phoneMedia) {
-      if (typeof phoneMedia.addEventListener === 'function') phoneMedia.addEventListener('change', updateViewport);
-      else if (typeof phoneMedia.addListener === 'function') phoneMedia.addListener(updateViewport);
-    }
-
-    return () => {
-      unregisterAuth();
-      disarmSound();
-      window.removeEventListener('storage', onStorage);
-      window.clearInterval(clockTimer);
-      window.clearInterval(healthTimer);
-      if (media) {
-        if (typeof media.removeEventListener === 'function') media.removeEventListener('change', updateViewport);
-        else if (typeof media.removeListener === 'function') media.removeListener(updateViewport);
-      }
-      if (phoneMedia) {
-        if (typeof phoneMedia.removeEventListener === 'function') phoneMedia.removeEventListener('change', updateViewport);
-        else if (typeof phoneMedia.removeListener === 'function') phoneMedia.removeListener(updateViewport);
-      }
-      actions.stopStream();
-    };
-  }, []);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (store.boot.value !== 'ready') return;
-      const mod = event.metaKey || event.ctrlKey;
-      const key = event.key.toLowerCase();
-
-      // The caret's own keys. On Apple platforms the app's chords are ⌘-based, so
-      // a bare Ctrl+letter inside a field is the field's emacs binding - Ctrl+B
-      // cursor-left, Ctrl+K kill-to-end-of-line, Ctrl+J next line - and taking it
-      // would move the caret *and* run a command. A ⌘ chord, or any Ctrl chord on
-      // Windows/Linux where Ctrl *is* the app modifier, stays the app's even while
-      // typing: Ctrl+K from the composer opening the palette is the only reason
-      // anyone learns that chord. Nothing below runs `preventDefault()` before
-      // this point, so an ignored chord reaches the field and the browser intact.
-      if (event.ctrlKey && !event.metaKey && isApplePlatform() && caretInEditable(event)) return;
-
-      // The one chord that is never a field's business on any platform: `Mod+N`
-      // starts a new conversation, so it must not fire while the reader is
-      // mid-sentence in the composer or an inline editor.
-      if (mod && key === 'n' && caretInEditable(event)) return;
-
-      // The Theme Studio used to sit on `Mod+Shift+T`, which every browser owns
-      // for "reopen the closed tab" and does not reliably hand to the page. The
-      // browser keeps that chord; the studio moved to `Mod+Shift+L`. It is a
-      // *Shift* chord, so the Apple-only Ctrl guard above does not cover it, and
-      // both engines treat it as a text chord: it does not fire from a field.
-      if (mod && event.shiftKey && key === 'l') {
-        if (caretInEditable(event)) return;
-        event.preventDefault();
-        actions.toggleThemeStudio();
-        return;
-      }
-      if (mod && key === 'k') {
-        event.preventDefault();
-        actions.togglePalette();
-        return;
-      }
-      // The Theme Studio owns no key handler of its own, so Escape must close it
-      // before the generic "a dialog is open, ignore shortcuts" guard below.
-      if (event.key === 'Escape' && store.themeStudioOpen.value) {
-        actions.closeThemeStudio();
-        return;
-      }
-      if (event.key === 'Escape' && workbench.contextOpen.value && !event.defaultPrevented) {
-        event.preventDefault();
-        workbench.closeContext();
-        return;
-      }
-      if (isDialogOpen()) return;
-
-      // The collapsed rail's fly-out is not a dialog and has no focus trap, so it
-      // closes itself here — before the Escape that stops a run, which would
-      // otherwise cancel a run when all the reader wanted was to dismiss the list.
-      if (event.key === 'Escape' && railPeek.peekProjectId.value !== null) {
-        railPeek.closePeek();
-        return;
-      }
-
-      // `Mod+B` is the bookmarks bar (and, in Gecko, the bookmarks sidebar) in
-      // every browser, so the rail owns `Mod+\` instead. A peek is a stand-in for
-      // the rail: collapsing or restoring it is over.
-      if (mod && key === '\\') {
-        event.preventDefault();
-        railPeek.closePeek();
-        actions.toggleRail();
-        return;
-      }
-      // `Mod+J` is Downloads in Gecko and cannot be counted on to reach the page;
-      // the Context drawer answers to `Mod+Shift+X`. When the control plane owns
-      // that drawer the chord belongs to the reader: do not swallow it.
-      if (mod && event.shiftKey && key === 'x') {
-        if (caretInEditable(event) || controlPlaneOpen.value) return;
-        event.preventDefault();
-        workbench.toggleContext();
-        return;
-      }
-      if (mod && key === 'n') {
-        event.preventDefault();
-        actions.startDraftSession();
-        return;
-      }
-      if (event.key === 'Escape') {
-        const target = event.target;
-        // The composer handles Escape itself; inline editors and open menus
-        // consume it so closing them does not also cancel the run.
-        if (
-          target instanceof HTMLElement &&
-          target.closest('input, textarea, select, [contenteditable="true"], [role="menu"]')
-        ) {
-          return;
-        }
-        if (store.mobileSheet.value !== null) {
-          actions.closeSheets();
-          return;
-        }
-        // A popped-out Results panel is an overlay, not a layout column: Escape
-        // dismisses it before it can be mistaken for "cancel the run".
-        if (
-          !store.narrowViewport.value &&
-          store.inspectorMode.value === 'popout' &&
-          !store.inspectorCollapsed.value
-        ) {
-          actions.toggleInspector();
-          return;
-        }
-        if (store.chat.value.running && !store.stopping.value) {
-          void actions.stopRun();
-        }
-      }
-    };
-
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
-
-  /**
-   * Shortcuts plugins contributed.
-   *
-   * A separate listener from the app's own, on purpose: the two sets cannot
-   * collide (a plugin binding must carry a modifier, and the host and the client
-   * both refuse the app's own chords), so neither has to know about the other, and
-   * a plugin that vanishes mid-session simply has no bindings in the next read.
-   *
-   * Two guards matter. No binding fires while a dialog is open — a shortcut that
-   * acts behind a modal is a bug. And none fires while the caret is in a field: a
-   * chord with a modifier is still a text-editing key there (Ctrl+A, Ctrl+Z), and
-   * a plugin must not make typing surprising.
-   */
-  useEffect(() => {
-    const onPluginKeyDown = (event: KeyboardEvent): void => {
-      if (store.boot.value !== 'ready') return;
-      if (event.defaultPrevented || isDialogOpen()) return;
-      if (caretInEditable(event)) return;
-      const binding = matchUiKeybinding(store.pluginUi.value.keybindings, event);
-      if (!binding) return;
-      event.preventDefault();
-      void actions.runPluginContributions(binding);
-    };
-    window.addEventListener('keydown', onPluginKeyDown);
-    return () => window.removeEventListener('keydown', onPluginKeyDown);
-  }, []);
-
-  useEffect(() => {
-    if (controlPlaneOpen.value) {
-      workbench.closeContext();
-      store.mobileSheet.value = null;
-    }
-  }, [controlPlaneOpen.value]);
-
-  const session = store.activeSession.value;
-  const unreadCount = store.unreadTotal.value;
-  useEffect(() => {
-    const base = session?.title ? `${session.title} — karucode` : 'karucode';
-    // The unread count is the only thing a notification can tell you from another
-    // tab, so it goes in the title rather than only in the page.
-    document.title = unreadCount > 0 ? `(${unreadCount}) ${base}` : base;
-  }, [session?.title, unreadCount]);
+  useAppBoot();
+  useGlobalKeybindings();
 
   if (store.boot.value === 'loading') return <BootSkeleton />;
   if (store.boot.value === 'auth') return <AuthScreen />;
@@ -1522,75 +1310,8 @@ export function App(): JSX.Element {
       <a class="skip-link" href="#chat-main">
         Skip to chat
       </a>
-      {/* One boundary per panel.
-        *
-        * The app has two layers at least: this outer shell boundary and one per
-        * grid child or overlay. A malformed payload in the inspector, a plugin
-        * panel that returns something its renderer did not expect, a theme file
-        * with a corrupt token - each throws inside one component, and without a
-        * boundary around it the throw unmounts the whole tree and leaves a white
-        * page with no chat, no rails and no way back but the browser's reload.
-        *
-        * `ChatView` is deliberately NOT wrapped here: it carries its own
-        * boundaries for the transcript and each of its sub-panels, so a crash in
-        * the conversation does not also take the composer down.
-        */}
-      <ErrorBoundary scope="The workspace" root>
-        <div
-          class={`app${store.narrowViewport.value ? ' is-narrow' : ''}`}
-          data-rail-collapsed={store.railCollapsed.value ? 'true' : 'false'}
-          data-inspector-collapsed={store.inspectorCollapsed.value ? 'true' : 'false'}
-          data-inspector-mode={store.inspectorMode.value}
-        >
-          {controlPlaneOpen.value || (!store.narrowViewport.value && store.railCollapsed.value) ? (
-            <ErrorBoundary scope="The project rail">
-              <ProjectRail />
-            </ErrorBoundary>
-          ) : null}
-          {controlPlaneOpen.value ? (
-            <ErrorBoundary scope="Mission control"><ControlPlane /></ErrorBoundary>
-          ) : (
-            <>
-              <ErrorBoundary scope="The sessions rail"><SessionsRail /></ErrorBoundary>
-              <ChatView />
-            </>
-          )}
-        </div>
-      </ErrorBoundary>
-
-      {store.mobileSheet.value !== null ? (
-        <button
-          type="button"
-          class="sheet-backdrop"
-          aria-label="Close panel"
-          onClick={actions.closeSheets}
-        />
-      ) : null}
-
-      <ErrorBoundary scope="Settings">
-        <SettingsSheet />
-      </ErrorBoundary>
-      <ErrorBoundary scope="The command palette">
-        <CommandPalette />
-      </ErrorBoundary>
-      <ErrorBoundary scope="The Theme studio">
-        <ThemeStudio />
-      </ErrorBoundary>
-      <ErrorBoundary scope="Notifications">
-        <NotificationCenter />
-      </ErrorBoundary>
-      <ErrorBoundary scope="The rewind dialog">
-        <RewindDialog />
-      </ErrorBoundary>
-      <ErrorBoundary scope="The file viewer">
-        <FileViewer />
-      </ErrorBoundary>
-      {/* The toast region stays OUTSIDE every boundary on purpose: it is how a
-        * crash gets reported to the user ("could not save", "the stream died"),
-        * so replacing it with a crash card would hide the very messages it exists
-        * to deliver. It renders nothing but text and has no dependencies, so it
-        * has nothing to throw about. */}
-      <ToastRegion />
+      <WorkbenchLayout />
+      <GlobalOverlays />
     </div>
   );
 }

@@ -250,18 +250,23 @@
   --focus-ring-width: 2px;
   --focus-ring-offset: 2px;
 
-  /* ---- legacy aliases -------------------------------------------------- */
-  /* Kept so untouched CSS keeps rendering during the restyle. New code must
-     use the names above; these will disappear once the migration is done. */
-  --bg-raised: var(--surface-raised);
-  --bg-sunken: var(--rail);
-  --panel: var(--surface);
-  --border: var(--line);
-  --border-strong: var(--line-strong);
-  --text-muted: var(--text-secondary);
-  --text-faint: var(--muted);
-  --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
-  --ok: var(--success);
+  /* ---- legacy aliases: deleted ----------------------------------------- *
+   * `--bg-raised`, `--bg-sunken`, `--panel`, `--border`, `--border-strong`,
+   * `--text-muted`, `--text-faint`, `--accent-soft`, `--ok`, `--panel-2`,
+   * `--surface-2`, `--surface-3`, `--text-2`, `--warning` and `--mono` used to
+   * live here so untouched sheets kept rendering during the restyle. The
+   * migration is done: the last reader of each was renamed to the token above
+   * (`--surface-2` → `--surface-raised`, `--bg-sunken` → `--rail`, `--warning`
+   * → `--warn`, `--mono` → `--font-mono`, …), and `--accent-soft` — a formula
+   * rather than a value — is written where it is used:
+   * `color-mix(in srgb, var(--accent) 16%, transparent)`.
+   *
+   * They are deleted rather than left as dead aliases. `scale.test.ts` already
+   * fails a sheet that reads an undefined token, and the reverse — a definition
+   * nothing reads — is how the seven silently empty fills described above
+   * happened. A name comes back only with a definition *and* a reader in the
+   * same change.
+   */
 
   /* ---- typography ------------------------------------------------------ */
   --font-ui:
@@ -351,25 +356,14 @@
   --inspector-w: 342px;
   --header-h: 66px; /* .main-head{height:66px;min-height:66px} */
   --content-max: 820px; /* .thread-inner{max-width:820px} */
-  /* ---- legacy alias names ---------------------------------------------- *
-   * Components reach for these names, so they are kept as aliases over the real
-   * tokens. They used to point at custom properties that did not exist —
-   * `--surface-2: var(--raised)` and `--surface-3: var(--hover)`, where the real
-   * names are `--surface-raised` and `--surface-hover`. An undefined `var()` makes
-   * the whole declaration invalid at computed-value time, so seven fills across
-   * the transcript (avatar, status chip, tool-group header, disabled Send, four
-   * hover states) silently painted nothing. Every alias below resolves. */
-  --panel-2: var(--rail);
-  --surface-2: var(--surface-raised);
-  --surface-3: var(--surface-hover);
-  --text-2: var(--text-secondary);
-  /* one step *below* a card, for a code block or console inside it, so an inset
-   * is always a recess rather than a second card */
+  /* ---- rungs with no alias -------------------------------------------- *
+   * `--surface-sunken` is one step *below* a card, for a code block or console
+   * inside it, so an inset is always a recess rather than a second card. It is
+   * a token in its own right (mapped as `bg-sunken` / `--color-sunken` in
+   * `tailwind.css`), not a legacy alias: `--panel-2`, `--surface-2`,
+   * `--surface-3`, `--text-2`, `--warning` and `--mono` lived beside it and are
+   * gone — see the note above. */
   --surface-sunken: var(--theme-line-soft);
-  /* `--warning` was read twice and never defined */
-  --warning: var(--warn);
-  /* a mono family alias, also read but never defined */
-  --mono: var(--font-mono);
 
   /* The mock's canvas glow: two very faint radial tints (warm top-left, cool
    * top-right) laid over `--bg`. Derived from the accent/info roles so every

@@ -23,12 +23,23 @@ initViewportInset();
 
 const root = document.getElementById('app');
 if (root) {
-  // A render that throws must not leave a white page: the boundary keeps the
-  // error on screen with a reload button and copyable diagnostics.
-  render(
-    <ErrorBoundary scope="The workspace">
-      <App />
-    </ErrorBoundary>,
-    root,
-  );
+  if (import.meta.env.DEV && new URLSearchParams(window.location.search).get('ui-gallery') === '1') {
+    void import('./ui/UiGallery').then(({ UiGallery }) => {
+      render(
+        <ErrorBoundary scope="UI Gallery">
+          <UiGallery />
+        </ErrorBoundary>,
+        root,
+      );
+    });
+  } else {
+    // A render that throws must not leave a white page: the boundary keeps the
+    // error on screen with a reload button and copyable diagnostics.
+    render(
+      <ErrorBoundary scope="The workspace">
+        <App />
+      </ErrorBoundary>,
+      root,
+    );
+  }
 }

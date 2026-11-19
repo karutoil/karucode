@@ -495,7 +495,7 @@
 .compose-bottom .model-switcher-button[aria-expanded='true'] {
   border-color: var(--line);
   background: var(--surface-hover);
-  color: var(--text-2);
+  color: var(--text-secondary);
 }
 
 .compose-bottom .model-switcher-button .down {
@@ -595,7 +595,7 @@
  * glyph rather than a dimmed accent. */
 .button-send:disabled {
   border-color: transparent;
-  background: var(--surface-3);
+  background: var(--surface-hover);
   color: var(--muted);
   box-shadow: none;
   opacity: 1;
@@ -683,7 +683,7 @@
 
 .context-pill:hover {
   background: var(--surface-hover);
-  color: var(--text-2);
+  color: var(--text-secondary);
 }
 
 .context-pill:focus-visible {
@@ -789,7 +789,7 @@
 .compose-bottom .model-switcher-search:focus-within {
   background: var(--surface-hover);
   box-shadow: inset 0 0 0 1px var(--accent-line);
-  color: var(--text-2);
+  color: var(--text-secondary);
 }
 
 .compose-bottom .model-switcher-filter {
@@ -1086,7 +1086,7 @@
 
 .compose-approvals:hover {
   background: var(--surface-hover);
-  color: var(--text-2);
+  color: var(--text-secondary);
 }
 
 .compose-approvals:focus-visible {

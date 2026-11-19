@@ -238,11 +238,12 @@ function sameTheme(a: Record<string, string>, b: Record<string, string>): boolea
  */
 function terminalTheme(): Record<string, string> {
   const read = (name: string, fallback: string): string => readToken(name, fallback);
-  // The canvas xterm paints on is `.terminal-surface`'s `--bg-sunken`. Reading a
-  // different token (`--surface-sunken`, which is a *line* tone) left the emulator
-  // believing its background was one colour while the CSS painted another, so
-  // selection, erase and the contrast maths inside xterm all used the wrong one.
-  const background = read('--bg-sunken', read('--bg', '#16181d'));
+  // The canvas xterm paints on is `.terminal-surface`'s `--rail`, the same token
+  // `terminal.css` fills that element with. Reading a different token
+  // (`--surface-sunken`, which is a *line* tone) left the emulator believing its
+  // background was one colour while the CSS painted another, so selection, erase
+  // and the contrast maths inside xterm all used the wrong one.
+  const background = read('--rail', read('--bg', '#16181d'));
   const foreground = read('--text', '#d7dbe3');
   // The ANSI ramp is *derived from this theme*, never written by hand. It used to
   // map `blue` to `--accent`, so in Ember an amber accent painted `ls` in amber —

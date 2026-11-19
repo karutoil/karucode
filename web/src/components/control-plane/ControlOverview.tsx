@@ -15,6 +15,7 @@ import { agentStatusWord, type ModelChoice, initials, sessionStatus, tone } from
 import type { SessionStatus } from './controlModel';
 import { contextMenuProps, Menu, MenuItem, useMenu } from '../../lib/menu';
 import { copyText } from '../../lib/clipboard';
+import { Badge, Button, Callout, Input, Select, StatusDot, Text, type StatusDotTone } from '../../ui';
 import '../../styles/control-overview.css';
 
 export function modelChoices(config: Config | null): ModelChoice[] {
@@ -62,25 +63,23 @@ function LaunchModelPicker({ value, effort, onModel, onEffort }: {
   return <>
     <label class="cp-launch-pick">
       <span class="eyebrow">Model</span>
-      <select
+      <Select
         class="input cp-launch-select"
         aria-label="Model for the new chat"
         value={chosen?.key ?? ''}
         onChange={(event) => onModel(event.currentTarget.value)}
-      >
-        {choices.map((choice) => <option value={choice.key} key={choice.key}>{choice.label}</option>)}
-      </select>
+        options={choices.map((choice) => ({ value: choice.key, label: choice.label }))}
+      />
     </label>
     {chosen?.canReason === false ? null : <label class="cp-launch-pick">
       <span class="eyebrow">Reasoning</span>
-      <select
+      <Select
         class="input cp-launch-select"
         aria-label="Reasoning for the new chat"
         value={effort}
         onChange={(event) => onEffort(event.currentTarget.value)}
-      >
-        {effortOptions(chosen?.reasoningLevels ?? null).map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
-      </select>
+        options={effortOptions(chosen?.reasoningLevels ?? null).map((option) => ({ value: option.value, label: option.label }))}
+      />
     </label>}
   </>;
 }
@@ -140,7 +139,7 @@ function RunningCard({ session, projectName, onNavigate, onOpenInProject }: {
     >
       <span class="cp-card-top">
         <span class="rail-avatar" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
-        <span class="session-state session-state-running"><span class="status-dot status-running" aria-hidden="true" />Running</span>
+        <span class="session-state session-state-running"><StatusDot tone="running" />Running</span>
       </span>
       <strong class="cp-card-title">{title}</strong>
       <span class="cp-card-meta">{projectName(session.project_id)} · {relativeTime(session.updated_at)} · {session.message_count.toLocaleString()} msgs</span>
@@ -249,10 +248,10 @@ function SessionRowCard({ session, rowClass, projectName, onNavigate, onOpenInPr
           <span class="session-meta">
             {statusWord
               ? <span class={`session-state session-state-${statusWord.tone}`}>
-                  <span class={`status-dot status-${statusWord.tone}`} aria-hidden="true" />{statusWord.label}
+                  <StatusDot tone={statusWord.tone as StatusDotTone} />{statusWord.label}
                 </span>
               : <span class="session-state session-state-warn">
-                  <span class="status-dot status-warn" aria-hidden="true" />Needs you
+                  <StatusDot tone="warn" />Needs you
                 </span>}
             <span class="meta-dot" aria-hidden="true" />
             <span>{projectName(session.project_id)}</span>
@@ -349,7 +348,7 @@ export function ControlOverview({
   return <div class="cp-overview">
     <header class="cp-hero">
       <div class="cp-hero-copy">
-        <p class="eyebrow">All projects</p>
+        <Text as="p" size="micro" tone="muted" weight="bold" class="eyebrow">All projects</Text>
         <h1>What are we building<span>.</span></h1>
         <p class="cp-hero-line">{(sessionCounts?.running ?? 0) > 0
           ? `${sessionCounts?.running} session${sessionCounts?.running === 1 ? '' : 's'} working right now across ${projectRows.length} projects.`
@@ -372,9 +371,9 @@ export function ControlOverview({
         status colour for "needs you", not the accent: the accent owns the primary
         action (the launch box), and §2 keeps status off the accent. */}
     {(overview?.approvals?.pending ?? 0) > 0
-      ? <p class="cp-pending" role="status">
+      ? <Callout tone="warn" role="status" class="cp-pending">
           <strong>{overview?.approvals?.pending}</strong> approval{(overview?.approvals?.pending ?? 0) === 1 ? '' : 's'} waiting on you — open the session to answer.
-        </p>
+        </Callout>
       : null}
 
     {/* The launch box is the one hand-built surface left in the plane, so every
@@ -385,7 +384,7 @@ export function ControlOverview({
       <label class="eyebrow cp-launch-label" for="cp-launch-input">Start something with control chat</label>
       <div class="cp-launch-row">
         <SparkIcon size={16} class="cp-launch-spark" />
-        <select
+        <Select
           class="input cp-launch-project"
           title={projects.find((item) => item.id === launchProject)?.name ?? undefined}
           aria-label="Project for control chat"
@@ -394,18 +393,23 @@ export function ControlOverview({
         >
           {projects.length === 0 ? <option value="">No projects</option> : null}
           {projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}
-        </select>
-        <input
+        </Select>
+        <Input
           id="cp-launch-input"
           class="input cp-launch-input"
           value={draft}
           placeholder="Describe work for any project — you’ll confirm the project before it starts…"
           onInput={(event) => onDraft(event.currentTarget.value)}
         />
-        <button type="submit" class="button button-primary cp-launch-submit" disabled={opening}>
+        <Button
+          type="submit"
+          variant="primary"
+          class="button button-primary cp-launch-submit"
+          disabled={opening}
+          iconRight={<ArrowRightIcon size={14} />}
+        >
           {draft.trim() === '' ? 'Open chat' : 'Continue'}
-          <ArrowRightIcon size={14} />
-        </button>
+        </Button>
       </div>
       <div class="cp-launch-model">
         <LaunchModelPicker
@@ -415,13 +419,15 @@ export function ControlOverview({
           onEffort={onLaunchEffort}
         />
       </div>
-      <p class="field-hint cp-launch-hint">The chat is pinned to this model before your prompt lands. Control chat names the project explicitly and never starts work without your review, according to the approval policy.</p>
+      <Text as="p" size="tiny" tone="muted" class="field-hint cp-launch-hint">
+        The chat is pinned to this model before your prompt lands. Control chat names the project explicitly and never starts work without your review, according to the approval policy.
+      </Text>
     </form>
 
     <div class="cp-dash">
       <div class="cp-dash-main">
         <section class="cp-section" aria-label="Running now">
-          <div class="cp-section-head"><h2 class="eyebrow">Running now</h2><span class="badge">{runningList.length}</span></div>
+          <div class="cp-section-head"><h2 class="eyebrow">Running now</h2><Badge class="badge">{runningList.length}</Badge></div>
           {runningList.length === 0
             ? <div class="empty-state cp-empty"><p class="empty-copy">No active runs. Recently active sessions are listed below.</p></div>
             : <div class="cp-cards">{runningList.slice(0, 8).map((session) => (
@@ -436,7 +442,7 @@ export function ControlOverview({
         </section>
 
         <section class="cp-section" aria-label="Recent sessions">
-          <div class="cp-section-head"><h2 class="eyebrow">Recent sessions</h2><span class="badge">{recentList.length}</span></div>
+          <div class="cp-section-head"><h2 class="eyebrow">Recent sessions</h2><Badge class="badge">{recentList.length}</Badge></div>
           {recentList.length === 0
             ? <div class="empty-state cp-empty"><p class="empty-copy">No other sessions yet.</p></div>
             /* Deliberately a table, not a list of `.session-row`s. The workbench's
@@ -473,7 +479,7 @@ export function ControlOverview({
 
       <div class="cp-dash-side">
         {waitingList.length > 0 ? <section class="cp-section" aria-label="Waiting on you">
-          <div class="cp-section-head"><h2 class="eyebrow">Waiting on you</h2><span class="badge">{waitingList.length}</span></div>
+          <div class="cp-section-head"><h2 class="eyebrow">Waiting on you</h2><Badge class="badge">{waitingList.length}</Badge></div>
           <ul class="session-list">
             {waitingList.slice(0, 6).map((session) => (
               <SessionRowCard
@@ -489,7 +495,7 @@ export function ControlOverview({
         </section> : null}
 
         {attentionList.length > 0 ? <section class="cp-section" aria-label="Needs attention">
-          <div class="cp-section-head"><h2 class="eyebrow">Needs attention</h2><span class="badge">{attentionList.length}</span></div>
+          <div class="cp-section-head"><h2 class="eyebrow">Needs attention</h2><Badge class="badge">{attentionList.length}</Badge></div>
           <ul class="session-list">
             {attentionList.slice(0, 6).map((session) => {
               const status = sessionStatus(session);
@@ -507,7 +513,7 @@ export function ControlOverview({
         </section> : null}
 
         {liveAgents.length > 0 ? <section class="cp-section" aria-label="Live agents">
-          <div class="cp-section-head"><h2 class="eyebrow">Agents working</h2><span class="badge">{liveAgents.length}</span></div>
+          <div class="cp-section-head"><h2 class="eyebrow">Agents working</h2><Badge class="badge">{liveAgents.length}</Badge></div>
           {/* The workbench's own agent card, not a one-line row of this region's
               own: same classes, same `data-status` paint (running/paused/failed),
               same foot with the 24px action. The overview is where an agent is
@@ -559,7 +565,7 @@ export function ControlOverview({
         </section> : null}
 
         <section class="cp-section" aria-label="Projects">
-          <div class="cp-section-head"><h2 class="eyebrow">Projects</h2><span class="badge">{projectRows.length}</span></div>
+          <div class="cp-section-head"><h2 class="eyebrow">Projects</h2><Badge class="badge">{projectRows.length}</Badge></div>
           {projectRows.length === 0
             ? <div class="empty-state cp-empty"><p class="empty-copy">No projects yet. Add one from the project rail.</p></div>
             : <div class="cp-projects">{projectRows.map((item) => <button

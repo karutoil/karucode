@@ -234,7 +234,7 @@
 
 .new-session:hover {
   border-color: var(--accent-line);
-  /* `--surface-2` is the raised rung, one L point above this button's own fill:
+  /* `--surface-raised` is the raised rung, one L point above this button's own fill:
    * measured 1.12:1 in Ember, i.e. no visible change in dark mode. §5.4's hover
    * token is a real step away from the base in both modes. */
   background: var(--surface-hover);
@@ -300,7 +300,7 @@
 
 .side-search:focus-within {
   border-color: var(--accent);
-  background: var(--surface-2);
+  background: var(--surface-raised);
 }
 
 .side-search svg {
@@ -473,7 +473,7 @@
 
 /* Current session: the accent tint plus the rail.
  *
- * It was `--surface-2` (the raised rung). Measured against the sidebar that is
+ * It was `--surface-raised` (the raised rung). Measured against the sidebar that is
  * 1.23:1 in Ember but **1.05:1 in Daybreak** — six RGB units, so in light mode
  * the selected row was identified by its 2px rail and a bolder title while the
  * fill said nothing, and the row it painted was a rung *below* the hover fill of
@@ -663,9 +663,9 @@
   max-width: 9ch;
   overflow: hidden;
   padding: 0 var(--space-2);
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: var(--radius-pill, 999px);
-  background: var(--surface-2, transparent);
+  background: var(--surface-raised, transparent);
   color: var(--muted);
   font-family: var(--font-ui);
   font-size: var(--fs-tiny);
@@ -677,7 +677,7 @@
 
 .session-chip-accent { border-color: currentColor; color: var(--accent-fill); }
 .session-chip-success { border-color: currentColor; color: var(--success); }
-.session-chip-warn { border-color: currentColor; color: var(--warning); }
+.session-chip-warn { border-color: currentColor; color: var(--warn); }
 .session-chip-danger { border-color: currentColor; color: var(--danger); }
 .session-chip-muted { opacity: 0.75; }
 
@@ -690,7 +690,7 @@
 }
 
 .session-state-warn {
-  color: var(--warning);
+  color: var(--warn);
 }
 
 .session-menu-wrap {
@@ -947,7 +947,7 @@
   height: 4px;
   overflow: hidden;
   border-radius: var(--radius-xs);
-  background: var(--surface-3);
+  background: var(--surface-hover);
 }
 
 .side-meter-bar i {
@@ -1217,7 +1217,7 @@
 
 .head-btn:hover:not(:disabled) {
   /* One hover for the whole header row: this rule and the `.head-icon` variant
-   * below were `--surface` and `--surface-2`, so the theme button and the bell
+   * below were `--surface` and `--surface-raised`, so the theme button and the bell
    * beside it flashed two different greys for the same gesture. */
   background: var(--surface-hover);
   border-color: var(--line-strong);
@@ -1389,7 +1389,7 @@
   padding: var(--hairline) var(--space-2);
   border: 1px solid transparent;
   border-radius: var(--radius-xs);
-  background: var(--surface-2);
+  background: var(--surface-raised);
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
@@ -1445,7 +1445,7 @@
 }
 
 .tab-close:hover {
-  background: var(--surface-2);
+  background: var(--surface-raised);
   color: var(--text);
 }
 
@@ -2191,7 +2191,7 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface);
-  color: var(--text-2);
+  color: var(--text-secondary);
   font-size: var(--fs-tiny);
   font-weight: 600;
   cursor: pointer;

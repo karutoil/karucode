@@ -21,6 +21,7 @@ import {
 import { formatDuration, relativeTime } from '../lib/format';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
+import { Badge, Button, Callout, IconButton, Inline, Spinner, Stack, StatusDot, Text, cn } from '../ui';
 import { BoltIcon, CpuIcon, RefreshIcon } from './icons';
 
 /**
@@ -452,30 +453,34 @@ function SubagentsSection({ info }: { info: SessionInfo }): JSX.Element {
       </div>
 
       <div class="si-choice" role="group" aria-label="Where this session's subagents work">
-        {choices.map((choice) => (
-          <button
-            key={String(choice.value)}
-            type="button"
-            class={`si-choice-button${override === choice.value ? ' is-active' : ''}`}
-            aria-pressed={override === choice.value}
-            data-testid={`session-worktrees-${choice.value === null ? 'inherit' : String(choice.value)}`}
-            title={choice.title}
-            disabled={saving}
-            onClick={() => choose(choice.value)}
-          >
-            {choice.label}
-          </button>
-        ))}
+        {choices.map((choice) => {
+          const active = override === choice.value;
+          return (
+            <Button
+              key={String(choice.value)}
+              variant={active ? 'secondary' : 'ghost'}
+              size="sm"
+              class={cn('si-choice-button', active && 'is-active')}
+              aria-pressed={active}
+              testId={`session-worktrees-${choice.value === null ? 'inherit' : String(choice.value)}`}
+              title={choice.title}
+              disabled={saving}
+              onClick={() => choose(choice.value)}
+            >
+              {choice.label}
+            </Button>
+          );
+        })}
       </div>
 
-      <p class="si-note">
+      <Text as="p" size="tiny" tone="muted" class="si-note">
         {effective
           ? 'Subagents in this session run in their own git checkout, started from this working tree as it is now. Nothing is merged for you: a child that changed files hands them back on a karucode/subagent/<id> branch. Needs a repository with at least one commit.'
           : 'Subagents in this session run in this working tree, so their edits are visible immediately and two children editing one file will interleave.'}
         {override === null
           ? ` Following the settings screen, which has it ${install ? 'on' : 'off'} for the whole install.`
           : ` This session overrides the settings screen, which has isolation ${install ? 'on' : 'off'} for the whole install. A single spawn can still override this with its own \`worktree\` argument.`}
-      </p>
+      </Text>
     </section>
   );
 }
@@ -519,30 +524,34 @@ function RecentRuns({ info }: { info: SessionInfo }): JSX.Element | null {
 
 function EmptyInfo(): JSX.Element {
   return (
-    <div class="empty-inspector">
-      <p class="empty-inspector-title">No session open</p>
-      <p>
+    <Stack gap="2" class="empty-inspector">
+      <Text as="p" size="body" weight="semibold" class="empty-inspector-title">
+        No session open
+      </Text>
+      <Text as="p" size="small" tone="muted">
         Open or create a session and this tab describes it: how many messages and runs it has,
         what it spent on input and output tokens, how much of that the prompt cache served, and
         how full the model's context window is.
-      </p>
-    </div>
+      </Text>
+    </Stack>
   );
 }
 
 function ErrorInfo({ message }: { message: string }): JSX.Element {
   return (
-    <div class="si-error" role="alert">
-      <span class="inspector-kicker">Could not read this session's numbers</span>
-      <p>{message}</p>
-      <button
-        type="button"
-        class="button button-small"
-        onClick={() => void actions.refreshSessionInfo()}
-      >
-        Try again
-      </button>
-    </div>
+    <Callout
+      tone="danger"
+      role="alert"
+      title="Could not read this session's numbers"
+      class="si-error"
+      actions={
+        <Button variant="secondary" size="sm" onClick={() => void actions.refreshSessionInfo()}>
+          Try again
+        </Button>
+      }
+    >
+      {message}
+    </Callout>
   );
 }
 
@@ -572,7 +581,12 @@ export function SessionInfoTab(): JSX.Element {
         <div class="inspector-kicker-row">
           <span class="inspector-kicker">Session</span>
         </div>
-        <p class="si-note">Reading this session's numbers…</p>
+        <Inline gap="2" align="center">
+          <Spinner size={14} />
+          <Text as="p" size="tiny" tone="muted" class="si-note">
+            Reading this session's numbers…
+          </Text>
+        </Inline>
       </div>
     );
   }
@@ -587,18 +601,22 @@ export function SessionInfoTab(): JSX.Element {
       <div class="inspector-kicker-row">
         <span class="inspector-kicker">
           Session
-          {info.running ? <span class="si-live">live</span> : null}
+          {info.running ? (
+            <Badge tone="accent" class="si-live">
+              <StatusDot tone="running" />
+              live
+            </Badge>
+          ) : null}
         </span>
-        <button
-          type="button"
-          class="icon-button inspector-mini"
-          aria-label="Refresh session information"
+        <IconButton
+          size="sm"
+          label="Refresh session information"
           title={summaryTitle}
           disabled={refreshing}
+          class="inspector-mini"
           onClick={() => void actions.refreshSessionInfo()}
-        >
-          <RefreshIcon size={13} class={refreshing ? 'spin' : undefined} />
-        </button>
+          icon={<RefreshIcon size={13} class={refreshing ? 'spin' : undefined} />}
+        />
       </div>
 
       <ContextSection info={info} />
@@ -608,10 +626,10 @@ export function SessionInfoTab(): JSX.Element {
       <SubagentsSection info={info} />
       <RecentRuns info={info} />
 
-      <p class="inspector-note">
+      <Text as="p" size="tiny" tone="muted" class="inspector-note">
         <BoltIcon size={12} /> Every figure is read from the server, so it survives a reload and
         covers the whole session — not only the transcript pages this browser has loaded.
-      </p>
+      </Text>
     </div>
   );
 }

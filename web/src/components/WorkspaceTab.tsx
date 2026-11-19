@@ -9,6 +9,19 @@ import { formatBytes } from '../lib/format';
 import { highlightCode, languageLabel } from '../lib/highlight';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
+import {
+  Badge,
+  Button,
+  Callout,
+  Card,
+  IconButton,
+  Inline,
+  LinkButton,
+  Skeleton,
+  Spinner,
+  Stack,
+  Text,
+} from '../ui';
 import { FileTree } from './FileTree';
 import {
   ArrowRightIcon,
@@ -109,11 +122,15 @@ function QuickPreview({
     return (
       <>
         <div class="inspector-inline-head">
-          <span class="inspector-kicker">Quick preview</span>
+          <Text as="span" size="micro" weight="bold" tone="muted" class="inspector-kicker">
+            Quick preview
+          </Text>
         </div>
-        <div class="preview-panel preview-panel-empty">
-          <div class="preview-empty">Select a file in the tree to preview it here.</div>
-        </div>
+        <Card surface="surface" padding="4" class="preview-panel preview-panel-empty">
+          <Text as="div" size="tiny" tone="muted" class="preview-empty">
+            Select a file in the tree to preview it here.
+          </Text>
+        </Card>
       </>
     );
   }
@@ -121,10 +138,12 @@ function QuickPreview({
   return (
     <>
       <div class="inspector-inline-head">
-        <span class="inspector-kicker">Quick preview</span>
-        <button type="button" class="tiny-link" onClick={onOpen}>
+        <Text as="span" size="micro" weight="bold" tone="muted" class="inspector-kicker">
+          Quick preview
+        </Text>
+        <LinkButton tone="muted" class="tiny-link" onClick={onOpen}>
           Open <ArrowRightIcon size={12} />
-        </button>
+        </LinkButton>
       </div>
 
       <div class="preview-panel">
@@ -133,22 +152,31 @@ function QuickPreview({
           <span class="preview-name" title={path}>
             {fileName(path)}
           </span>
-          <span class="preview-ext">{fileExt(path)}</span>
+          <Badge class="preview-ext">{fileExt(path)}</Badge>
         </div>
 
-        {state.kind === 'loading' ? <p class="preview-placeholder">Reading preview…</p> : null}
+        {state.kind === 'loading' ? (
+          <Inline gap="2" align="center" class="preview-placeholder">
+            <Spinner size={12} />
+            <Text as="span" size="tiny" tone="muted">
+              Reading preview…
+            </Text>
+          </Inline>
+        ) : null}
         {state.kind === 'error' ? (
-          <p class="preview-placeholder" role="status">
+          <Callout tone="warn" role="status" class="preview-placeholder">
             The file could not be read for this preview. Open it to see the error.
-          </p>
+          </Callout>
         ) : null}
         {state.kind === 'too-large' ? (
-          <p class="preview-placeholder">
+          <Text as="p" size="tiny" tone="muted" class="preview-placeholder">
             {formatBytes(state.size)} is too large for an inline preview. Open the file instead.
-          </p>
+          </Text>
         ) : null}
         {file?.binary ? (
-          <p class="preview-placeholder">Binary file — no text preview.</p>
+          <Text as="p" size="tiny" tone="muted" class="preview-placeholder">
+            Binary file — no text preview.
+          </Text>
         ) : null}
         {file && !file.binary ? (
           <pre class="preview-code">
@@ -272,19 +300,20 @@ export function WorkspaceTab(): JSX.Element {
   };
 
   return (
-    <div class="inspector-section">
+    <Stack gap="5" class="inspector-section">
       <div class="inspector-kicker-row">
-        <span class="inspector-kicker">Explorer</span>
-        <button
-          type="button"
-          class="icon-button inspector-mini"
-          aria-label="Refresh file tree"
+        <Text as="span" size="micro" weight="bold" tone="muted" class="inspector-kicker">
+          Explorer
+        </Text>
+        <IconButton
+          size="sm"
+          label="Refresh file tree"
           title="Refresh file tree"
+          class="inspector-mini"
           disabled={state === 'loading'}
           onClick={() => setRefreshKey((key) => key + 1)}
-        >
-          <RefreshIcon size={13} class={state === 'loading' ? 'spin' : undefined} />
-        </button>
+          icon={<RefreshIcon size={13} class={state === 'loading' ? 'spin' : undefined} />}
+        />
       </div>
 
       <div class="workspace-path" title={workspace}>
@@ -292,32 +321,37 @@ export function WorkspaceTab(): JSX.Element {
           <FolderIcon size={13} />
         </span>
         <span>{workspace}</span>
-        <button
-          type="button"
-          class="tiny-link"
-          aria-label="Copy workspace path"
+        <IconButton
+          size="sm"
+          label="Copy workspace path"
           title="Copy workspace path"
+          class="tiny-link"
           onClick={copyPath}
-        >
-          <CopyIcon size={12} />
-        </button>
+          icon={<CopyIcon size={12} />}
+        />
       </div>
 
       {state === 'loading' ? (
         <div class="tree-loading-skeleton" aria-busy="true" aria-label="Loading file tree">
           {[0, 1, 2, 3, 4].map((index) => (
-            <div class="skeleton skeleton-tree-row" key={index} />
+            <Skeleton class="skeleton-tree-row h-[24px]" key={index} />
           ))}
         </div>
       ) : null}
 
       {state === 'error' ? (
-        <div class="inline-error" role="alert">
-          <p>{error}</p>
-          <button type="button" class="button button-small" onClick={() => setRefreshKey((key) => key + 1)}>
-            Retry
-          </button>
-        </div>
+        <Callout
+          tone="danger"
+          role="alert"
+          class="inline-error"
+          actions={
+            <Button variant="secondary" size="sm" onClick={() => setRefreshKey((key) => key + 1)}>
+              Retry
+            </Button>
+          }
+        >
+          {error}
+        </Callout>
       ) : null}
 
       {state === 'ready' ? (
@@ -337,10 +371,10 @@ export function WorkspaceTab(): JSX.Element {
       ) : null}
 
       {partialPaths.size > 0 ? (
-        <p class="inspector-note tree-partial-warning" role="status">
+        <Callout tone="warn" role="status" class="inspector-note tree-partial-warning">
           Some folders are only partially listed because the server's entry or traversal budget was
           reached. Use file search for a file that is not shown.
-        </p>
+        </Callout>
       ) : null}
 
       <QuickPreview
@@ -351,8 +385,10 @@ export function WorkspaceTab(): JSX.Element {
       />
 
       {state === 'ready' ? (
-        <p class="inspector-note">VCS and build directories are hidden. File contents are read on demand.</p>
+        <Text as="p" size="tiny" tone="muted" class="inspector-note">
+          VCS and build directories are hidden. File contents are read on demand.
+        </Text>
       ) : null}
-    </div>
+    </Stack>
   );
 }

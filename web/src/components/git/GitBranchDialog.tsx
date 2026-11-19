@@ -2,7 +2,7 @@ import type { JSX } from 'preact';
 import { useState } from 'preact/hooks';
 import type { GitBranch } from '../../api/types';
 import { relativeTime } from '../../lib/format';
-import { Dialog } from '../Dialog';
+import { Button, Field, IconButton, Inline, Input, LinkButton, Overlay, Stack, Text } from '../../ui';
 import { BranchIcon, CheckIcon, TrashIcon } from '../icons';
 import { branchNameProblem } from './gitModel';
 
@@ -22,10 +22,14 @@ export interface GitBranchDialogProps {
 /**
  * Branch switching, creation and deletion in one place.
  *
- * A dialog rather than a popover: it holds a filter field and a form, both of
+ * An overlay rather than a popover: it holds a filter field and a form, both of
  * which need real focus handling and an Escape that does not close the whole
  * inspector. Deleting asks the manager for a confirmation first - `-D` on an
  * unmerged branch throws commits away.
+ *
+ * The body is left to own its own scrolling (`bodyLayout="contents"`), the same
+ * contract the pre-`Overlay` dialog had: `.gitm-branch-body` is the scroller, and
+ * a second one wrapped around it would trap the wheel.
  */
 export function GitBranchDialog({
   open,
@@ -47,9 +51,10 @@ export function GitBranchDialog({
     ? branches
     : branches.filter((branch) => branch.name.toLowerCase().includes(needle));
   const problem = draft.trim() === '' ? null : branchNameProblem(draft);
+  const hintId = 'gitm-new-branch-hint';
 
   return (
-    <Dialog
+    <Overlay
       open={open}
       title="Branches"
       description={
@@ -58,28 +63,33 @@ export function GitBranchDialog({
           : `On ${current ?? 'an unknown branch'}.`
       }
       onClose={onClose}
+      role="standard"
       class="gitm-branch-dialog"
+      bodyLayout="contents"
     >
-      <div class="gitm-branch-body">
-        <input
-          class="gitm-input"
+      <Stack class="gitm-branch-body" gap="5">
+        <Input
           type="search"
           placeholder="Filter branches"
           aria-label="Filter branches"
           value={filter}
+          testId="branch-filter"
           onInput={(event) => setFilter((event.target as HTMLInputElement).value)}
         />
 
-        <ul class="gitm-branch-list" aria-label="Local branches">
+        <Stack as="ul" gap="1" class="gitm-branch-list" aria-label="Local branches">
           {visible.length === 0 ? (
-            <li class="gitm-note">No branch matches “{filter}”.</li>
+            <li>
+              <Text as="span" size="small" tone="muted" class="gitm-note">
+                No branch matches “{filter}”.
+              </Text>
+            </li>
           ) : (
             visible.map((branch) => {
               const isCurrent = branch.current || branch.name === current;
               return (
                 <li class={`gitm-branch-row${isCurrent ? ' is-current' : ''}`} key={branch.name}>
-                  <button
-                    type="button"
+                  <LinkButton
                     class="gitm-branch-switch"
                     disabled={busy || isCurrent}
                     onClick={() => {
@@ -88,6 +98,7 @@ export function GitBranchDialog({
                       });
                     }}
                     title={isCurrent ? 'Already checked out' : `Switch to ${branch.name}`}
+                    testId={`branch-switch-${branch.name}`}
                   >
                     <span class="gitm-branch-icon" aria-hidden="true">
                       {isCurrent ? <CheckIcon size={13} /> : <BranchIcon size={13} />}
@@ -106,24 +117,33 @@ export function GitBranchDialog({
                         {branch.ahead === 0 && branch.behind === 0 ? 'synced' : ''}
                       </span>
                     ) : null}
-                  </button>
-                  <button
-                    type="button"
+                  </LinkButton>
+                  <IconButton
+                    label={`Delete branch ${branch.name}`}
+                    // The glyph carries the danger ink: the primitive's own
+                    // colour utility is what the cascade would win with, so the
+                    // destructive colour has to sit on a child instead.
+                    icon={
+                      <span class="text-danger">
+                        <TrashIcon size={14} />
+                      </span>
+                    }
                     class="gitm-act is-danger"
-                    aria-label={`Delete branch ${branch.name}`}
+                    size="sm"
                     title={isCurrent ? 'The checked-out branch cannot be deleted' : `Delete ${branch.name}`}
                     disabled={busy || isCurrent}
                     onClick={() => onRequestDelete(branch)}
-                  >
-                    <TrashIcon size={14} />
-                  </button>
+                    testId={`branch-delete-${branch.name}`}
+                  />
                 </li>
               );
             })
           )}
-        </ul>
+        </Stack>
 
-        <form
+        <Stack
+          as="form"
+          gap="3"
           class="gitm-branch-create"
           onSubmit={(event) => {
             event.preventDefault();
@@ -138,31 +158,42 @@ export function GitBranchDialog({
             });
           }}
         >
-          <label class="gitm-label" for="gitm-new-branch">
-            New branch from {current ?? 'HEAD'}
-          </label>
-          <div class="gitm-branch-create-row">
-            <input
-              id="gitm-new-branch"
-              class="gitm-input"
-              type="text"
-              placeholder="feat/my-change"
-              value={draft}
-              onInput={(event) => setDraft((event.target as HTMLInputElement).value)}
-            />
-            <button
+          {/* The field and its button share one row, bottom-aligned: the label
+              sits above the input, so `end` is what keeps the button on the
+              input's own baseline instead of floating beside the label. */}
+          <Inline gap="4" align="end" class="gitm-branch-create-row">
+            <Field
+              label={`New branch from ${current ?? 'HEAD'}`}
+              htmlFor="gitm-new-branch"
+              class="flex-1 min-w-0"
+            >
+              {(a11y) => (
+                <Input
+                  id={a11y.id}
+                  type="text"
+                  placeholder="feat/my-change"
+                  value={draft}
+                  aria-describedby={a11y.describedBy ?? hintId}
+                  testId="branch-name"
+                  invalid={problem !== null}
+                  onInput={(event) => setDraft((event.target as HTMLInputElement).value)}
+                />
+              )}
+            </Field>
+            <Button
               type="submit"
-              class="button button-primary"
+              variant="primary"
               disabled={busy || creating || draft.trim() === '' || problem !== null}
+              testId="branch-create"
             >
               Create &amp; switch
-            </button>
-          </div>
-          <p class="gitm-hint" role="status">
+            </Button>
+          </Inline>
+          <Text as="p" size="tiny" tone="muted" class="gitm-hint" id={hintId} role="status">
             {problem ?? 'The new branch starts at the checked-out commit and is switched to.'}
-          </p>
-        </form>
-      </div>
-    </Dialog>
+          </Text>
+        </Stack>
+      </Stack>
+    </Overlay>
   );
 }

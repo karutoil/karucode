@@ -311,7 +311,7 @@ async function flushTerminalMount(): Promise<void> {
 const DARK_TOKENS = {
   '--fs-body': '13px',
   '--font-mono': "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, ui-monospace, monospace",
-  '--bg-sunken': '#16181d',
+  '--rail': '#16181d',
   '--bg': '#1a1c22',
   '--text': '#d7dbe3',
   '--muted': '#8b92a1',
@@ -325,7 +325,7 @@ const DARK_TOKENS = {
 
 const LIGHT_TOKENS = {
   ...DARK_TOKENS,
-  '--bg-sunken': '#f6f4f1',
+  '--rail': '#f6f4f1',
   '--bg': '#ffffff',
   '--text': '#1c1a18',
   '--muted': '#5c5852',
@@ -471,7 +471,7 @@ describe('TerminalSurface follows the live theme', () => {
 
   it('accepts valid rgb()/hsl() custom CSS tokens when deriving ANSI mixes', async () => {
     Object.assign(tokenValues, DARK_TOKENS, {
-      '--bg-sunken': 'rgb(22 24 29)',
+      '--rail': 'rgb(22 24 29)',
       '--text': 'hsl(220 20% 85%)',
       '--danger': 'rgb(247 118 142 / 80%)',
       '--success': 'hsl(90, 50%, 60%)',

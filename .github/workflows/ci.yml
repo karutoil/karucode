@@ -307,6 +307,11 @@ jobs:
       # recorded there with its reason instead of turning every commit red.
       - run: npm run audit
       - run: npm run typecheck
+      # oxlint: no `any`, no <button> without an explicit `type`. The rule set is
+      # deliberately small (`web/.oxlintrc.json`) so the gate stays green and the
+      # output stays short; the style contract itself is
+      # `web/src/styles/ui-contract.test.ts`, which runs under `npm test`.
+      - run: npm run lint
       - run: npm test
 
   web-build:

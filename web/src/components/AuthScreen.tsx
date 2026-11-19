@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { passkeySupported } from '../lib/passkey';
+import { Button, Callout, IconButton, Input, LinkButton, Text } from '../ui';
 import {
   AlertIcon,
   ArrowRightIcon,
@@ -123,9 +124,9 @@ export function AuthScreen(): JSX.Element {
               <span class="auth-mark-glyph" />
               karucode
             </span>
-            <h1 class="auth-title" id="auth-title">
+            <Text as="h1" size="heading" weight="bold" class="auth-title" id="auth-title">
               Sign in
-            </h1>
+            </Text>
             <p class="auth-subtitle">
               {address ? (
                 <>
@@ -142,26 +143,24 @@ export function AuthScreen(): JSX.Element {
           </div>
 
           {error ? (
-            <div class="auth-alert" role="alert">
-              <AlertIcon size={15} />
+            <Callout tone="danger" icon={<AlertIcon size={15} />} class="mt-6 text-tiny auth-alert">
               <span>{error}</span>
-            </div>
+            </Callout>
           ) : null}
 
           {status === null ? (
-            <p class="auth-resolving" aria-live="polite">
+            <Text as="p" size="tiny" tone="muted" class="auth-resolving" aria-live="polite">
               Checking whether this server offers a password or passkey…
-            </p>
+            </Text>
           ) : null}
 
           {noMethod ? (
-            <div class="auth-alert is-note" role="status">
-              <AlertIcon size={15} />
+            <Callout tone="info" role="status" icon={<AlertIcon size={15} />} class="mt-6 text-tiny auth-alert is-note">
               <span>
                 Sign-in is required but no password or passkey is configured on the server. Set one
                 from the server's Access settings, or start it with <code>KARUCODE_AUTH_TOKEN</code>.
               </span>
-            </div>
+            </Callout>
           ) : null}
 
           {status?.password_set ? (
@@ -177,11 +176,11 @@ export function AuthScreen(): JSX.Element {
                   Password
                 </label>
                 <div class="auth-input-wrap">
-                  <input
+                  <Input
                     id="auth-password"
-                    ref={passwordInput}
-                    class="auth-input"
-                    type={passwordFieldType as 'password'}
+                    inputRef={passwordInput}
+                    class="auth-input h-[38px] px-6 pr-10 text-body"
+                    type={passwordFieldType}
                     autoComplete="current-password"
                     value={password}
                     data-autofocus
@@ -189,28 +188,28 @@ export function AuthScreen(): JSX.Element {
                     aria-describedby="auth-password-hint"
                     onInput={(event) => setPassword(event.currentTarget.value)}
                   />
-                  <button
-                    type="button"
+                  <IconButton
                     class="auth-reveal"
-                    aria-label={revealPassword ? 'Hide password' : 'Show password'}
-                    aria-pressed={revealPassword}
+                    label={revealPassword ? 'Hide password' : 'Show password'}
+                    pressed={revealPassword}
                     disabled={pending}
+                    icon={revealPassword ? <EyeOffIcon size={15} /> : <EyeIcon size={15} />}
                     onClick={() => setRevealPassword((shown) => !shown)}
-                  >
-                    {revealPassword ? <EyeOffIcon size={15} /> : <EyeIcon size={15} />}
-                  </button>
+                  />
                 </div>
-                <p class="auth-hint" id="auth-password-hint">
+                <Text as="p" size="tiny" tone="muted" class="auth-hint" id="auth-password-hint">
                   The password you set in the Access settings.
-                </p>
+                </Text>
               </div>
-              <button
+              <Button
                 type="submit"
-                class="button button-primary auth-submit"
-                disabled={pending || password === ''}
+                variant="primary"
+                loading={pending}
+                disabled={password === ''}
+                class="w-full h-[40px] mt-2"
               >
                 {pending ? 'Signing in…' : 'Sign in'}
-              </button>
+              </Button>
             </form>
           ) : null}
 
@@ -221,18 +220,18 @@ export function AuthScreen(): JSX.Element {
                   <span>or</span>
                 </div>
               ) : null}
-              <button
-                type="button"
-                class="button button-secondary auth-passkey"
-                disabled={pending}
+              <Button
+                variant="secondary"
+                icon={<KeyIcon size={15} />}
+                loading={pending}
+                class="w-full h-[40px]"
                 onClick={() => void actions.signInWithPasskey()}
               >
-                <KeyIcon size={15} />
                 {pending ? 'Waiting for your device…' : 'Sign in with a passkey'}
-              </button>
-              <p class="auth-hint auth-passkey-hint">
+              </Button>
+              <Text as="p" size="tiny" tone="muted" class="auth-hint auth-passkey-hint">
                 Uses this device's fingerprint, face, screen lock or security key.
-              </p>
+              </Text>
             </>
           ) : null}
 
@@ -250,36 +249,39 @@ export function AuthScreen(): JSX.Element {
                   Access token
                 </label>
                 <div class="auth-input-wrap">
-                  <input
+                  <Input
                     id="auth-token"
-                    ref={tokenInput}
-                    class="auth-input mono"
+                    inputRef={tokenInput}
+                    class="auth-input h-[38px] px-6"
+                    mono
                     type="password"
                     autoComplete="off"
-                    spellcheck={false}
+                    spellCheck={false}
                     value={token}
                     disabled={tokenPending}
                     aria-describedby="auth-token-hint"
                     onInput={(event) => setToken(event.currentTarget.value)}
                   />
                 </div>
-                <p class="auth-hint" id="auth-token-hint">
+                <Text as="p" size="tiny" tone="muted" class="auth-hint" id="auth-token-hint">
                   The <code>KARUCODE_AUTH_TOKEN</code> of the machine running karucode. It is kept
                   in this browser and sent as an <code>Authorization</code> header.
-                </p>
+                </Text>
               </div>
-              <button
+              <Button
                 type="submit"
-                class="button button-primary auth-submit"
-                disabled={tokenPending || token.trim() === ''}
+                variant="primary"
+                loading={tokenPending}
+                disabled={token.trim() === ''}
+                class="w-full h-[40px] mt-2"
               >
                 {tokenPending ? 'Connecting…' : 'Connect with the token'}
-              </button>
+              </Button>
             </form>
           ) : (
-            <button
-              type="button"
-              class="auth-token-toggle"
+            <LinkButton
+              tone="muted"
+              class="auth-token-toggle mt-7 py-2 px-0"
               onClick={() => {
                 setShowToken(true);
                 store.authError.value = null;
@@ -287,18 +289,18 @@ export function AuthScreen(): JSX.Element {
             >
               Use the bearer token instead
               <ArrowRightIcon size={13} />
-            </button>
+            </LinkButton>
           )}
 
           {sessionNote || status?.token_required ? (
-            <p class="auth-note">
+            <Text as="p" size="micro" tone="muted" class="auth-note">
               {sessionNote}
               {status?.token_required ? (
                 <>
                   {sessionNote ? ' ' : ''}A bearer token also works on this server.
                 </>
               ) : null}
-            </p>
+            </Text>
           ) : null}
         </section>
       </div>

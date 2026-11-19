@@ -23,6 +23,17 @@ import {
   type PluginInstallJob,
   type PluginInstallPreview,
 } from '../api/endpoints';
+import {
+  Button,
+  Callout,
+  Checkbox,
+  Field,
+  Inline,
+  Input,
+  Spinner,
+  Stack,
+  Text,
+} from '../ui';
 
 export interface PluginInstallSectionProps {
   /** Called after a job completes, so the plugin list can refresh itself. */
@@ -219,79 +230,85 @@ export function PluginInstallSection({ onInstalled }: PluginInstallSectionProps)
         <h3 id="plugin-install">Install from a repository</h3>
         {phase.kind === 'choosing' || phase.kind === 'done' || phase.kind === 'failed' ? (
           <div class="settings-section-actions">
-            <button type="button" class="button button-small" onClick={reset}>
+            <Button variant="secondary" size="sm" onClick={reset}>
               Start over
-            </button>
+            </Button>
           </div>
         ) : null}
       </div>
-      <p class="settings-section-note">
+      <Text as="p" size="tiny" tone="muted" class="settings-section-note">
         A GitHub repository ({'owner/repo'}, a URL, {'owner/repo@ref'}) or a local directory, in
         the layout the CLI installer takes: an index.toml or one directory per plugin. The
         install runs the plugins&rsquo; builds and rescans the server when it lands — no restart.
-      </p>
+      </Text>
 
       {error ? (
-        <div class="inline-error" role="alert">
-          <p>{error}</p>
-          {String(error).includes('admin credential') ? (
-            <label class="plugin-install-admin">
-              Admin token
-              <input
-                type="password"
-                value={adminToken}
-                onInput={(e) => setAdminToken((e.target as HTMLInputElement).value)}
-                placeholder="X-Karucode-Admin-Token"
-                autocomplete="off"
-              />
-            </label>
-          ) : null}
-        </div>
+        <Callout tone="danger" role="alert">
+          <Stack gap="3">
+            <Text as="p" size="small">
+              {error}
+            </Text>
+            {String(error).includes('admin credential') ? (
+              <Field label="Admin token" htmlFor="plugin-install-admin">
+                <Input
+                  id="plugin-install-admin"
+                  type="password"
+                  value={adminToken}
+                  onInput={(e) => setAdminToken(e.currentTarget.value)}
+                  placeholder="X-Karucode-Admin-Token"
+                  autoComplete="off"
+                />
+              </Field>
+            ) : null}
+          </Stack>
+        </Callout>
       ) : null}
 
       {phase.kind === 'idle' || phase.kind === 'previewing' ? (
-        <div class="plugin-install-form">
-          <label class="plugin-install-source">
-            Source
-            <input
+        <Stack gap="5" class="plugin-install-form">
+          <Field label="Source" htmlFor="plugin-install-source" class="field">
+            <Input
+              id="plugin-install-source"
               type="text"
               value={source}
-              onInput={(e) => setSource((e.target as HTMLInputElement).value)}
+              onInput={(e) => setSource(e.currentTarget.value)}
               placeholder="owner/plugin-repo, https://github.com/owner/repo, or /path/to/dir"
-              spellcheck={false}
+              spellCheck={false}
             />
-          </label>
-          <label class="plugin-install-ref">
-            Ref
-            <input
+          </Field>
+          <Field label="Ref" htmlFor="plugin-install-ref" class="field">
+            <Input
+              id="plugin-install-ref"
               type="text"
               value={gitRef}
-              onInput={(e) => setGitRef((e.target as HTMLInputElement).value)}
+              onInput={(e) => setGitRef(e.currentTarget.value)}
               placeholder="branch, tag or commit (default HEAD)"
-              spellcheck={false}
+              spellCheck={false}
             />
-          </label>
-          <button
-            type="button"
-            class="button"
-            onClick={runPreview}
-            disabled={busy}
-            title="Fetch the source and list its plugins without installing"
-          >
-            {phase.kind === 'previewing' ? 'Looking…' : 'Preview'}
-          </button>
-        </div>
+          </Field>
+          <Inline>
+            <Button
+              variant="secondary"
+              loading={phase.kind === 'previewing'}
+              onClick={runPreview}
+              disabled={busy}
+              title="Fetch the source and list its plugins without installing"
+            >
+              {phase.kind === 'previewing' ? 'Looking…' : 'Preview'}
+            </Button>
+          </Inline>
+        </Stack>
       ) : null}
 
       {phase.kind === 'choosing' ? (
-        <div class="plugin-install-choose">
-          <p class="plugin-install-source-line">
+        <Stack gap="4" class="plugin-install-choose">
+          <Text as="p" size="message" tone="secondary" mono class="plugin-install-source-line">
             {`${phase.preview.source}${phase.preview.resolved ? ` @ ${phase.preview.resolved}` : ''} — ${phase.preview.plugins.length} plugin${phase.preview.plugins.length === 1 ? '' : 's'}`}
-          </p>
-          {phase.preview.notes.map((note) => (
-            <p class="plugin-install-note" role="note">
+          </Text>
+          {phase.preview.notes.map((note, index) => (
+            <Callout key={index} tone="warn" role="status">
               {note}
-            </p>
+            </Callout>
           ))}
           <ul class="plugin-install-list">
             {phase.preview.plugins.map((plugin) => {
@@ -302,19 +319,14 @@ export function PluginInstallSection({ onInstalled }: PluginInstallSectionProps)
                 );
               return (
                 <li key={plugin.name} class="plugin-install-row">
-                  <label class="plugin-install-pick">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={toggle}
-                      disabled={busy}
-                    />
-                    <span class="plugin-install-name">{plugin.name}</span>
-                    {plugin.description ? (
-                      <span class="plugin-install-description">{plugin.description}</span>
-                    ) : null}
-                  </label>
-                  <span class="plugin-install-meta">
+                  <Checkbox
+                    checked={checked}
+                    onChange={toggle}
+                    disabled={busy}
+                    label={plugin.name}
+                    description={plugin.description ?? undefined}
+                  />
+                  <Text size="label" tone="secondary" class="plugin-install-meta">
                     {[
                       plugin.builds ? 'builds' : null,
                       plugin.permissions.length > 0
@@ -324,72 +336,75 @@ export function PluginInstallSection({ onInstalled }: PluginInstallSectionProps)
                     ]
                       .filter(Boolean)
                       .join(' · ')}
-                  </span>
+                  </Text>
                 </li>
               );
             })}
           </ul>
-          <div class="plugin-install-options">
-            <label class="plugin-install-toggle">
-              <input
-                type="checkbox"
-                checked={force}
-                onChange={() => setForce((v) => !v)}
-                disabled={busy}
-              />
-              Replace existing installs
-            </label>
-            <label class="plugin-install-toggle">
-              <input
-                type="checkbox"
-                checked={noBuild}
-                onChange={() => setNoBuild((v) => !v)}
-                disabled={busy}
-              />
-              Skip builds
-            </label>
-          </div>
-          <div class="plugin-install-actions">
-            <button type="button" class="button button-primary" onClick={runInstall} disabled={busy}>
+          <Inline gap="7" wrap class="plugin-install-options">
+            <Checkbox
+              checked={force}
+              onChange={setForce}
+              disabled={busy}
+              label="Replace existing installs"
+            />
+            <Checkbox
+              checked={noBuild}
+              onChange={setNoBuild}
+              disabled={busy}
+              label="Skip builds"
+            />
+          </Inline>
+          <Inline gap="4" class="plugin-install-actions">
+            <Button variant="primary" onClick={runInstall} disabled={busy}>
               Install {selected.length > 0 ? selected.join(', ') : 'everything'}
-            </button>
-            <button type="button" class="button" onClick={reset} disabled={busy}>
+            </Button>
+            <Button variant="secondary" onClick={reset} disabled={busy}>
               Cancel
-            </button>
-          </div>
-        </div>
+            </Button>
+          </Inline>
+        </Stack>
       ) : null}
 
       {phase.kind === 'installing' || phase.kind === 'done' || phase.kind === 'failed' ? (
         <div class="plugin-install-progress" role="log" aria-live="polite">
           {phase.kind === 'installing' ? (
-            <p class="plugin-install-running">
-              Installing…{' '}
-              {job ? <span class="muted small">{Math.round(job.elapsed_ms / 1000)}s</span> : null}
-              <button
-                type="button"
-                class="button button-small"
-                onClick={runCancel}
-                disabled={!job}
-              >
+            <Inline gap="5" align="center" class="plugin-install-running">
+              <Spinner size={14} />
+              <Text size="body">Installing…</Text>
+              {job ? (
+                <Text size="tiny" tone="muted">
+                  {Math.round(job.elapsed_ms / 1000)}s
+                </Text>
+              ) : null}
+              <Button variant="secondary" size="sm" onClick={runCancel} disabled={!job}>
                 Stop
-              </button>
-            </p>
+              </Button>
+            </Inline>
           ) : null}
           {(job?.events ?? []).map((event, index) => (
-            <p class="plugin-install-event" key={index}>
+            <Text
+              as="p"
+              size="label"
+              mono
+              tone={index === 0 ? 'default' : 'secondary'}
+              class="plugin-install-event"
+              key={index}
+            >
               {eventLine(event)}
-            </p>
+            </Text>
           ))}
           {phase.kind === 'done' && job?.result ? (
-            <p class="plugin-install-result">
+            <Text as="p" size="body" weight="semibold" class="plugin-install-result">
               {job.result.rescan?.added?.length
                 ? `Added: ${job.result.rescan.added.join(', ')} — ready, no restart needed.`
                 : 'Installed. The plugins list above has the details.'}
-            </p>
+            </Text>
           ) : null}
           {phase.kind === 'failed' && phase.job === null ? (
-            <p class="plugin-install-result">The job is no longer available.</p>
+            <Text as="p" size="body" weight="semibold" tone="danger" class="plugin-install-result">
+              The job is no longer available.
+            </Text>
           ) : null}
         </div>
       ) : null}

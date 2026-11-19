@@ -27,7 +27,19 @@ import { copyText } from '../lib/clipboard';
 import type { UpdatesPatch } from '../api/types';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
-import { Toggle } from './Toggle';
+import {
+  Badge,
+  Button,
+  Callout,
+  Card,
+  Checkbox,
+  Inline,
+  Input,
+  SettingRow,
+  Stack,
+  Text,
+  Toggle,
+} from '../ui';
 
 export interface UpdateSettingsProps {
   /** Settings are read-only (a locked install). */
@@ -163,24 +175,26 @@ export function UpdateSettings({ disabled }: UpdateSettingsProps): JSX.Element {
       <section class="settings-section" aria-labelledby="settings-update-build">
         <div class="settings-section-head">
           <h3 id="settings-update-build">This build</h3>
-          <span class="settings-section-note">
+          <Badge tone="neutral" mono={false}>
             {status ? INSTALL_LABELS[status.install.kind] ?? status.install.kind : 'loading'}
-          </span>
+          </Badge>
         </div>
 
         {status ? (
           <>
-            <div class="update-current">
-              <div class="update-build">
-                <span class="update-build-number">build {status.current.version}</span>
-                <span class="update-build-meta">
+            <Stack gap="5" class="update-current">
+              <Inline gap="5" align="baseline" wrap class="update-build">
+                <Text size="title" mono>
+                  build {status.current.version}
+                </Text>
+                <Text size="tiny" tone="muted" mono>
                   {status.current.commit}
                   {status.current.commit_date !== 'unknown'
                     ? ` · ${commitDate(status.current.commit_date)}`
                     : ''}
                   {status.current.dirty ? ' · dirty tree' : ''}
-                </span>
-              </div>
+                </Text>
+              </Inline>
               <dl class="update-facts">
                 <div>
                   <dt>Target</dt>
@@ -195,20 +209,22 @@ export function UpdateSettings({ disabled }: UpdateSettingsProps): JSX.Element {
                   <dd title={status.install.path}>{status.install.path}</dd>
                 </div>
               </dl>
-            </div>
-            <p class="settings-section-note">{status.install.detail}</p>
+            </Stack>
+            <Text as="p" size="tiny" tone="muted">
+              {status.install.detail}
+            </Text>
             {status.last_applied ? (
-              <p class="settings-section-note">
+              <Text as="p" size="tiny" tone="muted">
                 Installed build {status.last_applied.to} on {when(status.last_applied.applied_at)}{' '}
                 (was {status.last_applied.from}).
-              </p>
+              </Text>
             ) : null}
           </>
         ) : (
-          <p class="settings-section-note">
+          <Text as="p" size="tiny" tone="muted">
             The server did not answer <code>GET /api/update</code>, so this build cannot be named.
             The version is the commit count; <code>karucode --version</code> prints it from a shell.
-          </p>
+          </Text>
         )}
       </section>
 
@@ -216,9 +232,10 @@ export function UpdateSettings({ disabled }: UpdateSettingsProps): JSX.Element {
         <div class="settings-section-head">
           <h3 id="settings-update-available">Update</h3>
           <div class="settings-section-actions">
-            <button
-              type="button"
-              class="button button-small"
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={busy === 'check'}
               onClick={() => void checkNow()}
               disabled={busy !== null || !config?.check}
               title={
@@ -228,11 +245,11 @@ export function UpdateSettings({ disabled }: UpdateSettingsProps): JSX.Element {
               }
             >
               {busy === 'check' ? 'Checking…' : 'Check now'}
-            </button>
+            </Button>
           </div>
         </div>
 
-        <p class="settings-section-note">
+        <Text as="p" size="tiny" tone="muted">
           Last checked {when(status?.check.checked_at)}
           {status?.check.manifest_url ? (
             <>
@@ -240,25 +257,25 @@ export function UpdateSettings({ disabled }: UpdateSettingsProps): JSX.Element {
             </>
           ) : null}
           .
-        </p>
+        </Text>
 
         {malformed ? (
-          <p class="update-error" role="status">
+          <Callout tone="danger" role="status">
             {malformed}
-          </p>
+          </Callout>
         ) : null}
 
         {newer && latest ? (
-          <div class="update-available">
-            <div class="update-available-head">
-              <span class="update-badge">
+          <Card surface="raised" padding="6" radius="sm" class="update-available">
+            <Inline gap="5" align="baseline" wrap>
+              <Badge tone="accent" mono={false}>
                 build {latest.version} {installed ? 'installed' : 'available'}
-              </span>
-              <span class="update-build-meta">
+              </Badge>
+              <Text size="tiny" tone="muted" mono>
                 {latest.commit ?? 'unknown commit'}
                 {latest.commit_date ? ` · ${commitDate(latest.commit_date)}` : ''}
-              </span>
-            </div>
+              </Text>
+            </Inline>
             {latest.notes ? <pre class="update-notes">{latest.notes}</pre> : null}
             {latest.url ? (
               <a class="update-link" href={latest.url} target="_blank" rel="noreferrer noopener">
@@ -266,88 +283,88 @@ export function UpdateSettings({ disabled }: UpdateSettingsProps): JSX.Element {
               </a>
             ) : null}
             {!latest.has_target_for_this_build ? (
-              <p class="update-error">
-                This release has no build for {status?.current.target}. Nothing here can install
-                it.
-              </p>
+              <Callout tone="danger">
+                This release has no build for {status?.current.target}. Nothing here can install it.
+              </Callout>
             ) : installed ? (
-              <p class="update-notice">
+              <Callout tone="success" role="status">
                 Build {latest.build} is installed. Restart the service to run it (
                 <code>systemctl restart karucode</code>).
-              </p>
+              </Callout>
             ) : actionable ? (
-              <div class="update-actions">
-                <button
-                  type="button"
-                  class="button"
+              <Inline gap="6" wrap class="update-actions">
+                <Button
+                  variant="primary"
+                  loading={busy === 'install'}
                   onClick={() => void installNow()}
                   disabled={busy !== null || disabled}
                 >
                   {busy === 'install' ? 'Installing…' : `Install build ${latest.build}`}
-                </button>
-                <label class="update-restart">
-                  <input
-                    type="checkbox"
-                    checked={restart}
-                    disabled={!status?.restart.supervised || busy !== null}
-                    onChange={(event) => setRestart(event.currentTarget.checked)}
-                  />
-                  Restart the service afterwards
-                  {!status?.restart.supervised ? (
-                    <span class="setting-hint">
-                      {' '}— only possible when a supervisor (systemd) manages this process
-                    </span>
-                  ) : null}
-                </label>
-              </div>
+                </Button>
+                <Checkbox
+                  checked={restart}
+                  disabled={!status?.restart.supervised || busy !== null}
+                  onChange={setRestart}
+                  label="Restart the service afterwards"
+                  description={
+                    !status?.restart.supervised
+                      ? 'Only possible when a supervisor (systemd) manages this process'
+                      : undefined
+                  }
+                />
+              </Inline>
             ) : null}
             {!actionable && !installed ? (
-              <div class="update-command">
-                <span class="setting-hint">
+              <Stack gap="4" align="start" class="update-command">
+                <Text size="tiny" tone="muted">
                   {status?.install.kind === 'source'
                     ? 'This binary runs from a build tree. Update it from the checkout:'
                     : status?.install.kind === 'container'
                       ? 'This is a container install. Rebuild the image; nothing here can replace the binary.'
                       : 'This process may not write its own binary. Run this as the owner:'}
-                </span>
+                </Text>
                 <code>{status?.restart.apply_command ?? 'sudo karucode update --apply'}</code>
                 {status?.install.kind === 'source' ? (
                   <code>sudo sh packaging/update.sh</code>
                 ) : null}
-                <button
-                  type="button"
-                  class="button button-small"
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => {
                     const command = status?.restart.apply_command;
                     if (!command) return;
                     // Through the shared helper: `navigator.clipboard` does not
                     // exist on a plain-HTTP origin, and the optional chain this
                     // used to call made the button silently do nothing there.
-                    void copyText(command).then((copied) => {
-                      setCopied(copied);
-                      if (!copied) store.pushToast('Clipboard is unavailable in this browser.', 'error');
+                    void copyText(command).then((didCopy) => {
+                      setCopied(didCopy);
+                      if (!didCopy) store.pushToast('Clipboard is unavailable in this browser.', 'error');
                     });
                   }}
                 >
                   {copied ? 'Copied' : 'Copy command'}
-                </button>
-              </div>
+                </Button>
+              </Stack>
             ) : null}
-          </div>
+          </Card>
         ) : (
-          <p class="settings-section-note">
+          <Text as="p" size="tiny" tone="muted">
             {status?.latest
               ? `Build ${status.latest.build} is the newest release.`
               : 'No check has found a release yet.'}
-          </p>
+          </Text>
         )}
 
         {status?.staged && !newer ? (
-          <p class="settings-section-note">
+          <Text as="p" size="tiny" tone="muted">
             Build {status.staged.build} is staged and verified at <code>{status.staged.path}</code>.
-          </p>
+          </Text>
         ) : null}
-        {notice ? <p class="update-notice">{notice}</p> : null}
+        {notice ? (
+          <Callout tone="info" role="status">
+            {notice}
+          </Callout>
+        ) : null}
       </section>
 
       <section class="settings-section" aria-labelledby="settings-update-auto">
@@ -362,37 +379,38 @@ export function UpdateSettings({ disabled }: UpdateSettingsProps): JSX.Element {
           description="One small request to the release manifest on startup and on a timer. Off sends nothing at all, which is what an air-gapped install wants."
           onChange={(checked) => void save({ check: checked }, 'check')}
         />
-        <div class="setting-row">
-          <div class="setting-copy">
-            <span class="setting-name">Check every (minutes)</span>
-            <span class="setting-hint">
-              Between {Math.round((config?.min_check_secs ?? 300) / 60)} and{' '}
-              {Math.round((config?.max_check_secs ?? 604800) / 60)} minutes; clamped by the server.
-            </span>
-          </div>
-          <div class="update-interval">
-            <input
-              id="update-interval"
-              class="input"
-              type="number"
-              aria-label="Check every (minutes)"
-              min={Math.round((config?.min_check_secs ?? 300) / 60)}
-              max={Math.round((config?.max_check_secs ?? 604800) / 60)}
-              step="5"
-              value={intervalDraft}
-              disabled={disabled || saving !== null || !config?.check}
-              onInput={(event) => setIntervalDraft(event.currentTarget.value)}
-            />
-            <button
-              type="button"
-              class="button button-small"
-              onClick={() => void saveInterval()}
-              disabled={disabled || saving !== null || !config?.check}
-            >
-              {saving === 'interval' ? 'Saving…' : 'Save'}
-            </button>
-          </div>
-        </div>
+        <SettingRow
+          title="Check every (minutes)"
+          description={`Between ${Math.round((config?.min_check_secs ?? 300) / 60)} and ${Math.round(
+            (config?.max_check_secs ?? 604800) / 60,
+          )} minutes; clamped by the server.`}
+          htmlFor="update-interval"
+          control={
+            <Inline gap="3" align="center">
+              <Input
+                id="update-interval"
+                class="w-[96px]"
+                type="number"
+                aria-label="Check every (minutes)"
+                min={Math.round((config?.min_check_secs ?? 300) / 60)}
+                max={Math.round((config?.max_check_secs ?? 604800) / 60)}
+                step="5"
+                value={intervalDraft}
+                disabled={disabled || saving !== null || !config?.check}
+                onInput={(event) => setIntervalDraft(event.currentTarget.value)}
+              />
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={saving === 'interval'}
+                onClick={() => void saveInterval()}
+                disabled={disabled || saving !== null || !config?.check}
+              >
+                {saving === 'interval' ? 'Saving…' : 'Save'}
+              </Button>
+            </Inline>
+          }
+        />
         <Toggle
           id="update-auto-apply"
           checked={config?.auto_apply ?? false}
@@ -401,11 +419,11 @@ export function UpdateSettings({ disabled }: UpdateSettingsProps): JSX.Element {
           description="Off by default: installing restarts the service, which ends every run in flight. Only possible when this process may write its own binary."
           onChange={(checked) => void save({ auto_apply: checked }, 'auto_apply')}
         />
-        <p class="settings-section-note">
+        <Text as="p" size="tiny" tone="muted">
           The manifest URL is <code>{config?.manifest_url ?? 'unset'}</code>. Changing it needs the
           admin credential, so it is read-only here; set <code>updates.manifest_url</code> in
           config.toml, or <code>KARUCODE_UPDATE_MANIFEST_URL</code>.
-        </p>
+        </Text>
       </section>
     </>
   );

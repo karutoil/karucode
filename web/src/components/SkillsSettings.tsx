@@ -2,9 +2,21 @@ import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import type { SkillDetail, SkillListResponse, SkillRoot, SkillSource, SkillSummary } from '../api/types';
 import * as skills from '../state/skills';
-import { Dialog } from './Dialog';
-import { Toggle } from './Toggle';
-import { EditIcon, EyeIcon, RefreshIcon, TrashIcon } from './icons';
+import {
+  Button,
+  Callout,
+  Field,
+  IconButton,
+  Inline,
+  Input,
+  Overlay,
+  Spinner,
+  Stack,
+  Text,
+  Textarea,
+  Toggle,
+} from '../ui';
+import { CloseIcon, EditIcon, EyeIcon, RefreshIcon, TrashIcon } from './icons';
 
 /**
  * The **Skills** section of the settings sheet: every switch, folder and skill
@@ -92,7 +104,7 @@ function SkillRow({
       ) : (
         <p class="skill-path mono">Stored in config — no file on disk</p>
       )}
-      <div class="skill-row-actions">
+      <Inline gap="3" wrap class="skill-row-actions">
         <Toggle
           checked={skill.enabled}
           onChange={(next) => void skills.toggleSkill(skill.id, next)}
@@ -100,51 +112,51 @@ function SkillRow({
           disabled={busy}
           testId="skill-toggle"
         />
-        <button
-          type="button"
-          class="button button-small"
-          data-testid="skill-view"
+        <Button
+          variant="secondary"
+          size="sm"
+          icon={<EyeIcon size={12} />}
+          testId="skill-view"
           aria-label={`View the body of ${skill.id}`}
           disabled={busy}
           onClick={onView}
         >
-          <EyeIcon size={12} />
           View
-        </button>
+        </Button>
         {custom ? (
-          <button
-            type="button"
-            class="button button-small"
-            data-testid="skill-edit"
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<EditIcon size={12} />}
+            testId="skill-edit"
             aria-label={`Edit ${skill.id}`}
             disabled={busy}
             onClick={onEdit}
           >
-            <EditIcon size={12} />
             Edit
-          </button>
+          </Button>
         ) : null}
         {custom ? (
-          <button
-            type="button"
-            class="button button-small button-danger"
-            data-testid="skill-delete"
+          <Button
+            variant="danger-ghost"
+            size="sm"
+            icon={<TrashIcon size={12} />}
+            testId="skill-delete"
             aria-label={`Delete ${skill.id}`}
             title="Delete this hand-added skill"
             disabled={busy}
             onClick={() => void skills.deleteSkill(skill.id)}
           >
-            <TrashIcon size={12} />
             Delete
-          </button>
+          </Button>
         ) : null}
-      </div>
+      </Inline>
       {custom ? null : (
-        <p class="skill-refusal">
+        <Text as="p" size="micro" tone="muted" class="skill-refusal">
           Delete is refused for a skill that came from a file: the row would go and the file would
           stay. Turn it off here, or edit or remove{' '}
           <code class="mono">{skill.path ?? 'its file'}</code>.
-        </p>
+        </Text>
       )}
     </article>
   );
@@ -165,20 +177,29 @@ function SkillDialog({ mode }: { mode: 'view' | 'edit' }): JSX.Element {
   const ready = detail !== null && detail.id === id;
   const title = mode === 'edit' ? `Edit skill ${id ?? ''}` : `Skill ${id ?? ''}`;
   return (
-    <Dialog
+    <Overlay
       open={id !== null}
+      role="standard"
       title={title}
       onClose={skills.closeSkillBody}
       class="dialog-skill"
+      bodyLayout="contents"
       description={
         ready && detail.description.trim() !== '' ? detail.description : undefined
       }
     >
-      {loading ? <p class="field-hint">Loading {id}…</p> : null}
+      {loading ? (
+        <Inline gap="2" align="center" class="field-hint">
+          <Spinner size={14} />
+          <Text as="span" size="tiny" tone="muted">
+            Loading {id}…
+          </Text>
+        </Inline>
+      ) : null}
       {!loading && skills.skillsError.value !== null && detail === null ? (
-        <p class="field-error" role="alert">
+        <Callout tone="danger" role="alert">
           {skills.skillsError.value}
-        </p>
+        </Callout>
       ) : null}
       {!loading && ready && detail ? (
         mode === 'edit' ? (
@@ -187,21 +208,21 @@ function SkillDialog({ mode }: { mode: 'view' | 'edit' }): JSX.Element {
           <SkillBody detail={detail} />
         )
       ) : null}
-    </Dialog>
+    </Overlay>
   );
 }
 
 function SkillBody({ detail }: { detail: SkillDetail }): JSX.Element {
   return (
-    <div class="skill-body-wrap">
-      <p class="field-hint">
+    <Stack gap="4" class="skill-body-wrap">
+      <Text as="p" size="tiny" tone="muted" class="field-hint">
         The agent reads this text as data, not as instructions. It reaches the prompt only when the
         task matches the description above.
-      </p>
+      </Text>
       {detail.body_truncated ? (
-        <p class="inline-warning" role="status">
+        <Callout tone="warn" role="status">
           The server cut this body at its own size cap; the file on disk has the rest.
-        </p>
+        </Callout>
       ) : null}
       <pre class="skill-body" data-testid="skill-body" tabIndex={0}>
         {detail.body ?? ''}
@@ -211,7 +232,7 @@ function SkillBody({ detail }: { detail: SkillDetail }): JSX.Element {
           {detail.path}
         </p>
       ) : null}
-    </div>
+    </Stack>
   );
 }
 
@@ -235,67 +256,60 @@ function SkillEditor({ detail }: { detail: SkillDetail }): JSX.Element {
   };
 
   return (
-    <div class="skill-editor">
-      <div class="field">
-        <label class="field-label" for="skill-edit-name">
-          Name
-        </label>
-        <input
+    <Stack gap="4" class="skill-editor">
+      <Field label="Name" htmlFor="skill-edit-name">
+        <Input
           id="skill-edit-name"
-          class="input"
           type="text"
           value={name}
-          data-testid="skill-edit-name"
+          testId="skill-edit-name"
           onInput={(event) => setName(event.currentTarget.value)}
         />
-      </div>
-      <div class="field">
-        <label class="field-label" for="skill-edit-description">
-          Description
-        </label>
-        <input
+      </Field>
+      <Field
+        label="Description"
+        htmlFor="skill-edit-description"
+        description="One line. This is the only part of a skill the prompt shows."
+      >
+        <Input
           id="skill-edit-description"
-          class="input"
           type="text"
           value={description}
-          data-testid="skill-edit-description"
+          testId="skill-edit-description"
           onInput={(event) => setDescription(event.currentTarget.value)}
         />
-        <p class="field-hint">One line. This is the only part of a skill the prompt shows.</p>
-      </div>
-      <div class="field">
-        <label class="field-label" for="skill-edit-body">
-          Body
-        </label>
-        <textarea
+      </Field>
+      <Field label="Body" htmlFor="skill-edit-body">
+        <Textarea
           id="skill-edit-body"
-          class="input skill-editor-body"
+          mono
           rows={12}
           value={body}
-          data-testid="skill-edit-body"
+          testId="skill-edit-body"
+          class="skill-editor-body"
           onInput={(event) => setBody(event.currentTarget.value)}
         />
-      </div>
+      </Field>
       {problem ? (
-        <p class="field-error" role="alert">
+        <Callout tone="danger" role="alert">
           {problem}
-        </p>
+        </Callout>
       ) : null}
-      <footer class="dialog-actions">
-        <button type="button" class="button" onClick={skills.closeSkillBody} disabled={busy}>
+      <Inline gap="3" justify="end" class="dialog-actions">
+        <Button variant="secondary" onClick={skills.closeSkillBody} disabled={busy}>
           Cancel
-        </button>
-        <button
-          type="button"
-          class="button button-primary"
-          data-testid="skill-edit-save"
+        </Button>
+        <Button
+          variant="primary"
+          testId="skill-edit-save"
           disabled={busy}
+          loading={busy}
           onClick={() => void save()}
         >
           {busy ? 'Saving…' : 'Save'}
-        </button>
-      </footer>
-    </div>
+        </Button>
+      </Inline>
+    </Stack>
   );
 }
 
@@ -323,69 +337,64 @@ function AddSkillForm({ disabled }: { disabled: boolean }): JSX.Element {
   };
 
   return (
-    <section class="skills-add" aria-label="Add a skill">
-      <div class="field">
-        <label class="field-label" for="skill-add-name">
-          Name
-        </label>
-        <input
+    <Stack as="section" gap="4" class="skills-add" aria-label="Add a skill">
+      <Field
+        label="Name"
+        htmlFor="skill-add-name"
+        description="Becomes the id (lowercased, slugified). Leave it empty to name the skill after its description's first words."
+      >
+        <Input
           id="skill-add-name"
-          class="input"
           type="text"
           value={name}
           placeholder="release"
-          data-testid="skill-add-name"
+          testId="skill-add-name"
           onInput={(event) => setName(event.currentTarget.value)}
         />
-        <p class="field-hint">
-          Becomes the id (lowercased, slugified). Leave it empty to name the skill after its
-          description's first words.
-        </p>
-      </div>
-      <div class="field">
-        <label class="field-label" for="skill-add-description">
-          Description
-        </label>
-        <input
+      </Field>
+      <Field label="Description" htmlFor="skill-add-description">
+        <Input
           id="skill-add-description"
-          class="input"
           type="text"
           value={description}
           placeholder="Cut a release: bump versions, run the gates, tag, push."
-          data-testid="skill-add-description"
+          testId="skill-add-description"
           onInput={(event) => setDescription(event.currentTarget.value)}
         />
-      </div>
-      <div class="field">
-        <label class="field-label" for="skill-add-body">
-          Body
-        </label>
-        <textarea
+      </Field>
+      <Field
+        label="Body"
+        htmlFor="skill-add-body"
+        description="Markdown. Required — a skill with no body teaches the agent nothing."
+      >
+        <Textarea
           id="skill-add-body"
-          class="input skill-editor-body"
+          mono
           rows={8}
           value={body}
           placeholder={'# Cutting a release\n\n1. `cargo test --workspace` …'}
-          data-testid="skill-add-body"
+          testId="skill-add-body"
+          class="skill-editor-body"
           onInput={(event) => setBody(event.currentTarget.value)}
         />
-        <p class="field-hint">Markdown. Required — a skill with no body teaches the agent nothing.</p>
-      </div>
+      </Field>
       {problem ? (
-        <p class="field-error" role="alert" data-testid="skill-add-error">
+        <Callout tone="danger" role="alert" testId="skill-add-error">
           {problem}
-        </p>
+        </Callout>
       ) : null}
-      <button
-        type="button"
-        class="button button-primary"
-        data-testid="skill-add-submit"
-        disabled={busy}
-        onClick={() => void add()}
-      >
-        {busy ? 'Adding…' : 'Add skill'}
-      </button>
-    </section>
+      <div>
+        <Button
+          variant="primary"
+          testId="skill-add-submit"
+          disabled={busy}
+          loading={busy}
+          onClick={() => void add()}
+        >
+          {busy ? 'Adding…' : 'Add skill'}
+        </Button>
+      </div>
+    </Stack>
   );
 }
 
@@ -436,6 +445,7 @@ function PromptOptions({ data, disabled }: { data: SkillListResponse; disabled: 
   const [promptMax, setPromptMax] = useState(String(data.prompt_max_chars));
   const [maxSkills, setMaxSkills] = useState(String(data.max_skills));
   const [problem, setProblem] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const busy = skills.skillsBusy.value || disabled;
 
   // Re-seed from the stored values, not the whole payload: toggling one skill
@@ -447,6 +457,7 @@ function PromptOptions({ data, disabled }: { data: SkillListResponse; disabled: 
   }, [data.prompt, data.prompt_max_chars, data.max_skills]);
 
   const save = async (): Promise<void> => {
+    if (saving || disabled) return;
     const chars = Number(promptMax.trim());
     if (!Number.isInteger(chars) || chars < 0) {
       setProblem('Prompt budget must be a whole number of characters, 0 or more.');
@@ -460,7 +471,12 @@ function PromptOptions({ data, disabled }: { data: SkillListResponse; disabled: 
       return;
     }
     setProblem(null);
-    await skills.saveOptions({ prompt, prompt_max_chars: chars, max_skills: limit });
+    setSaving(true);
+    try {
+      await skills.saveOptions({ prompt, prompt_max_chars: chars, max_skills: limit });
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -474,68 +490,63 @@ function PromptOptions({ data, disabled }: { data: SkillListResponse; disabled: 
         testId="skills-prompt-toggle"
       />
       <div class="field-grid">
-        <div class="field">
-          <label class="field-label" for="skills-prompt-max">
-            Prompt budget (characters)
-          </label>
-          <input
+        <Field
+          label="Prompt budget (characters)"
+          htmlFor="skills-prompt-max"
+          description="The cap on skill text in the prompt; the server clamps it to 200–64,000. A long list is re-sent and re-billed on every turn."
+        >
+          <Input
             id="skills-prompt-max"
-            class="input mono"
+            mono
             type="number"
             min="200"
             max="64000"
             step="100"
             value={promptMax}
-            data-testid="skills-prompt-max"
+            testId="skills-prompt-max"
             disabled={busy}
             onInput={(event) => setPromptMax(event.currentTarget.value)}
           />
-          <p class="field-hint">
-            The cap on skill text in the prompt; the server clamps it to 200–64,000. A long list is
-            re-sent and re-billed on every turn.
-          </p>
-        </div>
-        <div class="field">
-          <label class="field-label" for="skills-max-skills">
-            Max skills
-          </label>
-          <input
+        </Field>
+        <Field
+          label="Max skills"
+          htmlFor="skills-max-skills"
+          description="How many skills the prompt block lists; the server keeps at least 1. Past the cap, the block says so."
+        >
+          <Input
             id="skills-max-skills"
-            class="input mono"
+            mono
             type="number"
             min="1"
             step="1"
             value={maxSkills}
-            data-testid="skills-max-skills"
+            testId="skills-max-skills"
             disabled={busy}
             onInput={(event) => setMaxSkills(event.currentTarget.value)}
           />
-          <p class="field-hint">
-            How many skills the prompt block lists; the server keeps at least 1. Past the cap, the
-            block says so.
-          </p>
-        </div>
+        </Field>
       </div>
       {problem ? (
-        <p class="field-error" role="alert">
+        <Callout tone="danger" role="alert">
           {problem}
-        </p>
+        </Callout>
       ) : null}
-      <div class="skills-options-actions">
-        <button
-          type="button"
-          class="button button-primary button-small"
-          data-testid="skills-save-options"
-          disabled={busy}
+      <Inline gap="4" wrap class="skills-options-actions">
+        <Button
+          variant="primary"
+          size="sm"
+          testId="skills-save-options"
+          disabled={disabled}
+          loading={saving}
           onClick={() => void save()}
         >
-          {busy ? 'Saving…' : 'Save prompt settings'}
-        </button>
-        <span class="field-hint">
+          {saving ? 'Saving…' : 'Save prompt settings'}
+        </Button>
+        <Text as="span" size="tiny" tone="muted" class="field-hint">
           Stored with <code>PATCH /api/config</code>; the fields show what was stored, not what was
           typed.
-        </span>
-      </div>
+        </Text>
+      </Inline>
     </>
   );
 }
@@ -560,43 +571,46 @@ function DirectoriesBlock({ data, disabled }: { data: SkillListResponse; disable
   };
 
   return (
-    <section class="skills-directories" aria-label="Extra skill folders">
-      <span class="field-label">Extra folders</span>
+    <Stack as="section" gap="4" class="skills-directories" aria-label="Extra skill folders">
+      <Text as="span" size="label" weight="semibold" tone="secondary" class="field-label">
+        Extra folders
+      </Text>
       {directories.length === 0 ? (
-        <p class="field-hint">None. Only the detected folders above are scanned.</p>
+        <Text as="p" size="tiny" tone="muted" class="field-hint">
+          None. Only the detected folders above are scanned.
+        </Text>
       ) : (
-        <ul class="skills-dir-list">
+        <Stack as="ul" gap="2" class="skills-dir-list">
           {directories.map((directory) => (
             <li class="skills-dir-row" key={directory} data-testid="skills-dir-row" data-dir={directory}>
               <code class="mono" title={directory}>
                 {directory}
               </code>
-              <button
-                type="button"
+              <IconButton
+                size="sm"
+                label={`Remove ${directory}`}
+                testId="skills-dir-remove"
                 class="chip-remove"
-                data-testid="skills-dir-remove"
-                aria-label={`Remove ${directory}`}
                 disabled={busy}
+                icon={<CloseIcon size={12} />}
                 onClick={() =>
                   void skills.saveOptions({
                     directories: directories.filter((entry) => entry !== directory),
                   })
                 }
-              >
-                ×
-              </button>
+              />
             </li>
           ))}
-        </ul>
+        </Stack>
       )}
       <div class="list-editor-add">
-        <input
+        <Input
           type="text"
-          class="input mono"
+          mono
           value={draft}
           placeholder="/home/me/my-skills or ~/skills"
           aria-label="Add an extra skill folder"
-          data-testid="skills-dir-input"
+          testId="skills-dir-input"
           disabled={busy}
           onInput={(event) => setDraft(event.currentTarget.value)}
           onKeyDown={(event) => {
@@ -605,26 +619,26 @@ function DirectoriesBlock({ data, disabled }: { data: SkillListResponse; disable
             void add();
           }}
         />
-        <button
-          type="button"
-          class="button button-small"
-          data-testid="skills-dir-add"
+        <Button
+          variant="secondary"
+          size="sm"
+          testId="skills-dir-add"
           disabled={busy || draft.trim() === ''}
           onClick={() => void add()}
         >
           Add
-        </button>
+        </Button>
       </div>
       {problem ? (
-        <p class="field-error" role="alert">
+        <Callout tone="danger" role="alert">
           {problem}
-        </p>
+        </Callout>
       ) : null}
-      <p class="field-hint">
+      <Text as="p" size="tiny" tone="muted" class="field-hint">
         Absolute paths, or <code>~</code> for your home folder. A folder that does not exist is not
         an error; the roots below say which ones were found.
-      </p>
-    </section>
+      </Text>
+    </Stack>
   );
 }
 
@@ -696,11 +710,11 @@ export function SkillsSettings({ disabled = false }: { disabled?: boolean }): JS
   const workspaceRoot = data?.roots.find((root) => root.source === 'workspace') ?? data?.roots[0];
 
   return (
-    <div class="skills-settings" data-testid="skills-panel">
+    <Stack gap="6" class="skills-settings" testId="skills-panel">
       {error !== null ? (
-        <p class="field-error skills-error" role="alert" data-testid="skills-error">
+        <Callout tone="danger" role="alert" testId="skills-error" class="skills-error">
           {error}
-        </p>
+        </Callout>
       ) : null}
 
       <section class="settings-section" aria-labelledby="settings-skills-switch">
@@ -716,11 +730,11 @@ export function SkillsSettings({ disabled = false }: { disabled?: boolean }): JS
           <>
             <MasterSwitch data={data} disabled={disabled} />
             {!data.enabled ? (
-              <div class="skills-master-off" role="status" data-testid="skills-master-off">
+              <Callout tone="info" role="status" testId="skills-master-off" class="skills-master-off">
                 <strong>Skills are off.</strong> No skill text reaches the system prompt and the{' '}
                 <code>skill</code> tool refuses. The list below still shows what is installed;
                 turning a single skill on or off changes nothing until the master switch is back on.
-              </div>
+              </Callout>
             ) : null}
           </>
         )}
@@ -736,9 +750,9 @@ export function SkillsSettings({ disabled = false }: { disabled?: boolean }): JS
             <DiscoveryToggle data={data} disabled={disabled} />
             <DirectoriesBlock data={data} disabled={disabled} />
             {staleRoots ? (
-              <p class="inline-warning" role="status" data-testid="skills-roots-stale">
+              <Callout tone="warn" role="status" testId="skills-roots-stale">
                 The folders changed. Refresh to see which ones exist and how many skills each holds.
-              </p>
+              </Callout>
             ) : null}
             <RootsBlock roots={data.roots} />
           </section>
@@ -760,16 +774,15 @@ export function SkillsSettings({ disabled = false }: { disabled?: boolean }): JS
                     ? 'loading…'
                     : `${skillCount(total)}${on < total ? ` · ${total - on} off` : ''}`}
                 </span>
-                <button
-                  type="button"
-                  class="icon-button inspector-mini"
-                  aria-label="Refresh skills"
+                <IconButton
+                  size="sm"
+                  label="Refresh skills"
                   title="Read every folder again"
                   disabled={loading}
+                  class="inspector-mini"
                   onClick={() => void skills.refreshSkills()}
-                >
-                  <RefreshIcon size={13} class={loading ? 'spin' : undefined} />
-                </button>
+                  icon={<RefreshIcon size={13} class={loading ? 'spin' : undefined} />}
+                />
               </span>
             </div>
             {data.truncated ? (
@@ -817,6 +830,6 @@ export function SkillsSettings({ disabled = false }: { disabled?: boolean }): JS
       )}
 
       {dialog !== null ? <SkillDialog mode={dialog} /> : null}
-    </div>
+    </Stack>
   );
 }

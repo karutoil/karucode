@@ -27,6 +27,7 @@ import {
   sessionStatus,
   tone,
 } from './controlModel';
+import { Badge, Button, IconButton, StatusDot, Text, type StatusDotTone } from '../../ui';
 import '../../styles/control-rail.css';
 
 const FILTERS: { id: Filter; label: string }[] = [
@@ -99,14 +100,16 @@ function RowMenu({ menu, session, title, onRename, onDelete }: {
       copied ? 'success' : 'error');
   };
   return <div class="session-menu-wrap">
-    <button
-      type="button"
+    <IconButton
+      size="sm"
       class="icon-button session-menu-trigger"
-      aria-label={`Actions for ${title}`}
-      {...menu.triggerProps}
-    >
-      <KebabIcon size={15} />
-    </button>
+      label={`Actions for ${title}`}
+      buttonRef={menu.triggerProps.ref}
+      aria-haspopup={menu.triggerProps['aria-haspopup']}
+      expanded={menu.triggerProps['aria-expanded']}
+      icon={<KebabIcon size={15} />}
+      onClick={menu.triggerProps.onClick}
+    />
     <Menu
         menu={menu}
         label={`Session actions for ${title}`}
@@ -204,7 +207,7 @@ function RailRow({
           <span class="session-head">
             <span class="session-title">{title}</span>
             {badge}
-            <span class={`status-dot status-${status.tone}`} aria-hidden="true" />
+            <StatusDot tone={status.tone as StatusDotTone} />
           </span>
           <span class="session-meta">
             <span
@@ -341,10 +344,10 @@ export function ControlRail({
       // the whole line and truncates on its own. The agent count rides beside the
       // title (a `.badge`, the workbench's count pill) rather than in the meta
       // line, which is a single 12px row of mono text.
-      badge={chat.agents.total > 0 ? <span
+      badge={chat.agents.total > 0 ? <Badge
         class="badge"
         title={agentBadgeTitle(chat.agents)}
-      >{chat.agents.live}/{chat.agents.total} agents</span> : null}
+      >{chat.agents.live}/{chat.agents.total} agents</Badge> : null}
       facts={[<span key="age">{relativeTime(chat.updated_at)}</span>]}
       onOpen={() => onNavigate(chat)}
       {...rowActions}
@@ -384,13 +387,13 @@ export function ControlRail({
         <span class="project-title-text">Control plane</span>
         <span class="path-hint">Every project, one view</span>
       </div>
-      <button
-        type="button"
+      <IconButton
         class="icon-button"
         title="Refresh sessions"
-        aria-label="Refresh sessions"
+        label="Refresh sessions"
+        icon={<RefreshIcon size={15} />}
         onClick={onRefresh}
-      ><RefreshIcon size={15} /></button>
+      />
     </header>
     <label class="side-search">
       <SearchIcon size={15} />
@@ -418,13 +421,15 @@ export function ControlRail({
       <section aria-label="Control chats">
         <div class="cp-group-head">
           <h2 class="session-group-label">Control chats</h2>
-          <button
-            type="button"
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<PlusIcon size={13} />}
             class="button button-small"
             aria-label="New control chat"
             title="New control chat"
             onClick={onNewChat}
-          ><PlusIcon size={13} /> New</button>
+          >New</Button>
         </div>
         {chats.length === 0
           ? <button type="button" class="cp-control-entry" onClick={onNewChat}>
@@ -434,13 +439,13 @@ export function ControlRail({
             </button>
           : <ul class="session-list">{chats.map((chat) => controlRow(chat, rowActions))}</ul>}
       </section>
-      {loading && sessions.length === 0 ? <p class="cp-note">Loading sessions…</p> : null}
+      {loading && sessions.length === 0 ? <Text as="p" size="tiny" tone="muted" class="cp-note">Loading sessions…</Text> : null}
       {/* The project-session group keeps a stable name so a screen reader (and
           the browser verification script) can tell which group a row is in. */}
       <section aria-label="Sessions">
         <h2 class="session-group-label">Sessions<span aria-hidden="true">{projectSessions.length}</span></h2>
         {!loading && projectSessions.length === 0 && !listError
-          ? <p class="cp-note">No sessions yet. Start one from control chat.</p>
+          ? <Text as="p" size="tiny" tone="muted" class="cp-note">No sessions yet. Start one from control chat.</Text>
           : null}
         {groups.map((group) => <section key={group.key} aria-label={group.label}>
           {/* The sub-group count is only worth drawing when it says something
@@ -452,7 +457,7 @@ export function ControlRail({
           </h2>
           <ul class="session-list">{group.items.map((session) => row(session, rowActions))}</ul>
         </section>)}
-        {!loading && filtered.length === 0 && query.trim() !== '' ? <p class="cp-note">No sessions match “{query}”.</p> : null}
+        {!loading && filtered.length === 0 && query.trim() !== '' ? <Text as="p" size="tiny" tone="muted" class="cp-note">No sessions match “{query}”.</Text> : null}
       </section>
     </nav>
     {/* The workbench's foot, with the plane's own facts.
@@ -467,7 +472,7 @@ export function ControlRail({
      * The count is pluralised: the old foot said "1 projects". */}
     <div class="side-footer">
       <div class="online-row">
-        <span class={`online-ind status-${live ? 'ok' : 'warn'}`} aria-hidden="true" />
+        <StatusDot tone={live ? 'ok' : 'warn'} class="online-ind" />
         <span>{live ? 'Live' : 'Stale'}</span>
         <span class="right">{pluralise(projectCount, 'project')}</span>
       </div>
@@ -475,13 +480,15 @@ export function ControlRail({
         {/* `focus()` before opening, as the workbench's own foot does: the sheet
          * returns focus here when it closes, and the button is about to be the
          * only thing under the pointer. */}
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="sm"
+          icon={<SettingsIcon size={15} />}
           class="settings-btn"
           onClick={(event) => { event.currentTarget.focus(); actions.openSettings(); }}
         >
-          <SettingsIcon size={15} /> Settings
-        </button>
+          Settings
+        </Button>
       </div>
     </div>
   </aside>;

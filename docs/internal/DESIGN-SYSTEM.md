@@ -454,10 +454,66 @@ offers elsewhere, anchored at the pointer:
 
 ---
 
+## 5C. Utility classes: Tailwind v4, mapped onto the tokens
+
+The stylesheet carries a Tailwind v4 utility layer, and it is **not** a second
+design system. `web/src/styles/tailwind.css` resets every default scale
+(`--color-*`, `--spacing-*`, `--radius-*`, `--text-*`, `--font-*`, `--shadow-*`
+set to `initial`) and maps only karucode's own tokens back in with
+`@theme inline`, so `bg-surface` compiles to `background-color: var(--surface)`,
+`p-4` to `padding: var(--space-4)` and `text-body` to `font-size: var(--fs-body)`.
+There is no Tailwind palette, no Tailwind spacing and no Tailwind type scale to
+reach for: a class like `bg-zinc-800` resolves to nothing, which is the point.
+
+What that means for a component:
+
+1. **A utility may not carry a raw value.** `bg-[#1a1a1a]`, `text-[13px]`,
+   `p-[6px]`, `gap-[5px]` and `rounded-[3px]` are refused — they are the exact
+   literals §5 rule 1 forbids, only written in markup instead of CSS. Pure
+   geometry (`w-[320px]`, `max-w-[720px]`, `grid-cols-[auto_1fr]`) is allowed,
+   because the token scale has no step for a measurement.
+2. **No default palette.** `bg-zinc-*`, `text-gray-*`, `text-red-*`,
+   `bg-amber-*` and their 21 siblings fail the guard: they compile only when the
+   reset above is broken, so they are a typo with no visible error.
+3. **`text-faint` does not exist.** `--faint` is a decorative object colour
+   (scrollbar thumbs, hairline glyphs) and fails the prose floor as ink. Use
+   `text-muted` for quiet text and `text-text-secondary` for body ink.
+4. **The cascade order is decided in one file.** `web/src/styles/index.css`
+   imports `tokens.css` and `tailwind.css` unlayered and every component sheet
+   with `@import './x.css' layer(components)`. So a utility overrides a
+   component's `.class` rule, not just the element resets: `class="button px-8"`
+   is 20px of padding, not `.button`'s 10px. `base.css` keeps its resets in a
+   nested `@layer base`, which becomes `components.base` — above Tailwind's
+   Preflight, below the rest of `components` (a class rule still beats a reset),
+   below `utilities`. The exceptions are named, not forgotten: six sheets are
+   imported by the component that owns them (`notifications.css`,
+   `workbench-navigation.css` and the four `control-*.css`) and are therefore
+   unlayered, so a utility does nothing there — restyle those with a class rule
+   until they move. `web/src/styles/layers.test.ts` fails an import without the
+   layer and fails a sheet that is neither imported by `index.css` nor given an
+   entry with a reason in that test.
+5. **Two Preflight defaults had to be restored** because the app relied on the
+   browser's own: link underlines (`text-decoration-line: underline` in the `a`
+   reset) and list markers (`list-style: revert` on `ul`/`ol`, whose bullets
+   `padding-left` was already reserved for). Anything else Preflight flattens —
+   heading sizes are pinned per level too — must be justified by a class.
+
+**Enforced by** `web/src/styles/ui-contract.test.ts` (the four rules above, over
+every `.ts`/`.tsx` under `src/` except tests and `theme/`),
+`web/src/styles/layers.test.ts` (rule 4) and `cd web && npm run lint` (oxlint:
+no `any`, no `<button>` without an explicit `type`, in product code).
+
+---
+
 ## 6. How this is verified
 
 - `node web/scripts/design-audit.mjs` — static: token-rule violations with
-  `file:line`. The target is **zero** outside `tokens.css`.
+  `file:line`. The target is **zero** outside `tokens.css`, and the report is at
+  zero. It is stricter than `scale.test.ts` (it also flags an *on-scale* literal
+  like `gap: 12px`, which is legal but does not follow the density knob) and
+  allows the same two kinds of exception, because they are measurements rather
+  than decisions: a geometry radius (`0`, `50%` for a circle, `inherit`) and a
+  computed length (`calc()`, `env(safe-area-inset-bottom)`, `min(17vh, 150px)`).
 - `cd web && npx vitest run` — `contrast.test.ts` for §4, `roles.test.ts` for
   palette derivation, and the per-file style contracts for structure.
 - A real Chromium over CDP, driving every screen in dark and light mode. jsdom

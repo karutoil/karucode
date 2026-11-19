@@ -2108,7 +2108,9 @@ describe('SettingsSheet plugins', () => {
     // The per-server button is the "I rebuilt it" path and targets one name.
     const row = (await screen.findByText('fs')).closest('.diagnostics-row');
     if (!(row instanceof HTMLElement)) throw new Error('no MCP row');
-    fireEvent.click(within(row).getByRole('button', { name: 'Reload' }));
+    const reloadButton = within(row).getByRole('button', { name: 'Reload' }) as HTMLButtonElement;
+    await waitFor(() => expect(reloadButton.disabled).toBe(false));
+    fireEvent.click(reloadButton);
     await waitFor(() =>
       expect(mcpPosts).toEqual(['/api/mcp/reload', '/api/mcp/fs/reload']),
     );
@@ -2131,7 +2133,9 @@ describe('SettingsSheet plugins', () => {
     await waitFor(() => expect(pluginPosts).toEqual(['/api/plugins/wordy/enable']));
 
     // A disabled plugin offers the opposite action, never "Reload" by itself.
-    fireEvent.click(within(stopped).getByRole('button', { name: 'Enable' }));
+    const enableButton = within(stopped).getByRole('button', { name: 'Enable' }) as HTMLButtonElement;
+    await waitFor(() => expect(enableButton.disabled).toBe(false));
+    fireEvent.click(enableButton);
     await waitFor(() =>
       expect(pluginPosts).toEqual([
         '/api/plugins/wordy/enable',

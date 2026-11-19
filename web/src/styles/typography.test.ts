@@ -70,7 +70,8 @@ describe('the scale exists and has a floor (§3.3)', () => {
 
 describe('the base layer uses the scale', () => {
   it('body copy takes size, leading and family from tokens', () => {
-    const body = base.match(/\nbody\s*{[^}]+}/s)?.[0] ?? '';
+    // The resets sit inside `@layer base`, so every rule starts indented.
+    const body = base.match(/\n\s*body\s*{[^}]+}/s)?.[0] ?? '';
     expect(body).toMatch(/font-size:\s*var\(--fs-body\)/);
     expect(body).toMatch(/line-height:\s*var\(--lh-body\)/);
     expect(body).toMatch(/font-family:\s*var\(--font-ui\)/);
@@ -86,14 +87,14 @@ describe('the base layer uses the scale', () => {
   });
 
   it('headings are a single closed definition', () => {
-    const headings = base.match(/\nh1,\s*h2,\s*h3,\s*h4\s*{[^}]+}/s)?.[0] ?? '';
+    const headings = base.match(/\n\s*h1,\s*h2,\s*h3,\s*h4\s*{[^}]+}/s)?.[0] ?? '';
     expect(headings).toMatch(/font-weight:\s*660/);
     expect(headings).toMatch(/line-height:\s*1\.3/);
     expect(headings).toMatch(/letter-spacing:\s*-0\.02em/);
   });
 
   it('code, kbd and pre share the mono family', () => {
-    const mono = base.match(/\ncode,\s*kbd,\s*pre,\s*samp\s*{[^}]+}/s)?.[0] ?? '';
+    const mono = base.match(/\n\s*code,\s*kbd,\s*pre,\s*samp\s*{[^}]+}/s)?.[0] ?? '';
     expect(mono).toMatch(/font-family:\s*var\(--font-mono\)/);
   });
 });

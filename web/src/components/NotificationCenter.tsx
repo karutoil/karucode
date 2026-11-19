@@ -5,6 +5,7 @@ import { contextMenuProps, Menu, MenuItem, useMenu } from '../lib/menu';
 import { relativeTime } from '../lib/format';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
+import { Button, IconButton, Inline, Text } from '../ui';
 import { Dialog } from './Dialog';
 import { BellIcon, CheckIcon } from './icons';
 import '../styles/notifications.css';
@@ -132,20 +133,19 @@ function NotificationRow({
           <CheckIcon size={12} />
         </span>
       ) : (
-        <button
-          type="button"
+        <IconButton
+          size="sm"
           class="icon-button notification-mark"
           // The session is in the name because two notifications can
           // share a title ("Run finished") and a button called "mark that
           // one read" tells a screen-reader user nothing about which.
-          aria-label={`Mark "${entry.title}" read${
+          label={`Mark "${entry.title}" read${
             entry.sessionTitle ? ` in ${entry.sessionTitle}` : ''
           }`}
           title="Mark as read"
+          icon={<CheckIcon size={13} />}
           onClick={markRead}
-        >
-          <CheckIcon size={13} />
-        </button>
+        />
       )}
 
       {/* Pointer-anchored only: this row has no kebab, so the menu is a
@@ -214,33 +214,38 @@ export function NotificationCenter(): JSX.Element {
             ? 'Nothing yet'
             : `${entries.length} ${entries.length === 1 ? 'notification' : 'notifications'}`}
         </span>
-        <span class="notification-toolbar-actions">
-          <button
-            type="button"
+        <Inline gap="3" class="notification-toolbar-actions">
+          <Button
+            variant="secondary"
+            size="md"
+            icon={<CheckIcon size={13} />}
             class="button"
             disabled={unread === 0}
             onClick={store.markAllNotificationsRead}
           >
-            <CheckIcon size={13} /> Mark all read
-          </button>
-          <button
-            type="button"
+            Mark all read
+          </Button>
+          <Button
+            variant="secondary"
+            size="md"
             class="button"
             disabled={entries.length === 0}
             onClick={store.clearNotifications}
           >
             Clear
-          </button>
-        </span>
+          </Button>
+        </Inline>
       </div>
 
       {entries.length === 0 ? (
         <div class="rail-empty notification-empty">
-          <p class="rail-empty-title">No notifications yet</p>
-          <p class="rail-empty-body">
+          <Text as="p" size="label" weight="semibold" class="rail-empty-title">
+            No notifications yet
+          </Text>
+          <Text as="p" size="tiny" tone="muted" class="rail-empty-body">
             One arrives when a run finishes, when a session parks on an approval, or when a run
             fails — including runs in projects you are not looking at.
-          </p>
+          </Text>
         </div>
       ) : (
         <ul class="notification-list" aria-label="Notifications, newest first">

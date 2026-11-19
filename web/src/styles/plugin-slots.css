@@ -78,7 +78,7 @@
   padding: 0 var(--space-2);
   gap: var(--space-1);
   border-radius: var(--radius-pill);
-  background: var(--surface-2);
+  background: var(--surface-raised);
   color: var(--muted);
   font-size: var(--fs-tiny);
   line-height: 1.5;

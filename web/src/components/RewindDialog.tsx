@@ -3,7 +3,7 @@ import { useEffect, useState } from 'preact/hooks';
 import type { RewindFile, RewindMode, RewindPreview } from '../api/types';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
-import { Dialog } from './Dialog';
+import { Badge, Button, Callout, Checkbox, Field, Overlay, Text, Textarea } from '../ui';
 
 /**
  * Recall to an earlier message: the confirmation surface for a rewind.
@@ -47,19 +47,25 @@ function FileRow({ file }: { file: RewindFile }): JSX.Element {
   const action = file.removes_file ? 'Remove' : 'Restore';
   return (
     <li class={file.incomplete ? 'rewind-file is-incomplete' : 'rewind-file'}>
-      <span class={`rewind-file-action ${file.removes_file ? 'is-remove' : 'is-restore'}`}>
+      <Badge
+        tone={file.removes_file ? 'danger' : 'success'}
+        mono={false}
+        class="self-start uppercase tracking-wider font-bold"
+      >
         {action}
-      </span>
-      <code class="rewind-file-path">{file.path}</code>
-      <span class="rewind-file-meta">
+      </Badge>
+      <Text as="code" size="small" mono class="rewind-file-path">
+        {file.path}
+      </Text>
+      <Text size="tiny" tone="muted" class="rewind-file-meta">
         {file.changes === 1 ? '1 change' : `${file.changes} changes`}
         {file.tools.length > 0 ? ` · ${file.tools.join(', ')}` : ''}
-      </span>
+      </Text>
       {file.incomplete ? (
-        <span class="rewind-file-warn">
+        <Text size="tiny" tone="warn" class="rewind-file-warn">
           No snapshot of the original was kept (too large or not text), so this file
           cannot be put back exactly.
-        </span>
+        </Text>
       ) : null}
     </li>
   );
@@ -185,8 +191,10 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
   };
 
   return (
-    <Dialog
+    <Overlay
       open
+      role="compact"
+      bodyLayout="contents"
       title={heading}
       onClose={requestClose}
       class="dialog-rewind"
@@ -199,30 +207,26 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
       <div class="rewind-body">
         <blockquote class="rewind-target">{summary || '(empty message)'}</blockquote>
 
-        <p
-          class={previewFailed ? 'rewind-count rewind-error' : 'rewind-count'}
-          role={previewFailed ? 'alert' : undefined}
-        >
-          {preview === null
-            ? loading
+        {previewFailed ? (
+          <Callout key="preview-failed" tone="danger" role="alert">
+            The file changes after this message could not be read. The transcript half can still be rewound.
+          </Callout>
+        ) : (
+          <Text key="preview-count" as="p" size="small" tone="muted" class="rewind-count">
+            {preview === null
               ? 'Working out what this will change…'
-              : // The one preview-failure line. It used to say "close this dialog
-                // and try again", while the `previewError` line below it said the
-                // conversation half still applies — two contradictory
-                // instructions on screen at once. The true reading is the one
-                // below: the file half is unknown, so it stays disabled.
-                'The file changes after this message could not be read. The transcript half can still be rewound.'
-            : preview.messages_removed === 0
-              ? 'Nothing after this message: the agent will just answer it again.'
-              : `${preview.messages_removed} message${
-                  preview.messages_removed === 1 ? '' : 's'
-                } after this one will be removed.`}
-        </p>
+              : preview.messages_removed === 0
+                ? 'Nothing after this message: the agent will just answer it again.'
+                : `${preview.messages_removed} message${
+                    preview.messages_removed === 1 ? '' : 's'
+                  } after this one will be removed.`}
+          </Text>
+        )}
 
         {previewError ? (
-          <p class="rewind-error" role="alert" data-testid="rewind-preview-error">
+          <Callout key="preview-error" tone="danger" role="alert" testId="rewind-preview-error">
             {previewError}
-          </p>
+          </Callout>
         ) : null}
 
         <fieldset class="rewind-modes">
@@ -269,43 +273,36 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
         </fieldset>
 
         {mode === 'note' ? (
-          <label class="rewind-note">
-            <span class="rewind-note-label">Your note</span>
-            <textarea
-              class="input rewind-note-input"
+          <Field label="Your note" htmlFor="rewind-note-input">
+            <Textarea
+              id="rewind-note-input"
               rows={3}
               value={note}
               placeholder="Actually, do it this way…"
-              data-autofocus
               onInput={(event) => setNote(event.currentTarget.value)}
             />
-          </label>
+          </Field>
         ) : null}
 
         <fieldset class="rewind-revert">
           <legend>File changes made after this message</legend>
           {preview === null ? (
-            <p class="rewind-empty">
+            <Text as="p" size="tiny" tone="muted" class="rewind-empty">
               {loading
                 ? 'Checking which file changes could be put back…'
                 : 'Whether any files changed is unknown. Rewind stays disabled until the preview can be loaded.'}
-            </p>
+            </Text>
           ) : nothingToRevert ? (
-            <p class="rewind-empty">
+            <Text as="p" size="tiny" tone="muted" class="rewind-empty">
               No file was changed after this message, so there is nothing to put back.
-            </p>
+            </Text>
           ) : (
             <>
-              <label class="rewind-toggle">
-                <input
-                  type="checkbox"
-                  checked={revert}
-                  onChange={(event) => setRevert(event.currentTarget.checked)}
-                />
-                <span>
-                  Revert {fileCount(files.length)} to how they were before
-                </span>
-              </label>
+              <Checkbox
+                checked={revert}
+                onChange={setRevert}
+                label={`Revert ${fileCount(files.length)} to how they were before`}
+              />
               {revert ? (
                 <ul class="rewind-files">
                   {files.map((file) => (
@@ -313,46 +310,46 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
                   ))}
                 </ul>
               ) : (
-                <p class="rewind-empty">
+                <Text as="p" size="tiny" tone="muted" class="rewind-empty">
                   Left unticked, the changes stay on disk and only the conversation is
                   rewound.
-                </p>
+                </Text>
               )}
             </>
           )}
           {preview?.incomplete ? (
-            <p class="rewind-warn" role="status">
+            <Callout tone="warn" role="status" class="mt-5">
               Some files changed after this message have no saved copy of their previous
               contents, so reverting cannot restore them exactly.
-            </p>
+            </Callout>
           ) : null}
           {opaque.length > 0 ? (
-            <p class="rewind-warn" role="status">
+            <Callout tone="warn" role="status" class="mt-5">
               This turn also ran {opaque.join(', ')}, whose effects (processes, generated
               files, network calls) cannot be undone.
-            </p>
+            </Callout>
           ) : null}
         </fieldset>
 
         {error ? (
-          <p class="rewind-error" role="alert">
+          <Callout tone="danger" role="alert">
             {error}
-          </p>
+          </Callout>
         ) : null}
       </div>
-
       <footer class="dialog-actions">
-        <button
-          type="button"
-          class="button button-small"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={requestClose}
           disabled={status === 'running'}
         >
           Cancel
-        </button>
-        <button
-          type="button"
-          class="button button-small button-primary"
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          loading={status === 'running'}
           disabled={!canSubmit}
           onClick={() => void submit()}
         >
@@ -365,8 +362,8 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
               : revert && !nothingToRevert
                 ? 'Rewind and revert files'
                 : 'Rewind'}
-        </button>
+        </Button>
       </footer>
-    </Dialog>
+    </Overlay>
   );
 }

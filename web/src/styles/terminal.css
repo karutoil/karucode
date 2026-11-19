@@ -236,7 +236,7 @@
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  background: var(--bg-sunken, var(--bg));
+  background: var(--rail, var(--bg));
 }
 
 .terminal-meta {

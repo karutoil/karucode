@@ -2667,7 +2667,7 @@
   flex: 0 0 264px;
   padding: var(--space-8);
   border-right: 1px solid var(--line);
-  background: var(--bg-sunken);
+  background: var(--rail);
 }
 
 .boot-chat {
@@ -2679,7 +2679,7 @@
   flex: 0 0 380px;
   padding: var(--space-8);
   border-left: 1px solid var(--line);
-  background: var(--panel);
+  background: var(--surface);
 }
 
 .skeleton-brand {

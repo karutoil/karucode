@@ -16,6 +16,16 @@
  *   node scripts/design-audit.mjs            # summary
  *   node scripts/design-audit.mjs --detail   # every violation
  *   node scripts/design-audit.mjs --rule colour
+ *
+ * How this relates to `src/styles/scale.test.ts`: that test is the floor CI
+ * enforces — it fails on a raw colour, an off-scale radius, a font size below
+ * the 10px floor, and spacing that is not a step on the 4px rhythm. This report
+ * is the stricter target: it also flags *on-scale* literals (`gap: 12px` is legal
+ * but loses the density knob, which rewrites `--space-*` and nothing else). Both
+ * allow the same three geometry radii (`0`, `50%`, `inherit`) and the same
+ * computed lengths (`calc()`, `env()`, `min()`), because those are measurements
+ * rather than design decisions — the two used to disagree, and the audit's
+ * version was the one that pushed somebody to put `--radius-pill` on a circle.
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
@@ -55,8 +65,34 @@ const RAW_OK_PROPERTIES = new Set([
   'transform',
 ]);
 
-/** Radii the token layer publishes. Anything else is ad hoc. */
-const RADIUS_SCALE = ['--radius', '--radius-sm', '--radius-lg', '--radius-pill', '--radius-input', '--radius-prompt'];
+/**
+ * Radii that are geometry rather than a corner style, and therefore not a
+ * violation: a circle (`50%` on an avatar, a dot, a spinner), a square (`0`), and
+ * `inherit` (a child that must follow its parent's corner). `scale.test.ts`
+ * allows exactly these three, and `tokens.css` §3.4 says "50% is for circles
+ * only" — so reporting them here was the audit disagreeing with the rule it
+ * exists to enforce, and the only way to clear the report was to write
+ * `var(--radius-pill)` (999px) on something that has to be round.
+ *
+ * Everything else must be one of the published corners: `--radius`,
+ * `--radius-sm`, `--radius-lg`, `--radius-pill`, `--radius-input`,
+ * `--radius-prompt`.
+ */
+const RADIUS_GEOMETRY = new Set(['0', '50%', 'inherit']);
+
+/**
+ * A value a function computes is a measurement, not a hand-picked step:
+ * `calc(var(--space-6) + env(safe-area-inset-bottom))`, `env(safe-area-inset-
+ * bottom)`, `min(17vh, 150px)` for an overlay that stays centred in a tall or a
+ * short window. There is no token for "the notch" or "17% of the viewport", and
+ * inventing one would freeze a real measurement at a build-time number. These are
+ * skipped by the spacing rule, the same way `scale.test.ts` skips `var(`/`calc(`.
+ */
+const COMPUTED = /\b(calc|env|min|max|clamp)\(/;
+
+/** Font sizes that declare no size of their own: they copy the parent's step. */
+const RELATIVE_FONT_SIZE = /var\(|em\b|rem\b|%$|inherit|calc\(/;
+
 
 /** Font sizes the token layer publishes. */
 const FONT_SCALE = ['--fs-body', '--fs-small', '--fs-micro', '--fs-message'];
@@ -96,17 +132,28 @@ function collect() {
 
       // ---- radii ----
       if (/^border(-[a-z]+)*-radius$/.test(property) && !/var\(/.test(value)) {
-        out.radius.push({ at, property, value: value.trim() });
+        // A shorthand can carry several radii; every part must be a circle, a
+        // square or `inherit`, exactly as `scale.test.ts` requires.
+        const parts = value.split(/\s+/).filter(Boolean);
+        if (parts.some((part) => !RADIUS_GEOMETRY.has(part))) {
+          out.radius.push({ at, property, value: value.trim() });
+        }
       }
 
       // ---- font sizes ----
-      if (property === 'font-size' && !/var\(|em\b|%$/.test(value)) {
+      if (property === 'font-size' && !RELATIVE_FONT_SIZE.test(value)) {
         out.fontSize.push({ at, property, value: value.trim() });
       }
 
       // ---- spacing off the 4/7/10/14/18/24/30 scale ----
       if (/^(padding|margin|gap|row-gap|column-gap)(-[a-z]+)*$/.test(property)) {
-        if (/\d+px/.test(value) && !/var\(/.test(value) && !RAW_OK_PROPERTIES.has(property)) {
+        if (
+          /\d+px/.test(value) &&
+          !/var\(/.test(value) &&
+          !COMPUTED.test(value) &&
+          !/^(auto|inherit|0)$/.test(value) &&
+          !RAW_OK_PROPERTIES.has(property)
+        ) {
           out.spacing.push({ at, property, value: value.trim() });
         }
       }

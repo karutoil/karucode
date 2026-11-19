@@ -16,6 +16,7 @@ import {
   SparkIcon,
 } from '../icons';
 import { chatTitle, controlStarter, sessionStatus } from './controlModel';
+import { Button, IconButton, LinkButton, Spinner, StatusDot, type StatusDotTone } from '../../ui';
 import '../../styles/control-session.css';
 
 export interface ControlSessionProps {
@@ -68,8 +69,9 @@ function ControlChatIntro({ projects, onStart }: {
         {projects.length === 0
           ? <span class="cp-intro-empty">Add a project first.</span>
           : projects.map((project) => (
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="sm"
                 class="button button-small"
                 key={project.id}
                 title={project.name}
@@ -79,7 +81,7 @@ function ControlChatIntro({ projects, onStart }: {
                     ran the button off a 390px screen. The name yields and
                     ellipsises; the tooltip keeps the full spelling. */}
                 <span class="cp-intro-project-name">{project.name}</span>
-              </button>
+              </Button>
             ))}
       </div>
       <p class="cp-intro-hint">You can also ask for a status summary, or discuss the plan before anything starts.</p>
@@ -139,16 +141,21 @@ function SessionFacts({ session, projects }: {
         <dt>Session id</dt>
         <dd class="cp-facts-id">
           <span title={session?.id ?? undefined}>{session?.id ?? '—'}</span>
-          <button type="button" class="link-button" onClick={copyId} disabled={!session}>Copy</button>
+          <LinkButton class="link-button" onClick={copyId} disabled={!session}>Copy</LinkButton>
         </dd>
       </div>
     </dl>
 
     {session?.running
       ? <div class="cp-facts-actions">
-          <button type="button" class="button button-small button-danger-ghost" onClick={() => void actions.stopRun()}>
+          <Button
+            variant="danger-ghost"
+            size="sm"
+            class="button button-small button-danger-ghost"
+            onClick={() => void actions.stopRun()}
+          >
             Stop this run
-          </button>
+          </Button>
         </div>
       : null}
   </section>;
@@ -322,13 +329,13 @@ export function ControlSession({
   const status = chosen ? sessionStatus(chosen) : null;
   return <section class="cp-session" aria-label="Open session">
     <header class="main-head cp-session-head">
-      <button
-        type="button"
+      <IconButton
         class="icon-button"
         onClick={onBack}
-        aria-label="Back to overview"
+        label="Back to overview"
         title="Back to overview"
-      ><ChevronLeftIcon size={16} /></button>
+        icon={<ChevronLeftIcon size={16} />}
+      />
       <div class="breadcrumb cp-session-id">
         <strong title={project?.path ?? where}>{where}</strong>
         <span class="crumb-sep" aria-hidden="true">/</span>
@@ -339,7 +346,7 @@ export function ControlSession({
       <div class="cp-session-actions">
         {status
           ? <span class={`session-state session-state-${status.tone}`} title={`Latest state: ${status.label}`}>
-              <span class={`status-dot status-${status.tone}`} aria-hidden="true" />{status.label}
+              <StatusDot tone={status.tone as StatusDotTone} />{status.label}
             </span>
           : null}
         {chosen ? <span class="cp-session-count">{chosen.message_count.toLocaleString()} messages</span> : null}
@@ -348,17 +355,19 @@ export function ControlSession({
             as the snapshot refreshed. */}
         {control
           ? null
-          : <button
-              type="button"
+          : <Button
+              variant="secondary"
+              size="sm"
+              icon={<ExternalIcon size={12} />}
               class="button button-small"
               title="Open this session in its project’s workspace"
               aria-label="Open in project"
               onClick={onOpenInProject}
-            ><ExternalIcon size={12} />Open in project</button>}
+            >Open in project</Button>}
       </div>
     </header>
 
-    {opening && !chosen ? <div class="cp-loading"><span class="cp-spinner" aria-hidden="true" />Opening session…</div> : null}
+    {opening && !chosen ? <div class="cp-loading"><Spinner size={14} />Opening session…</div> : null}
     {ready
       ? <div class="cp-session-body">
           <div class="cp-chat"><ChatView
@@ -378,9 +387,9 @@ export function ControlSession({
         </div>
       : !opening ? <div class="cp-loading">
           This session is not open yet.{' '}
-          <button type="button" class="button button-small" onClick={() => { if (chosen) onNavigate(chosen); }}>
+          <Button variant="secondary" size="sm" class="button button-small" onClick={() => { if (chosen) onNavigate(chosen); }}>
             Try again
-          </button>
+          </Button>
         </div> : null}
   </section>;
 }

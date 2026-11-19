@@ -35,7 +35,7 @@ import {
 import { CUE_LABELS, CUE_NAMES, type CueName } from '../lib/notifySound';
 import * as notifyWiring from '../state/notifyWiring';
 import * as store from '../state/store';
-import { Toggle } from './Toggle';
+import { Button, Callout, Inline, Input, SettingRow, Stack, Text, Toggle } from '../ui';
 
 /** The per-event switches, in the order the server documents them. */
 const EVENT_SWITCHES: { key: keyof NotificationsPatch; label: string; description: string }[] = [
@@ -134,15 +134,15 @@ export function NotificationsSection({
     <section class="settings-section" aria-labelledby="settings-notifications">
       <div class="settings-section-head">
         <h3 id="settings-notifications">Notifications</h3>
-        <span class="settings-section-note">
+        <Text size="tiny" tone="muted">
           What the server announces at all, for every browser
-        </span>
+        </Text>
       </div>
 
       {error ? (
-        <p class="field-error" role="alert">
+        <Callout tone="danger" role="alert">
           {error}
-        </p>
+        </Callout>
       ) : null}
 
       <Toggle
@@ -158,14 +158,16 @@ export function NotificationsSection({
           so they are disabled rather than hidden: the user can see what they
           would get back. */}
       <div class="setting-row setting-row-stack">
-        <div class="setting-copy">
-          <span class="setting-name">Which events</span>
-          <span class="setting-hint">
+        <Stack gap="2" class="setting-copy">
+          <Text size="label" weight="semibold">
+            Which events
+          </Text>
+          <Text size="tiny" tone="muted">
             {draft.enabled
               ? 'Each kind can be silenced on its own.'
               : 'Everything is off while notifications are disabled above.'}
-          </span>
-        </div>
+          </Text>
+        </Stack>
         <div class="toggle-group">
           {EVENT_SWITCHES.map((item) => (
             <Toggle
@@ -221,9 +223,9 @@ export function NotificationsDeviceSection(): JSX.Element {
     <section class="settings-section" aria-labelledby="settings-notifications-browser">
       <div class="settings-section-head">
         <h3 id="settings-notifications-browser">This browser</h3>
-        <span class="settings-section-note">
+        <Text size="tiny" tone="muted">
           Stored on this device only; other browsers are unaffected
-        </span>
+        </Text>
       </div>
 
       <Toggle
@@ -238,44 +240,48 @@ export function NotificationsDeviceSection(): JSX.Element {
         }}
       />
 
-      <div class="setting-row">
-        <div class="setting-copy">
-          <span class="setting-name">Volume</span>
-          <span class="setting-hint">Applies to this browser.</span>
-        </div>
-        <input
-          id="notify-volume"
-          class="input-range"
-          type="range"
-          min="0"
-          max="100"
-          step="5"
-          value={String(Math.round(volume * 100))}
-          disabled={!sound}
-          aria-label="Notification sound volume"
-          onInput={(event) => {
-            const next = Number(event.currentTarget.value) / 100;
-            setVolume(next);
-            store.persistVolume(next);
-            notifyWiring.syncSoundPreferences();
-          }}
-        />
-      </div>
+      <SettingRow
+        title="Volume"
+        description="Applies to this browser."
+        htmlFor="notify-volume"
+        control={
+          <input
+            id="notify-volume"
+            class="input-range"
+            type="range"
+            min="0"
+            max="100"
+            step="5"
+            value={String(Math.round(volume * 100))}
+            disabled={!sound}
+            aria-label="Notification sound volume"
+            onInput={(event) => {
+              const next = Number(event.currentTarget.value) / 100;
+              setVolume(next);
+              store.persistVolume(next);
+              notifyWiring.syncSoundPreferences();
+            }}
+          />
+        }
+      />
 
       <div class="setting-row setting-row-stack">
-        <div class="setting-copy">
-          <span class="setting-name">Preview a cue</span>
-          <span class="setting-hint">
-            Each kind has its own sound. A preview plays even while sound is muted, so
-            the button can answer whether it works.
-          </span>
-        </div>
-        <div class="cue-buttons">
+        <Stack gap="2" class="setting-copy">
+          <Text size="label" weight="semibold">
+            Preview a cue
+          </Text>
+          <Text size="tiny" tone="muted">
+            Each kind has its own sound. A preview plays even while sound is muted, so the button
+            can answer whether it works.
+          </Text>
+        </Stack>
+        <Inline gap="4" wrap class="cue-buttons">
           {CUE_NAMES.map((cue) => (
-            <button
+            <Button
               key={cue}
-              type="button"
-              class="panel-action-btn"
+              variant="secondary"
+              size="sm"
+              loading={preview === cue}
               onClick={() => {
                 setPreview(cue);
                 void notifyWiring.previewCue(cue).finally(() => setPreview(null));
@@ -283,9 +289,9 @@ export function NotificationsDeviceSection(): JSX.Element {
             >
               {CUE_LABELS[cue]}
               {preview === cue ? ' …' : ''}
-            </button>
+            </Button>
           ))}
-        </div>
+        </Inline>
       </div>
 
       <Toggle
@@ -301,37 +307,34 @@ export function NotificationsDeviceSection(): JSX.Element {
       />
 
       {desktop.canRequest ? (
-        <div class="setting-row">
-          <div class="setting-copy">
-            <span class="setting-name">Browser permission</span>
-            <span class="setting-hint">
-              The browser has not been asked yet. It will only ask because of this
-              button — never on its own.
-            </span>
-          </div>
-          <button
-            type="button"
-            class="panel-action-btn"
-            onClick={() => {
-              void (async () => {
-                await requestDesktopPermission(browserNotificationEnvironment());
-                // Re-read rather than assuming: the user may have dismissed it.
-                setDesktop(desktopState(browserNotificationEnvironment()));
-                if (browserNotificationEnvironment().NotificationCtor?.permission === 'granted') {
-                  // Granting it is a clear signal that it is wanted.
-                  setDesktopWanted(true);
-                  store.persistDesktopEnabled(true);
-                }
-              })();
-            }}
-          >
-            Allow notifications
-          </button>
-        </div>
+        <SettingRow
+          title="Browser permission"
+          description="The browser has not been asked yet. It will only ask because of this button — never on its own."
+          control={
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                void (async () => {
+                  await requestDesktopPermission(browserNotificationEnvironment());
+                  // Re-read rather than assuming: the user may have dismissed it.
+                  setDesktop(desktopState(browserNotificationEnvironment()));
+                  if (browserNotificationEnvironment().NotificationCtor?.permission === 'granted') {
+                    // Granting it is a clear signal that it is wanted.
+                    setDesktopWanted(true);
+                    store.persistDesktopEnabled(true);
+                  }
+                })();
+              }}
+            >
+              Allow notifications
+            </Button>
+          }
+        />
       ) : (
-        <p class="field-hint" data-testid="notify-desktop-state">
+        <Text as="p" size="tiny" tone="muted" testId="notify-desktop-state">
           {desktop.detail}
-        </p>
+        </Text>
       )}
     </section>
   );
@@ -375,52 +378,54 @@ export function NotificationsDeliverySection({
     <section class="settings-section" aria-labelledby="settings-notifications-delivery">
       <div class="settings-section-head">
         <h3 id="settings-notifications-delivery">Delivery</h3>
-        <span class="settings-section-note">Server-side; applies to every browser</span>
+        <Text size="tiny" tone="muted">
+          Server-side; applies to every browser
+        </Text>
       </div>
 
       {error ? (
-        <p class="field-error" role="alert">
+        <Callout tone="danger" role="alert">
           {error}
-        </p>
+        </Callout>
       ) : null}
 
-      <div class="setting-row">
-        <div class="setting-copy">
-          <span class="setting-name">Minimum run length</span>
-          <span class="setting-hint">
-            Skip notifications for runs shorter than this. 0 means every run notifies.
-          </span>
-        </div>
-        <input
-          id="notify-min-run"
-          class="input mono input-inline"
-          type="number"
-          min="0"
-          max={String(routing.max_min_run_secs)}
-          step="1"
-          value={String(draft.min_run_secs)}
-          disabled={disabled || saving || !draft.enabled}
-          aria-describedby="notify-min-run-hint"
-          onInput={(event) => {
-            // Local only until blur: PATCHing on every keystroke would send "3",
-            // "36", "360" while the user types.
-            const next = Number(event.currentTarget.value);
-            if (Number.isFinite(next)) {
-              setDraft((current) => ({ ...current, min_run_secs: Math.max(0, next) }));
-            }
-          }}
-          onBlur={() => {
-            const clamped = Math.min(
-              routing.max_min_run_secs,
-              Math.max(0, Math.round(draft.min_run_secs)),
-            );
-            if (clamped !== routing.min_run_secs) void persist({ min_run_secs: clamped });
-          }}
-        />
-      </div>
-      <p class="field-hint" id="notify-min-run-hint">
+      <SettingRow
+        title="Minimum run length"
+        description="Skip notifications for runs shorter than this. 0 means every run notifies."
+        htmlFor="notify-min-run"
+        control={
+          <Input
+            id="notify-min-run"
+            mono
+            class="w-[92px]"
+            type="number"
+            min="0"
+            max={String(routing.max_min_run_secs)}
+            step="1"
+            value={String(draft.min_run_secs)}
+            disabled={disabled || saving || !draft.enabled}
+            aria-describedby="notify-min-run-hint"
+            onInput={(event) => {
+              // Local only until blur: PATCHing on every keystroke would send "3",
+              // "36", "360" while the user types.
+              const next = Number(event.currentTarget.value);
+              if (Number.isFinite(next)) {
+                setDraft((current) => ({ ...current, min_run_secs: Math.max(0, next) }));
+              }
+            }}
+            onBlur={() => {
+              const clamped = Math.min(
+                routing.max_min_run_secs,
+                Math.max(0, Math.round(draft.min_run_secs)),
+              );
+              if (clamped !== routing.min_run_secs) void persist({ min_run_secs: clamped });
+            }}
+          />
+        }
+      />
+      <Text as="p" size="tiny" tone="muted" id="notify-min-run-hint">
         Seconds. The ceiling is {routing.max_min_run_secs}.
-      </p>
+      </Text>
 
       <Toggle
         id="notify-say-body"

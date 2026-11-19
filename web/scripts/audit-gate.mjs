@@ -41,21 +41,10 @@ export const THRESHOLD = 'moderate';
  * these, delete the entry in the same commit as the dependency update.
  */
 export const ACCEPTED = new Map([
-  [
-    'GHSA-fc5q-39xc-vjpf',
-    {
-      package: 'picomatch',
-      reason:
-        'ReDoS through single-branch repeated extglobs. `picomatch` <= 4.0.7 is the whole published range ' +
-        'and 4.0.7 is still `latest`, so there is nothing to upgrade to yet; npm offers only a downgrade of ' +
-        '@preact/preset-vite and vitest, which would break the build.',
-      scope:
-        'Dev/build tooling only: it arrives through vite -> tinyglobby/fdir and vitest -> vite, plus ' +
-        '@preact/preset-vite -> @rollup/pluginutils. None of it is in the bundle `web/dist` embeds, and the ' +
-        'patterns it matches come from our own config, never from a request.',
-      until: 'a `picomatch` release above 4.0.7 is installed (then delete this entry)',
-    },
-  ],
+  // Empty today: the only entry, the picomatch ReDoS, was withdrawn by GitHub on
+  // 2026-11-18, so `npm audit` no longer reports it and there is nothing left to
+  // waive. Keep this empty until an advisory genuinely has no fix - then add it
+  // back here with reason/scope/until, never widen the gate instead.
 ]);
 
 /** Numeric rank for a severity name; unknown names rank as `info`. */
@@ -65,7 +54,7 @@ export function severityRank(severity) {
 }
 
 /**
- * A GHSA id in the one spelling used everywhere: `GHSA-fc5q-39xc-vjpf`.
+ * A GHSA id in the one spelling used everywhere: `GHSA-1234-abcd-efgh`.
  *
  * GitHub prints them in either case and `ACCEPTED` below has to match a report
  * from any npm, so the comparison is case-insensitive on the middle segments but

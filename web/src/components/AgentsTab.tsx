@@ -18,6 +18,19 @@ import {
 import { agentStatusLabel } from '../state/selectors';
 import * as store from '../state/store';
 import {
+  Badge,
+  Button,
+  Callout,
+  Chip,
+  IconButton,
+  Inline,
+  Stack,
+  StatusDot,
+  Text,
+  cn,
+  type StatusDotTone,
+} from '../ui';
+import {
   AgentsIcon,
   ArrowRightIcon,
   ChevronLeftIcon,
@@ -279,29 +292,54 @@ function ActivityItemView({ item }: { item: AgentActivityItem }): JSX.Element | 
   );
 }
 
+function statusDotTone(status: AgentStatus): StatusDotTone {
+  switch (status) {
+    case 'running':
+      return 'running';
+    case 'paused':
+      return 'approval';
+    case 'completed':
+      return 'ok';
+    case 'failed':
+      return 'error';
+    case 'cancelled':
+      return 'cancelled';
+    case 'interrupted':
+      return 'interrupted';
+    default:
+      return 'muted';
+  }
+}
+
 function AgentsEmpty({ filtered }: { filtered: boolean }): JSX.Element {
   if (filtered) {
     return (
-      <div class="empty-inspector">
-        <p class="empty-inspector-title">No agents match this filter</p>
-        <p>Clear the status filter to see the rest of this project's agents.</p>
-        <button type="button" class="button button-small" onClick={() => actions.setAgentFilter('all')}>
+      <Stack gap="3" align="start" class="empty-inspector">
+        <Text as="p" size="body" weight="semibold" class="empty-inspector-title">
+          No agents match this filter
+        </Text>
+        <Text as="p" size="small" tone="muted">
+          Clear the status filter to see the rest of this project's agents.
+        </Text>
+        <Button variant="secondary" size="sm" onClick={() => actions.setAgentFilter('all')}>
           Show all statuses
-        </button>
-      </div>
+        </Button>
+      </Stack>
     );
   }
   return (
-    <div class="empty-inspector">
-      <p class="empty-inspector-title">No subagents yet</p>
-      <p>
+    <Stack gap="3" align="start" class="empty-inspector">
+      <Text as="p" size="body" weight="semibold" class="empty-inspector-title">
+        No subagents yet
+      </Text>
+      <Text as="p" size="small" tone="muted">
         Nothing has been delegated in this project. When a session calls <code>spawn_agent</code>, the
         agent appears here — including agents running in a session you are not looking at.
-      </p>
-      <button type="button" class="button button-small" onClick={() => actions.openSettings()}>
+      </Text>
+      <Button variant="secondary" size="sm" onClick={() => actions.openSettings()}>
         Subagent settings
-      </button>
-    </div>
+      </Button>
+    </Stack>
   );
 }
 
@@ -331,26 +369,28 @@ function AgentControls({ agent }: { agent: AgentRow }): JSX.Element | null {
     sendControl(agent.id, action);
   };
   return (
-    <div class="agent-controls">
-      <button
-        type="button"
-        class="button button-small"
+    <Inline gap="2" class="agent-controls">
+      <Button
+        variant="secondary"
+        size="sm"
         aria-label={paused ? `Resume ${agent.name}` : `Pause ${agent.name}`}
         disabled={pending !== undefined}
+        loading={pending === 'pause' || pending === 'resume'}
         onClick={run(paused ? 'resume' : 'pause')}
       >
-        {pending === 'pause' || pending === 'resume' ? '…' : paused ? 'Resume' : 'Pause'}
-      </button>
-      <button
-        type="button"
-        class="button button-small button-danger"
+        {paused ? 'Resume' : 'Pause'}
+      </Button>
+      <Button
+        variant="danger-ghost"
+        size="sm"
         aria-label={`Stop ${agent.name}`}
         disabled={pending !== undefined}
+        loading={pending === 'cancel'}
         onClick={run('cancel')}
       >
         {pending === 'cancel' ? 'Stopping…' : 'Stop'}
-      </button>
-    </div>
+      </Button>
+    </Inline>
   );
 }
 
@@ -407,13 +447,18 @@ function AgentCard({
               {showSession && agent.session_title ? ` · ${truncate(agent.session_title, 34)}` : ''}
             </p>
           </div>
+          <StatusDot tone={statusDotTone(agent.status)} />
           <span class="agent-live" title={liveLabel(agent, activity)}>
             {agent.status === 'running' ? liveLabel(agent, activity) : agentStatusLabel(agent.status)}
           </span>
         </div>
       </header>
 
-      {agent.task ? <p class="agent-task">{truncate(agent.task, 180)}</p> : null}
+      {agent.task ? (
+        <Text as="p" size="small" tone="secondary" class="agent-task">
+          {truncate(agent.task, 180)}
+        </Text>
+      ) : null}
 
       {agent.note ? (
         <p class="agent-note" title={agent.note}>
@@ -429,7 +474,11 @@ function AgentCard({
         <span>
           {agent.iterations ?? 0} {(agent.iterations ?? 0) === 1 ? 'iteration' : 'iterations'}
         </span>
-        {agent.background ? <span class="agent-badge">background</span> : null}
+        {agent.background ? (
+          <Badge mono={false} class="agent-badge">
+            background
+          </Badge>
+        ) : null}
         <span>
           {agent.finished_at ? relativeTime(agent.finished_at, now) : elapsed(agent, now)}
         </span>
@@ -527,20 +576,24 @@ function AgentDetail({
   return (
     <div class="agent-detail" ref={rootRef}>
       <div class="agent-detail-top">
-        <button type="button" class="icon-button inspector-mini" onClick={actions.closeAgentDetail}>
-          <ChevronLeftIcon size={14} />
-          <span class="sr-only">Back to all agents</span>
-        </button>
-        <span class="agent-detail-kicker">Agent detail</span>
-        <button
-          type="button"
-          class="icon-button inspector-mini"
+        <IconButton
+          size="sm"
+          label="Back to all agents"
+          class="inspector-mini"
+          onClick={actions.closeAgentDetail}
+          icon={<ChevronLeftIcon size={14} />}
+        />
+        <Text as="span" size="micro" weight="bold" tone="muted" class="agent-detail-kicker">
+          Agent detail
+        </Text>
+        <IconButton
+          size="sm"
+          label="Open session"
           title="Open the session this agent belongs to"
-          aria-label="Open session"
+          class="inspector-mini"
           onClick={() => void actions.openAgentSession(agent as AgentSummary)}
-        >
-          <ArrowRightIcon size={13} />
-        </button>
+          icon={<ArrowRightIcon size={13} />}
+        />
       </div>
 
       <header class="agent-detail-head">
@@ -551,6 +604,7 @@ function AgentDetail({
           <h3 class="agent-name">{agent.name || 'subagent'}</h3>
           <p class="agent-role">{agent.role || 'agent'}</p>
         </div>
+        <StatusDot tone={statusDotTone(agent.status)} />
         <span class="agent-live" data-status={agent.status}>
           {isAgentLive(agent.status) ? liveLabel(agent, activity) : agentStatusLabel(agent.status)}
         </span>
@@ -612,8 +666,8 @@ function AgentDetail({
           <span class="inspector-kicker">Owned paths</span>
           <ul>
             {agent.owned_paths.map((path) => (
-              <li key={path} class="path-chip">
-                {path}
+              <li key={path}>
+                <Chip class="path-chip">{path}</Chip>
               </li>
             ))}
           </ul>
@@ -638,12 +692,20 @@ function AgentDetail({
             ) : (
               <p class="agent-history-start">Beginning of the activity.</p>
             )}
-            {history.error ? <p role="alert">{history.error}</p> : null}
+            {history.error ? (
+              <Callout tone="danger" role="alert">
+                {history.error}
+              </Callout>
+            ) : null}
           </div>
         ) : trimmed ? (
           <p class="agent-history-more">Showing the newest {AGENT_ACTIVITY_LIMIT} steps.</p>
         ) : null}
-        {store.agentDetailError.value ? <p role="alert">{store.agentDetailError.value}</p> : null}
+        {store.agentDetailError.value ? (
+          <Callout tone="danger" role="alert">
+            {store.agentDetailError.value}
+          </Callout>
+        ) : null}
         {steps.length === 0 ? (
           <p class="agent-activity-empty">
             {running
@@ -667,10 +729,9 @@ function AgentDetail({
       ) : null}
 
       {agent.error ? (
-        <div class="agent-error" role="alert">
-          <span class="inspector-kicker">Error</span>
-          <p>{agent.error}</p>
-        </div>
+        <Callout tone="danger" role="alert" title="Error" class="agent-error">
+          {agent.error}
+        </Callout>
       ) : null}
     </div>
   );
@@ -739,35 +800,36 @@ export function AgentsTab(): JSX.Element {
             {counts.paused > 0 ? ` · ${counts.paused} paused` : ''} · {counts.all} total
           </span>
         </span>
-        <button
-          type="button"
-          class="icon-button inspector-mini"
-          aria-label="Refresh agents"
+        <IconButton
+          size="sm"
+          label="Refresh agents"
           title="Refresh agents"
+          class="inspector-mini"
           disabled={loading}
           onClick={refresh}
-        >
-          <RefreshIcon size={13} class={loading ? 'spin' : undefined} />
-        </button>
+          icon={<RefreshIcon size={13} class={loading ? 'spin' : undefined} />}
+        />
       </div>
 
       <div class="agent-scope" role="group" aria-label="Agent scope">
-        <button
-          type="button"
-          class={`agent-scope-button${scope === 'workspace' ? ' is-active' : ''}`}
+        <Button
+          variant={scope === 'workspace' ? 'secondary' : 'ghost'}
+          size="sm"
+          class={cn('agent-scope-button', scope === 'workspace' && 'is-active')}
           aria-pressed={scope === 'workspace'}
           onClick={() => actions.setAgentScope('workspace')}
         >
           Project
-        </button>
-        <button
-          type="button"
-          class={`agent-scope-button${scope === 'session' ? ' is-active' : ''}`}
+        </Button>
+        <Button
+          variant={scope === 'session' ? 'secondary' : 'ghost'}
+          size="sm"
+          class={cn('agent-scope-button', scope === 'session' && 'is-active')}
           aria-pressed={scope === 'session'}
           onClick={() => actions.setAgentScope('session')}
         >
           This session
-        </button>
+        </Button>
       </div>
 
       <div class="agent-filters" role="group" aria-label="Filter agents by status">
@@ -775,7 +837,7 @@ export function AgentsTab(): JSX.Element {
           <button
             key={chip.id}
             type="button"
-            class={`agent-filter${filter === chip.id ? ' is-active' : ''}`}
+            class={cn('agent-filter', filter === chip.id && 'is-active')}
             aria-pressed={filter === chip.id}
             data-status={chip.id === 'all' ? undefined : chip.id}
             disabled={chip.id !== 'all' && counts[chip.id] === 0}
@@ -788,15 +850,15 @@ export function AgentsTab(): JSX.Element {
       </div>
 
       {error ? (
-        <p class="agent-detail-error" role="alert">
+        <Callout tone="danger" role="alert" class="agent-detail-error">
           {error}
-        </p>
+        </Callout>
       ) : null}
 
       {visible.length === 0 ? (
         <AgentsEmpty filtered={agents.length > 0} />
       ) : (
-        <div class="agent-list">
+        <Stack gap="5" class="agent-list">
           {shown.map((agent) => (
             <AgentCard
               key={agent.id}
@@ -809,26 +871,25 @@ export function AgentsTab(): JSX.Element {
           ))}
           {capped ? (
             <div class="agent-list-more">
-              <p class="agent-list-more-note">
+              <Text as="p" size="label" tone="secondary" class="agent-list-more-note">
                 Showing {AGENT_RENDER_CAP} of {visible.length} agents. Live agents are listed
                 first, so anything still running is already here.
-              </p>
-              <button
-                type="button"
-                class="button"
+              </Text>
+              <Button
+                variant="secondary"
                 onClick={() => setShowAll(true)}
                 aria-label={`Show all ${visible.length} agents`}
               >
                 Show all {visible.length}
-              </button>
+              </Button>
             </div>
           ) : null}
-        </div>
+        </Stack>
       )}
 
-      <p class="inspector-note">
+      <Text as="p" size="tiny" tone="muted" class="inspector-note">
         Subagents share this workspace. Owned paths are advisory, not file locks.
-      </p>
+      </Text>
     </div>
   );
 }

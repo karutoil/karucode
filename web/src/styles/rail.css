@@ -146,7 +146,7 @@
   height: var(--project-rail-glyph);
   border: 1px solid var(--rail-glyph-line);
   border-radius: var(--radius);
-  background: var(--surface-3);
+  background: var(--surface-hover);
   color: var(--text-secondary);
   font-family: var(--font-ui);
   font-size: var(--fs-micro);

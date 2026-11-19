@@ -2,6 +2,8 @@ import type { JSX } from 'preact';
 import { useState } from 'preact/hooks';
 import { ApiError } from '../api/client';
 import { sendMessage, sendQueuedMessage } from '../api/endpoints';
+import { Badge, Button, Callout, Card, Chip, Inline, Stack, Text } from '../ui';
+import type { FeedbackTone } from '../ui';
 import type { PluginPanelRenderProps, PluginPanelRenderer } from './pluginPanels';
 import { AlertIcon, CheckIcon } from './icons';
 
@@ -342,6 +344,21 @@ function toneFor(status: string): Tone {
   }
 }
 
+function feedbackTone(tone: Tone): FeedbackTone {
+  switch (tone) {
+    case 'active':
+      return 'accent';
+    case 'waiting':
+      return 'warn';
+    case 'done':
+      return 'success';
+    case 'bad':
+      return 'danger';
+    case 'ok':
+      return 'neutral';
+  }
+}
+
 function checkLabel(check: PanelCheck): { text: string; tone: Tone } {
   if (check.ok === true) return { text: 'passed', tone: 'done' };
   if (check.ok === false) return { text: 'failed', tone: 'bad' };
@@ -368,7 +385,12 @@ async function sendInstruction(sessionId: string, instruction: string): Promise<
 }
 
 function StatusPill({ status }: { status: string }): JSX.Element {
-  return <span class={`goals-pill goals-pill-${toneFor(status)}`}>{status}</span>;
+  const tone = toneFor(status);
+  return (
+    <Badge tone={feedbackTone(tone)} class={`goals-pill goals-pill-${tone}`}>
+      {status}
+    </Badge>
+  );
 }
 
 function CriteriaRow({ criterion }: { criterion: PanelCriterion }): JSX.Element {
@@ -378,20 +400,33 @@ function CriteriaRow({ criterion }: { criterion: PanelCriterion }): JSX.Element 
       <span class="goals-mark" aria-hidden="true">
         {criterion.met ? <CheckIcon /> : <span class="goals-mark-empty" />}
       </span>
-      <div class="goals-criterion-body">
+      <Stack gap="1" class="goals-criterion-body">
         <div class="goals-criterion-text">
-          <span class="goals-criterion-id">{criterion.id}</span> {criterion.text}
+          <Text as="span" size="tiny" mono class="goals-criterion-id">
+            {criterion.id}
+          </Text>{' '}
+          {criterion.text}
         </div>
         {criterion.check && check ? (
-          <div class="goals-check">
-            <span class={`goals-check-badge goals-pill-${check.tone}`}>{check.text}</span>
-            <code class="goals-command">{criterion.check.command}</code>
-          </div>
+          <Inline gap="2" wrap class="goals-check">
+            <Badge
+              tone={feedbackTone(check.tone)}
+              mono={false}
+              class={`goals-check-badge goals-pill-${check.tone}`}
+            >
+              {check.text}
+            </Badge>
+            <Text as="code" size="tiny" mono tone="muted" class="goals-command">
+              {criterion.check.command}
+            </Text>
+          </Inline>
         ) : null}
         {criterion.evidence ? (
-          <p class="goals-evidence">{criterion.evidence}</p>
+          <Text as="p" size="tiny" tone="muted" class="goals-evidence">
+            {criterion.evidence}
+          </Text>
         ) : null}
-      </div>
+      </Stack>
     </li>
   );
 }
@@ -437,17 +472,26 @@ function GoalCard({
   }
 
   return (
-    <section class={`goals-goal goals-goal-${toneFor(goal.status)}`}>
+    <Card
+      as="section"
+      surface="raised"
+      padding="5"
+      class={`goals-goal goals-goal-${toneFor(goal.status)}`}
+    >
       <header class="goals-goal-head">
         <div class="goals-goal-titles">
-          <h3 class="goals-title">{goal.title}</h3>
-          <div class="goals-sub">
+          <Text as="h3" size="body" weight="semibold" class="goals-title">
+            {goal.title}
+          </Text>
+          <Inline gap="3" wrap class="goals-sub">
             <StatusPill status={goal.status} />
-            <span class="goals-score">{goal.score} criteria</span>
-            <span class="goals-subtle">
+            <Text as="span" size="tiny" tone="muted" class="goals-score">
+              {goal.score} criteria
+            </Text>
+            <Text as="span" size="tiny" tone="muted" class="goals-subtle">
               {goal.goal} · {goal.source} · updated {goal.updated}
-            </span>
-          </div>
+            </Text>
+          </Inline>
         </div>
         <span class="goals-continuations" title="Times the engine resumed this goal">
           {goal.continuations} resumed
@@ -466,59 +510,85 @@ function GoalCard({
       </div>
 
       {goal.statement && goal.statement !== goal.title ? (
-        <p class="goals-statement">{goal.statement}</p>
+        <Text as="p" size="label" tone="secondary" class="goals-statement">
+          {goal.statement}
+        </Text>
       ) : null}
 
       {goal.pause_reason ? (
-        <p class="goals-note goals-note-waiting">
-          <AlertIcon /> {goal.pause_reason}
-        </p>
+        <Callout tone="warn" role="status" icon={<AlertIcon />} class="goals-note goals-note-waiting">
+          {goal.pause_reason}
+        </Callout>
       ) : null}
 
       {goal.criteria_detail.length > 0 ? (
-        <ul class="goals-criteria">
+        <Stack as="ul" gap="3" class="goals-criteria">
           {goal.criteria_detail.map((criterion) => (
             <CriteriaRow criterion={criterion} key={criterion.id} />
           ))}
-        </ul>
+        </Stack>
       ) : (
-        <p class="goals-note">No criteria yet — this goal cannot be completed.</p>
+        <Callout tone="info" role="status" class="goals-note">
+          No criteria yet — this goal cannot be completed.
+        </Callout>
       )}
 
-      <p class="goals-next">Next: {goal.next}</p>
+      <Text as="p" size="label" tone="secondary" class="goals-next">
+        Next: {goal.next}
+      </Text>
 
       <div class="goals-engine">
-        <span class="goals-engine-text">{goal.engine}</span>
+        <Text as="span" size="tiny" tone="muted" class="goals-engine-text">
+          {goal.engine}
+        </Text>
       </div>
 
       {goal.actions.length > 0 ? (
-        <div class="goals-actions">
+        <Inline gap="3" wrap class="goals-actions">
           {goal.actions.map((action) => (
-            <button
+            <Button
+              key={action.id}
+              variant={
+                action.kind === 'primary'
+                  ? 'primary'
+                  : action.kind === 'danger'
+                    ? 'danger-ghost'
+                    : 'secondary'
+              }
+              size="sm"
               class={`goals-btn goals-btn-${action.kind}`}
               disabled={!action.enabled || busy !== null}
+              loading={busy === action.id}
               title={action.hint}
-              key={action.id}
               onClick={() => void run(action)}
             >
-              {busy === action.id ? '…' : action.label}
-            </button>
+              {action.label}
+            </Button>
           ))}
           {note ? (
-            <span class={`goals-action-note${note.bad ? ' goals-action-note-bad' : ''}`}>
+            <Text
+              as="span"
+              size="tiny"
+              tone={note.bad ? 'danger' : 'accent'}
+              class={`goals-action-note${note.bad ? ' goals-action-note-bad' : ''}`}
+            >
               {note.text}
-            </span>
+            </Text>
           ) : null}
-        </div>
+        </Inline>
       ) : null}
       {goal.actions.length > 0 ? (
-        <p class="goals-hint">A button sends that instruction to this session as a turn.</p>
+        <Text as="p" size="tiny" tone="muted" class="goals-hint">
+          A button sends that instruction to this session as a turn.
+        </Text>
       ) : null}
 
       <details class="goals-details">
         <summary>Limits</summary>
         <OptionGrid options={goal.options} />
-        <p class="goals-subtle">{goal.budget_text}</p>
+        <Text as="p" size="tiny" tone="muted" class="goals-subtle">
+          {goal.budget_text}
+        </Text>
       </details>
 
       {goal.journal.length > 0 ? (
@@ -527,14 +597,17 @@ function GoalCard({
           <ul class="goals-journal">
             {goal.journal.map((entry, index) => (
               <li key={index}>
-                <span class="goals-subtle">{entry.ago}</span> {entry.note}
+                <Text as="span" size="tiny" tone="muted" class="goals-subtle">
+                  {entry.ago}
+                </Text>{' '}
+                {entry.note}
                 {entry.next ? <em class="goals-journal-next"> → {entry.next}</em> : null}
               </li>
             ))}
           </ul>
         </details>
       ) : null}
-    </section>
+    </Card>
   );
 }
 
@@ -549,11 +622,11 @@ export function GoalsPanel({ data, refresh }: PluginPanelRenderProps): JSX.Eleme
   const parsed = parseGoalsPayload(data);
   if (!parsed) {
     return (
-      <p class="goals-note goals-note-bad">
-        <AlertIcon /> This panel does not understand its payload (schema{' '}
+      <Callout tone="danger" role="alert" icon={<AlertIcon />} class="goals-note goals-note-bad">
+        This panel does not understand its payload (schema{' '}
         {isRecord(data) ? str(data.schema, 'missing') : 'missing'}). The JSON view above still
         shows it.
-      </p>
+      </Callout>
     );
   }
 
@@ -564,36 +637,38 @@ export function GoalsPanel({ data, refresh }: PluginPanelRenderProps): JSX.Eleme
     : 'engine off';
 
   return (
-    <div class="goals-tab">
+    <Stack gap="5" class="goals-tab">
       {/* No refresh button here: `PluginPanelView` already draws one in the
           panel header, and two controls for one fetch is exactly the redundancy
           this removed. `refresh` is still passed down - an action's own message
           can change the goal, so the card rereads the panel after sending it. */}
-      <div class="goals-summary">
-        <span class="goals-count">
+      <Inline gap="3" wrap class="goals-summary">
+        <Chip class="goals-count">
           <strong>{parsed.open}</strong> open
-        </span>
-        <span class="goals-count">
+        </Chip>
+        <Chip class="goals-count">
           <strong>{parsed.total}</strong> total
-        </span>
-        <span class="goals-count">{engineLine}</span>
+        </Chip>
+        <Chip class="goals-count">{engineLine}</Chip>
         {parsed.engine.verify_commands ? (
-          <span class="goals-count goals-count-on">command checks</span>
+          <Chip tone="accent" class="goals-count goals-count-on">
+            command checks
+          </Chip>
         ) : null}
-      </div>
+      </Inline>
 
       {parsed.error ? (
-        <p class="goals-note goals-note-bad">
-          <AlertIcon /> {parsed.error}
-        </p>
+        <Callout tone="danger" role="alert" icon={<AlertIcon />} class="goals-note goals-note-bad">
+          {parsed.error}
+        </Callout>
       ) : null}
 
       {parsed.goals.length === 0 ? (
-        <p class="goals-note">
+        <Callout tone="info" role="status" class="goals-note">
           No goals in this workspace. Ask the agent to set one (
           <code>goal_set</code> with a title and at least one criterion), or say what must be
           finished and it will record it.
-        </p>
+        </Callout>
       ) : (
         parsed.goals.map((goal) => (
           <GoalCard
@@ -607,7 +682,9 @@ export function GoalsPanel({ data, refresh }: PluginPanelRenderProps): JSX.Eleme
       <details class="goals-details">
         <summary>Engine options</summary>
         <OptionGrid options={parsed.engine.options} />
-        <p class="goals-subtle">{parsed.engine.actions_note}</p>
+        <Text as="p" size="tiny" tone="muted" class="goals-subtle">
+          {parsed.engine.actions_note}
+        </Text>
       </details>
 
       {parsed.log.length > 0 ? (
@@ -616,17 +693,22 @@ export function GoalsPanel({ data, refresh }: PluginPanelRenderProps): JSX.Eleme
           <ul class="goals-log">
             {parsed.log.map((entry, index) => (
               <li key={index}>
-                <span class="goals-subtle">{entry.at}</span>{' '}
-                <span class={`goals-log-kind goals-pill-${entry.kind === 'error' ? 'bad' : 'ok'}`}>
+                <Text as="span" size="tiny" tone="muted" class="goals-subtle">
+                  {entry.at}
+                </Text>{' '}
+                <Badge
+                  tone={entry.kind === 'error' ? 'danger' : 'neutral'}
+                  class={`goals-log-kind goals-pill-${entry.kind === 'error' ? 'bad' : 'ok'}`}
+                >
                   {entry.kind}
-                </span>{' '}
+                </Badge>{' '}
                 {entry.outcome}
               </li>
             ))}
           </ul>
         </details>
       ) : null}
-    </div>
+    </Stack>
   );
 }
 

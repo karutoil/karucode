@@ -193,7 +193,7 @@ describe('control plane: status words survive, actions keep names', () => {
     // A settled state is quiet, not invisible, and a live one is the accent.
     expect(declarations(layoutCss, '.session-state-running')['color']).toBe('var(--accent-fill)');
     expect(declarations(layoutCss, '.session-state-danger')['color']).toBe('var(--danger)');
-    expect(declarations(layoutCss, '.session-state-warn')['color']).toBe('var(--warning)');
+    expect(declarations(layoutCss, '.session-state-warn')['color']).toBe('var(--warn)');
   });
 
   it('never hides the word, in any sheet, at any width', () => {

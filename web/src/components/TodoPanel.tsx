@@ -1,6 +1,8 @@
 import type { JSX } from 'preact';
 import { useState } from 'preact/hooks';
 import { truncate } from '../lib/format';
+import { Badge, Callout, Chip, Inline, Stack, Text } from '../ui';
+import type { FeedbackTone } from '../ui';
 import type { PluginPanelRenderProps, PluginPanelRenderer } from './pluginPanels';
 import {
   AlertIcon,
@@ -121,6 +123,20 @@ function toneFor(status: string): Tone {
       return 'muted';
     default:
       return 'open';
+  }
+}
+
+function feedbackTone(tone: Tone): FeedbackTone {
+  switch (tone) {
+    case 'active':
+      return 'accent';
+    case 'warn':
+      return 'warn';
+    case 'done':
+      return 'success';
+    case 'muted':
+    case 'open':
+      return 'neutral';
   }
 }
 
@@ -308,21 +324,36 @@ function ItemRow({ item, isSubtask }: { item: PanelItem; isSubtask: boolean }): 
           </span>
         )}
 
-        <span class={`todo-status todo-tone-${tone}`}>
+        <Badge tone={feedbackTone(tone)} mono={false} class={`todo-status todo-tone-${tone}`}>
           {item.status === 'done' ? <CheckIcon size={11} /> : null}
           {item.label}
-        </span>
+        </Badge>
 
-        <span class="todo-id">{item.id}</span>
+        <Text as="span" mono size="tiny" tone="muted" class="todo-id">
+          {item.id}
+        </Text>
         {/* A text node, so a title containing markup is shown as text. */}
-        <span class="todo-title">{item.title}</span>
+        <Text
+          as="span"
+          size="small"
+          tone={tone === 'done' || tone === 'muted' || tone === 'open' ? 'muted' : 'default'}
+          class="todo-title"
+        >
+          {item.title}
+        </Text>
       </div>
 
       <div class="todo-item-body" id={bodyId} hidden={!open}>
-        {item.detail ? <p class="todo-detail">{item.detail}</p> : null}
+        {item.detail ? (
+          <Text as="p" size="tiny" tone="muted" class="todo-detail">
+            {item.detail}
+          </Text>
+        ) : null}
         {note ? (
           <p class="todo-note">
-            <span class="todo-note-kind">{note.kind}</span>
+            <Text as="span" size="micro" weight="bold" tone="muted" class="todo-note-kind">
+              {note.kind}
+            </Text>
             {note.text}
           </p>
         ) : null}
@@ -352,24 +383,31 @@ function AuditStrip({ audit }: { audit: PanelAudit }): JSX.Element | null {
   if (problems.length === 0) {
     if (audit.total === 0) return null;
     return (
-      <p class="todo-audit todo-audit-clean">
-        <CircleCheckIcon size={12} /> No unverified claims.
-      </p>
+      <Callout
+        tone="success"
+        role="status"
+        icon={<CircleCheckIcon size={12} />}
+        class="todo-audit todo-audit-clean"
+      >
+        No unverified claims.
+      </Callout>
     );
   }
 
   return (
-    <div class="todo-audit todo-audit-warn">
-      <div class="todo-audit-head">
-        <AlertIcon size={12} />
-        <span>Needs a second look</span>
-      </div>
+    <Callout
+      tone="warn"
+      role="status"
+      title="Needs a second look"
+      icon={<AlertIcon size={12} />}
+      class="todo-audit todo-audit-warn"
+    >
       <ul class="todo-audit-list">
         {problems.map((problem) => (
           <li key={problem}>{problem}</li>
         ))}
       </ul>
-    </div>
+    </Callout>
   );
 }
 
@@ -384,34 +422,39 @@ export function TodoPanel({ data }: PluginPanelRenderProps): JSX.Element {
   // payload should degrade, not blank the inspector.
   if (!payload) {
     return (
-      <div class="empty-inspector" role="alert">
-        <p class="empty-inspector-title">Unrecognised task list</p>
-        <p>The kc-todo plugin returned a payload this renderer cannot read.</p>
-      </div>
+      <Callout tone="danger" role="alert" title="Unrecognised task list" class="empty-inspector">
+        The kc-todo plugin returned a payload this renderer cannot read.
+      </Callout>
     );
   }
 
   if (payload.error) {
     return (
-      <div class="todo-audit todo-audit-warn" role="alert">
-        <div class="todo-audit-head">
-          <AlertIcon size={12} />
-          <span>Could not read the list</span>
-        </div>
-        <p class="todo-error-text">{payload.error}</p>
-      </div>
+      <Callout
+        tone="warn"
+        role="alert"
+        title="Could not read the list"
+        icon={<AlertIcon size={12} />}
+        class="todo-audit todo-audit-warn"
+      >
+        <Text as="p" size="tiny" mono tone="secondary" class="todo-error-text">
+          {payload.error}
+        </Text>
+      </Callout>
     );
   }
 
   if (payload.items.length === 0) {
     return (
-      <div class="empty-inspector">
-        <p class="empty-inspector-title">No plan yet</p>
-        <p>
+      <Stack gap="2" class="empty-inspector">
+        <Text as="p" size="body" weight="semibold" class="empty-inspector-title">
+          No plan yet
+        </Text>
+        <Text as="p" size="small" tone="muted">
           When the agent plans multi-step work it records a task list here, with subtasks and a
           status for each. Nothing appears until then.
-        </p>
-      </div>
+        </Text>
+      </Stack>
     );
   }
 
@@ -445,36 +488,44 @@ export function TodoPanel({ data }: PluginPanelRenderProps): JSX.Element {
   }
 
   return (
-    <>
-      <div class="todo-summary">
+    <Stack gap="4">
+      <Inline gap="3" wrap class="todo-summary">
         {summary.map((status) => (
-          <span key={status} class={`todo-count todo-tone-${toneFor(status)}`}>
-            <span class="todo-count-number">{counts.get(status)}</span>
-            <span class="todo-count-label">{FALLBACK_LABELS[status] ?? status}</span>
-          </span>
+          <Chip
+            key={status}
+            tone={feedbackTone(toneFor(status))}
+            class={`todo-count todo-tone-${toneFor(status)}`}
+          >
+            <Text as="span" size="tiny" mono weight="bold" class="todo-count-number">
+              {counts.get(status)}
+            </Text>{' '}
+            <Text as="span" size="tiny" tone="muted" class="todo-count-label">
+              {FALLBACK_LABELS[status] ?? status}
+            </Text>
+          </Chip>
         ))}
-      </div>
+      </Inline>
 
       {carryShow ? (
-        <p class="todo-carry">
+        <Callout tone="warn" role="status" class="todo-carry">
           Still open from the last run: {carryParts.join('; ')}.
-        </p>
+        </Callout>
       ) : null}
 
-      <ul class="todo-list">
+      <Stack as="ul" gap="1" class="todo-list">
         {rows.map((item) => (
           <ItemRow key={item.id} item={item} isSubtask={item.depth > 0 || Boolean(item.parent)} />
         ))}
-      </ul>
+      </Stack>
 
       <AuditStrip audit={payload.audit} />
 
-      <p class="inspector-note">
+      <Text as="p" size="tiny" tone="muted" class="inspector-note">
         {openCount === 0 ? 'Everything is closed.' : `${openCount} still open.`} Written by the
         agent through <code>kc-todo</code>; read-only here so this list and the agent's cannot
         drift apart.
-      </p>
-    </>
+      </Text>
+    </Stack>
   );
 }
 

@@ -1,6 +1,6 @@
 import type { JSX } from 'preact';
 import { useState } from 'preact/hooks';
-import { Dialog } from '../Dialog';
+import { ConfirmDialog, Text } from '../../ui';
 
 /**
  * A destructive git action, described once so the manager can ask for it.
@@ -23,42 +23,46 @@ export interface GitConfirmDialogProps {
   onClose: () => void;
 }
 
+/**
+ * The shell is `ConfirmDialog` (compact measure, the same question-with-buttons
+ * surface every other confirmation in the product uses). What stays here is the
+ * git-specific part: an action that can be asynchronous, so the dialog reports
+ * itself busy - the confirm button spins and is disabled, and the dialog cannot
+ * be dismissed out from under a delete that is already on its way to the server.
+ */
 export function GitConfirmDialog({ request, onClose }: GitConfirmDialogProps): JSX.Element {
   const [working, setWorking] = useState(false);
+
+  const run = (): void => {
+    if (request === null) return;
+    setWorking(true);
+    void Promise.resolve(request.onConfirm()).then(() => {
+      setWorking(false);
+      onClose();
+    });
+  };
+
   return (
-    <Dialog
+    <ConfirmDialog
       open={request !== null}
       title={request?.title ?? 'Are you sure?'}
       description={request?.description}
+      confirmLabel={request?.confirmLabel ?? 'Confirm'}
+      tone="danger"
+      busy={working}
       onClose={onClose}
-      class="gitm-confirm-dialog"
-    >
-      {request ? (
-        <div class="gitm-confirm">
-          {/* The sentence is Dialog's own `description` (announced through
-              `aria-describedby`); repeating it here showed it twice. */}
-          {request.note ? <p class="gitm-confirm-note">{request.note}</p> : null}
-          <div class="gitm-confirm-actions">
-            <button type="button" class="button" onClick={onClose}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              class="button button-danger"
-              disabled={working}
-              onClick={() => {
-                setWorking(true);
-                void Promise.resolve(request.onConfirm()).then(() => {
-                  setWorking(false);
-                  onClose();
-                });
-              }}
-            >
-              {request.confirmLabel}
-            </button>
-          </div>
-        </div>
-      ) : null}
-    </Dialog>
+      onConfirm={run}
+      testId="git-confirm"
+      // The note is a footer line, which is where `Overlay` expects a surface to
+      // explain what it refuses or how to undo it - the description above is the
+      // sentence assistive tech announces as the dialog's own.
+      footerNote={
+        request?.note !== undefined ? (
+          <Text as="p" size="tiny" tone="muted" class="gitm-confirm-note">
+            {request.note}
+          </Text>
+        ) : undefined
+      }
+    />
   );
 }

@@ -1,23 +1,57 @@
+/* The entry stylesheet, and the one place the *cascade layers* are decided.
+ *
+ * Two files stay unlayered, because neither is a component sheet:
+ *
+ *   tokens.css    `:root { --… }`. Custom properties are not subject to the
+ *                 layer order in any way that matters here (nothing else
+ *                 declares them), and keeping it unlayered means the theme
+ *                 engine keeps writing the same variables to the same place.
+ *   tailwind.css  declares the order itself — `@layer theme, base, components,
+ *                 utilities` — and its own output is Tailwind's `theme`, `base`
+ *                 (Preflight) and `utilities` layers.
+ *
+ * Every component sheet below is imported *into* `components` with
+ * `@import … layer(components)`. That is what makes a Tailwind utility able to
+ * override a component class: an unlayered rule beats any layer whatever the
+ * specificity, so before this the 27 unlayered sheets outranked every utility
+ * and `p-4` on `.button` did nothing. Inside `components` the sheets keep the
+ * source order they have here, which is still what decides a tie between two
+ * class rules.
+ *
+ * `base.css` goes into the same layer, one sub-layer lower: its element resets
+ * are already inside `@layer base`, and a nested `@layer base` inside
+ * `components` becomes `components.base`, which sorts above Tailwind's `base`
+ * (so the resets still beat Preflight) and below the rest of `components` (so a
+ * class rule still beats a reset) and below `utilities`. `docs/internal/
+ * DESIGN-SYSTEM.md` §5.4 has the reader-facing version of this.
+ *
+ * One consequence to remember: `@font-face` in `base.css` is in a layer now.
+ * `@font-face` is not a style rule, so the cascade does not apply to it; it is
+ * simply registered wherever it is found.
+ */
+
 @import './tokens.css';
-@import './base.css';
-@import './layout.css';
-@import './rail.css';
-@import './chat.css';
-@import './artifacts.css';
-@import './composer.css';
-@import './inspector.css';
-@import './plugin-slots.css';
-@import './plugin-views.css';
-@import './git.css';
-@import './terminal.css';
-@import './todo.css';
-@import './goals.css';
-@import './skills.css';
-@import './overlays.css';
-@import './auth.css';
-@import './settings.css';
-@import './access-settings.css';
-@import './plugin-install.css';
-@import './onboarding.css';
-@import './theme-studio.css';
-@import './workbench.css';
+@import './tailwind.css';
+
+@import './base.css' layer(components);
+@import './layout.css' layer(components);
+@import './rail.css' layer(components);
+@import './chat.css' layer(components);
+@import './artifacts.css' layer(components);
+@import './composer.css' layer(components);
+@import './inspector.css' layer(components);
+@import './plugin-slots.css' layer(components);
+@import './plugin-views.css' layer(components);
+@import './git.css' layer(components);
+@import './terminal.css' layer(components);
+@import './todo.css' layer(components);
+@import './goals.css' layer(components);
+@import './skills.css' layer(components);
+@import './overlays.css' layer(components);
+@import './auth.css' layer(components);
+@import './settings.css' layer(components);
+@import './access-settings.css' layer(components);
+@import './plugin-install.css' layer(components);
+@import './onboarding.css' layer(components);
+@import './theme-studio.css' layer(components);
+@import './workbench.css' layer(components);

@@ -58,7 +58,7 @@
 # Node is a build-time dependency only. `web/.npmrc` sets `include=dev` and vite
 # is a devDependency, so the full dependency tree is required - do not prune.
 # -----------------------------------------------------------------------------
-FROM node:22.12-bookworm-slim AS web
+FROM node:22.22-bookworm-slim AS web
 
 WORKDIR /src/web
 

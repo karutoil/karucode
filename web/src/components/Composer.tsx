@@ -1,409 +1,33 @@
 import type { JSX } from 'preact';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
-import type { TargetedKeyboardEvent } from 'preact';
-import type { Activity } from '../state/selectors';
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
+import type { QueuedKind } from '../api/types';
+import { contextUsage } from '../state/selectors';
 import * as store from '../state/store';
-import * as actions from '../state/actions';
-import * as api from '../api/endpoints';
-import { toErrorMessage } from '../api/client';
-import type { QueuedAttachment, QueuedKind, QueuedMessage } from '../api/types';
-import { describeApprovals } from '../lib/approvalCopy';
+import { AttachmentStrip } from '../features/composer/AttachmentStrip';
+import { ComposerFooter } from '../features/composer/ComposerFooter';
+import { ComposerToolbar } from '../features/composer/ComposerToolbar';
+import { ContextPill } from '../features/composer/ContextPill';
 import {
-  attachForQueue,
-  attachmentSummary,
-  attachmentsFromQueue,
-  canSendAttachments,
-  classifyFile,
-  composeMessage,
-  newAttachmentId,
-  readBytes,
-  readText,
-  UPLOAD_MAX_BYTES,
-  type Attachment,
-} from '../lib/attachments';
-import {
-  activeMention,
-  indexFromTree,
-  insertMention,
-  MENTION_INDEX_DEPTH,
-  MENTION_LIMIT,
-  rankMentions,
-  type MentionCandidate,
-  type TreeLoader,
-} from '../lib/mentions';
-import { formatBytes } from '../lib/format';
-import { isImeComposing } from '../lib/keyboard';
-import { isApplePlatform, modKey } from '../lib/platform';
-import {
-  insertCommand,
-  knownCommand,
-  rankCommands,
-  slashQuery,
-  SLASH_MENU_LIMIT,
-} from '../lib/slash';
-import type { CommandSpec } from '../api/types';
+  CHAR_COUNTER_THRESHOLD,
+  composerPlaceholder,
+  FORM_SCOPE_LIMIT,
+  MENTION_MENU_ID,
+  sendChordLabels,
+  SLASH_MENU_ID,
+  trimFormScopes,
+} from '../features/composer/helpers';
+import { QueuedPanel } from '../features/composer/QueueTray';
+import type { ComposerProps, UploadContext } from '../features/composer/types';
+import { useComposerAttachments } from '../features/composer/useComposerAttachments';
+import { useComposerInput } from '../features/composer/useComposerInput';
+import { useComposerPopovers } from '../features/composer/useComposerPopovers';
+import { useScopedComposerForm } from '../features/composer/useScopedComposerForm';
 import { FileMentionMenu, mentionOptionId } from './FileMentionMenu';
+import { PlusIcon } from './icons';
 import { SlashMenu, slashOptionId } from './SlashMenu';
-import { ModelControls } from './ModelSwitcher';
-import { PluginSlot } from './PluginSlot';
-import { isUiHidden, UI_HIDE_COMPOSER_ATTACH, UI_HIDE_COMPOSER_MODEL, UI_SLOT_COMPOSER_TOOLBAR } from './uiContributions';
-import {
-  AlertIcon,
-  ArrowUpIcon,
-  CloseIcon,
-  FileIcon,
-  LockIcon,
-  PaperclipIcon,
-  PlusIcon,
-  StopIcon,
-} from './icons';
-import {
-  contextTone,
-  contextUsage,
-  formatContextPercent,
-  type ContextUsage,
-} from '../state/selectors';
 
-export interface UploadContext {
-  session: string | null;
-  project: string | null;
-}
-
-interface ComposerFormState {
-  draft: string;
-  attachments: Attachment[];
-  caret: number;
-  sending: boolean;
-  announcement: string;
-}
-
-interface ScopedComposerForm {
-  value: ComposerFormState;
-  /** Present only while this session/project is the visible composer. */
-  render?: () => void;
-}
-
-type FieldUpdate<T> = T | ((current: T) => T);
-
-/** One-line label for each queue kind, used by the toggle and the rows. */
-const QUEUE_LABEL: Record<QueuedKind, string> = {
-  steer: 'Steer',
-  follow_up: 'Follow-up',
-};
-
-const QUEUE_TITLE: Record<QueuedKind, string> = {
-  steer:
-    'Steer: fold this into the turn that is already running. The model sees it at its next step, without losing the work in flight.',
-  follow_up:
-    'Follow-up: run this as a new turn once the current one finishes. The agent finishes what it is doing first.',
-};
-
-/**
- * Which queue a message typed while the agent works goes into.
- *
- * Shown only while a run is in flight, because that is the only time the choice
- * exists: with nothing running, sending *is* the follow-up. The two options are
- * genuinely different - a steer changes the turn in progress, a follow-up begins
- * the next one - so the toggle says which one is armed rather than hiding the
- * choice behind a modifier key.
- *
- * Keyboard behaviour is the ARIA radio-group contract, which a row of plain
- * buttons does not give you: exactly one option is in the tab order (the checked
- * one), Left/Up and Right/Down move *and* select the neighbour, Home/End jump to
- * the ends, and Space/Enter activate the focused option natively. Without the
- * roving tabindex a keyboard user had to tab through both options, and the arrow
- * keys did nothing, so the control announced itself as a radiogroup and then
- * refused to behave like one.
- */
-function QueueModeToggle({
-  mode,
-  onChange,
-}: {
-  mode: QueuedKind;
-  onChange: (next: QueuedKind) => void;
-}): JSX.Element {
-  const kinds = Object.keys(QUEUE_LABEL) as QueuedKind[];
-  const buttons = useRef(new Map<QueuedKind, HTMLButtonElement | null>());
-
-  /** Select an option and move focus to it, like a native radio button. */
-  const choose = (next: QueuedKind): void => {
-    onChange(next);
-    buttons.current.get(next)?.focus();
-  };
-
-  const onKeyDown = (event: TargetedKeyboardEvent<HTMLButtonElement>): void => {
-    const index = kinds.indexOf(mode);
-    let next: QueuedKind | undefined;
-    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
-      next = kinds[(index + 1) % kinds.length];
-    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
-      next = kinds[(index - 1 + kinds.length) % kinds.length];
-    } else if (event.key === 'Home') {
-      next = kinds[0];
-    } else if (event.key === 'End') {
-      next = kinds[kinds.length - 1];
-    }
-    if (next === undefined) return;
-    // Both keys would scroll the transcript otherwise.
-    event.preventDefault();
-    choose(next);
-  };
-
-  return (
-    <div class="queue-mode" role="radiogroup" aria-label="What this message does">
-      {kinds.map((kind) => (
-        <button
-          key={kind}
-          ref={(element) => {
-            buttons.current.set(kind, element);
-          }}
-          type="button"
-          role="radio"
-          aria-checked={mode === kind}
-          // The checked option is the group's one tab stop; arrows move within.
-          tabIndex={mode === kind ? 0 : -1}
-          class="queue-mode-option"
-          data-active={mode === kind ? 'true' : 'false'}
-          title={QUEUE_TITLE[kind]}
-          onClick={() => onChange(kind)}
-          onKeyDown={onKeyDown}
-        >
-          {QUEUE_LABEL[kind]}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/**
- * The messages waiting for this run, with the one action that matters on each:
- * take it back.
- *
- * A queued message is invisible in the transcript by design (a steer only becomes
- * a turn when the loop folds it in), which made a mis-sent message impossible to
- * undo before this panel existed. Recall is honest about the race: the server
- * answers `404` if the run already applied the message, and the row says the same
- * thing rather than pretending the click always works.
- */
-function QueuedPanel({
-  queued,
-  recalling,
-  onRecall,
-}: {
-  queued: readonly QueuedMessage[];
-  recalling: Record<string, boolean>;
-  onRecall: (queuedId: string) => void;
-}): JSX.Element | null {
-  if (queued.length === 0) return null;
-  return (
-    <section class="queued-panel" aria-label="Queued messages">
-      <p class="queued-head">
-        {queued.length === 1 ? '1 message waiting' : `${queued.length} messages waiting`}
-        <span class="queued-head-hint"> · the agent sees them in this order</span>
-      </p>
-      <ul class="queued-list">
-        {queued.map((entry) => (
-          <li key={entry.id} class="queued-row" data-kind={entry.kind}>
-            <span class="queued-kind" title={QUEUE_TITLE[entry.kind]}>
-              {QUEUE_LABEL[entry.kind]}
-            </span>
-            <span class="queued-body">
-              <span class="queued-text" title={entry.content}>
-                {entry.draft ?? entry.content}
-              </span>
-              {entry.attachments && entry.attachments.length > 0 ? (
-                <span class="queued-attachments">
-                  {entry.attachments.map((attachment) => (
-                    <span
-                      key={`${entry.id}:${attachment.path}`}
-                      class="queued-attachment"
-                      title={attachment.path}
-                    >
-                      <FileIcon size={10} />
-                      {attachment.name}
-                    </span>
-                  ))}
-                </span>
-              ) : null}
-            </span>
-            <button
-              type="button"
-              class="queued-recall"
-              disabled={recalling[entry.id] === true}
-              onClick={() => onRecall(entry.id)}
-              aria-label={`Recall ${QUEUE_LABEL[entry.kind].toLowerCase()}: ${entry.draft ?? entry.content}`}
-              title="Take this back, with its attachments, and put it in the composer"
-            >
-              {recalling[entry.id] ? 'Recalling…' : 'Recall'}
-            </button>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-/**
- * The provider-reported `57.4%` context-window reading is also the Usage entry
- * point when the caller has a Usage destination. Without one, the same telemetry
- * stays read-only; the composer never estimates usage from the unsubmitted draft.
- */
-function ContextPill({
-  usage,
-  onOpenUsage,
-}: {
-  usage: ContextUsage;
-  onOpenUsage?: () => void;
-}): JSX.Element {
-  const text = formatContextPercent(usage.fraction);
-  const tone = contextTone(usage.fraction);
-  const title =
-    `${usage.tokens.toLocaleString()} of ${usage.window.toLocaleString()} context tokens used (${text}) — ` +
-    'the prompt size the provider reported for the newest call. ' +
-    'karucode compacts the oldest turns when the request passes this model\'s window. ' +
-    'Open Usage for session details.';
-  const ariaLabel =
-    `Usage: context window ${text} full, ${usage.tokens.toLocaleString()} of ` +
-    `${usage.window.toLocaleString()} tokens. Open session usage`;
-  const content = (
-    <>
-      <span class="context-pill-label">Usage</span>
-      <span class="context-pill-meter" aria-hidden="true">
-        <span class="context-pill-fill" style={{ width: `${Math.max(2, usage.fraction * 100)}%` }} />
-      </span>
-      <span class="context-pill-text">{text}</span>
-    </>
-  );
-
-  if (!onOpenUsage) {
-    return (
-      <span class="context-pill" data-tone={tone} title={title} aria-label={ariaLabel}>
-        {content}
-      </span>
-    );
-  }
-  return (
-    <button
-      type="button"
-      class="context-pill"
-      data-tone={tone}
-      title={title}
-      aria-label={ariaLabel}
-      onClick={() => onOpenUsage()}
-    >
-      {content}
-    </button>
-  );
-}
-
-export interface ComposerProps {
-  disabledReason: string | null;
-  running: boolean;
-  stopping: boolean;
-  status: Activity;
-  /** Receives the final message text (draft + inlined/referenced attachments). */
-  onSend: (text: string) => Promise<boolean>;
-  /**
-   * Send one slash command.
-   *
-   * Separate from `onSend` because a command is not a prompt: it is answered in
-   * place, it never starts a run, and it is allowed while one is in flight (that
-   * is when `/stop` matters). Defaults to `onSend`, which is correct for any
-   * caller whose server answers commands through the same route.
-   */
-  onCommand?: (text: string) => Promise<boolean>;
-  /**
-   * Queue a message against the run that is already working.
-   *
-   * `mode` is what the toggle asked for: a steer joins the turn in flight, a
-   * follow-up starts the run after it. The form is passed alongside the rendered
-   * content so a recall can put both back.
-   */
-  onQueue?: (
-    mode: QueuedKind,
-    message: { content: string; draft: string; attachments: QueuedAttachment[] },
-  ) => Promise<boolean>;
-  /** Messages waiting for the run, newest last. */
-  queued?: QueuedMessage[];
-  /** Take a queued message back out; resolves `true` when it was recalled. */
-  onRecall?: (queuedId: string) => Promise<boolean>;
-  /** Queued ids whose recall is in flight, so the button can say so. */
-  recalling?: Record<string, boolean>;
-  onStop: () => void;
-  onOpenSettings: () => void;
-  /** Open Usage in this caller's workspace; omitted where no destination exists. */
-  onOpenUsage?: () => void;
-  focusTick: number;
-  usageLabel?: string;
-  /** Override the workspace tree fetch behind `@` suggestions (tests). */
-  loadMentionTree?: TreeLoader;
-  /** Override the command catalog fetch behind the `/` menu (tests). */
-  loadCommands?: (project: string | null) => Promise<CommandSpec[]>;
-  /** What `@` lists, for the hint line. The control chat mentions projects. */
-  mentionLabel?: string;
-  /** Override the attachment upload call (tests). */
-  uploadFile?: (file: File, context: UploadContext) => Promise<{ path: string }>;
-}
-
-const CHAR_COUNTER_THRESHOLD = 4000;
-/** The mock's `.compose-area{max-height:150px}` now lives in CSS as
- * `--compose-input-max` on `.composer-input` (composer.css), which is what
- * actually clamps the box: an inline `height` cannot beat `max-height`, and a
- * viewport-dependent cap has to be a style rule rather than a constant. */
-/** Suggestion index lifetime; the workspace changes under us all the time. */
-const INDEX_TTL_MS = 60_000;
-const MENTION_MENU_ID = 'composer-mention-menu';
-const SLASH_MENU_ID = 'composer-slash-menu';
-
-/**
- * How many parked composer forms this tab keeps.
- *
- * A record holds the draft *and* the attachments, whose inlined file bodies are
- * whole source files, so the map is a window over the sessions a reader
- * alternates between - not a history of every session they have ever opened.
- * 24 covers a rail's worth of switching back and forth.
- */
-export const FORM_SCOPE_LIMIT = 24;
-
-/**
- * Bound the parked-scope map, shedding the coldest scope first.
- *
- * `Map` iterates in insertion order and the composer re-inserts a scope every
- * time it draws it, so the first key is the one nothing has touched the
- * longest. `protect` is the scope on screen: it is never evicted, however cold
- * its key looks, because throwing away the box the reader is typing in is worse
- * than keeping one entry too many.
- */
-export function trimFormScopes<K, V>(map: Map<K, V>, limit: number, protect: K): void {
-  // Shed coldest-first. `map.size <= limit` is the target, so a map of 25 with a
-  // limit of 24 sheds one. When the protected scope is the only key left above the
-  // limit the walk runs to the end, which is the documented trade: one entry too
-  // many beats throwing away the box the reader is typing in. Deleting the entry
-  // the iterator is on is well defined - the next `next()` continues from the
-  // following key - so the walk does not stop early at the protected one.
-  for (const key of map.keys()) {
-    if (map.size <= limit) return;
-    if (key === protect) continue;
-    map.delete(key);
-  }
-}
-
-const defaultLoadTree: TreeLoader = (depth = MENTION_INDEX_DEPTH) =>
-  api.getWorkspaceTree('.', depth, store.currentProjectId.value);
-
-const defaultUploadFile = async (
-  file: File,
-  context: UploadContext,
-): Promise<{ path: string }> => {
-  if (!context.session) throw new Error('Open a session before attaching files.');
-  // The wire stays `application/octet-stream` per the contract; the response's
-  // `path` is what the message references (the name may be deduplicated).
-  const result = await api.uploadAttachment(
-    { name: file.name, data: await readBytes(file) },
-    { session: context.session, project: context.project },
-  );
-  return { path: result.path };
-};
+export { FORM_SCOPE_LIMIT, trimFormScopes };
+export type { ComposerProps, UploadContext };
 
 /**
  * Message composer: restyled to the mock (attach button, bottom action row,
@@ -435,209 +59,23 @@ export function Composer({
   mentionLabel,
   uploadFile,
 }: ComposerProps): JSX.Element {
-  // One record per project/session: a different session in the same project must
-  // not inherit a draft, just as the same session must not follow a later project.
-  // Async upload/send continuations retain this record, not the next visible one.
-  //
-  // An unsent draft has no session id, so it is keyed by the draft's own nonce:
-  // "New session" twice must be two empty boxes, and a fresh draft must not
-  // inherit the text of the one that was just sent.
-  const sessionId = store.currentSessionId.value;
-  const draftId = store.draftSession.value?.id ?? null;
-  const projectId = store.currentProjectId.value;
-  const scopeKey = JSON.stringify([projectId, sessionId, draftId]);
-  const forms = useRef(new Map<string, ScopedComposerForm>());
-  // A draft that becomes a real session (its first send, or a binary attachment
-  // that had to create it) is the same conversation under a new key, so the
-  // half-written message and its chips move with it. `store.draftToSession` names
-  // exactly that transition; any other key change - opening another session,
-  // switching project - is a different conversation and starts clean.
-  const carry = store.draftToSession.value;
-  if (carry !== null && carry.sessionId === sessionId) {
-    const from = JSON.stringify([projectId, null, carry.draftId]);
-    const carried = forms.current.get(from);
-    if (carried) {
-      forms.current.set(scopeKey, carried);
-      forms.current.delete(from);
-    }
-  }
-  let scopedForm = forms.current.get(scopeKey);
-  if (scopedForm) {
-    // Re-inserting the scope every time it is drawn *is* the LRU: a `Map`
-    // iterates in insertion order, so the first key is the scope nothing has
-    // touched for the longest time. Without this, an eviction would throw away
-    // the session the reader keeps coming back to.
-    forms.current.delete(scopeKey);
-    forms.current.set(scopeKey, scopedForm);
-  } else {
-    scopedForm = {
-      value: { draft: '', attachments: [], caret: 0, sending: false, announcement: '' },
-    };
-    forms.current.set(scopeKey, scopedForm);
-  }
-  // A record holds the attachments' inlined file bodies, so browsing sessions
-  // must not accumulate them: keep the recent window, never the visible box.
-  trimFormScopes(forms.current, FORM_SCOPE_LIMIT, scopeKey);
-  const form = scopedForm;
-  const { draft, attachments, caret, sending, announcement } = form.value;
-  const [, renderForm] = useState(0);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const {
+    sessionId,
+    projectId,
+    form,
+    draft,
+    attachments,
+    caret,
+    sending,
+    announcement,
+    setDraft,
+    setAttachments,
+    setAnnouncement,
+    setCaret,
+    setSending,
+  } = useScopedComposerForm(textarea);
 
-  const updateForm = (update: (current: ComposerFormState) => ComposerFormState): void => {
-    form.value = update(form.value);
-    // When this scope is parked there is deliberately no subscriber to update.
-    form.render?.();
-  };
-  const setDraft = (update: FieldUpdate<string>): void => {
-    updateForm((current) => ({
-      ...current,
-      draft: typeof update === 'function' ? update(current.draft) : update,
-    }));
-  };
-  const setAttachments = (update: FieldUpdate<Attachment[]>): void => {
-    updateForm((current) => ({
-      ...current,
-      attachments: typeof update === 'function' ? update(current.attachments) : update,
-    }));
-  };
-  const setAnnouncement = (update: FieldUpdate<string>): void => {
-    updateForm((current) => ({
-      ...current,
-      announcement: typeof update === 'function' ? update(current.announcement) : update,
-    }));
-  };
-  const setCaret = (update: FieldUpdate<number>): void => {
-    updateForm((current) => ({
-      ...current,
-      caret: typeof update === 'function' ? update(current.caret) : update,
-    }));
-  };
-  const setSending = (update: FieldUpdate<boolean>): void => {
-    updateForm((current) => ({
-      ...current,
-      sending: typeof update === 'function' ? update(current.sending) : update,
-    }));
-  };
-
-  useLayoutEffect(() => {
-    const render = (): void => renderForm((current) => current + 1);
-    form.render = render;
-    return () => {
-      if (form.render === render) form.render = undefined;
-    };
-  }, [form]);
-
-  // The carry above has been applied, so forget it: a later navigation must not
-  // replay it. Clearing it in an effect rather than during render keeps the write
-  // out of the render that reads it (that is a render loop waiting to happen).
-  useEffect(() => {
-    const pending = store.draftToSession.value;
-    if (pending !== null && pending.sessionId === sessionId) store.draftToSession.value = null;
-  }, [sessionId, carry]);
-
-  // A scope nothing can reach again is a record holding a draft - and whole
-  // inlined files - for no one: a session the rail no longer lists because it
-  // was deleted, or a draft replaced by the next "New session" (a sent draft has
-  // already been carried to its session above, so its old key is gone by now).
-  //
-  // Only the visible project's rows are consulted: `store.sessions` holds *that*
-  // project's sessions, and a parked draft in another project has to survive the
-  // switch, which is the reason this map exists. An empty or still-loading list
-  // is a refresh in progress, not a mass deletion, so it prunes nothing; and the
-  // visible scope is never pruned, because a session created moments ago is not
-  // in the rail's rows yet.
-  const sessionRows = store.sessions.value;
-  useEffect(() => {
-    if (store.sessionsLoading.value || sessionRows.length === 0) return;
-    const live = new Set(sessionRows.map((row) => row.id));
-    // Only an *empty* unreachable record is dropped. A parked draft is unsent
-    // typing: losing it because its session was deleted is worse than keeping a
-    // record the reader cannot reach, and the count cap above still bounds the
-    // map (it sheds the coldest). A record with text, attachments or a send in
-    // flight is therefore kept and left to that cap.
-    const unreachable: string[] = [];
-    for (const key of Array.from(forms.current.keys())) {
-      if (key === scopeKey) continue;
-      const [project, session, draft] = JSON.parse(key) as [
-        string | null,
-        string | null,
-        number | null,
-      ];
-      if (project !== projectId) continue;
-      const stale =
-        session !== null
-          ? !live.has(session)
-          : draft !== null && draftId !== null && draft !== draftId;
-      if (stale) unreachable.push(key);
-    }
-    const isEmpty = (key: string): boolean => {
-      const value = forms.current.get(key)?.value;
-      return (
-        value === undefined ||
-        (value.draft.trim() === '' && value.attachments.length === 0 && !value.sending)
-      );
-    };
-    for (const key of unreachable) {
-      if (isEmpty(key)) forms.current.delete(key);
-    }
-  }, [sessionRows, projectId, scopeKey, draftId]);
-
-  // `store.composerDraft` is how another surface (the empty state's quick
-  // prompts) hands text to the composer; it is consumed once and cleared.
-  // Reading `.value` here subscribes the composer to the signal, so a hand-off
-  // that arrives while the composer is already mounted still lands (the empty
-  // state and the composer are on screen together).
-  const incomingDraft = store.composerDraft.value;
-  useEffect(() => {
-    if (incomingDraft === null) return;
-    setDraft(incomingDraft);
-    store.composerDraft.value = null;
-    // Focus synchronously so the caret is already in the box when the click
-    // returns; re-place it on the next frame, once the controlled value has
-    // been committed to the DOM.
-    const node = textarea.current;
-    node?.focus();
-    node?.setSelectionRange(incomingDraft.length, incomingDraft.length);
-    requestAnimationFrame(() => {
-      const element = textarea.current;
-      if (!element) return;
-      element.focus();
-      element.setSelectionRange(incomingDraft.length, incomingDraft.length);
-    });
-  }, [incomingDraft]);
-
-  // A recalled message comes in the same way, but restores the *form*: the draft
-  // is appended to whatever has been typed since (a recall must never silently
-  // replace a fresh draft), and the chips come back so sending again produces the
-  // same request the recall took back.
-  const handoff = store.composerHandoff.value;
-  useEffect(() => {
-    if (handoff === null) return;
-    store.composerHandoff.value = null;
-    setDraft((current) => {
-      if (current.trim() === '') return handoff.text;
-      return `${current.replace(/\s+$/, '')}\n\n${handoff.text}`;
-    });
-    setAttachments((current) => {
-      if (handoff.attachments.length === 0) return current;
-      // Two recalls of the same file must not collapse into one chip: the ids are
-      // regenerated per recall, and `attachmentsFromQueue` already does that.
-      return [...current, ...attachmentsFromQueue(handoff.attachments)];
-    });
-    setAnnouncement(
-      handoff.attachments.length > 0
-        ? `Recalled to the composer with ${handoff.attachments.length} ${
-            handoff.attachments.length === 1 ? 'attachment' : 'attachments'
-          }.`
-        : 'Recalled to the composer.',
-    );
-    requestAnimationFrame(() => {
-      const element = textarea.current;
-      if (!element) return;
-      element.focus();
-      element.setSelectionRange(element.value.length, element.value.length);
-    });
-  }, [handoff]);
-  const [dragging, setDragging] = useState(false);
   /**
    * Which queue the next message goes into while a run is in flight.
    *
@@ -647,258 +85,41 @@ export function Composer({
    * the follow-up then.
    */
   const [queueMode, setQueueMode] = useState<QueuedKind>('steer');
-  const textarea = useRef<HTMLTextAreaElement>(null);
-  const fileInput = useRef<HTMLInputElement>(null);
-  const dragDepth = useRef(0);
 
-  // ---- @-mentions -------------------------------------------------------
-  const [suggestions, setSuggestions] = useState<MentionCandidate[]>([]);
-  const [activeOption, setActiveOption] = useState(0);
-  const [indexError, setIndexError] = useState<string | null>(null);
-  const [indexLoading, setIndexLoading] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
-  const indexedAt = useRef(0);
-  const loadTree = loadMentionTree ?? defaultLoadTree;
+  const popovers = useComposerPopovers({
+    draft,
+    caret,
+    projectId,
+    textarea,
+    setDraft,
+    setCaret,
+    loadMentionTree,
+    loadCommands,
+  });
 
-  // The index is per project. The TTL alone would keep the previous project's
-  // file list for up to a minute after a switch, and a mention could then name a
-  // path the agent cannot open.
-  const indexedProject = useRef(projectId);
-  useEffect(() => {
-    if (indexedProject.current === projectId) return;
-    indexedProject.current = projectId;
-    indexedAt.current = 0;
-    setSuggestions([]);
-  }, [projectId]);
+  const canType = disabledReason === null;
 
-  const mention = activeMention(draft, caret);
-  const mentionOpen = mention !== null && !dismissed;
-  const ranked = mentionOpen && mention ? rankMentions(suggestions, mention.query, MENTION_LIMIT) : [];
-  const activeIndex = ranked.length === 0 ? 0 : Math.min(activeOption, ranked.length - 1);
-  const menuOpen = mentionOpen && (ranked.length > 0 || indexLoading || indexError !== null);
-
-  useEffect(() => {
-    if (!mentionOpen) return;
-    const fresh = indexedAt.current > 0 && Date.now() - indexedAt.current < INDEX_TTL_MS;
-    if (fresh) {
-      setIndexLoading(false);
-      return;
-    }
-    let cancelled = false;
-    const requestedProject = projectId;
-    setIndexLoading(true);
-    setIndexError(null);
-    void (async () => {
-      try {
-        const tree = await loadTree(MENTION_INDEX_DEPTH);
-        // A response can outlive both this popover and a project switch. Never
-        // let the previous workspace populate the next project's menu.
-        if (cancelled || store.currentProjectId.value !== requestedProject) return;
-        setSuggestions(indexFromTree(tree).filter((entry) => entry.kind === 'file'));
-        indexedAt.current = Date.now();
-      } catch (error) {
-        if (cancelled || store.currentProjectId.value !== requestedProject) return;
-        setIndexError(`Could not index the workspace: ${toErrorMessage(error)}`);
-      } finally {
-        if (!cancelled && store.currentProjectId.value === requestedProject) {
-          setIndexLoading(false);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [mentionOpen, loadTree, projectId]);
-
-  // A new query always starts at the best match.
-  useEffect(() => {
-    setActiveOption(0);
-  }, [mention?.query, mentionOpen]);
-
-  const chooseMention = (candidate: MentionCandidate): void => {
-    if (!mention) return;
-    const next = insertMention(draft, mention, candidate.path);
-    setDraft(next.text);
-    setCaret(next.caret);
-    setDismissed(false);
-    setActiveOption(0);
-    // The textarea is controlled: move the caret once the value has rendered.
-    window.setTimeout(() => {
-      const element = textarea.current;
-      if (!element) return;
-      element.focus();
-      element.setSelectionRange(next.caret, next.caret);
-    }, 0);
-  };
-
-  // ---- slash commands ---------------------------------------------------
-  //
-  // The menu is a *hint*: the server resolves the command from the message, so a
-  // stale or failed catalog costs a missing suggestion, never a wrong action. That
-  // is why the fetch is lazy (on the first `/`), cached per project, and why a
-  // failure still leaves the box usable.
-  const catalog = store.commandCatalog.value;
-  const catalogProject = store.commandCatalogProject.value;
-  const catalogError = store.commandCatalogError.value;
-  const catalogTick = store.commandCatalogTick.value;
-  const [slashIndex, setSlashIndex] = useState(0);
-  const [slashDismissed, setSlashDismissed] = useState(false);
-  const loadedCatalogKey = useRef<string | null>(null);
-  const loadCatalog =
-    loadCommands ?? ((project: string | null) => api.listCommands(project));
-
-  const slashQueryText = slashQuery(draft, caret);
-  const slashOpen = slashQueryText !== null && !slashDismissed;
-  // Skills are discovered inside the project's workspace, so another project's
-  // list would offer a command the agent cannot read.
-  const projectCatalog = catalogProject === projectId ? (catalog ?? []) : [];
-  const rankedCommands = slashOpen ? rankCommands(projectCatalog, slashQueryText ?? '', SLASH_MENU_LIMIT) : [];
-  const slashActiveIndex =
-    rankedCommands.length === 0 ? 0 : Math.min(slashIndex, rankedCommands.length - 1);
-
-  useEffect(() => {
-    if (slashQueryText === null) return;
-    const key = `${projectId ?? ''}#${catalogTick}`;
-    if (loadedCatalogKey.current === key) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const list = await loadCatalog(projectId);
-        // A response can outlive a project switch; never seed the next project's
-        // menu with another workspace's skills.
-        if (cancelled || store.currentProjectId.value !== projectId) return;
-        store.commandCatalog.value = list;
-        store.commandCatalogProject.value = projectId;
-        store.commandCatalogError.value = null;
-        loadedCatalogKey.current = key;
-      } catch (error) {
-        if (cancelled) return;
-        store.commandCatalogError.value = `Could not load the commands: ${toErrorMessage(error)}`;
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [slashQueryText === null, projectId, catalogTick]);
-
-  // A new query always starts at the best match.
-  useEffect(() => {
-    setSlashIndex(0);
-  }, [slashQueryText]);
-
-  const chooseCommand = (command: CommandSpec): void => {
-    const text = insertCommand(command);
-    setDraft(text);
-    setCaret(text.length);
-    // Picking closes the menu: the next Enter is a send, not another pick of the
-    // row that is now the whole draft. Typing re-opens it (`onInput` below).
-    setSlashDismissed(true);
-    window.setTimeout(() => {
-      const element = textarea.current;
-      if (!element) return;
-      element.focus();
-      element.setSelectionRange(text.length, text.length);
-    }, 0);
-  };
-
-  // ---- attachments ------------------------------------------------------
-  const updateAttachment = (id: string, patch: Partial<Attachment>): void => {
-    setAttachments((current) =>
-      current.map((attachment) => (attachment.id === id ? { ...attachment, ...patch } : attachment)),
-    );
-  };
-
-  const processFile = async (
-    attachment: Attachment,
-    file: File,
-    upload: typeof defaultUploadFile,
-  ): Promise<void> => {
-    if (attachment.mode === 'inline') {
-      try {
-        const content = await readText(file);
-        updateAttachment(attachment.id, { status: 'ready', content });
-      } catch {
-        updateAttachment(attachment.id, { status: 'error', error: 'Could not read the file' });
-      }
-      return;
-    }
-    try {
-      // The ids are captured before classification, file reads and the upload.
-      // Reading them after an await can upload A's file into B's session.
-      //
-      // An unsent draft has no id yet, and an uploaded file lives under the
-      // session's own directory (`POST /api/workspace/upload?session=`), so the
-      // conversation is created here. Attaching a real file is deliberate work,
-      // and a chip that cannot be sent would block the composer.
-      const target = sessionId ?? (await actions.materializeDraftSession());
-      if (!target) throw new Error('Open a session before attaching files.');
-      const result = await upload(file, {
-        session: target,
-        project: projectId,
-      });
-      updateAttachment(attachment.id, { status: 'ready', path: result.path });
-      // The uploaded file is now mentionable in its own workspace. A completion
-      // that arrives after a project switch must not seed this project's index.
-      if (store.currentProjectId.value === projectId) {
-        setSuggestions((current) =>
-          current.some((entry) => entry.path === result.path)
-            ? current
-            : [...current, { path: result.path, kind: 'file', size: attachment.size }],
-        );
-      }
-    } catch (error) {
-      updateAttachment(attachment.id, { status: 'error', error: toErrorMessage(error) });
-    }
-  };
-
-  const addFiles = async (files: readonly File[]): Promise<void> => {
-    if (files.length === 0) return;
-    const accepted: { attachment: Attachment; file: File }[] = [];
-    for (const file of files) {
-      const decision =
-        file.size > UPLOAD_MAX_BYTES
-          ? { mode: 'upload' as const, reason: `Larger than ${formatBytes(UPLOAD_MAX_BYTES)}` }
-          : await classifyFile(file).catch(() => ({ mode: 'upload' as const, reason: 'Could not read the file' }));
-      const attachment: Attachment = {
-        id: newAttachmentId(file.name),
-        name: file.name,
-        size: file.size,
-        mode: decision.mode,
-        path: file.name,
-        status: file.size > UPLOAD_MAX_BYTES ? 'error' : decision.mode === 'inline' ? 'reading' : 'uploading',
-        ...(file.size > UPLOAD_MAX_BYTES ? { error: decision.reason } : {}),
-      };
-      accepted.push({ attachment, file });
-    }
-    setAttachments((current) => [...current, ...accepted.map((entry) => entry.attachment)]);
-    setAnnouncement(
-      accepted.length === 1
-        ? `Attached ${accepted[0]?.attachment.name ?? 'file'}.`
-        : `Attached ${accepted.length} files.`,
-    );
-    await Promise.all(
-      accepted
-        .filter((entry) => entry.attachment.status !== 'error')
-        .map((entry) => processFile(entry.attachment, entry.file, uploadFile ?? defaultUploadFile)),
-    );
-  };
-
-  const dropAttachment = (id: string): void => {
-    const removed = attachments.find((attachment) => attachment.id === id);
-    setAttachments((current) => current.filter((attachment) => attachment.id !== id));
-    if (removed) setAnnouncement(`Removed ${removed.name}.`);
-  };
-
-  const resetDrag = (): void => {
-    dragDepth.current = 0;
-    setDragging(false);
-  };
-
-  const hasFiles = (event: DragEvent): boolean => {
-    const types = event.dataTransfer?.types;
-    if (!types) return false;
-    return Array.from(types).includes('Files');
-  };
+  const {
+    dragging,
+    fileInput,
+    addFiles,
+    dropAttachment,
+    onDragEnter,
+    onDragOver,
+    onDragLeave,
+    onDrop,
+    onPaste,
+  } = useComposerAttachments({
+    sessionId,
+    projectId,
+    canType,
+    disabledReason,
+    attachments,
+    setAttachments,
+    setAnnouncement,
+    uploadFile,
+    onUploaded: popovers.appendUploadedSuggestion,
+  });
 
   // ---- layout effects ---------------------------------------------------
   const growTextarea = useCallback((): void => {
@@ -941,159 +162,35 @@ export function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stopping]);
 
-  const canType = disabledReason === null;
-  const attachmentReady = canSendAttachments(attachments);
-  const hasContent = draft.trim() !== '' || attachments.some((attachment) => attachment.status === 'ready');
   // Which Enter sends. Read from the store during render, so switching it in
   // Settings applies to the very next key press with no reload - and so the hint,
   // the buttons' names and the behaviour can never disagree.
   const enterSends = store.sendKey.value === 'enter';
-  /** The sending chord, spelled the way the foot hint and the buttons spell it.
-   *  The modifier is the platform's own (`⌘` on a Mac, where there is no Ctrl
-   *  key): every other hint in the app already reads `modKey()`, and a chord
-   *  nobody has on their keyboard is worse than no hint at all. */
-  const sendChord = enterSends ? 'Enter' : `${modKey()} Enter`;
-  /** The same chord in words, for accessible names and tooltips.
-   *  `⌘` is a private-use glyph: several screen readers announce it as nothing
-   *  useful, which made the send button's name "Send message (Enter)" on a Mac.
-   *  So the spoken form spells the modifier out on the platform's own terms. */
-  const sendChordLong = enterSends
-    ? 'Enter'
-    : isApplePlatform()
-      ? 'Command + Enter'
-      : 'Control + Enter';
-  // While a run is in flight the same box sends into the queue instead of
-  // starting one, because starting one is exactly what the API refuses with a
-  // 409. `canQueue` is therefore the "running" half of `canSend`.
-  //
-  // `stopping` gates queueing too, and for the same reason: a stop is in flight,
-  // so a steer has no run to fold into and a follow-up has no turn to wait for
-  // yet - the server answers 409 and the toast is noise. The box stays usable
-  // (the draft is kept) and the controls come back when the stop lands.
-  const canQueue =
-    canType && running && !stopping && !sending && attachmentReady && hasContent && onQueue !== undefined;
-  const canSend = canType && !running && !sending && attachmentReady && hasContent;
-  // A slash command is not a prompt: the server answers it in place, it never
-  // starts a run, and it has to work while one is in flight (`/stop` is the case
-  // the whole feature exists for). It also carries no attachments - the text after
-  // the command would become its arguments.
-  const slashCommand = knownCommand(projectCatalog, draft);
-  const canCommand = canType && !sending && slashCommand !== null && attachments.length === 0;
+  const { sendChord, sendChordLong } = sendChordLabels(enterSends);
 
-  const clearComposer = (
-    message: string,
-    submitted?: { draft: string; attachments: Attachment[] },
-  ): void => {
-    // Sending is asynchronous and the textarea stays editable. If the reader
-    // changed this scoped form while the request was pending, preserve that work.
-    if (
-      submitted &&
-      (form.value.draft !== submitted.draft || form.value.attachments !== submitted.attachments)
-    ) {
-      setAnnouncement(message);
-      return;
-    }
-    setDraft('');
-    setCaret(0);
-    setAttachments([]);
-    setDismissed(true);
-    setAnnouncement(message);
-  };
-
-  const submit = async (): Promise<void> => {
-    // A command carries no attachments: the text after the command is its
-    // arguments, so an attachment would be read as arguments and never reach the
-    // model. The command's reply clears the composer, so the reader would simply
-    // lose the file. Refuse, and keep both the draft and the attachments.
-    if (slashCommand !== null && attachments.length > 0) {
-      setAnnouncement(
-        `/${slashCommand.name} cannot carry attachments. Remove them to run the command, or send them with a message.`,
-      );
-      return;
-    }
-    // A command is answered by the server and is never queued: queueing it behind
-    // the run it is trying to change is exactly the wrong behaviour. This branch
-    // comes first for that reason.
-    if (slashCommand !== null) {
-      if (!canType || sending) return;
-      const submitted = { draft, attachments };
-      setSending(true);
-      try {
-        const accepted = await (onCommand ?? onSend)(draft.trim());
-        if (accepted) clearComposer(`Ran /${slashCommand.name}.`, submitted);
-      } finally {
-        setSending(false);
-      }
-      return;
-    }
-    // While the agent works, the same box queues: a steer joins the turn in
-    // flight, a follow-up starts the next one.
-    if (running) {
-      if (!canQueue) return;
-      const submitted = { draft, attachments };
-      setSending(true);
-      try {
-        const accepted = await onQueue(queueMode, {
-          content: composeMessage(draft, attachments),
-          draft,
-          attachments: attachForQueue(attachments),
-        });
-        if (accepted) {
-          const count = attachments.length;
-          const what = QUEUE_LABEL[queueMode].toLowerCase();
-          clearComposer(
-            count === 0
-              ? `Queued as a ${what}.`
-              : `Queued as a ${what} with ${count} ${count === 1 ? 'attachment' : 'attachments'}.`,
-            submitted,
-          );
-        }
-      } finally {
-        setSending(false);
-      }
-      return;
-    }
-    if (!canSend) return;
-    const submitted = { draft, attachments };
-    setSending(true);
-    try {
-      const accepted = await onSend(composeMessage(draft, attachments));
-      if (accepted) {
-        const sent = attachments.length;
-        clearComposer(
-          sent === 0 ? '' : `Sent with ${sent} ${sent === 1 ? 'attachment' : 'attachments'}.`,
-          submitted,
-        );
-      }
-    } finally {
-      setSending(false);
-    }
-  };
-
-  const syncCaret = (element: HTMLTextAreaElement): void => {
-    setCaret(element.selectionStart ?? element.value.length);
-  };
-
-  /**
-   * Start a new line at the caret, for a chord the browser will not type.
-   *
-   * Shift+Enter is typed by the browser itself. A Command/Ctrl+Enter produces no
-   * text at all in Chrome or Firefox, so when Enter is the send key the composer
-   * has to write the break into the draft itself - otherwise the setting's own
-   * hint would promise something the key does not do. Going through the draft
-   * (rather than editing `value` directly) keeps the controlled textarea, the
-   * auto-grow re-measurement and the text that is finally sent the same string.
-   */
-  const insertLineBreak = (element: HTMLTextAreaElement): void => {
-    const start = element.selectionStart ?? element.value.length;
-    const end = element.selectionEnd ?? start;
-    setDraft(`${element.value.slice(0, start)}\n${element.value.slice(end)}`);
-    // Writing the controlled value back drops the caret at the end of the text,
-    // so put it after the newline once that render has landed.
-    requestAnimationFrame(() => {
-      textarea.current?.setSelectionRange(start + 1, start + 1);
+  const { canSend, canQueue, canCommand, hasContent, submit, syncCaret, handleKeyDown } =
+    useComposerInput({
+      form,
+      draft,
+      attachments,
+      sending,
+      canType,
+      running,
+      stopping,
+      enterSends,
+      queueMode,
+      textarea,
+      popovers,
+      onSend,
+      onCommand,
+      onQueue,
+      onStop,
+      setDraft,
+      setCaret,
+      setAttachments,
+      setAnnouncement,
+      setSending,
     });
-  };
 
   // Phones get a short placeholder: at 16px (the iOS no-zoom size) the desktop
   // sentence wraps to two lines in a 390px column, and an empty dock would then
@@ -1101,27 +198,17 @@ export function Composer({
   // rather than `matchMedia` here: this is decided during render, and a phone
   // held sideways (or a window narrowed after load) has to re-decide.
   const narrowViewport = store.phoneViewport.value;
-
-  const placeholder = !canType
-    ? (disabledReason ?? 'The composer is unavailable.')
-    : running
-      ? narrowViewport
-        ? queueMode === 'steer'
-          ? 'Steer the run…'
-          : 'Queue a follow-up…'
-        : queueMode === 'steer'
-          ? 'The agent is working — send a message to steer it at its next step…'
-          : 'The agent is working — type the next thing to do once it finishes…'
-      : narrowViewport
-        ? 'Ask karucode anything…'
-        : 'Ask karucode anything, or describe a change...';
+  const placeholder = composerPlaceholder({
+    canType,
+    disabledReason,
+    running,
+    narrowViewport,
+    queueMode,
+  });
 
   const attachTitle = !canType
     ? 'Attaching is unavailable until the composer is ready'
     : 'Attach files — or drop them on the composer';
-
-  const approvals = describeApprovals(store.config.value);
-  const usageTitle = usageLabel ? `Session usage: ${usageLabel}` : undefined;
 
   // How full the context window is. Reported, never estimated: the provider's own
   // prompt-token count for the newest call, against the window the selected model
@@ -1154,63 +241,35 @@ export function Composer({
           event.preventDefault();
           void submit();
         }}
-        onDragEnter={(event) => {
-          if (!hasFiles(event)) return;
-          // Even a disabled composer must cancel a file drag. Otherwise enabling
-          // the drop later can still fall through to browser navigation.
-          event.preventDefault();
-          if (!canType) return;
-          dragDepth.current += 1;
-          setDragging(true);
-        }}
-        onDragOver={(event) => {
-          if (!hasFiles(event)) return;
-          event.preventDefault();
-          if (event.dataTransfer) event.dataTransfer.dropEffect = canType ? 'copy' : 'none';
-          if (!canType) return;
-        }}
-        onDragLeave={() => {
-          // Some browsers report empty `types` on dragleave, so the counter — not
-          // the payload — decides when the overlay goes away.
-          if (dragDepth.current === 0) return;
-          dragDepth.current -= 1;
-          if (dragDepth.current === 0) setDragging(false);
-        }}
-        onDrop={(event) => {
-          if (!hasFiles(event)) return;
-          // Cancel every file drop, including when the composer is disabled:
-          // ignoring it would make the browser open the dropped local file.
-          event.preventDefault();
-          const files = event.dataTransfer?.files;
-          resetDrag();
-          if (!canType) return;
-          if (files && files.length > 0) void addFiles(Array.from(files));
-        }}
+        onDragEnter={onDragEnter}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
       >
-        {menuOpen && mention ? (
+        {popovers.menuOpen && popovers.mention ? (
           <FileMentionMenu
             id={MENTION_MENU_ID}
-            items={ranked}
-            activeIndex={activeIndex}
-            query={mention.query}
-            loading={indexLoading && ranked.length === 0}
-            error={ranked.length === 0 ? indexError : null}
-            onPick={chooseMention}
-            onHover={setActiveOption}
+            items={popovers.ranked}
+            activeIndex={popovers.activeIndex}
+            query={popovers.mention.query}
+            loading={popovers.indexLoading && popovers.ranked.length === 0}
+            error={popovers.ranked.length === 0 ? popovers.indexError : null}
+            onPick={popovers.chooseMention}
+            onHover={popovers.setActiveOption}
             title={mentionLabel === 'projects' ? 'Projects' : undefined}
           />
         ) : null}
 
-        {slashOpen ? (
+        {popovers.slashOpen ? (
           <SlashMenu
             id={SLASH_MENU_ID}
-            items={rankedCommands}
-            activeIndex={slashActiveIndex}
-            query={slashQueryText ?? ''}
-            loading={projectCatalog.length === 0 && catalogError === null}
-            error={projectCatalog.length === 0 ? catalogError : null}
-            onPick={chooseCommand}
-            onHover={setSlashIndex}
+            items={popovers.rankedCommands}
+            activeIndex={popovers.slashActiveIndex}
+            query={popovers.slashQueryText ?? ''}
+            loading={popovers.projectCatalog.length === 0 && popovers.catalogError === null}
+            error={popovers.projectCatalog.length === 0 ? popovers.catalogError : null}
+            onPick={popovers.chooseCommand}
+            onHover={popovers.setSlashIndex}
           />
         ) : null}
 
@@ -1236,16 +295,20 @@ export function Composer({
             // the accessibility tree describe a control this is not.
             aria-haspopup="listbox"
             aria-controls={
-              slashOpen ? SLASH_MENU_ID : menuOpen ? MENTION_MENU_ID : undefined
+              popovers.slashOpen
+                ? SLASH_MENU_ID
+                : popovers.menuOpen
+                  ? MENTION_MENU_ID
+                  : undefined
             }
             aria-autocomplete="list"
             aria-activedescendant={
-              slashOpen
-                ? rankedCommands[slashActiveIndex]
-                  ? slashOptionId(SLASH_MENU_ID, slashActiveIndex)
+              popovers.slashOpen
+                ? popovers.rankedCommands[popovers.slashActiveIndex]
+                  ? slashOptionId(SLASH_MENU_ID, popovers.slashActiveIndex)
                   : undefined
-                : menuOpen && ranked[activeIndex]
-                  ? mentionOptionId(MENTION_MENU_ID, activeIndex)
+                : popovers.menuOpen && popovers.ranked[popovers.activeIndex]
+                  ? mentionOptionId(MENTION_MENU_ID, popovers.activeIndex)
                   : undefined
             }
             aria-describedby="composer-status"
@@ -1253,8 +316,8 @@ export function Composer({
               const element = event.currentTarget;
               setDraft(element.value);
               syncCaret(element);
-              setDismissed(false);
-              setSlashDismissed(false);
+              popovers.setDismissed(false);
+              popovers.setSlashDismissed(false);
             }}
             onClick={(event) => syncCaret(event.currentTarget)}
             onKeyUp={(event) => {
@@ -1262,263 +325,31 @@ export function Composer({
                 syncCaret(event.currentTarget);
               }
             }}
-            onPaste={(event) => {
-              const files = event.clipboardData?.files;
-              if (!files || files.length === 0) return;
-              // A clipboard that carries files nearly always carries their names
-              // as text too (copy a file in a file manager and both forms
-              // arrive), so the paste has to be claimed: without this the chip
-              // *and* "shot.png" typed into the draft are the same paste twice.
-              // The paste is only claimed when it is actually used: claiming it on
-              // the refusal path suppressed the text the clipboard also carries
-              // and then dropped the whole gesture, so the reader got nothing
-              // *and* lost the browser default.
-              if (!canType) {
-                // A dropped paste looks exactly like a broken clipboard, so say
-                // which it is - the same live region a refused send uses.
-                setAnnouncement(
-                  `Files cannot be attached while the composer is unavailable${
-                    disabledReason ? `: ${disabledReason}` : '.'
-                  }`,
-                );
-                return;
-              }
-              event.preventDefault();
-              void addFiles(Array.from(files));
-            }}
-            onKeyDown={(event) => {
-              // An IME owns these keys while it is composing: Enter commits a
-              // candidate, the arrows walk the candidate list and Escape cancels
-              // the composition. Every branch below - the `/` menu, the `@` menu,
-              // send, queue, stop - would act on half a word. The guard is first
-              // because the two popovers used to sit above the send path's own
-              // check and ate the commit key before it could reach the IME.
-              if (isImeComposing(event)) return;
-              // The `/` menu owns the arrows and Enter while it is open. Enter only
-              // completes when a row is highlighted: with no match the key must
-              // fall through and send the message, which is what a path or a
-              // sentence that happens to start with `/` is.
-              if (slashOpen) {
-                if (event.key === 'ArrowDown' && rankedCommands.length > 0) {
-                  event.preventDefault();
-                  setSlashIndex((current) => (current + 1) % rankedCommands.length);
-                  return;
-                }
-                if (event.key === 'ArrowUp' && rankedCommands.length > 0) {
-                  event.preventDefault();
-                  setSlashIndex(
-                    (current) => (current - 1 + rankedCommands.length) % rankedCommands.length,
-                  );
-                  return;
-                }
-                if (
-                  (event.key === 'Enter' || event.key === 'Tab') &&
-                  !event.metaKey &&
-                  !event.ctrlKey &&
-                  rankedCommands.length > 0
-                ) {
-                  event.preventDefault();
-                  const chosen = rankedCommands[slashActiveIndex];
-                  if (chosen) chooseCommand(chosen);
-                  return;
-                }
-                if (event.key === 'Escape') {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setSlashDismissed(true);
-                  return;
-                }
-              }
-              if (menuOpen && mention) {
-                if (event.key === 'ArrowDown' && ranked.length > 0) {
-                  event.preventDefault();
-                  setActiveOption((current) => (current + 1) % ranked.length);
-                  return;
-                }
-                if (event.key === 'ArrowUp' && ranked.length > 0) {
-                  event.preventDefault();
-                  setActiveOption((current) => (current - 1 + ranked.length) % ranked.length);
-                  return;
-                }
-                if (
-                  (event.key === 'Enter' || event.key === 'Tab') &&
-                  !event.metaKey &&
-                  !event.ctrlKey &&
-                  ranked.length > 0
-                ) {
-                  event.preventDefault();
-                  const chosen = ranked[activeIndex];
-                  if (chosen) chooseMention(chosen);
-                  return;
-                }
-                if (event.key === 'Escape') {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setDismissed(true);
-                  return;
-                }
-              }
-              if (event.key === 'Enter') {
-                // An IME's Enter confirms the composition it is part of, not the
-                // message: Japanese, Chinese and Korean input all end a word this
-                // way, and sending there would submit half of one. That guard is
-                // the first thing this handler does, so both popovers above obey
-                // it too.
-                const chord = event.metaKey || event.ctrlKey;
-                if (enterSends) {
-                  // Enter sends; Shift and Alt start a line the way the browser
-                  // already knows how. With nothing to send, Enter falls through
-                  // to a line break too, rather than swallowing the key.
-                  if (event.shiftKey || event.altKey) return;
-                  if (chord) {
-                    // No browser types a line break for a Command/Ctrl chord
-                    // (Chrome and Firefox produce no text at all for it), so
-                    // "the chord starts a new line" is a promise this handler has
-                    // to keep itself.
-                    event.preventDefault();
-                    insertLineBreak(event.currentTarget);
-                    return;
-                  }
-                  if (!(canCommand || (running ? canQueue : canSend))) return;
-                  event.preventDefault();
-                  void submit();
-                  return;
-                }
-                // Default: a plain Enter is a line break, the chord sends.
-                if (!chord) return;
-                event.preventDefault();
-                void submit();
-              } else if (event.key === 'Escape' && running) {
-                event.preventDefault();
-                event.stopPropagation();
-                if (!stopping) onStop();
-              }
-            }}
+            onPaste={onPaste}
+            onKeyDown={handleKeyDown}
           />
         </div>
 
-        {attachments.length > 0 ? (
-          <ul class="composer-attachments" aria-label="Attached files">
-            {attachments.map((attachment) => (
-              <li
-                key={attachment.id}
-                class={`attachment-chip attachment-chip-${attachment.status}`}
-                data-mode={attachment.mode}
-              >
-                <span class="attachment-chip-icon" aria-hidden="true">
-                  <FileIcon size={12} />
-                </span>
-                <span class="attachment-chip-body">
-                  <span class="attachment-chip-name" title={attachment.path}>
-                    {attachment.name}
-                  </span>
-                  <span class="attachment-chip-meta">{attachmentSummary(attachment)}</span>
-                </span>
-                <button
-                  type="button"
-                  class="attachment-chip-remove"
-                  onClick={() => dropAttachment(attachment.id)}
-                  aria-label={`Remove ${attachment.name}`}
-                >
-                  <CloseIcon size={11} />
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
+        <AttachmentStrip attachments={attachments} onRemove={dropAttachment} />
 
-        <div class={`compose-bottom${running ? ' is-running' : ''}`}>
-          <div class="compose-configuration">
-            <div class="composer-controls compose-bar-left">
-              {isUiHidden(store.pluginUi.value, UI_HIDE_COMPOSER_ATTACH) ? null : (
-                <button
-                  type="button"
-                  class="compose-plus"
-                  onClick={() => fileInput.current?.click()}
-                  disabled={!canType}
-                  aria-label="Attach files"
-                  title={attachTitle}
-                >
-                  <PaperclipIcon size={15} />
-                </button>
-              )}
-              <div
-                class="composer-session-pins"
-                role="group"
-                aria-label="Model and reasoning pins for subsequent runs in this session"
-                title="Model and reasoning changes apply to subsequent runs, not a run already in flight."
-              >
-                {isUiHidden(store.pluginUi.value, UI_HIDE_COMPOSER_MODEL) ? null : <ModelControls />}
-              </div>
-              {/* Controls plugins contributed to this row. Nothing is drawn when
-               * no plugin asked for a place here, which is the normal case. */}
-              <PluginSlot slot={UI_SLOT_COMPOSER_TOOLBAR} />
-            </div>
-            <div class="composer-spacer" />
-            {running ? null : contextControl}
-            {running ? null : characterCounter}
-          </div>
-
-          {running ? (
-            <>
-              <div class="compose-run-actions">
-                {contextControl}
-                {characterCounter}
-                {/* Stop ends the run; this group submits into its explicit queue.
-                 * Both stay visible with an empty draft. The mode choice appears
-                 * only once there is a message for it to describe. */}
-                {hasContent && slashCommand === null ? (
-                  <QueueModeToggle mode={queueMode} onChange={setQueueMode} />
-                ) : null}
-                <button
-                  type="submit"
-                  class="button button-primary button-queue"
-                  disabled={!canQueue && !canCommand}
-                  aria-label={
-                    slashCommand !== null
-                      ? `Run /${slashCommand.name}`
-                      : queueMode === 'steer'
-                        ? `Queue this message and steer the running turn (${sendChordLong})`
-                        : `Queue this follow-up for the next turn (${sendChordLong})`
-                  }
-                  title={slashCommand !== null ? `Run /${slashCommand.name}` : QUEUE_TITLE[queueMode]}
-                >
-                  <ArrowUpIcon size={13} />
-                  {slashCommand !== null ? 'Run' : queueMode === 'steer' ? 'Steer' : 'Queue'}
-                </button>
-              </div>
-              <button
-                type="button"
-                class="button button-stop"
-                onClick={onStop}
-                disabled={stopping}
-                aria-busy={stopping}
-                aria-label={stopping ? 'Stopping… (Escape)' : 'Stop run (Escape)'}
-                title={stopping ? 'Stopping…' : 'Stop (Escape)'}
-              >
-                <StopIcon size={13} />
-              </button>
-            </>
-          ) : (
-            <button
-              type="submit"
-              class="button button-primary button-send"
-              disabled={!canSend && !canCommand}
-              aria-label={
-                slashCommand !== null
-                  ? `Run /${slashCommand.name} (${sendChordLong})`
-                  : `Send message (${sendChordLong})`
-              }
-              title={
-                slashCommand !== null
-                  ? `Run /${slashCommand.name} (${sendChordLong})`
-                  : `Send (${sendChordLong})`
-              }
-            >
-              <ArrowUpIcon size={14} />
-            </button>
-          )}
-        </div>
+        <ComposerToolbar
+          running={running}
+          stopping={stopping}
+          canType={canType}
+          canSend={canSend}
+          canQueue={canQueue}
+          canCommand={canCommand}
+          hasContent={hasContent}
+          slashCommand={popovers.slashCommand}
+          queueMode={queueMode}
+          onQueueModeChange={setQueueMode}
+          sendChordLong={sendChordLong}
+          attachTitle={attachTitle}
+          fileInput={fileInput}
+          contextControl={contextControl}
+          characterCounter={characterCounter}
+          onStop={onStop}
+        />
 
         <p class="sr-only" aria-live="polite">
           {announcement}
@@ -1549,65 +380,16 @@ export function Composer({
         ) : null}
       </form>
 
-      {/* The mock's `.compose-foot` is a sibling of the box, not its last child:
-       * status + hints on the left, the approval policy on the right. */}
-      <div class="compose-foot">
-        <span class="compose-foot-main">
-          <span
-            id="composer-status"
-            class={`composer-status status-${status.kind}`}
-            role="status"
-            aria-live="polite"
-            title={usageTitle}
-          >
-            {disabledReason ? (
-              <>
-                <AlertIcon size={13} />
-                <span>{disabledReason}</span>
-                <button type="button" class="link-button" onClick={onOpenSettings}>
-                  Open settings
-                </button>
-              </>
-            ) : (
-              <>
-                <span class={`status-dot status-${status.kind}`} aria-hidden="true" />
-                <span>{status.label}</span>
-              </>
-            )}
-          </span>
-
-          {disabledReason ? null : (
-            <span class="composer-hint" aria-hidden="true">
-              {running ? (
-                <>
-                  <strong>{sendChord}</strong> to {queueMode === 'steer' ? 'steer' : 'queue a follow-up'}
-                  <span class="composer-hint-sep">·</span>
-                  <strong>Esc</strong> to stop
-                </>
-              ) : (
-                <>
-                  <strong>{sendChord}</strong> to send
-                  <span class="composer-hint-sep">·</span>
-                  <strong>@</strong> reference {mentionLabel ?? 'files'}
-                </>
-              )}
-            </span>
-          )}
-        </span>
-
-        {approvals ? (
-          <button
-            type="button"
-            class="compose-approvals"
-            title={approvals.title}
-            aria-label={`Approvals: ${approvals.label}. Open Settings`}
-            onClick={onOpenSettings}
-          >
-            Approvals: {approvals.label}
-            <LockIcon size={11} />
-          </button>
-        ) : null}
-      </div>
+      <ComposerFooter
+        status={status}
+        disabledReason={disabledReason}
+        running={running}
+        queueMode={queueMode}
+        sendChord={sendChord}
+        mentionLabel={mentionLabel}
+        usageLabel={usageLabel}
+        onOpenSettings={onOpenSettings}
+      />
     </>
   );
 }

@@ -6,13 +6,18 @@ a workspace/git/session/subagent inspector, and a settings sheet. Built against
 
 ## Stack
 
-- Vite 6 + Preact 10 + TypeScript (strict, no `any` in public interfaces)
+- Vite 6 + Preact 11 + TypeScript (strict, no `any` in public interfaces)
 - `@preact/signals` for small, colocated state
 - `markdown-it` (raw HTML disabled) with `markdown-it-task-lists` and
   `markdown-it-footnote` for GFM, plus DOMPurify and selected highlight.js languages
-- Hand-written CSS with design tokens; no UI/CSS framework and no third-party webfonts
-  (Inter and JetBrains Mono are self-hosted from `public/fonts/`, see below)
-- Vitest + @testing-library/preact + jsdom for tests
+- Hand-written component CSS with design tokens, plus a Tailwind CSS v4 utility layer
+  mapped onto those same tokens via `@theme inline` (`src/styles/tailwind.css`): no
+  default Tailwind palette, spacing or type scale exists, so a utility can only carry a
+  token. First-party UI primitives live in `src/ui/` (`src/ui/index.ts`). No
+  third-party webfonts (Inter and JetBrains Mono are self-hosted from
+  `public/fonts/`, see below)
+- `oxlint` (`.oxlintrc.json`) for fast static linting and Vitest +
+  `@testing-library/preact` + jsdom for tests
 
 `@types/markdown-it` is a types-only dev dependency. `.npmrc` sets `include=dev` so the
 toolchain installs on machines where npm defaults to `--omit=dev`.
@@ -38,9 +43,12 @@ CSS below.
 ```bash
 npm install
 npm run dev        # http://127.0.0.1:5173, proxies /api to http://127.0.0.1:8787
+                   # add ?ui-gallery=1 in dev to open src/ui/UiGallery.tsx
 npm run typecheck
+npm run lint       # oxlint: no `any`, no <button> without an explicit type
 npm test
 npm run audit      # dependency gate: npm audit at `moderate`, dev/build deps included
+node scripts/design-audit.mjs  # static CSS token/scale report across src/styles/
 npm run build      # writes dist/index.html + hashed assets
 npm run preview    # static preview; also proxies /api to 8787
 npm run preview:api  # prints the KARUCODE_WEB_DIR hint for serving the Rust binary
@@ -76,18 +84,27 @@ UI and API are same-origin.
 
 ```text
 src/
-  api/        typed client, endpoint functions, fetch-based SSE stream, API types
+  ui/         first-party Preact 11 UI primitives (`Button`, `Input`, `Field`, `Card`,
+              `Stack`, `Inline`, `Text`, `Badge`, `Callout`, `ConfirmDialog`, graduated
+              shells `Overlay`/`Tabs`/`Toggle`/`EmptyState`/`ErrorBoundary`/`icons`,
+              and `variants()`/`cn()`)
+  app/        `App` shell layout and hooks (`WorkbenchLayout`, `GlobalOverlays`,
+              `useAppBoot`, `useGlobalKeybindings`)
+  features/   decomposed domain modules: `access/`, `composer/`, `rail/`, `settings/`,
+              and `transcript/`
+  api/        typed client, `endpoints/*` (`endpoints.ts` barrel), `types/*` (`types.ts`
+              barrel), and fetch-based SSE stream (`sharedStream.ts`, `events.ts`)
   state/      signals store, transient Workbench Context, pure event reducer,
-              session→transcript seeding and actions
-  components/ task rail, transcript, rows/cards, Results Inspector, Context,
-              composer, Task actions, Theme Studio, settings, dialogs and states;
-              git/ is the real source-control manager
+              session→transcript seeding and domain `actions/*` (`actions.ts` barrel)
+  components/ top-level feature shells, `git/` source-control manager, `control-plane/`,
+              and graduated shell primitives
   theme/      theme engine, built-in palettes, colour maths, storage/import/export
   lib/        markdown+DOMPurify, highlight.js registry, diff parser, format, focus,
               @-mention index and ranking, attachment classification/formatting,
               dock-height measuring for the floating composer
-  styles/     tokens, base, layout, rail, chat, composer, inspector, git,
-              overlays, settings, theme-studio, workbench and workbench-navigation
+  styles/     tokens, tailwind, index (layer order), base, layout, rail, chat, composer,
+              inspector, git, overlays, settings, theme-studio, workbench and
+              workbench-navigation
   test/       jsdom setup, fixtures, smoke render
 ```
 
@@ -100,6 +117,50 @@ the frame metrics (`--rail-w`, `--header-h`, `--content-max`, …).
 `data-mode`, `data-density`, `data-tool-style`, `data-grouping` and
 `data-thinking` on `<html>`, so every component repaints from CSS custom
 properties with no React/Preact re-render.
+
+### Utility classes (Tailwind v4)
+
+`styles/tailwind.css` is the one place utilities are defined, and it defines them
+by *naming* those tokens: every default Tailwind scale is reset to `initial` and
+only karucode's own variables are mapped back with `@theme inline`. So
+`bg-surface` compiles to `background-color: var(--surface)`, `p-4` to
+`padding: var(--space-4)`, `rounded-sm` to `border-radius: var(--radius-sm)` and
+`text-body` to `font-size: var(--fs-body)` — a utility repaints with Theme Studio
+exactly like component CSS, because it *is* the same variable.
+
+| Want | Write | Never |
+| --- | --- | --- |
+| a surface | `bg-bg`, `bg-surface`, `bg-raised`, `bg-hover`, `bg-inset` | `bg-[#23211f]`, `bg-zinc-800` |
+| lines | `border border-line`, `border-line-soft`, `divide-line` | `border-gray-700` |
+| ink | `text-text`, `text-text-secondary`, `text-muted` | `text-faint`, `text-gray-400` |
+| accent | `bg-accent-fill text-on-accent`, `text-accent-text` | `bg-amber-500` |
+| spacing | `p-4`, `gap-2`, `mt-10` (the `--space-*` ladder, 0–10) | `p-[6px]`, `p-12` |
+| radius | `rounded-sm`, `rounded`, `rounded-lg`, `rounded-pill` | `rounded-[3px]` |
+| type | `text-micro` … `text-hero` (the `--fs-*` ladder) | `text-[13px]` |
+
+`text-faint` deliberately does not exist: `--faint` is a decorative object colour
+(scrollbar thumbs, hairline glyphs) and is unreadable as prose. Use
+`text-muted`.
+
+Two layer rules follow from that:
+
+* element resets live in `@layer base` (`styles/base.css`), so a utility
+  overrides them;
+* every component sheet is imported with `layer(components)` in
+  `styles/index.css`, so a utility overrides an existing `.class` rule too:
+  `class="button px-8"` gets 20px of padding, not `.button`'s 10px. The six
+  sheets a component imports itself (`notifications.css`,
+  `workbench-navigation.css`, the four `control-*.css`) are still unlayered, and
+  an unlayered rule beats every layer whatever the specificity — a utility does
+  nothing there until those move.
+
+Both are enforced statically: `src/styles/ui-contract.test.ts` refuses arbitrary
+values (except geometry such as `w-[320px]`), `text-faint` and every default
+palette class in the TSX, `src/styles/scale.test.ts` refuses raw colours and
+off-scale radii/font sizes/spacing in CSS sheets outside `tokens.css`,
+`src/styles/layers.test.ts` refuses an import without `layer(components)` and any
+sheet that is neither imported by `index.css` nor listed with a reason, and
+`npm run lint` refuses `any` and a `<button>` without an explicit `type`.
 
 Theme Studio (Task actions → Theme studio, the project-rail palette button where
 that rail is present, `Ctrl/Cmd+Shift+L`, or Settings → Appearance → Theme and layout) ships

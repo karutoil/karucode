@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "react", "unicorn", "oxc", "eslint"],
+  "categories": {
+    "correctness": "off",
+    "suspicious": "off",
+    "pedantic": "off",
+    "perf": "off",
+    "style": "off",
+    "nursery": "off"
+  },
+  "rules": {
+    "typescript/no-explicit-any": "error",
+    "react/button-has-type": "error",
+    "eslint/no-debugger": "error",
+    "eslint/no-dupe-keys": "error",
+    "eslint/no-cond-assign": "error",
+    "eslint/no-unsafe-negation": "error",
+    "eslint/no-self-compare": "error"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts", "**/*.test.tsx", "**/*.test.mjs"],
+      "rules": {
+        "react/button-has-type": "off"
+      }
+    }
+  ],
+  "ignorePatterns": ["dist/**", "public/**", "node_modules/**", "mock/**"]
+}

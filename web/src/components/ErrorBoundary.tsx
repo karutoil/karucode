@@ -1,6 +1,7 @@
 import { Component } from 'preact';
 import type { ComponentChildren, JSX } from 'preact';
 import { copyText } from '../lib/clipboard';
+import { Button } from '../ui/Button';
 
 export interface ErrorBoundaryProps {
   children: ComponentChildren;
@@ -94,12 +95,12 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
         <p class="crash-message">{error.message || error.name}</p>
         <p class="crash-hint">{hint}</p>
         <div class="crash-actions">
-          <button type="button" class="button button-primary button-small" onClick={this.reload}>
+          <Button variant="primary" size="sm" onClick={this.reload}>
             Reload
-          </button>
-          <button type="button" class="button button-small" onClick={this.copy}>
+          </Button>
+          <Button variant="secondary" size="sm" onClick={this.copy}>
             {copied ? 'Copied' : 'Copy diagnostics'}
-          </button>
+          </Button>
         </div>
       </div>
     );

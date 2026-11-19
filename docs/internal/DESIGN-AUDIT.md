@@ -94,7 +94,10 @@ todo, goals.
 2. **Undefined custom properties are silent.** `--surface-2`, `--surface-3`,
    `--warning`, `--mono` and `--focus-ring` were all read and never defined, so
    declarations became invalid at computed-value time with no error. Fixed for
-   the five above; a component may not invent a token name.
+   the five above; a component may not invent a token name. The four aliases have
+   since been deleted as well: every reader was renamed to the canonical token
+   (`--surface-raised`, `--warn`, `--font-mono`), so `tokens.css` no longer
+   publishes a second name for anything — see §5C rule 4.
 3. **The tests asserted the drift.** `geometry.test.ts` and `typography.test.ts`
    pinned the mock's 11px/13px radii, 33px margins and 25 font sizes, so every
    correction was a test failure. Both are now scale contracts instead.

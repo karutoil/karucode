@@ -1,11 +1,12 @@
 /// <reference types="vitest/config" />
 import { defineConfig } from 'vite';
 import preact from '@preact/preset-vite';
+import tailwindcss from '@tailwindcss/vite';
 
 // The dev server proxies the documented API surface to the Rust server.
 // `npm run dev` gives you the UI on :5173 with live /api and /api/events streams.
 export default defineConfig({
-  plugins: [preact()],
+  plugins: [preact(), tailwindcss()],
   server: {
     port: 5173,
     strictPort: true,
