@@ -471,7 +471,11 @@ def attribute_errors(lines: list[str], in_page: list[str], base: str) -> tuple[l
             continue
         exception = JS_EXCEPTION.match(stripped)
         if exception:
-            if exception.group("url").startswith(base) or "127.0.0.1" in exception.group("url"):
+            url = exception.group("url")
+            # Ours means the origin under test, not "some local port". The mock
+            # provider and geckodriver both live on 127.0.0.1, so a substring test
+            # reported their failures as page defects.
+            if url.startswith(base) or url.startswith(base.replace("http://", "https://")):
                 attributed.append(stripped[:400])
             else:
                 ignored.append(stripped[:200])
@@ -822,6 +826,15 @@ def main() -> int:
             browser.set_window(width, height)
             time.sleep(0.4)
             probe = browser.evaluate("return {w: innerWidth, h: innerHeight};")
+            # The first probe tells us whether this width is reachable at all. A
+            # correction below the floor is a no-op that never converges (asking
+            # 420 gives a 500px viewport, the correction computes 340, the clamp
+            # raises it back to 500), so the loop stops rather than spinning and
+            # the caller is told the truth about what it is measuring.
+            if probe["w"] > width and width < WIDTH_FLOOR:
+                probe["requested"] = width
+                probe["clamped"] = True
+                return probe
             for _ in range(3):
                 if probe["w"] == width and probe["h"] == height:
                     break
@@ -874,8 +887,12 @@ def main() -> int:
                 f"project-rail={dim('projectRail')}, rail-toggle={dim('sessionsToggle')}"
             )
             offscreen = [f".{item['cls']} right={item['right']}" for item in layout["offscreen"]]
+            # Name what was measured, not what was asked for: on a clamped width the
+            # two differ, and a passing "at 420x800" that really ran at 500x800 is a
+            # check claiming coverage it does not have.
+            label = measured if clamped else requested
             check(
-                f"no horizontal overflow at {requested}",
+                f"no horizontal overflow at {label}",
                 layout["docScrollWidth"] <= layout["innerWidth"] + 1,
                 f"scrollWidth={layout['docScrollWidth']} vs viewport={layout['innerWidth']}"
                 + (f"; elements drawn past the edge (transformed drawers): {', '.join(offscreen)}" if offscreen else ""),
@@ -888,13 +905,13 @@ def main() -> int:
             # either the rail itself or that toggle must be reachable on screen.
             rail_ok = on_screen(layout["rail"]) or on_screen(layout["sessionsToggle"]) or on_screen(layout["projectRail"])
             check(
-                f"composer, transcript and rail are on screen at {requested} (viewport {measured})",
+                f"composer, transcript and rail are on screen at {label} (viewport {measured})",
                 on_screen(layout["composer"]) and on_screen(layout["transcript"]) and rail_ok,
                 f"composer={dim('composer')}, transcript={dim('transcript')}, "
                 f"rail={dim('rail')}, rail-toggle={dim('sessionsToggle')}",
             )
             check(
-                f"screenshot captured at {requested}",
+                f"screenshot captured at {label} (viewport {measured})",
                 shot.exists() and size > 2000,
                 f"{shot} ({size} bytes, viewport {measured})",
             )

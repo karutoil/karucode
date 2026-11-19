@@ -283,16 +283,18 @@ export function useFocusTrap(
         body.style.overscrollBehavior = baseBodyOverscroll;
         root.style.overscrollBehavior = baseRootOverscroll;
         // Put the position back only when the browser reset it. A page that is
-        // still where it was needs nothing; a page that moved after the lock was
-        // taken was moved by the reader (a mobile browser lets the page behind
-        // pan while `overflow: hidden` is in force), and snapping it back would
-        // throw that away. So the restore exists for exactly one case: a scroll
-        // position the lock had, and the top of the document now.
+        // still where it was needs nothing, and a page the reader moved (a mobile
+        // browser lets the page behind pan while `overflow: hidden` is in force)
+        // must be left alone.
         const y = typeof window.scrollY === 'number' ? window.scrollY : 0;
         const wasReset = y === 0 && lockedScrollY !== 0;
         if (wasReset && typeof window.scrollTo === 'function') {
           window.scrollTo(0, lockedScrollY);
         }
+        // This lock is over: a later one records its own position rather than
+        // inheriting this one's and "restoring" the reader to where an older
+        // surface happened to be opened.
+        lockedScrollY = 0;
       }
       if (previous && previous.isConnected && previous !== document.body) previous.focus();
       else {

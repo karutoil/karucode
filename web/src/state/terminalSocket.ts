@@ -123,7 +123,12 @@ export class TerminalSocket {
     try {
       socket = factory(url);
     } catch (error) {
+      // A factory that throws (a bad URL, largely) is an outage like any other:
+      // reporting `failed` and returning left the terminal dead forever, because
+      // nothing counted the failure and nothing scheduled a retry. Go through the
+      // reconnect ladder, which is also what raises the "not coming back" notice.
       this.setStatus('failed', error instanceof Error ? error.message : String(error));
+      this.scheduleReconnect(error instanceof Error ? error.message : String(error));
       return;
     }
     socket.binaryType = 'arraybuffer';

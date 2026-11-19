@@ -204,17 +204,23 @@ export async function apiRequestBlob(path: string, options: RequestOptions = {})
     skipAuthHandler: options.skipAuthHandler,
   });
   if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    release();
-    let parsed: unknown = undefined;
-    if (text.trim() !== '') {
-      try {
-        parsed = JSON.parse(text) as unknown;
-      } catch {
-        // A non-JSON error body is handled by `responseError` below.
+    // One `finally` for the whole branch: the error body read must not be the
+    // thing that decides whether the caller's signal keeps two listeners for the
+    // life of the app (that is the whole reason `release` exists).
+    try {
+      const text = await response.text().catch(() => '');
+      let parsed: unknown = undefined;
+      if (text.trim() !== '') {
+        try {
+          parsed = JSON.parse(text) as unknown;
+        } catch {
+          // A non-JSON error body is handled by `responseError` below.
+        }
       }
+      throw responseError(response, parsed, path, options.skipAuthHandler);
+    } finally {
+      release();
     }
-    throw responseError(response, parsed, path, options.skipAuthHandler);
   }
   // The blob body is the one place the deadline still has to cover.
   try {

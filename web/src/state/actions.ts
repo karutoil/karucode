@@ -866,7 +866,21 @@ function handleRawEvent(raw: RawEvent): void {
 }
 
 function releaseBootstrapEvents(buffer: BootstrapEventBuffer): void {
-  if (bootstrapEventBuffer !== buffer) return;
+  if (bootstrapEventBuffer !== buffer) {
+    // A superseded run reaching its `finally`: the newer run owns the gate now.
+    // Its own frames are still worth keeping - they were real events - so hand
+    // them to the owner, and ask for a resync when there are any, because the
+    // newer run's snapshot was taken before these arrived. Dropping them silently
+    // was the older behaviour, and nothing scheduled the resync that would have
+    // repaired the hole.
+    const owner = bootstrapEventBuffer;
+    if (owner === null) return;
+    if (buffer.events.length > 0) {
+      owner.events.push(...buffer.events);
+      owner.needsResync = true;
+    }
+    return;
+  }
   // Open the live gate before replaying: a handler is then indistinguishable from
   // an event that arrives immediately after this synchronous release pass.
   bootstrapEventBuffer = null;

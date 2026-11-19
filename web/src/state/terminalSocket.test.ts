@@ -97,6 +97,34 @@ describe('TerminalSocket', () => {
     vi.restoreAllMocks();
   });
 
+  it('keeps retrying when the socket factory throws', () => {
+    // A factory that threw reported `failed` and returned: nothing counted the
+    // failure and nothing scheduled a retry, so the terminal stayed dead for the
+    // rest of the session.
+    (globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeSocket;
+    const statuses: TerminalSocketStatus[] = [];
+    let attempts = 0;
+    const socket = new TerminalSocket({
+      id: 't_abc',
+      cols: 80,
+      rows: 24,
+      token: null,
+      createSocket: () => {
+        attempts += 1;
+        throw new Error('bad url');
+      },
+      handlers: { onData: vi.fn(), onControl: vi.fn(), onStatus: (s) => statuses.push(s) },
+    });
+
+    socket.connect();
+    expect(attempts).toBe(1);
+    expect(statuses).toContain('failed');
+
+    // The reconnect ladder still runs, so the next step tries again.
+    vi.advanceTimersByTime(30_000);
+    expect(attempts).toBeGreaterThan(1);
+  });
+
   it('builds the documented url with the window size and the token', () => {
     const { socket, sockets } = harness({ token: 'tok-123' });
     socket.connect();
