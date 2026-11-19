@@ -48,7 +48,7 @@ env:
   # Pinned: the fork's `main` after the verification pass merged. A reviewer that changes when
   # someone pushes is not evidence.
   GOBY_REVIEWER_REPO: karutoil/goby
-  GOBY_REVIEWER_REF: dca0e45379514caba6ae099f5818428db699fdf4
+  GOBY_REVIEWER_REF: 0ee1126f9d26b20f74664e65bfcd507d29986658
 
 jobs:
   review:
@@ -61,7 +61,7 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository &&
        github.actor != 'dependabot[bot]')
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Check out the reviewer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -96,12 +96,17 @@ jobs:
           # A review per push while this is being evaluated. The image default is 1: a later
           # push reuses the first review and the post-merge cleaner takes over.
           GOBY_MAX_ROUNDS: "0"
+          # An 18.5k-line pull request is 146 files to navigate, not 50 turns and not ten
+          # minutes. The deadline still ends the run; the caps only stop being the reason.
+          GOBY_AGENT_TIMEOUT_S: "1200"
+          GOBY_MAX_TURNS: "120"
+          GOBY_MAX_TOOL_CALLS: "200"
           GOBY_VERIFY: advisory
           # Rust probes compile a workspace, not a snippet: the defaults (90s per probe, 300s
           # for the pass) are sized for a five-line script.
           GOBY_PROBE_TIMEOUT_S: "240"
           GOBY_VERIFY_BUDGET_S: "600"
-          GOBY_MAX_PROBES: "6"
+          GOBY_MAX_PROBES: "10"
           GOBY_GATE: "off"
         run: |
           docker run --rm \
@@ -109,5 +114,6 @@ jobs:
             -e GITHUB_TOKEN -e OPENAI_API_KEY \
             -e GOBY_PROVIDER -e GOBY_UPSTREAM -e GOBY_MODEL \
             -e GOBY_VERIFY -e GOBY_GATE -e GOBY_MAX_ROUNDS \
+            -e GOBY_AGENT_TIMEOUT_S -e GOBY_MAX_TURNS -e GOBY_MAX_TOOL_CALLS \
             -e GOBY_PROBE_TIMEOUT_S -e GOBY_VERIFY_BUDGET_S -e GOBY_MAX_PROBES \
             goby-review
