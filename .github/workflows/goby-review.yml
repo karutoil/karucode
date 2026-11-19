@@ -65,7 +65,7 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository &&
        github.actor != 'dependabot[bot]')
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Check out the reviewer
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -100,13 +100,13 @@ jobs:
           # A review per push while this is being evaluated. The image default is 1: a later
           # push reuses the first review and the post-merge cleaner takes over.
           GOBY_MAX_ROUNDS: "0"
-          # An 18.5k-line pull request is 146 files to navigate. The first review with these
-          # knobs spent 120 turns reading the patch in chunks and reported a partial scan; the
-          # brief now points at per-file `git diff`, and the cap is 300 turns. The deadline still
-          # ends the run; the caps only stop being the reason.
-          GOBY_AGENT_TIMEOUT_S: "1500"
-          GOBY_MAX_TURNS: "300"
-          GOBY_MAX_TOOL_CALLS: "400"
+          # An 18.5k-line pull request is 146 files to navigate. 300 turns with per-file
+          # `git diff` still ended in a partial scan at file ~120, so the cap is 600 turns and
+          # the clock 50 minutes. Routine pull requests stop long before either; the deadline
+          # still ends the run, and a partial scan is reported as one.
+          GOBY_AGENT_TIMEOUT_S: "3000"
+          GOBY_MAX_TURNS: "600"
+          GOBY_MAX_TOOL_CALLS: "800"
           GOBY_VERIFY: advisory
           # A reviewer upgrade does not change the head, the base or the diff, so the reuse
           # check cannot see it. `force` is how a dispatch asks for a fresh pass anyway.
