@@ -16,7 +16,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, waitFor } from '@testing-library/preact';
-import { render as renderPreact, type ComponentChildren } from 'preact';
+import { createPortal, render as renderPreact, type ComponentChildren } from 'preact';
 import { useRef } from 'preact/hooks';
 import { focusableWithin, useFocusTrap } from './dom';
 
@@ -126,17 +126,37 @@ interface TrapProps {
   onEscape?: () => void;
   label: string;
   children: ComponentChildren;
+  /** Render the surface *inside* this element, as a dialog in the shell's main is. */
+  host?: HTMLElement;
 }
 
 /** A minimal surface using the shared trap, so the hook can be driven directly. */
-function Trap({ active = true, onEscape = () => undefined, label, children }: TrapProps) {
+function Trap({ active = true, onEscape = () => undefined, label, children, host }: TrapProps) {
   const ref = useRef<HTMLDivElement>(null);
   useFocusTrap(ref, active, onEscape);
   return (
     <div ref={ref} data-testid={label} aria-label={label}>
-      {children}
+      {host ? createPortal(children, host) : children}
     </div>
   );
+}
+
+/** The trap's content always present, mounted into a host elsewhere in the DOM. */
+function Shell({ active, mount }: { active: boolean; mount: HTMLElement }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useFocusTrap(ref, active, () => undefined);
+  return (
+    <div ref={ref} data-testid="sheet" aria-label="sheet">
+      {createPortal(<button id="inside">Inside</button>, mount)}
+    </div>
+  );
+}
+
+/** Closed the way the shell closes a sheet: same live region, surfaced content gone. */
+function ClosedShell() {
+  const ref = useRef<HTMLDivElement>(null);
+  useFocusTrap(ref, false, () => undefined);
+  return <div ref={ref} data-testid="sheet" aria-label="sheet" />;
 }
 
 describe('useFocusTrap: Escape belongs to the control before the surface', () => {
@@ -321,7 +341,7 @@ describe('useFocusTrap: the page behind a surface does not pan', () => {
     expect(document.body.style.overscrollBehavior).toBe('contain');
     expect(document.documentElement.style.overscrollBehavior).toBe('contain');
 
-    // Some mobile browsers reset the document position when the lock is released.
+    // The browser parked the page at the top while the lock held it down.
     scrollY = 0;
     view.unmount();
 
@@ -330,6 +350,49 @@ describe('useFocusTrap: the page behind a surface does not pan', () => {
     expect(document.body.style.overscrollBehavior).toBe('');
     expect(document.documentElement.style.overscrollBehavior).toBe('');
     expect(scrollTo).toHaveBeenCalledWith(0, 640);
+  });
+
+  it('does not undo a page the reader panned behind the surface', async () => {
+    // On a mobile browser `overflow: hidden` does not stop the page behind the
+    // sheet from panning, and panning it is a deliberate move. Snapping it back
+    // to where the surface was opened would throw that away.
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+    let scrollY = 640;
+    Object.defineProperty(window, 'scrollY', { configurable: true, get: () => scrollY });
+
+    const view = render(
+      <Trap label="sheet">
+        <button>Pin</button>
+      </Trap>,
+    );
+    await waitFor(() =>
+      expect(document.activeElement).toBe(document.querySelector('[aria-label="sheet"] button')),
+    );
+
+    scrollY = 900;
+    view.unmount();
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('leaves a page that never moved exactly where it was', async () => {
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+    let scrollY = 0;
+    Object.defineProperty(window, 'scrollY', { configurable: true, get: () => scrollY });
+
+    const view = render(
+      <Trap label="sheet">
+        <button>Pin</button>
+      </Trap>,
+    );
+    await waitFor(() =>
+      expect(document.activeElement).toBe(document.querySelector('[aria-label="sheet"] button')),
+    );
+
+    // Opened at the top, still at the top: nothing was reset, so nothing is
+    // scrolled - a `scrollTo` here is a jump the reader did not ask for.
+    scrollY = 0;
+    view.unmount();
+    expect(scrollTo).not.toHaveBeenCalled();
   });
 
   it('keeps the lock through a nested surface and releases it once', async () => {
@@ -478,9 +541,88 @@ describe('useFocusTrap: nesting and focus restoration', () => {
     unmount();
     expect(document.activeElement).not.toBe(document.body);
     expect(document.activeElement).toBe(main);
-    // Focusable by programmatic focus only: the next Tab starts at its first
-    // control rather than at the top of the document.
+    // Focusable by programmatic focus only, and only while it has to be: the
+    // attribute is the trap's, so the landmark is left exactly as it was found
+    // and the next Tab still starts at its first control rather than the top.
+    expect(main.hasAttribute('tabindex')).toBe(false);
+  });
+
+  it('leaves a landmark’s own tabindex alone', async () => {
+    const main = document.createElement('main');
+    main.id = 'shell-main';
+    main.setAttribute('tabindex', '-1');
+    document.body.appendChild(main);
+    hosts.push(main);
+
+    const opener = document.createElement('button');
+    document.body.appendChild(opener);
+    hosts.push(opener);
+    opener.focus();
+
+    const { unmount } = render(
+      <Trap label="sheet">
+        <button id="inside">Inside</button>
+      </Trap>,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(document.getElementById('inside')));
+
+    opener.remove();
+    unmount();
+    expect(document.activeElement).toBe(main);
     expect(main.getAttribute('tabindex')).toBe('-1');
+  });
+
+  it('does not hand focus to a landmark wrapped around the surface being closed', async () => {
+    // A dialog rendered inside the shell's <main> used to match the landmark
+    // selector itself: focus landed on a subtree that was about to be removed,
+    // which puts it back on <body> - the bug the landmark exists to prevent. With
+    // nothing else on the page there is no honest place to put focus, so the
+    // teardown must add no `tabindex` to the shell at all.
+    const main = document.createElement('main');
+    main.id = 'shell-main';
+    main.innerHTML = '<div id="shell-mount"></div>';
+    document.body.appendChild(main);
+    hosts.push(main);
+    const mount = main.querySelector<HTMLElement>('#shell-mount');
+    if (!mount) throw new Error('mount point missing');
+
+    const host = document.createElement('div');
+    renderPreact(<Shell active mount={mount} />, host);
+    // The trap's first task focuses its own region; the portal lands in the
+    // landmark's subtree in a later commit, which jsdom will not focus into.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // The sheet closes and the shell replaces its contents in the same commit, so
+    // by the time the trap's cleanup runs the landmark no longer wraps it.
+    renderPreact(<ClosedShell />, host);
+
+    // The fallback ran - an <html>/<body> scroll restore and the release below are
+    // its neighbours - and it had no landmark it was allowed to use.
+    expect(document.body.style.overflow).toBe('');
+    expect(main.hasAttribute('tabindex')).toBe(false);
+  });
+
+  it('does not call <body> an opener worth restoring', async () => {
+    // Nothing was focused when the surface opened, so `activeElement` is <body>.
+    // Handing focus back to it is the "next Tab restarts at the top" case the
+    // landmark fallback exists for, not a restore.
+    const main = document.createElement('main');
+    main.id = 'shell-main';
+    main.innerHTML = '<button id="first">First</button>';
+    document.body.appendChild(main);
+    hosts.push(main);
+
+    const { unmount } = render(
+      <Trap label="sheet">
+        <button id="inside">Inside</button>
+      </Trap>,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(document.getElementById('inside')));
+
+    unmount();
+    // A landmark, not <body>: the fallback ran instead of the restore.
+    expect(document.activeElement).toBe(main);
+    expect(document.activeElement).not.toBe(document.body);
   });
 
   it('returns the stack to the outer surface when the inner one closes', async () => {

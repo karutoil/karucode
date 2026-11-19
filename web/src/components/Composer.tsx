@@ -375,6 +375,12 @@ export const FORM_SCOPE_LIMIT = 24;
  * than keeping one entry too many.
  */
 export function trimFormScopes<K, V>(map: Map<K, V>, limit: number, protect: K): void {
+  // Shed coldest-first. `map.size <= limit` is the target, so a map of 25 with a
+  // limit of 24 sheds one. When the protected scope is the only key left above the
+  // limit the walk runs to the end, which is the documented trade: one entry too
+  // many beats throwing away the box the reader is typing in. Deleting the entry
+  // the iterator is on is well defined - the next `next()` continues from the
+  // following key - so the walk does not stop early at the protected one.
   for (const key of map.keys()) {
     if (map.size <= limit) return;
     if (key === protect) continue;
@@ -1247,7 +1253,10 @@ export function Composer({
               // as text too (copy a file in a file manager and both forms
               // arrive), so the paste has to be claimed: without this the chip
               // *and* "shot.png" typed into the draft are the same paste twice.
-              event.preventDefault();
+              // The paste is only claimed when it is actually used: claiming it on
+              // the refusal path suppressed the text the clipboard also carries
+              // and then dropped the whole gesture, so the reader got nothing
+              // *and* lost the browser default.
               if (!canType) {
                 // A dropped paste looks exactly like a broken clipboard, so say
                 // which it is - the same live region a refused send uses.
@@ -1258,6 +1267,7 @@ export function Composer({
                 );
                 return;
               }
+              event.preventDefault();
               void addFiles(Array.from(files));
             }}
             onKeyDown={(event) => {

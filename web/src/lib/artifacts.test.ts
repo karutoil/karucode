@@ -102,26 +102,42 @@ describe('sniffKind', () => {
     expect(sniffKind('   ')).toBe('unknown');
   });
 
-  it('does not parse a whole 256 KB body just to name it', () => {
-    const payload = JSON.stringify(
-      Array.from({ length: 8_000 }, (_, index) => ({ id: index, name: `item-${index}` })),
-    );
-    expect(payload.length).toBeGreaterThan(200_000);
+  it('rejects a long body on its first character without parsing it', () => {
+    // The head alone cannot answer "is this JSON": a 4 KiB slice of a valid
+    // document ends mid-string. So a long body is *rejected* on the cheap evidence
+    // (it cannot even open a JSON value) and otherwise judged by the full parse -
+    // the same parse the preview would do. Long markdown and CSV never start with
+    // a bracket, so they cost one regex and no parse at all.
     const markdown = Array.from({ length: 6_000 }, (_, index) => `## Heading ${index}`).join('\n');
     const csv = Array.from({ length: 10_000 }, (_, index) => `${index},item ${index},${index % 7}`).join(
       '\n',
     );
 
     const parse = vi.spyOn(JSON, 'parse');
-    expect(sniffKind(payload)).toBe('json');
     expect(sniffKind(markdown)).toBe('markdown');
     expect(sniffKind(csv)).toBe('csv');
+    expect(parse).not.toHaveBeenCalled();
+  });
 
-    // Every body it inspected, it inspected through the head: the largest slice
-    // handed to `JSON.parse` is a few kilobytes, not a quarter of a megabyte.
-    const inspected = parse.mock.calls.map(([text]) => String(text).length);
-    expect(Math.max(...inspected)).toBeLessThanOrEqual(8 * 1024);
-    expect(parse).not.toHaveBeenCalledWith(payload);
+  it('names a real long JSON body json', () => {
+    const payload = JSON.stringify(
+      Array.from({ length: 8_000 }, (_, index) => ({ id: index, name: `item-${index}` })),
+    );
+    expect(payload.length).toBeGreaterThan(200_000);
+    expect(sniffKind(payload)).toBe('json');
+  });
+
+  it('keeps a bracketed log dump out of the JSON pane', () => {
+    // This is what the head-only fallback got wrong: a 4 KiB prefix that merely
+    // *looks* like the start of a JSON value was enough to route the document to
+    // the JSON preview, which then showed a parse error instead of the text view.
+    const log = Array.from({ length: 400 }, (_, index) => `[2024-01-0${index % 9}] started`).join('\n');
+    expect(log.length).toBeGreaterThan(4_096);
+    expect(sniffKind(log)).not.toBe('json');
+
+    const template = Array.from({ length: 400 }, (_, index) => `{name} is required (${index})`).join('\n');
+    expect(template.length).toBeGreaterThan(4_096);
+    expect(sniffKind(template)).not.toBe('json');
   });
 });
 

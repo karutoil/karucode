@@ -573,19 +573,18 @@ def main() -> int:
     server = serve(styles_dir, free_port())
     server_port = server.server_address[1]
 
-    gecko_owned = False
+    gecko: subprocess.Popen | None = None
     if port_in_use(args.port):
         print(f"  reusing the geckodriver already listening on {args.port}", flush=True)
     else:
         LOG_PATH.write_text("")
         with open(LOG_PATH, "ab") as log:
-            subprocess.Popen(
+            gecko = subprocess.Popen(
                 [str(args.geckodriver), "--port", str(args.port)],
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-        gecko_owned = True
         wait_for_port(args.port)
 
     browser: Firefox | None = None
@@ -742,15 +741,20 @@ def main() -> int:
         measured_rings = []
         for starter in ("before-nav", "before-palette"):
             browser.evaluate(f"var el = document.getElementById('{starter}'); if (el) el.focus(); return true;")
+            # Reset per starter: a result must belong to the starter this loop just
+            # walked, never to the previous one.
+            found = None
             # Tab once per hop: Gecko makes a scroll container itself focusable
-            # (`overflow: auto` + keyboard scrolling), so the first Tab lands on
-            # the port and the second on its first row.
+            # (`overflow: auto` + keyboard scrolling), so the first Tab lands on the
+            # port and the second on its first row.
             for _ in range(3):
                 browser.keys(["\ue004"])
                 found = browser.evaluate(RING) or {}
                 if found.get("focused") not in ("session-nav", "palette-list", "table-wrap"):
                     break
-            if found:
+            # Only a row counts as a measured ring: a scrollport has no ring to
+            # judge, and recording it would pass the check on the wrong element.
+            if found and found.get("rowTop") is not None:
                 measured_rings.append(found)
         for found in measured_rings:
             note(
@@ -785,9 +789,15 @@ def main() -> int:
                 print(f"  screenshot: {args.screenshot} ({size} bytes)", flush=True)
             browser.quit()
         server.shutdown()
-        if gecko_owned:
-            # Leave no driver behind, but keep the log for a failed run.
-            subprocess.run(["pkill", "-f", f"geckodriver --port {args.port}"], check=False)
+        # Stop only the driver this run started, by its own process handle: a
+        # `pkill -f 'geckodriver --port N'` would also match (and kill) a driver a
+        # concurrent run or the reader started on that port.
+        if gecko is not None and gecko.poll() is None:
+            gecko.terminate()
+            try:
+                gecko.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                gecko.kill()
 
     print(
         f"\n{len(PASS)} passed, {len(FAIL)} failed"

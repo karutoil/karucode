@@ -18,14 +18,22 @@ let lockedScrollY = 0;
  * Tab restarts at the very top of the app. The shell's landmarks are the
  * structural answer. `tabindex="-1"` keeps a landmark out of the Tab order while
  * still letting it take focus, so the next Tab lands on its first control.
+ *
+ * `closing` is the surface being torn down: a dialog mounted *inside* a landmark
+ * would match the plain selector, and handing focus to something that is about to
+ * be removed puts it right back on `body` — the bug this exists to fix. The
+ * attribute set here is removed again when the trap lets go, so the landmark is
+ * left exactly as it was found.
  */
 const FOCUS_LANDMARK_SELECTOR = 'main, .workbench';
 
-function lastResortFocusTarget(): HTMLElement | null {
-  const landmark = document.querySelector<HTMLElement>(FOCUS_LANDMARK_SELECTOR);
-  if (!landmark) return null;
-  if (!landmark.hasAttribute('tabindex')) landmark.tabIndex = -1;
-  return landmark;
+function lastResortFocusTarget(closing?: HTMLElement | null): HTMLElement | null {
+  const candidates = document.querySelectorAll<HTMLElement>(FOCUS_LANDMARK_SELECTOR);
+  for (const landmark of candidates) {
+    if (closing && (landmark === closing || landmark.contains(closing))) continue;
+    return landmark;
+  }
+  return null;
 }
 
 const FOCUSABLE_SELECTOR = [
@@ -271,21 +279,27 @@ export function useFocusTrap(
         root.style.overflow = baseRootOverflow;
         body.style.overscrollBehavior = baseBodyOverscroll;
         root.style.overscrollBehavior = baseRootOverscroll;
-        // Some mobile browsers reset the document's position when the lock that
-        // stopped it panning is released; the reader was reading here, not at the
-        // top.
+        // Put the position back only when the browser reset it. A page that is
+        // still where it was needs nothing; a page that moved after the lock was
+        // taken was moved by the reader (a mobile browser lets the page behind
+        // pan while `overflow: hidden` is in force), and snapping it back would
+        // throw that away. So the restore exists for exactly one case: a scroll
+        // position the lock had, and the top of the document now.
         const y = typeof window.scrollY === 'number' ? window.scrollY : 0;
-        if (y !== lockedScrollY && typeof window.scrollTo === 'function') {
+        const wasReset = y === 0 && lockedScrollY !== 0;
+        if (wasReset && typeof window.scrollTo === 'function') {
           window.scrollTo(0, lockedScrollY);
         }
       }
-      if (previous && previous.isConnected) previous.focus();
+      if (previous && previous.isConnected && previous !== document.body) previous.focus();
       else {
         // The opener is gone: a transcript row the window swapped out, a menu
         // item a rerun removed. Nothing focused means the next Tab restarts at
         // the top of the document, so focus a landmark instead. Anything already
         // focused *outside* this surface is a deliberate choice — the focus
         // still inside it is this surface's own default and dies with it.
+        // `<body>` is not an opener: it is what "nothing was focused" looks like,
+        // and handing focus back to it is the very thing being avoided.
         const active = document.activeElement;
         const keepsFocus =
           active instanceof HTMLElement &&
@@ -295,7 +309,17 @@ export function useFocusTrap(
         // The restore above is only worth anything if focus does not scroll the
         // landmark it lands on into view: `focus()` pans by default, so the
         // position just put back would move again.
-        if (!keepsFocus) lastResortFocusTarget()?.focus({ preventScroll: true });
+        if (!keepsFocus) {
+          const landmark = lastResortFocusTarget(container);
+          if (landmark) {
+            const hadTabIndex = landmark.hasAttribute('tabindex');
+            if (!hadTabIndex) landmark.tabIndex = -1;
+            landmark.focus({ preventScroll: true });
+            // `tabindex="-1"` was ours, not the landmark's: leaving it behind is a
+            // permanent edit to the shell made from a transient surface.
+            if (!hadTabIndex) landmark.removeAttribute('tabindex');
+          }
+        }
       }
     };
   }, [active, ref]);

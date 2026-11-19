@@ -939,15 +939,23 @@ describe('Composer', () => {
       // A busy composer used to swallow the paste with nothing said, which is
       // indistinguishable from a broken clipboard.
       const { container } = renderComposer({ disabledReason: 'No model configured' });
-      fireEvent.paste(screen.getByLabelText('Message karucode'), {
-        clipboardData: { files: [binaryFile('shot.png')], types: ['Files'] },
+      const paste = createEvent.paste(screen.getByLabelText('Message karucode'), {
+        clipboardData: {
+          files: [binaryFile('shot.png')],
+          types: ['Files', 'text/plain'],
+          getData: () => 'shot.png',
+        },
       });
+      fireEvent(screen.getByLabelText('Message karucode'), paste);
 
       await waitFor(() =>
         expect(container.querySelector('.sr-only[aria-live="polite"]')?.textContent).toContain(
           'Files cannot be attached while the composer is unavailable',
         ),
       );
+      // Refused, so the paste is not claimed: the browser's own text insert still
+      // happens and the reader at least gets the name they copied.
+      expect(paste.defaultPrevented).toBe(false);
       expect(screen.queryByText('shot.png')).toBeNull();
     });
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/preact';
-import { FileViewer } from './FileViewer';
+import { FileViewer, splitLines } from './FileViewer';
 import { errorResponse, jsonResponse, resetAppState } from '../test/fixtures';
 import * as store from '../state/store';
 
@@ -624,5 +624,25 @@ describe('FileViewer', () => {
     // Home goes back to the first tab, which wraps the other way round.
     fireEvent.keyDown(screen.getByRole('tab', { name: /source/i }), { key: 'Home' });
     await waitFor(() => expect(screen.getByTestId('file-preview-markdown')).toBeTruthy());
+  });
+});
+
+describe('splitLines', () => {
+  it('keeps both documents while two are read side by side', () => {
+    // An editor tab and a preview of another file render in the same commit. A
+    // one-slot memo re-split whichever file was not the last one asked for, on
+    // every keystroke - a 2 MiB copy and a ~100 000-element array each time.
+    const left = Array.from({ length: 500 }, (_, index) => `left ${index}`).join('\n');
+    const right = Array.from({ length: 500 }, (_, index) => `right ${index}`).join('\n');
+
+    const first = splitLines(left);
+    splitLines(right);
+    // Same array instance: no second split of `left`.
+    expect(splitLines(left)).toBe(first);
+  });
+
+  it('still splits a document it has never seen', () => {
+    const lines = splitLines('a\nb\nc');
+    expect(lines).toEqual(['a', 'b', 'c']);
   });
 });

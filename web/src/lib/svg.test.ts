@@ -102,4 +102,23 @@ describe('prepareSvg', () => {
     prepareSvg(sources[0] ?? '');
     expect(sanitize).toHaveBeenCalledTimes(6);
   });
+
+  it('does not remember a document that is over the budget by itself', () => {
+    resetSvgCache();
+    // Twice the budget: it is drawn, and never cached, so it cannot evict every
+    // smaller diagram around it only to be evicted again.
+    const huge = SVG(`<text>${'y'.repeat(8 * 1024 * 1024)}</text>`);
+    const small = SVG('<text>small</text>');
+    expect(prepareSvg(small).ok).toBe(true);
+
+    const sanitize = vi.spyOn(DOMPurify, 'sanitize');
+    prepareSvg(huge);
+    prepareSvg(huge);
+    // Parsed both times (never remembered)...
+    expect(sanitize).toHaveBeenCalledTimes(2);
+
+    // ...and the small one it would have evicted is still prepared.
+    prepareSvg(small);
+    expect(sanitize).toHaveBeenCalledTimes(2);
+  });
 });

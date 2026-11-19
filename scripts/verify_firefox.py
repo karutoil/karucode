@@ -65,6 +65,10 @@ FIREFOX_BIN = Path("/tmp/ffpkg/firefox/firefox")
 GECKODRIVER_BIN = Path("/tmp/ffpkg/geckodriver")
 SHOT_DIR = Path("/tmp/ffpkg")
 
+# Headless Gecko will not lay the content viewport out narrower than this, so a
+# phone-width check below it measures the floor and says which width it really got.
+WIDTH_FLOOR = 500
+
 PASS: list[str] = []
 FAIL: list[str] = []
 
@@ -445,10 +449,22 @@ def attribute_errors(lines: list[str], in_page: list[str], base: str) -> tuple[l
       * an exception counts when the URL it names is ours;
       * a `console.error` counts when the page's own collector recorded it, which
         only the page's console object can reach.
+
+    The console match is an *exact* message comparison, not a substring test: a
+    short page message would otherwise match any browser line that happens to
+    contain it, and browser noise would be reported as an app defect.
     """
     attributed: list[str] = []
     ignored: list[str] = []
-    page_messages = [item.split(": ", 1)[-1].strip() for item in in_page]
+    # `shown` is what the page's console.error received, `text` what was rendered.
+    page_messages: set[str] = set()
+    for item in in_page:
+        rest = item.split(": ", 1)[-1].strip()
+        page_messages.add(rest)
+        if " | " in rest:
+            shown, text = rest.split(" | ", 1)
+            page_messages.add(shown.strip())
+            page_messages.add(text.strip())
     for line in lines:
         stripped = line.strip()
         if not stripped or GECKO_OWN_LINE.match(line):
@@ -463,7 +479,7 @@ def attribute_errors(lines: list[str], in_page: list[str], base: str) -> tuple[l
         console = CONSOLE_ERROR.match(stripped)
         if console:
             message = console.group("message").strip()
-            if any(page_message and page_message in message for page_message in page_messages):
+            if message in page_messages:
                 attributed.append(stripped[:400])
             else:
                 ignored.append(stripped[:200])
@@ -798,10 +814,10 @@ def main() -> int:
             """Set the window and report the viewport Firefox actually gives us.
 
             `window/rect` is the outer window, so the viewport loses the chrome
-            height; correct by the measured delta until it settles. The width is
-            a different matter: headless Firefox clamps the content viewport to a
-            floor (500px on this build), so a phone-width request comes back
-            wider and the run says so instead of pretending.
+            height; correct by the measured delta until it settles. Below
+            {@link WIDTH_FLOOR} the engine clamps the content viewport (500px on
+            this build), so the caller is told which width was really measured
+            instead of the run quietly pretending it reached the one it asked for.
             """
             browser.set_window(width, height)
             time.sleep(0.4)
@@ -809,16 +825,26 @@ def main() -> int:
             for _ in range(3):
                 if probe["w"] == width and probe["h"] == height:
                     break
-                browser.set_window(max(320, width + width - probe["w"]), height + height - probe["h"])
+                # Never ask for less than the floor: past it every correction is a
+                # no-op that only adds waiting, and the delta below would keep
+                # subtracting from the requested width.
+                browser.set_window(
+                    max(WIDTH_FLOOR, width + width - probe["w"]), height + height - probe["h"]
+                )
                 time.sleep(0.4)
                 probe = browser.evaluate("return {w: innerWidth, h: innerHeight};")
+            # Say which width the assertions below are really measuring.
+            probe["requested"] = width
+            probe["clamped"] = probe["w"] > width
             return probe
 
         for width, height in ((1440, 900), (1024, 700), (420, 800)):
             viewport = fit(width, height)
             requested = f"{width}x{height}"
             measured = f"{viewport['w']}x{viewport['h']}"
-            clamped = viewport["w"] > width
+            if "clamped" not in viewport:
+                viewport["clamped"] = viewport["w"] > width
+            clamped = viewport["clamped"]
             if clamped:
                 if not width_floor_checked:
                     # Prove the floor rather than assert it: ask for less still.
@@ -828,6 +854,7 @@ def main() -> int:
                          f"content viewport, so the phone layout is measured at its narrowest")
                     width_floor_checked = True
                     viewport = fit(width, height)
+                    viewport["clamped"] = True
                     measured = f"{viewport['w']}x{viewport['h']}"
                 note(f"{requested} requested, Firefox gave a {measured} viewport "
                      f"(content-width floor / window chrome)")

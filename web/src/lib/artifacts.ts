@@ -391,15 +391,28 @@ const JSON_HEAD_CHARS = 4096;
 /** What a JSON value can start with, right after its opening bracket. */
 const JSON_VALUE_START = /^[[{]\s*(?:"|\[|\{|\]|\}|-|\d|true\b|false\b|null\b)/;
 
+/**
+ * Does this document parse as JSON?
+ *
+ * Below {@link JSON_HEAD_CHARS} one `JSON.parse` answers it exactly. Above it, a
+ * parse of the whole body is the megabytes this exists to avoid, and the head
+ * alone cannot answer the question: a head that ends mid-string or mid-array
+ * always fails whatever the document is. So a long body is *rejected* on the
+ * cheap evidence — a first character that cannot open a JSON value — and
+ * otherwise judged by what the preview will actually do with it: the full parse.
+ * That keeps a bracketed log dump (`[2024-01-01] started`, `{name} is required`)
+ * out of the JSON pane, which would otherwise show a parse error instead of the
+ * text view it belongs in, and it hands the sniffer the non-json answer cheaply
+ * for the overwhelming majority of long documents (they do not start with a
+ * bracket at all).
+ */
 function isJson(text: string): boolean {
-  const head = text.length > JSON_HEAD_CHARS ? text.slice(0, JSON_HEAD_CHARS) : text;
+  if (text.length > JSON_HEAD_CHARS && !JSON_VALUE_START.test(text)) return false;
   try {
-    JSON.parse(head);
+    JSON.parse(text);
     return true;
   } catch {
-    // Only a body too long to judge in one parse falls back to its shape; a short
-    // one that failed is not JSON.
-    return text.length > JSON_HEAD_CHARS && JSON_VALUE_START.test(text);
+    return false;
   }
 }
 

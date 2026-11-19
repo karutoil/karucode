@@ -69,25 +69,29 @@ let cachedChars = 0;
  * instance across re-renders) because a hash of an 800 KB document would cost as
  * much as the parse it replaces. Text is immutable, so a hit can share the
  * prepared object between the two cards showing the same drawing.
+ *
+ * Two budgets, and the second one is the hard one: at most {@link MAX_CACHED}
+ * documents, and at most {@link MAX_CACHED_CHARS} characters of source plus
+ * sanitised copy in total. A single document that alone exceeds the byte budget
+ * is drawn but never remembered; once the newest document is the only one left,
+ * the eviction loop *does* drop it, so the total can never sit above the budget
+ * because of the entry that just arrived.
  */
 export function prepareSvg(source: string): PreparedSvg {
   const cached = cache.get(source);
   if (cached !== undefined) return cached;
   const html = sanitizeSvg(source);
   const prepared: PreparedSvg = { html, ok: hasSvgElement(html) };
-  // A document that alone exceeds the budget is drawn but not remembered: keeping
-  // it would evict every other entry and be evicted again on the next one.
-  if (source.length + html.length <= MAX_CACHED_CHARS) {
-    cache.set(source, prepared);
-    cachedChars += source.length + html.length;
-    while (cache.size > MAX_CACHED || cachedChars > MAX_CACHED_CHARS) {
-      const oldest = cache.keys().next();
-      // The entry just inserted always stays, even when it is the only one left.
-      if (oldest.done || cache.size === 1) break;
-      const entry = cache.get(oldest.value);
-      cache.delete(oldest.value);
-      cachedChars -= oldest.value.length + (entry?.html.length ?? 0);
-    }
+  const size = source.length + html.length;
+  if (size > MAX_CACHED_CHARS) return prepared;
+  cache.set(source, prepared);
+  cachedChars += size;
+  while (cache.size > MAX_CACHED || cachedChars > MAX_CACHED_CHARS) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    const entry = cache.get(oldest.value);
+    cache.delete(oldest.value);
+    cachedChars -= oldest.value.length + (entry?.html.length ?? 0);
   }
   return prepared;
 }
