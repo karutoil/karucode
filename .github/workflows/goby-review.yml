@@ -7,8 +7,15 @@ name: Goby Review (verification test)
 #
 # The reviewer is `karutoil/goby` at a pinned commit, built here rather than pulled from a
 # registry: this repository's token cannot read the fork's package, and a build from a pinned
-# SHA is the same bytes with no visibility question. `GOBY_VERIFY=required` is the test: a
-# finding without a reproduction is withheld and counted in the review body.
+# SHA is the same bytes with no visibility question.
+#
+# `GOBY_VERIFY=advisory`: reproduced findings are published with the command that reproduced
+# them; the rest are published with a "Not reproduced" note. `required` would be stronger, but
+# `goby-base` ships no Rust toolchain and no C compiler, so a `cargo test` probe is a setup
+# error here and `required` would withhold most findings in this workspace. The reviewer said
+# exactly that on the first run (pull/32, finding `069a75b60f`). To move to `required`: add
+# rustup + build-essential to the image, `cargo fetch --locked` in both worktrees before the
+# pass, and raise the probe budget below.
 #
 # The gate ("Goby Gate") is off. Turn it on only after this reviewer has run on a few real
 # pull requests: with `required`, a high-severity claim nobody could reproduce fails the gate.
@@ -86,7 +93,12 @@ jobs:
           GOBY_PR: ${{ github.event.pull_request.number || inputs.pr }}
           GOBY_HEAD: ${{ github.event.pull_request.head.sha || inputs.head }}
           GOBY_BASE: ${{ github.event.pull_request.base.sha || inputs.base }}
-          GOBY_VERIFY: required
+          GOBY_VERIFY: advisory
+          # Rust probes compile a workspace, not a snippet: the defaults (90s per probe, 300s
+          # for the pass) are sized for a five-line script.
+          GOBY_PROBE_TIMEOUT_S: "240"
+          GOBY_VERIFY_BUDGET_S: "600"
+          GOBY_MAX_PROBES: "6"
           GOBY_GATE: "off"
         run: |
           docker run --rm \
@@ -94,4 +106,5 @@ jobs:
             -e GITHUB_TOKEN -e OPENAI_API_KEY \
             -e GOBY_PROVIDER -e GOBY_UPSTREAM -e GOBY_MODEL \
             -e GOBY_VERIFY -e GOBY_GATE \
+            -e GOBY_PROBE_TIMEOUT_S -e GOBY_VERIFY_BUDGET_S -e GOBY_MAX_PROBES \
             goby-review
