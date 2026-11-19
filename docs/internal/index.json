@@ -979,7 +979,8 @@
         "ui:ChatView",
         "tool:note",
         "internal:kc-runtime:context-digest",
-        "internal:kc-runtime:compaction-snapshot"
+        "internal:kc-runtime:compaction-snapshot",
+        "internal:kc-provider:prompt_cache_key"
       ],
       "path": "prompt-cache.md",
       "slug": "prompt-cache",

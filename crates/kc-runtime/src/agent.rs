@@ -1543,6 +1543,11 @@ is {})",
                 max_tokens: spec.model.max_tokens,
                 top_p: spec.model.top_p,
                 parallel_tool_calls: spec.model.parallel_tool_calls,
+                // The session is the unit a provider can pin: every request in
+                // it shares one growing prefix, so naming it lets the endpoint
+                // route them back to the same cache instead of re-billing the
+                // whole window on whichever upstream answered this time.
+                prompt_cache_key: Some(spec.session_id.0.clone()),
                 extra_headers: spec
                     .model
                     .extra_headers

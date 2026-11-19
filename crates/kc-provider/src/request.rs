@@ -58,6 +58,20 @@ pub fn models_url(base_url: &str) -> Result<String> {
 pub fn build_chat_body(request: &ChatRequest) -> Value {
     let mut body = Map::new();
     body.insert("model".into(), Value::String(request.model.clone()));
+    // The cache key rides next to the model, not in `extra_body`: it is a
+    // per-request value (this session), so an operator cannot set it in a
+    // profile, and a request that goes to a different model must still name the
+    // session it belongs to so the endpoint can route it back to the same cache.
+    // `extra_body` is merged after this, so a profile that wants its own key
+    // still wins.
+    if let Some(key) = request
+        .prompt_cache_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        body.insert("prompt_cache_key".into(), Value::String(key.to_string()));
+    }
     body.insert(
         "messages".into(),
         Value::Array(messages_json(&request.messages)),
@@ -474,6 +488,7 @@ mod tests {
             max_tokens: None,
             top_p: None,
             parallel_tool_calls: true,
+            prompt_cache_key: None,
             extra_headers: Vec::new(),
             extra_body: Map::new(),
         }
@@ -556,6 +571,34 @@ mod tests {
             .insert("stream_options".into(), serde_json::json!({}));
         let body = build_chat_body(&req);
         assert_eq!(body["stream_options"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn the_prompt_cache_key_names_the_session_and_an_operator_can_override_it() {
+        // Prefix caching needs no key, but *routing* does: an endpoint that
+        // balances several upstream accounts bills the whole window again when
+        // a request lands on an account that has never seen this prefix. The
+        // key is what lets it keep a session where its cache already lives.
+        let mut req = request();
+        assert_eq!(build_chat_body(&req).get("prompt_cache_key"), None);
+        req.prompt_cache_key = Some("s_abc123".into());
+        let body = build_chat_body(&req);
+        assert_eq!(body["prompt_cache_key"], "s_abc123");
+
+        // Empty or whitespace-only is "no key", never an empty string on the
+        // wire: a provider would treat that as its own key and group every
+        // such request together.
+        for empty in ["", "   "] {
+            req.prompt_cache_key = Some(empty.into());
+            assert_eq!(build_chat_body(&req).get("prompt_cache_key"), None);
+        }
+
+        // A profile that needs its own key still wins, exactly like every other
+        // field an operator reaches into `extra_body` for.
+        req.prompt_cache_key = Some("s_abc123".into());
+        req.extra_body
+            .insert("prompt_cache_key".into(), serde_json::json!("operator"));
+        assert_eq!(build_chat_body(&req)["prompt_cache_key"], "operator");
     }
 
     #[test]

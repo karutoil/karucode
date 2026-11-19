@@ -19,6 +19,25 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     pub top_p: Option<f32>,
     pub parallel_tool_calls: bool,
+    /// A stable identity for this conversation's prefix, sent as
+    /// `prompt_cache_key` when set.
+    ///
+    /// Prefix caching itself needs nothing from the client: an endpoint caches
+    /// the leading tokens of a request and bills the rest, which is why the
+    /// prefix karucode sends is append-only between compactions. What a key buys
+    /// is **routing**: OpenAI keeps requests naming the same key on the same
+    /// cache shard, and an OpenAI-compatible gateway that balances several
+    /// upstream accounts reads it as the session to pin (the same field a
+    /// client-side id would use, without inventing a proprietary header).
+    ///
+    /// Measured against this install's gateway, one 12,086-token request
+    /// repeated as a session would repeat it: `100%`, `0%`, `100%`, `0%` cached
+    /// while the gateway's session-affinity TTL was 0. The bytes were identical;
+    /// the requests were served by different upstream accounts, each with its
+    /// own cold cache, and the gateway logged "no available affinity target" for
+    /// every one because the client never said which session it was. The key is
+    /// what it needs to be able to pin.
+    pub prompt_cache_key: Option<String>,
     pub extra_headers: Vec<(String, String)>,
     pub extra_body: serde_json::Map<String, serde_json::Value>,
 }

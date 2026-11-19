@@ -7,7 +7,7 @@
 
 - **Slug:** `prompt-cache`
 - **Tags:** cache, caching, cost, context, compaction, tokens, performance, provider
-- **Applies to:** `config:limits.context_max_chars`, `config:limits.max_context_messages`, `config:limits.max_tool_output_bytes`, `config:limits.max_image_read_bytes`, `config:limits.max_tool_calls_per_turn`, `config:limits.model_compaction`, `config:limits.compaction_model`, `config:limits.compaction_max_tokens`, `config:limits.compaction_timeout_secs`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_MAX_TOOL_OUTPUT_BYTES`, `route:GET /api/events`, `ui:ChatView`, `tool:note`, `internal:kc-runtime:context-digest`, `internal:kc-runtime:compaction-snapshot`
+- **Applies to:** `config:limits.context_max_chars`, `config:limits.max_context_messages`, `config:limits.max_tool_output_bytes`, `config:limits.max_image_read_bytes`, `config:limits.max_tool_calls_per_turn`, `config:limits.model_compaction`, `config:limits.compaction_model`, `config:limits.compaction_max_tokens`, `config:limits.compaction_timeout_secs`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_MAX_TOOL_OUTPUT_BYTES`, `route:GET /api/events`, `ui:ChatView`, `tool:note`, `internal:kc-runtime:context-digest`, `internal:kc-runtime:compaction-snapshot`, `internal:kc-provider:prompt_cache_key`
 - **Source:** `crates/kc-runtime/src/context.rs:88`
 
 ---
@@ -23,6 +23,34 @@ the first message differs, so the cost of a long run is decided by one thing:
 
 Verified against a real gateway: appending a turn to an identical prefix hit
 99.0% of 9,055 prompt tokens; changing a single earlier message hit 0%.
+
+## Identical bytes can still miss: the cache belongs to an account
+
+The prepend half is not the whole story, and on a gated endpoint it is not
+even the larger half. A cache entry lives on **the upstream that answered**,
+not on the model id you asked for. An OpenAI-compatible gateway is free to
+spread one model id across several upstream accounts (key pools, quota
+failover, "priority" combos), and each of those has its own empty cache. The
+prefix can be byte-identical and still be re-billed in full, because this
+request was served somewhere the earlier one was not.
+
+Measured on one install's gateway with one 12,086-token request, resent
+unchanged as a session resends it: `100%`, `0%`, `100%`, `0%` cached. Not the
+bytes - the routing. A week of real calls on the same install splits the miss
+into very different populations:
+
+| | share |
+|---|---|
+| steady-state requests (each reusing its predecessor, only the new turn new) | **99.0% cached** |
+| the necessarily-new text itself, i.e. the ceiling for the week | 0.95% of all prompt tokens |
+| requests billed cold (<50% cached) | **76.5% of every uncached token** |
+| the week as a whole, measured | 95.4% cached |
+
+So when a session reads 96% while its requests are 40-60k tokens, the number
+is not saying "the cache is broken turn by turn". It is saying "roughly one
+request in a session was billed cold, and a whole window is expensive". Both
+halves are addressed below: karucode keeps the bytes stable, and it names the
+session so the endpoint *can* keep it in one place.
 
 ## How karucode keeps the prefix stable
 
@@ -378,5 +406,15 @@ budget cannot fix without inventing a different call.
   not move that counter.
 * Two tool calls with the same arguments in the same turn are not de-duplicated;
   only the warning above is raised.
-* `prompt_cache_key` (OpenAI) is not sent. Prefix caching works without it; the
-  key only improves routing across cache shards on very large providers.
+* **Every request names its session** (`prompt_cache_key`, the session id).
+  Prefix caching needs nothing from the client, but *routing* does. OpenAI
+  uses the field to keep a conversation on one cache shard; an
+  OpenAI-compatible gateway uses it - the same field it already reads as a
+  session identity - to pin the session to one upstream account instead of
+  answering from whichever account its pool handed out. Without it a gateway
+  can only guess "which session is this" from a hash of the system prompt, so
+  every session on the install competes for one pin and a request that misses
+  it is billed cold. `extra_body.prompt_cache_key` still overrides it per
+  profile. This is *the* setting to check first when the rate is flat at
+  95-97% instead of 99%: the prefix is `in`, `out` and `P% cached` on the HUD,
+  and a cold request reads as a whole-window miss however stable the bytes are.

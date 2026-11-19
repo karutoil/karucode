@@ -805,6 +805,7 @@ mod tests {
             max_tokens: None,
             top_p: None,
             parallel_tool_calls: false,
+            prompt_cache_key: None,
             extra_headers: Vec::new(),
             extra_body: serde_json::Map::new(),
         };

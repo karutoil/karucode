@@ -59,6 +59,7 @@ fn full_request() -> ChatRequest {
         max_tokens: None,
         top_p: None,
         parallel_tool_calls: false,
+        prompt_cache_key: None,
         extra_headers: vec![("x-request-header".into(), "yes".into())],
         extra_body: serde_json::Map::from_iter([("seed".to_string(), serde_json::json!(7))]),
     }
@@ -211,6 +212,33 @@ async fn request_body_and_headers_match_the_wire_contract() {
     assert_eq!(messages[3]["content"], "file contents");
     assert_eq!(messages[3]["tool_call_id"], "call_1");
     assert_eq!(messages[3]["name"], "read_file");
+}
+
+#[tokio::test]
+async fn the_session_identity_reaches_the_endpoint_on_the_wire() {
+    // A gateway that pools several upstream accounts for one model id bills the
+    // whole window again when a request lands on an account whose cache has
+    // never seen this prefix. Measured on this install: one 12,086-token
+    // request, byte-identical each time, came back 100%, 0%, 100%, 0% cached
+    // while the gateway had nothing to pin it by. So the body carries the
+    // session, on the wire, not just in the type.
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, OK_SSE).await }).await;
+    let provider = OpenAiProvider::new(base_config(&server)).unwrap();
+    let mut request = full_request();
+    request.prompt_cache_key = Some("s_5a2e9bd3a9c04b2195023f24b4cf7c59".into());
+    drain(
+        provider
+            .stream_chat(request, CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    let body = server.wait_for_request().await.json();
+    assert_eq!(body["prompt_cache_key"], "s_5a2e9bd3a9c04b2195023f24b4cf7c59");
+    // It is a routing hint, never part of the conversation the model reads.
+    assert_eq!(body["messages"].as_array().unwrap().len(), 4);
 }
 
 #[tokio::test]

@@ -180,6 +180,7 @@ fn title_request(model: &ModelConfig, prompt: &str, titles: &TitlesConfig) -> Ch
         max_tokens: Some((max_chars as u32).saturating_mul(4).clamp(32, 512)),
         top_p: None,
         parallel_tool_calls: false,
+        prompt_cache_key: None,
         extra_headers: model
             .extra_headers
             .iter()

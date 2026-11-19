@@ -54,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_tokens: None,
         top_p: None,
         parallel_tool_calls: true,
+        prompt_cache_key: None,
         extra_body: Default::default(),
         extra_headers: Default::default(),
         admission: None,
