@@ -269,12 +269,23 @@ export async function refreshAccessSettings(): Promise<AccessSettingsSummary | n
 }
 
 /** Re-fetch the onboarding state (after a step, or after finishing). */
-export async function refreshOnboarding(): Promise<OnboardingState | null> {
+/**
+ * Read the onboarding state, and commit it only if this run still owns the boot.
+ *
+ * `isCurrent` is passed in because the read is awaited: a superseded run must not
+ * write `store.onboarding`, and must certainly not `enterAuthState()` for a 401
+ * that belongs to a boot which has already been replaced.
+ */
+export async function refreshOnboarding(
+  isCurrent: () => boolean = () => true,
+): Promise<OnboardingState | null> {
   try {
     const state = await api.getOnboarding();
+    if (!isCurrent()) return null;
     store.onboarding.value = state;
     return state;
   } catch (error) {
+    if (!isCurrent()) return null;
     if (isUnauthorized(error)) {
       enterAuthState();
       return null;
@@ -1131,6 +1142,10 @@ export async function bootstrap(force = false): Promise<void> {
         api.getConfig(),
         api.listProjects(),
       ]);
+      // Ownership is checked before *every* write, not once at the end: a boot
+      // superseded while its reads were in flight must not leave its project
+      // list and session list beside the newer run's chat.
+      if (!isCurrent()) return;
       store.health.value = health;
       store.config.value = config;
       store.projects.value = projectList.projects;
@@ -1154,6 +1169,7 @@ export async function bootstrap(force = false): Promise<void> {
       const { sessions: list, annotations } = await api.listSessionsWithAnnotations(
         project?.id ?? null,
       );
+      if (!isCurrent()) return;
       // The same invariant as every other write: a boot with no project reads the
       // unscoped list, which contains control chats and every project's rows.
       store.sessions.value = projectSessionsOnly(list);
@@ -1173,7 +1189,7 @@ export async function bootstrap(force = false): Promise<void> {
       // The wizard runs before the workspace does, and only once: the server
       // persists the completion marker, so an established install is never
       // interrupted by it.
-      const onboardingState = await refreshOnboarding();
+      const onboardingState = await refreshOnboarding(isCurrent);
       if (!isCurrent()) return;
       if (onboardingState?.needed) {
         store.boot.value = 'onboarding';

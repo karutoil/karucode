@@ -197,6 +197,45 @@ describe('bootstrap failure', () => {
     expect(store.bootError.value).toBeNull();
   });
 
+  it('never lets a superseded boot leave its session list behind', async () => {
+    // Ownership used to be checked once, at the end: a boot superseded while its
+    // session read was in flight still committed that list, so the newer run's
+    // transcript sat beside the older run's rows.
+    const staleRead = deferred<Response>();
+    let staleFired = false;
+    let sessionCalls = 0;
+    stubFetch((url) => {
+      if (url.startsWith('/api/sessions')) {
+        sessionCalls += 1;
+        if (!staleFired) {
+          staleFired = true;
+          return staleRead.promise;
+        }
+      }
+      return healthy(url);
+    });
+
+    const stale = actions.bootstrap(true);
+    // Wait until the stale run is parked on its session read...
+    await vi.waitFor(() => expect(sessionCalls).toBe(1));
+    // ...then supersede it. The newer run reads from the live handler.
+    const fresh = actions.bootstrap(true);
+    await fresh;
+    expect(store.boot.value).toBe('ready');
+
+    // The stale read completes last, carrying a row the current run never saw.
+    staleRead.resolve(
+      new Response(JSON.stringify({ sessions: [{ id: 'stale_row', title: 'stale' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    await stale;
+
+    expect(store.sessions.value.some((row) => row.id === 'stale_row')).toBe(false);
+    expect(store.boot.value).toBe('ready');
+  });
+
   it('never lets a superseded boot paint its own outcome over the newer one', async () => {
     // Retry starts a second boot while the first is still waiting on the server.
     // The older one used to be the last writer: its failure landed after the

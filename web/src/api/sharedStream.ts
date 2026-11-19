@@ -194,7 +194,16 @@ export function startSharedEventStream(options: EventStreamOptions): EventStream
 
   const setState = (next: StreamState, detail?: StatusDetail): void => {
     state = next;
-    options.onStatus?.(next, detail);
+    // A caller's callback must not decide whether the election can continue:
+    // this runs inside `closing` handling, and an exception here used to stop
+    // the takeover from scheduling its claim, so the last tab never reconnected.
+    try {
+      options.onStatus?.(next, detail);
+    } catch (error) {
+      // Same rule as `events.ts`'s `safely`: a subscriber bug must not take the
+      // stream (or the election) down with it.
+      console.error('karucode: status handler threw', error);
+    }
   };
 
   /** Forget any claim or heartbeat this tab scheduled. */
