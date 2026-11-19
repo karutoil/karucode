@@ -1,0 +1,97 @@
+name: Goby Review (verification test)
+
+# A sandboxed, agentic review with a mechanical second opinion: the reviewer records the
+# command that demonstrates each finding, and the harness re-runs it on the head and on the
+# merge base before anything is published. Only "fails on head, passes on the base" is a bug
+# this change introduces.
+#
+# The reviewer is `karutoil/goby` at a pinned commit, built here rather than pulled from a
+# registry: this repository's token cannot read the fork's package, and a build from a pinned
+# SHA is the same bytes with no visibility question. `GOBY_VERIFY=required` is the test: a
+# finding without a reproduction is withheld and counted in the review body.
+#
+# The gate ("Goby Gate") is off. Turn it on only after this reviewer has run on a few real
+# pull requests: with `required`, a high-severity claim nobody could reproduce fails the gate.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+      head:
+        description: Head commit SHA
+        required: true
+      base:
+        description: Base commit SHA
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: goby-review-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+env:
+  GOBY_REPO_UNDER_TEST: ${{ github.repository }}
+  # Pinned: the fork's `main` after the verification pass merged. A reviewer that changes when
+  # someone pushes is not evidence.
+  GOBY_REVIEWER_REPO: karutoil/goby
+  GOBY_REVIEWER_REF: 838d4810c837772e51971375c6ba430e1495e056
+
+jobs:
+  review:
+    name: goby
+    # Fork and Dependabot runs do not receive repository secrets, so they cannot reach the
+    # model. Skip them instead of failing, and never fall back to `pull_request_target`.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.draft == false &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.actor != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the reviewer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ env.GOBY_REVIEWER_REPO }}
+          ref: ${{ env.GOBY_REVIEWER_REF }}
+          path: .goby
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build the reviewer image
+        run: |
+          docker build -t goby-base .goby/base
+          docker build -t goby-review -f .goby/review/Dockerfile .goby
+
+      - name: Review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The same gateway the zero-loop workflow uses. The key stays in the runner's
+          # environment: goby writes it to a root-only file and the agent only ever sees a
+          # dummy behind a loopback proxy.
+          OPENAI_API_KEY: ${{ secrets.ZERO_LOOP_LLM_API_KEY }}
+          # `custom` is any OpenAI-compatible endpoint. The host only, no `/v1`: the agent's
+          # models file names the path, and the proxy prepends the upstream's own.
+          GOBY_PROVIDER: custom
+          GOBY_UPSTREAM: https://omni.karutoil.site
+          GOBY_MODEL: ${{ vars.ZERO_LOOP_MODEL }}
+          GOBY_REPO: ${{ env.GOBY_REPO_UNDER_TEST }}
+          GOBY_PR: ${{ github.event.pull_request.number || inputs.pr }}
+          GOBY_HEAD: ${{ github.event.pull_request.head.sha || inputs.head }}
+          GOBY_BASE: ${{ github.event.pull_request.base.sha || inputs.base }}
+          GOBY_VERIFY: required
+          GOBY_GATE: "off"
+        run: |
+          docker run --rm \
+            -e GOBY_REPO -e GOBY_PR -e GOBY_HEAD -e GOBY_BASE \
+            -e GITHUB_TOKEN -e OPENAI_API_KEY \
+            -e GOBY_PROVIDER -e GOBY_UPSTREAM -e GOBY_MODEL \
+            -e GOBY_VERIFY -e GOBY_GATE \
+            goby-review
