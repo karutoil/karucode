@@ -62,7 +62,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 walkdir = "2"
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "trace", "cors", "compression-gzip"] }
+tower-http = { version = "0.7", features = ["fs", "trace", "cors", "compression-gzip"] }
 # `debug-embed` makes dev builds embed the UI too: rust-embed's default is to
 # read the folder from disk at runtime in debug builds, which quietly turned
 # `cargo run` into a build that needed `web/dist` on the machine.
