@@ -201,6 +201,10 @@ jobs:
             echo
             sed -n '1,220p' "$RUNNER_TEMP/zero-loop-review.txt"
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" -eq 2 ]; then
+            echo "Human review is advisory; the review was posted and the job will not fail."
+            exit 0
+          fi
           exit "$code"
 
       - name: Upload review receipts
