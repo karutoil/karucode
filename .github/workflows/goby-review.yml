@@ -33,6 +33,10 @@ on:
       base:
         description: Base commit SHA
         required: true
+      force:
+        description: Re-review even if this head already has a receipt
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -48,7 +52,7 @@ env:
   # Pinned: the fork's `main` after the verification pass merged. A reviewer that changes when
   # someone pushes is not evidence.
   GOBY_REVIEWER_REPO: karutoil/goby
-  GOBY_REVIEWER_REF: c71a316641b07492f8492d75e49ed7721e319011
+  GOBY_REVIEWER_REF: c3d7da0d9fa70b476b57c128ccae3ba8a6d2293e
 
 jobs:
   review:
@@ -104,6 +108,9 @@ jobs:
           GOBY_MAX_TURNS: "300"
           GOBY_MAX_TOOL_CALLS: "400"
           GOBY_VERIFY: advisory
+          # A reviewer upgrade does not change the head, the base or the diff, so the reuse
+          # check cannot see it. `force` is how a dispatch asks for a fresh pass anyway.
+          GOBY_FORCE: ${{ inputs.force && '1' || '' }}
           # Rust probes compile a workspace, not a snippet: the defaults (90s per probe, 300s
           # for the pass) are sized for a five-line script.
           GOBY_PROBE_TIMEOUT_S: "240"
@@ -116,6 +123,6 @@ jobs:
             -e GITHUB_TOKEN -e OPENAI_API_KEY \
             -e GOBY_PROVIDER -e GOBY_UPSTREAM -e GOBY_MODEL \
             -e GOBY_VERIFY -e GOBY_GATE -e GOBY_MAX_ROUNDS \
-            -e GOBY_AGENT_TIMEOUT_S -e GOBY_MAX_TURNS -e GOBY_MAX_TOOL_CALLS \
+            -e GOBY_AGENT_TIMEOUT_S -e GOBY_MAX_TURNS -e GOBY_MAX_TOOL_CALLS -e GOBY_FORCE \
             -e GOBY_PROBE_TIMEOUT_S -e GOBY_VERIFY_BUDGET_S -e GOBY_MAX_PROBES \
             goby-review
