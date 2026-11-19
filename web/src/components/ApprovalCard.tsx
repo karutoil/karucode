@@ -3,6 +3,7 @@ import type { JsonValue } from '../api/types';
 import type { ApprovalView } from '../state/chat';
 import { AlertIcon } from './icons';
 import { DiffView } from './DiffView';
+import { Button } from '../ui';
 
 export interface ApprovalCardProps {
   approval: ApprovalView;
@@ -117,30 +118,29 @@ export function ApprovalCard({ approval, resolving, onDecide }: ApprovalCardProp
       <div class="approval-actions">
         {pending ? (
           <>
-            <button
-              type="button"
-              class="button button-primary"
+            <Button
+              variant="primary"
               disabled={resolving}
+              testId="approval-allow-once"
               onClick={() => onDecide('allow_once')}
             >
               Allow once
-            </button>
-            <button
-              type="button"
-              class="button"
+            </Button>
+            <Button
               disabled={resolving}
+              testId="approval-allow-session"
               onClick={() => onDecide('allow_session')}
             >
               Allow for session
-            </button>
-            <button
-              type="button"
-              class="button button-danger-ghost"
+            </Button>
+            <Button
+              variant="danger-ghost"
               disabled={resolving}
+              testId="approval-deny"
               onClick={() => onDecide('deny')}
             >
               Deny
-            </button>
+            </Button>
             <span class="approval-hint" role="status">
               {resolving ? 'Sending decision…' : 'The run is waiting for this decision.'}
             </span>

@@ -55,3 +55,22 @@
 @import './onboarding.css' layer(components);
 @import './theme-studio.css' layer(components);
 @import './workbench.css' layer(components);
+
+/* The last six sheets to move. They were imported by the component that owned
+ * them (`Notifications`, the sessions rail, the control-plane shell and its three
+ * regions), which left them *outside* every layer: an unlayered rule beats a
+ * layered one whatever the specificity, so a `p-*`/`text-*` utility did nothing
+ * inside those surfaces. They are here now, after `layout.css` and
+ * `workbench.css`, so a region still wins a tie against the workbench vocabulary
+ * it extends - `control-shared.css` first, because the three region sheets are
+ * written against the vocabulary it declares. Their selectors reach the shared
+ * classes only through a descendant (`.cp-chat .chat-inner`,
+ * `.control-plane .rail-avatar[data-tone]`, `.rail .project-switcher-item`), so
+ * each one is more specific than the sheet it adjusts: the move changes nothing
+ * for those rules, it only lets the utilities layer reach them. */
+@import './notifications.css' layer(components);
+@import './workbench-navigation.css' layer(components);
+@import './control-shared.css' layer(components);
+@import './control-rail.css' layer(components);
+@import './control-overview.css' layer(components);
+@import './control-session.css' layer(components);

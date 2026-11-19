@@ -109,6 +109,12 @@ describe('AgentsTab', () => {
       [...container.querySelectorAll('.agent-card .agent-name')].map((node) => node.textContent),
     ).toEqual(['a_live', 'a_done', 'a_failed']);
     expect(screen.getByText('1 running · 3 total')).not.toBeNull();
+    // One line, one sentence: the count note must not run into its kicker. JSX
+    // drops the newline between text and an element, so "Agents" and the note
+    // read as "Agents1 running · 3 total" to a screen reader without the space.
+    expect(container.querySelector('.inspector-kicker')?.textContent).toBe(
+      'Agents 1 running · 3 total',
+    );
     // Every status has a filter chip with its count, including zeros.
     expect(screen.getByRole('button', { name: /All/ })).not.toBeNull();
     expect(screen.getByRole('button', { name: /Failed/ })).not.toBeNull();
@@ -139,13 +145,16 @@ describe('AgentsTab', () => {
     expect(tab.querySelector('.tab-count')?.textContent).toBe('2');
   });
 
-  it('filters the list to one status', () => {
+  it('filters the list to one status', async () => {
     store.agentsAll.value = [
       agent('a_done', { status: 'completed' }),
       agent('a_failed', { status: 'failed' }),
     ];
     const { container } = render(<AgentsTab />);
 
+    // The tab reads the roster on mount, so the list arrives after a round trip
+    // rather than at first paint.
+    await screen.findByRole('button', { name: /Failed/ });
     fireEvent.click(screen.getByRole('button', { name: /Failed/ }));
     expect(
       [...container.querySelectorAll('.agent-card .agent-name')].map((node) => node.textContent),
@@ -153,7 +162,7 @@ describe('AgentsTab', () => {
 
     // An empty filtered list explains itself instead of looking like no agents.
     fireEvent.click(screen.getByRole('button', { name: /Cancelled/ }));
-    expect(screen.getByText('No agents match this filter')).not.toBeNull();
+    expect(await screen.findByText('No agents match this filter')).not.toBeNull();
   });
 
   it('shows the project and the current session as two scopes', () => {
@@ -277,10 +286,23 @@ describe('AgentsTab', () => {
     );
   });
 
-  it('explains the empty state', () => {
+  it('explains the empty state', async () => {
     render(<AgentsTab />);
-    expect(screen.getByText('No subagents yet')).not.toBeNull();
+    expect(await screen.findByText('No subagents yet')).not.toBeNull();
     expect(screen.getByText('0 running · 0 total')).not.toBeNull();
+  });
+
+  /**
+   * The roster is a round trip. Before it returns, "No subagents yet" is a claim
+   * about the project that has not been answered yet, and a reader who opened the
+   * tab to check on a fan-out would be told nothing was delegated.
+   */
+  it('does not claim emptiness while the first read is in flight', async () => {
+    // A read that never settles in this test: the in-flight state is the subject.
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    render(<AgentsTab />);
+    expect(await screen.findByText("Reading this project's agents…")).not.toBeNull();
+    expect(screen.queryByText('No subagents yet')).toBeNull();
   });
 
   /**

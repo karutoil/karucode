@@ -13,6 +13,7 @@ import {
   TrashIcon,
   UploadIcon,
 } from '../icons';
+import { Button, Checkbox, IconButton, Input, Select } from '../../ui';
 import { remoteNameProblem } from './gitModel';
 import type { ConfirmRequest } from './GitConfirmDialog';
 
@@ -147,19 +148,17 @@ export function GitRemotesView({
                   : `${remoteList.length} remote${remoteList.length === 1 ? '' : 's'} configured`}
               </p>
             </div>
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Refresh remotes"
+            <IconButton
+              label="Refresh remotes"
               title="Refresh remotes"
+              testId="git-remotes-refresh"
+              icon={<RefreshIcon size={14} />}
               disabled={busy}
               onClick={() => {
                 onLoadRemotes();
                 onLoadGitHubStatus();
               }}
-            >
-              <RefreshIcon size={14} />
-            </button>
+            />
           </div>
 
           {remoteList.length > 0 ? (
@@ -177,12 +176,13 @@ export function GitRemotesView({
                     </div>
                     {editing?.name === remote.name ? (
                       <form class="gitm-inline-edit" onSubmit={submitEdit}>
-                        <input
+                        <Input
                           type="text"
                           class="gitm-input"
                           aria-label={`URL for ${remote.name}`}
                           value={editing.url}
                           disabled={busy}
+                          testId={`git-remote-url-${remote.name}`}
                           onInput={(event) =>
                             setEditing({
                               name: remote.name,
@@ -190,17 +190,24 @@ export function GitRemotesView({
                             })
                           }
                         />
-                        <button type="submit" class="button button-small button-primary" disabled={busy}>
+                        <Button
+                          type="submit"
+                          variant="primary"
+                          size="sm"
+                          testId="git-remote-url-save"
+                          disabled={busy}
+                        >
                           Save
-                        </button>
-                        <button
-                          type="button"
-                          class="button button-small"
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          testId="git-remote-url-cancel"
                           disabled={busy}
                           onClick={() => setEditing(null)}
                         >
                           Cancel
-                        </button>
+                        </Button>
                       </form>
                     ) : (
                       <code class="gitm-remote-url">
@@ -209,11 +216,13 @@ export function GitRemotesView({
                     )}
                   </div>
                   <div class="gitm-remote-actions">
-                    <button
-                      type="button"
+                    <IconButton
+                      size="sm"
                       class="gitm-act"
-                      aria-label={`Edit URL for ${remote.name}`}
+                      label={`Edit URL for ${remote.name}`}
                       title="Edit remote URL"
+                      testId={`git-remote-edit-${remote.name}`}
+                      icon={<EditIcon size={13} />}
                       disabled={busy}
                       onClick={() =>
                         setEditing({
@@ -221,14 +230,14 @@ export function GitRemotesView({
                           url: remote.fetch_url ?? remote.push_url ?? '',
                         })
                       }
-                    >
-                      <EditIcon size={13} />
-                    </button>
-                    <button
-                      type="button"
-                      class="gitm-act is-danger"
-                      aria-label={`Remove remote ${remote.name}`}
+                    />
+                    <IconButton
+                      size="sm"
+                      class="gitm-act is-danger text-danger"
+                      label={`Remove remote ${remote.name}`}
                       title={`Remove ${remote.name}`}
+                      testId={`git-remote-remove-${remote.name}`}
+                      icon={<TrashIcon size={13} />}
                       disabled={busy}
                       onClick={() =>
                         onRequestConfirm({
@@ -240,9 +249,7 @@ export function GitRemotesView({
                           },
                         })
                       }
-                    >
-                      <TrashIcon size={13} />
-                    </button>
+                    />
                   </div>
                 </li>
               ))}
@@ -256,13 +263,14 @@ export function GitRemotesView({
                 <label class="sr-only" for={nameId}>
                   Remote name
                 </label>
-                <input
+                <Input
                   id={nameId}
                   type="text"
                   class="gitm-input"
                   placeholder="origin"
                   value={addName}
                   disabled={busy}
+                  testId="git-remote-add-name"
                   onInput={(event) => setAddName((event.target as HTMLInputElement).value)}
                 />
               </div>
@@ -270,23 +278,27 @@ export function GitRemotesView({
                 <label class="sr-only" for={urlId}>
                   Remote URL
                 </label>
-                <input
+                <Input
                   id={urlId}
                   type="text"
                   class="gitm-input"
                   placeholder="https://github.com/owner/repo.git"
                   value={addUrl}
                   disabled={busy}
+                  testId="git-remote-add-url"
                   onInput={(event) => setAddUrl((event.target as HTMLInputElement).value)}
                 />
               </div>
-              <button
+              <Button
                 type="submit"
-                class="button button-primary"
+                variant="primary"
+                size="sm"
+                icon={<PlusIcon size={13} />}
+                testId="git-remote-add-submit"
                 disabled={busy || nameProblem !== null || addName.trim() === '' || addUrl.trim() === ''}
               >
-                <PlusIcon size={13} /> Add
-              </button>
+                Add
+              </Button>
             </div>
             {nameProblem ? (
               <p class="gitm-field-error" role="status">
@@ -299,45 +311,44 @@ export function GitRemotesView({
             <div class="gitm-sync-box">
               <h4 class="gitm-label">Remote sync</h4>
               <div class="gitm-sync-toggles">
-                <label class="gitm-check">
-                  <input
-                    type="checkbox"
-                    checked={fetchPrune}
-                    disabled={busy}
-                    onChange={(event) => setFetchPrune((event.target as HTMLInputElement).checked)}
-                  />
-                  <span>Prune deleted branches on fetch</span>
-                </label>
-                <label class="gitm-check">
-                  <input
-                    type="checkbox"
-                    checked={pullRebase}
-                    disabled={busy}
-                    onChange={(event) => setPullRebase((event.target as HTMLInputElement).checked)}
-                  />
-                  <span>Rebase on pull</span>
-                </label>
+                <Checkbox
+                  class="gitm-check"
+                  checked={fetchPrune}
+                  disabled={busy}
+                  label="Prune deleted branches on fetch"
+                  onChange={(checked) => setFetchPrune(checked)}
+                />
+                <Checkbox
+                  class="gitm-check"
+                  checked={pullRebase}
+                  disabled={busy}
+                  label="Rebase on pull"
+                  onChange={(checked) => setPullRebase(checked)}
+                />
               </div>
               <div class="gitm-sync-buttons">
-                <button
-                  type="button"
-                  class="button"
+                <Button
+                  variant="secondary"
+                  icon={<RefreshIcon size={13} />}
+                  testId="git-fetch-all"
                   disabled={busy}
                   onClick={() => void onFetch({ all: true, prune: fetchPrune })}
                 >
-                  <RefreshIcon size={13} /> Fetch all
-                </button>
-                <button
-                  type="button"
-                  class="button"
+                  Fetch all
+                </Button>
+                <Button
+                  variant="secondary"
+                  icon={<DownloadIcon size={13} />}
+                  testId="git-pull"
                   disabled={busy || !status?.branch}
                   onClick={() => void onPull({ rebase: pullRebase })}
                 >
-                  <DownloadIcon size={13} /> Pull{status?.behind ? ` (↓${status.behind})` : ''}
-                </button>
-                <button
-                  type="button"
-                  class="button button-primary"
+                  Pull{status?.behind ? ` (↓${status.behind})` : ''}
+                </Button>
+                <Button
+                  variant="primary"
+                  icon={<UploadIcon size={13} />}
+                  testId="git-push"
                   disabled={busy || !status?.branch}
                   onClick={() =>
                     void onPush({
@@ -345,15 +356,14 @@ export function GitRemotesView({
                     })
                   }
                 >
-                  <UploadIcon size={13} />{' '}
                   {status?.upstream
                     ? `Push${status.ahead ? ` (↑${status.ahead})` : ''}`
                     : 'Publish branch'}
-                </button>
+                </Button>
                 {status?.upstream ? (
-                  <button
-                    type="button"
-                    class="button"
+                  <Button
+                    variant="secondary"
+                    testId="git-force-push"
                     disabled={busy}
                     onClick={() =>
                       onRequestConfirm({
@@ -368,7 +378,7 @@ export function GitRemotesView({
                     }
                   >
                     Force push
-                  </button>
+                  </Button>
                 ) : null}
               </div>
             </div>
@@ -454,12 +464,13 @@ export function GitRemotesView({
                 <label class="gitm-label" for={ghNameId}>
                   Repository name
                 </label>
-                <input
+                <Input
                   id={ghNameId}
                   type="text"
                   class="gitm-input"
                   value={ghName}
                   disabled={busy}
+                  testId="git-repo-name"
                   onInput={(event) => setGhName((event.target as HTMLInputElement).value)}
                 />
               </div>
@@ -467,53 +478,56 @@ export function GitRemotesView({
                 <label class="gitm-label" for={ghDescId}>
                   Description (optional)
                 </label>
-                <input
+                <Input
                   id={ghDescId}
                   type="text"
                   class="gitm-input"
                   placeholder="Short description"
                   value={ghDesc}
                   disabled={busy}
+                  testId="git-repo-description"
                   onInput={(event) => setGhDesc((event.target as HTMLInputElement).value)}
                 />
               </div>
               <div class="gitm-field-grid">
                 <div class="gitm-field">
                   <span class="gitm-label">Visibility</span>
-                  <select
+                  <Select
                     class="gitm-select"
                     aria-label="Repository visibility"
                     value={ghVisibility}
                     disabled={busy}
+                    testId="git-repo-visibility"
+                    options={[
+                      { value: 'private', label: 'Private' },
+                      { value: 'public', label: 'Public' },
+                      { value: 'internal', label: 'Internal' },
+                    ]}
                     onChange={(event) =>
                       setGhVisibility(
                         (event.target as HTMLSelectElement).value as 'private' | 'public' | 'internal',
                       )
                     }
-                  >
-                    <option value="private">Private</option>
-                    <option value="public">Public</option>
-                    <option value="internal">Internal</option>
-                  </select>
-                </div>
-                <label class="gitm-check">
-                  <input
-                    type="checkbox"
-                    checked={ghPush}
-                    disabled={busy || !status?.has_head}
-                    onChange={(event) => setGhPush((event.target as HTMLInputElement).checked)}
                   />
-                  <span>Push commits now</span>
-                </label>
+                </div>
+                <Checkbox
+                  class="gitm-check"
+                  checked={ghPush}
+                  disabled={busy || !status?.has_head}
+                  label="Push commits now"
+                  onChange={(checked) => setGhPush(checked)}
+                />
               </div>
               <div class="gitm-setup-actions">
-                <button
+                <Button
                   type="submit"
-                  class="button button-primary"
+                  variant="primary"
+                  icon={<CheckIcon size={13} />}
+                  testId="git-repo-create"
                   disabled={busy || ghName.trim() === ''}
                 >
-                  <CheckIcon size={13} /> Create GitHub repository
-                </button>
+                  Create GitHub repository
+                </Button>
               </div>
             </form>
           ) : null}

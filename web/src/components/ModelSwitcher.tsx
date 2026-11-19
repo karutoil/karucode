@@ -7,6 +7,7 @@ import * as actions from '../state/actions';
 import * as store from '../state/store';
 import type { ModelSelection } from '../state/store';
 import { CheckIcon, ChevronDownIcon, CpuIcon, SearchIcon, SparkIcon } from './icons';
+import { Badge, Button, Input, LinkButton, StatusDot, Text } from '../ui';
 
 /**
  * Composer model + reasoning controls.
@@ -151,12 +152,16 @@ function usePopover(
  * The reasoning picker's list is short and fixed, so it keeps this walk. The
  * model picker does not: it has a filter field, and a hook that moves focus on
  * every key would pull the caret out of the field the reader is typing in.
+ *
+ * Rows are found by their own DOM id rather than a data attribute, because the
+ * row is a `Button` from `src/ui` and the kit does not take arbitrary `data-*`.
  */
 function useRovingOptions(
   open: boolean,
   selectedKey: string,
   keys: readonly string[],
   listbox: { current: HTMLElement | null },
+  listboxId: string,
 ): { activeKey: string; onKeyDown: (event: KeyboardEvent) => void } {
   const [traversalKey, setTraversalKey] = useState(selectedKey);
   const signature = keys.join('\0');
@@ -169,10 +174,8 @@ function useRovingOptions(
 
   useEffect(() => {
     if (!open) return;
-    const option = Array.from(listbox.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])
-      .find((candidate) => candidate.dataset.optionKey === activeKey);
-    option?.focus();
-  }, [open, activeKey, signature, listbox]);
+    findRow(listbox.current, listboxId, activeKey)?.focus();
+  }, [open, activeKey, signature, listbox, listboxId]);
 
   const onKeyDown = (event: KeyboardEvent): void => {
     // The phone sheet holds a reasoning group beside the model list. Arrow keys
@@ -183,8 +186,7 @@ function useRovingOptions(
     const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
     if (step === 0 && event.key !== 'Home' && event.key !== 'End') return;
     const options = keys.filter((key) => {
-      const element = Array.from(listbox.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])
-        .find((candidate) => candidate.dataset.optionKey === key);
+      const element = findRow(listbox.current, listboxId, key);
       return element && !element.hasAttribute('disabled');
     });
     if (options.length === 0) return;
@@ -300,6 +302,29 @@ function optionKey(option: ModelOption): string {
   return `${option.providerId}:${option.modelId}`;
 }
 
+/** The DOM id of one listbox row, derived from the key it stands for. */
+function rowDomId(listboxId: string, key: string): string {
+  return `${listboxId}--${key.replace(/[^a-zA-Z0-9_-]+/g, '-')}`;
+}
+
+/**
+ * The rendered row for `key`, or `undefined` when the filter has hidden it.
+ *
+ * Every row lookup goes through here so the roving tab stop, the scroll-into-view
+ * and the arrow-key walk agree on what "row N" is.
+ */
+function findRow(
+  listbox: HTMLElement | null,
+  listboxId: string,
+  key: string,
+): HTMLElement | undefined {
+  if (!listbox) return undefined;
+  const id = rowDomId(listboxId, key);
+  return Array.from(listbox.querySelectorAll<HTMLElement>('[role="option"]')).find(
+    (row) => row.id === id,
+  );
+}
+
 /**
  * What a row says to a screen reader: the model, where it runs, and the facts
  * the chips draw. The chips themselves are decorative — this is the sentence
@@ -367,16 +392,15 @@ export function ModelSwitcher(): JSX.Element | null {
       return;
     }
     const rows = Array.from(listbox.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? []);
-    (rows.find((row) => row.dataset.optionKey === selectedKey) ?? rows[0])?.focus();
-  }, [open, phone, selectedKey]);
+    (findRow(listbox.current, listboxId, selectedKey) ?? rows[0])?.focus();
+  }, [open, phone, selectedKey, listboxId]);
 
   // A long list opens at the top; the model this session is on may be far down
   // it. Scrolling the row into view is what makes the checkmark findable.
   useEffect(() => {
     if (!open) return;
-    const rows = Array.from(listbox.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? []);
-    rows.find((row) => row.dataset.optionKey === selectedKey)?.scrollIntoView({ block: 'nearest' });
-  }, [open, selectedKey]);
+    findRow(listbox.current, listboxId, selectedKey)?.scrollIntoView({ block: 'nearest' });
+  }, [open, selectedKey, listboxId]);
 
   // A session is open - or a draft, which is a conversation that has not been
   // created yet: the pills stay mounted, and a choice made here travels in the
@@ -467,8 +491,7 @@ export function ModelSwitcher(): JSX.Element | null {
   /** Move the roving tab stop and the real focus onto one row. */
   const focusOption = (key: string): void => {
     setTraversalKey(key);
-    const rows = Array.from(listbox.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? []);
-    rows.find((row) => row.dataset.optionKey === key)?.focus();
+    findRow(listbox.current, listboxId, key)?.focus();
   };
 
   /**
@@ -542,9 +565,10 @@ export function ModelSwitcher(): JSX.Element | null {
 
   return (
     <div class="model-switcher" ref={root}>
-      <button
-        ref={trigger}
-        type="button"
+      <Button
+        buttonRef={trigger}
+        variant="ghost"
+        size="sm"
         class="model-switcher-button"
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="listbox"
@@ -570,7 +594,7 @@ export function ModelSwitcher(): JSX.Element | null {
           ) : null}
         </span>
         <ChevronDownIcon size={12} class="down" />
-      </button>
+      </Button>
 
       {open ? (
         <div
@@ -584,15 +608,15 @@ export function ModelSwitcher(): JSX.Element | null {
         >
           <label class="model-switcher-search">
             <SearchIcon size={13} />
-            <input
-              ref={search}
+            <Input
+              inputRef={search}
               type="search"
               class="model-switcher-filter"
               placeholder="Filter models"
               aria-label="Filter models"
               aria-controls={filtered.length > 0 ? listboxId : undefined}
-              autocomplete="off"
-              spellcheck={false}
+              autoComplete="off"
+              spellCheck={false}
               value={query}
               onInput={(event) => {
                 setQuery(event.currentTarget.value);
@@ -600,11 +624,11 @@ export function ModelSwitcher(): JSX.Element | null {
                 setTraversalKey('');
               }}
             />
-            <span class="model-switcher-count" aria-live="polite">
+            <Text as="span" size="micro" tone="muted" class="model-switcher-count" aria-live="polite">
               {query.trim() === ''
                 ? `${options.length} ${options.length === 1 ? 'model' : 'models'}`
                 : `${filtered.length} of ${options.length}`}
-            </span>
+            </Text>
           </label>
 
           <div class="model-switcher-scroll">
@@ -612,15 +636,14 @@ export function ModelSwitcher(): JSX.Element | null {
               // A fresh install with no models is not a filter that matched
               // nothing: there is no query to clear, and the fix is the footer's
               // own door into Settings.
-              <p class="model-switcher-empty" role="status">
+              <Text as="p" size="small" tone="muted" role="status" class="model-switcher-empty">
                 No models configured yet. Add one under <strong>Models &amp; providers</strong>.
-              </p>
+              </Text>
             ) : filtered.length === 0 ? (
-              <p class="model-switcher-empty" role="status">
+              <Text as="p" size="small" tone="muted" role="status" class="model-switcher-empty">
                 No model matches “{query.trim()}”.
-                <button
-                  type="button"
-                  class="link-button"
+                <LinkButton
+                  class="model-switcher-clear"
                   onClick={() => {
                     setQuery('');
                     setTraversalKey('');
@@ -628,8 +651,8 @@ export function ModelSwitcher(): JSX.Element | null {
                   }}
                 >
                   Clear filter
-                </button>
-              </p>
+                </LinkButton>
+              </Text>
             ) : (
               <div
                 ref={listbox}
@@ -649,54 +672,80 @@ export function ModelSwitcher(): JSX.Element | null {
                     role="group"
                     aria-label={`${group.providerName}${group.providerKeySet ? '' : ', no API key'}`}
                   >
-                    <p class="model-switcher-group-title">
+                    <Text
+                      as="p"
+                      size="micro"
+                      tone="muted"
+                      weight="bold"
+                      class="model-switcher-group-title"
+                    >
                       {group.providerName}
-                      {group.providerKeySet ? null : <span class="model-switcher-warn">no key</span>}
-                    </p>
+                      {group.providerKeySet ? null : (
+                        <Text as="span" size="micro" tone="warn" class="model-switcher-warn">
+                          <StatusDot tone="warn" />
+                          no key
+                        </Text>
+                      )}
+                    </Text>
                     {group.models.map((option) => {
                       const key = optionKey(option);
                       const active = option.providerId === providerId && option.modelId === modelId;
                       const busy = mutationPending && pendingTarget === key;
                       return (
-                        <button
-                          type="button"
+                        <Button
+                          key={key}
+                          id={rowDomId(listboxId, key)}
                           role="option"
                           aria-selected={active}
                           aria-label={optionLabel(option)}
-                          class={`model-switcher-option${active ? ' is-active' : ''}`}
-                          key={key}
-                          data-option-key={key}
+                          variant={active ? 'secondary' : 'ghost'}
+                          size="sm"
+                          class="model-switcher-option min-h-[34px]"
                           tabIndex={activeKey === key ? 0 : -1}
                           disabled={mutationPending}
                           onClick={() => void choose(option)}
                         >
-                          <span class="model-switcher-option-main">
-                            <span class="model-switcher-option-name">{option.modelName}</span>
-                            <code class="model-switcher-option-id">{option.modelId}</code>
-                          </span>
-                          <span class="model-switcher-option-meta">
-                            {busy ? (
-                              'Switching…'
-                            ) : (
-                              <span class="model-switcher-chips" aria-hidden="true">
-                                {option.contextWindow ? (
-                                  <span
-                                    class="model-chip"
-                                    title={`${option.contextWindow.toLocaleString()} tokens of context`}
-                                  >
-                                    {formatContextWindow(option.contextWindow)} ctx
-                                  </span>
-                                ) : null}
-                                {option.toolCall === false ? (
-                                  <span class="model-chip model-chip-warn">no tools</span>
-                                ) : null}
-                                {option.vision ? <span class="model-chip">vision</span> : null}
-                                {option.reasoning ? <span class="model-chip">reasoning</span> : null}
-                                {active ? <CheckIcon size={13} /> : null}
+                          <span class="flex w-full items-start justify-between gap-4 text-left">
+                            <span class="model-switcher-option-main">
+                              <span
+                                class={
+                                  active
+                                    ? 'model-switcher-option-name text-accent-text'
+                                    : 'model-switcher-option-name'
+                                }
+                              >
+                                {option.modelName}
                               </span>
-                            )}
+                              <code class="model-switcher-option-id">{option.modelId}</code>
+                            </span>
+                            <span class="model-switcher-option-meta">
+                              {busy ? (
+                                'Switching…'
+                              ) : (
+                                <span class="model-switcher-chips" aria-hidden="true">
+                                  {option.contextWindow ? (
+                                    <Badge
+                                      class="model-chip"
+                                      title={`${option.contextWindow.toLocaleString()} tokens of context`}
+                                    >
+                                      {formatContextWindow(option.contextWindow)} ctx
+                                    </Badge>
+                                  ) : null}
+                                  {option.toolCall === false ? (
+                                    <Badge tone="warn" class="model-chip model-chip-warn">
+                                      no tools
+                                    </Badge>
+                                  ) : null}
+                                  {option.vision ? <Badge class="model-chip">vision</Badge> : null}
+                                  {option.reasoning ? (
+                                    <Badge class="model-chip">reasoning</Badge>
+                                  ) : null}
+                                  {active ? <CheckIcon size={13} /> : null}
+                                </span>
+                              )}
+                            </span>
                           </span>
-                        </button>
+                        </Button>
                       );
                     })}
                   </div>
@@ -718,26 +767,37 @@ export function ModelSwitcher(): JSX.Element | null {
               role="group"
               aria-label="Reasoning effort for this session"
             >
-              <p class="model-switcher-group-title">
+              <Text
+                as="p"
+                size="micro"
+                tone="muted"
+                weight="bold"
+                class="model-switcher-group-title"
+              >
                 Reasoning
-                {dangling ? <span class="model-switcher-warn">unavailable</span> : null}
-              </p>
+                {dangling ? (
+                  <Text as="span" size="micro" tone="warn" class="model-switcher-warn">
+                    <StatusDot tone="warn" />
+                    unavailable
+                  </Text>
+                ) : null}
+              </Text>
               <div class="reasoning-choices">
                 {effortChoices.map((option) => {
                   const active = option.value === (effort ?? 'default');
                   return (
-                    <button
+                    <Button
                       key={option.value}
-                      type="button"
+                      variant={active ? 'primary' : 'secondary'}
+                      size="sm"
                       class="reasoning-choice"
                       aria-pressed={active}
-                      data-active={active ? 'true' : 'false'}
                       disabled={mutationPending || dangling}
                       title={option.description}
                       onClick={() => void chooseEffort(option.value)}
                     >
                       {option.label}
-                    </button>
+                    </Button>
                   );
                 })}
               </div>
@@ -747,18 +807,14 @@ export function ModelSwitcher(): JSX.Element | null {
 
           <div class="model-switcher-footer">
             {pinned ? (
-              <button
-                type="button"
-                class="link-button"
+              <LinkButton
                 disabled={mutationPending}
                 onClick={() => void followDefault()}
               >
                 {mutationPending && pendingTarget === 'default' ? 'Resetting…' : 'Follow install default'}
-              </button>
+              </LinkButton>
             ) : null}
-            <button
-              type="button"
-              class="link-button"
+            <LinkButton
               disabled={mutationPending}
               onClick={() => {
                 setOpen(false);
@@ -766,7 +822,7 @@ export function ModelSwitcher(): JSX.Element | null {
               }}
             >
               Manage providers and models
-            </button>
+            </LinkButton>
           </div>
         </div>
       ) : null}
@@ -782,12 +838,19 @@ export function ReasoningSelector(): JSX.Element | null {
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const listbox = useRef<HTMLDivElement>(null);
+  const listboxId = useId();
   const mutationPending = sessionId !== null && store.sessionModelMutationPending.value === sessionId;
   const { providerId, modelId, pinned, effort } = effectiveSelection();
   const options = effortOptions(store.offeredReasoningLevels.value);
   const DEFAULT_OPTION = options[0] as ReasoningOption;
   const current = options.find((option) => option.value === (effort ?? 'default')) ?? DEFAULT_OPTION;
-  const roving = useRovingOptions(open, current.value, options.map((option) => option.value), listbox);
+  const roving = useRovingOptions(
+    open,
+    current.value,
+    options.map((option) => option.value),
+    listbox,
+    listboxId,
+  );
   usePopover(open, () => setOpen(false), root, trigger);
 
   // Same gate as the model picker: a session (or a draft) is open, so the picker
@@ -827,9 +890,10 @@ export function ReasoningSelector(): JSX.Element | null {
 
   return (
     <div class="model-switcher reasoning-selector" ref={root}>
-      <button
-        ref={trigger}
-        type="button"
+      <Button
+        buttonRef={trigger}
+        variant="ghost"
+        size="sm"
         class="model-switcher-button reasoning-selector-button"
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="listbox"
@@ -852,7 +916,7 @@ export function ReasoningSelector(): JSX.Element | null {
           </span>
         </span>
         <ChevronDownIcon size={12} class="down" />
-      </button>
+      </Button>
 
       {open ? (
         <div
@@ -865,23 +929,36 @@ export function ReasoningSelector(): JSX.Element | null {
           {options.map((option) => {
             const active = option.value === current.value;
             return (
-              <button
-                type="button"
+              <Button
+                key={option.value}
+                id={rowDomId(listboxId, option.value)}
                 role="option"
                 aria-selected={active}
-                class={`model-switcher-option${active ? ' is-active' : ''}`}
-                key={option.value}
-                data-option-key={option.value}
+                variant={active ? 'secondary' : 'ghost'}
+                size="sm"
+                class="model-switcher-option min-h-[34px]"
                 tabIndex={roving.activeKey === option.value ? 0 : -1}
                 disabled={mutationPending}
                 onClick={() => void choose(option.value)}
               >
-                <span class="model-switcher-option-main">
-                  <span class="model-switcher-option-name">{option.label}</span>
-                  <code class="model-switcher-option-id">{option.description}</code>
+                <span class="flex w-full items-start justify-between gap-4 text-left">
+                  <span class="model-switcher-option-main">
+                    <span
+                      class={
+                        active
+                          ? 'model-switcher-option-name text-accent-text'
+                          : 'model-switcher-option-name'
+                      }
+                    >
+                      {option.label}
+                    </span>
+                    <code class="model-switcher-option-id">{option.description}</code>
+                  </span>
+                  <span class="model-switcher-option-meta">
+                    {active ? <CheckIcon size={13} /> : null}
+                  </span>
                 </span>
-                <span class="model-switcher-option-meta">{active ? <CheckIcon size={13} /> : null}</span>
-              </button>
+              </Button>
             );
           })}
         </div>

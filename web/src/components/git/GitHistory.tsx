@@ -6,6 +6,7 @@ import { relativeTime } from '../../lib/format';
 import { contextMenuProps, Menu, MenuItem, useMenu } from '../../lib/menu';
 import * as store from '../../state/store';
 import { CommitIcon, LayersIcon, PlusIcon, TrashIcon, UndoIcon } from '../icons';
+import { IconButton, LinkButton } from '../../ui';
 
 export interface GitHistoryProps {
   variant: 'page' | 'panel';
@@ -74,13 +75,13 @@ function CommitRow({
       class={`gitm-row gitm-commit-row${active ? ' is-active' : ''}`}
       {...contextMenuProps(menu, undefined, () => mainRef.current)}
     >
-      <button
-        ref={mainRef}
-        type="button"
+      <LinkButton
+        buttonRef={mainRef}
+        tone="muted"
         class="gitm-row-main"
         aria-pressed={active}
-        onClick={onSelect}
         title={`${commit.short_id} ${commit.subject}`}
+        onClick={onSelect}
       >
         <span class="gitm-badge is-info" aria-hidden="true">
           <CommitIcon size={11} />
@@ -99,7 +100,7 @@ function CommitRow({
           ))}
           <code class="gitm-sha">{commit.short_id}</code>
         </span>
-      </button>
+      </LinkButton>
       <Menu menu={menu} float label={`Commit actions for ${commit.short_id}`}>
         <MenuItem
           menu={menu}
@@ -158,30 +159,30 @@ export function GitHistory({
     <div class={`gitm-history gitm-history-${variant}`}>
       <section class="gitm-group" aria-label="History">
         <header class="gitm-group-head">
-          <button
-            type="button"
+          <LinkButton
+            tone="muted"
             class="gitm-group-toggle"
             aria-expanded={open}
-            onClick={toggle}
             title="Recent commits on this branch"
+            onClick={toggle}
           >
             <span class="gitm-group-chevron" aria-hidden="true">
               <CommitIcon size={12} />
             </span>
             <span class="gitm-group-label">History</span>
             <span class="gitm-group-note">{stateSummary(commits)}</span>
-          </button>
+          </LinkButton>
           <span class="gitm-group-actions">
-            <button
-              type="button"
+            <IconButton
+              size="sm"
               class="gitm-act"
+              label="Reload the history"
               title="Reload the history"
-              aria-label="Reload the history"
+              testId="git-history-reload"
+              icon={<UndoIcon size={14} />}
               disabled={busy}
               onClick={onLoadHistory}
-            >
-              <UndoIcon size={14} />
-            </button>
+            />
           </span>
         </header>
         {open ? (
@@ -206,16 +207,16 @@ export function GitHistory({
 
       <section class="gitm-group" aria-label="Stashes">
         <header class="gitm-group-head">
-          <button
-            type="button"
+          <LinkButton
+            tone="muted"
             class="gitm-group-toggle"
             aria-expanded={stashOpen}
+            title="Stashed working trees"
             onClick={() => {
               const next = !stashOpen;
               setStashOpen(next);
               if (next && stashes === null) onLoadStashes();
             }}
-            title="Stashed working trees"
           >
             <span class="gitm-group-chevron" aria-hidden="true">
               <LayersIcon size={12} />
@@ -224,28 +225,28 @@ export function GitHistory({
             <span class="gitm-group-note">
               {stashes === null ? 'not loaded' : stashes.length === 0 ? 'empty' : `${stashes.length}`}
             </span>
-          </button>
+          </LinkButton>
           <span class="gitm-group-actions">
-            <button
-              type="button"
+            <IconButton
+              size="sm"
               class="gitm-act"
+              label="Stash changes"
               title="Stash the tracked changes"
-              aria-label="Stash changes"
+              testId="git-stash-push"
+              icon={<PlusIcon size={14} />}
               disabled={busy || !dirty}
               onClick={() => onStash('push', false)}
-            >
-              <PlusIcon size={14} />
-            </button>
-            <button
-              type="button"
+            />
+            <IconButton
+              size="sm"
               class="gitm-act"
+              label="Stash all changes including untracked files"
               title="Stash all changes, untracked files included"
-              aria-label="Stash all changes including untracked files"
+              testId="git-stash-push-untracked"
+              icon={<LayersIcon size={14} />}
               disabled={busy || !dirty}
               onClick={() => onStash('push', true)}
-            >
-              <LayersIcon size={14} />
-            </button>
+            />
           </span>
         </header>
         {stashOpen ? (
@@ -269,26 +270,26 @@ export function GitHistory({
                     </span>
                   </span>
                   <span class="gitm-row-actions">
-                    <button
-                      type="button"
+                    <IconButton
+                      size="sm"
                       class="gitm-act"
+                      label={`Pop ${stash.ref}`}
                       title="Restore and drop this stash"
-                      aria-label={`Pop ${stash.ref}`}
+                      testId={`git-stash-pop-${stash.ref}`}
+                      icon={<UndoIcon size={14} />}
                       disabled={busy}
                       onClick={() => onStashEntry('pop', stash)}
-                    >
-                      <UndoIcon size={14} />
-                    </button>
-                    <button
-                      type="button"
-                      class="gitm-act is-danger"
+                    />
+                    <IconButton
+                      size="sm"
+                      class="gitm-act is-danger text-danger"
+                      label={`Drop ${stash.ref}`}
                       title="Drop this stash (as a reminder: it cannot be undone here)"
-                      aria-label={`Drop ${stash.ref}`}
+                      testId={`git-stash-drop-${stash.ref}`}
+                      icon={<TrashIcon size={14} />}
                       disabled={busy}
                       onClick={() => onStashEntry('drop', stash)}
-                    >
-                      <TrashIcon size={14} />
-                    </button>
+                    />
                   </span>
                 </li>
               ))}

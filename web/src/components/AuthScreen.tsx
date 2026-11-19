@@ -130,7 +130,12 @@ export function AuthScreen(): JSX.Element {
             <p class="auth-subtitle">
               {address ? (
                 <>
-                  Continue to
+                  {/* The space is part of the sentence. JSX drops the newline
+                      before an element, and the 4px flex gap that separates the
+                      two boxes is visual only: a copied sentence or a screen
+                      reader's name for this line has no gap to rely on, so
+                      without it they read "Continue to127.0.0.1:8787". */}
+                  Continue to{' '}
                   <span class="auth-server" title={address}>
                     {addressIsTls ? <LockIcon size={11} /> : null}
                     <span class="auth-server-address">{address}</span>

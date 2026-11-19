@@ -1,11 +1,22 @@
 import type { JSX } from 'preact';
+import { Suspense } from 'preact/compat';
 import { ChatView } from '../components/ChatView';
-import { ControlPlane } from '../components/control-plane/ControlPlane';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { ProjectRail } from '../components/ProjectRail';
 import { SessionsRail } from '../components/SessionsRail';
 import { controlPlaneOpen } from '../state/controlPlane';
+import { Skeleton } from '../ui';
 import * as store from '../state/store';
+import { lazyNamed } from '../lib/lazyView';
+
+// Mission control is the heaviest screen in the app - three regions, its own
+// snapshot store and a poll - and it lives behind one button. It travels as its
+// own chunk so the workspace's first paint never waits for a screen the reader
+// may not open.
+const ControlPlaneLazy = lazyNamed(
+  () => import('../components/control-plane/ControlPlane'),
+  'ControlPlane',
+);
 
 export function WorkbenchLayout(): JSX.Element {
   return (
@@ -36,7 +47,17 @@ export function WorkbenchLayout(): JSX.Element {
         ) : null}
         {controlPlaneOpen.value ? (
           <ErrorBoundary scope="Mission control">
-            <ControlPlane />
+            <Suspense
+              fallback={
+                // The fallback holds the grid cell the screen will take over, so
+                // the rail and the chat column do not reflow when the chunk lands.
+                <div class="flex-1 min-w-0 p-6" aria-busy="true">
+                  <Skeleton label="Loading mission control" class="h-32 w-full" />
+                </div>
+              }
+            >
+              <ControlPlaneLazy />
+            </Suspense>
           </ErrorBoundary>
         ) : (
           <>

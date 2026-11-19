@@ -7,6 +7,7 @@ import { contextMenuProps, Menu, MenuItem, useMenu } from '../lib/menu';
 import type { TerminalSocketStatus } from '../state/terminalSocket';
 import * as terminalsState from '../state/terminals';
 import { AlertIcon, CloseIcon, EditIcon, PlusIcon, RefreshIcon, TerminalIcon } from './icons';
+import { Badge, Button, IconButton, Input } from '../ui';
 
 /**
  * xterm is ~200 kB of emulator, and a user who never opens the terminal tab
@@ -69,13 +70,15 @@ export function TerminalTab(): JSX.Element {
           <AlertIcon size={20} />
           <p class="terminal-empty-title">Could not load terminals</p>
           <p>{error}</p>
-          <button
-            type="button"
-            class="button button-small"
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<RefreshIcon size={13} />}
+            testId="terminal-load-retry"
             onClick={() => void terminalsState.loadTerminals()}
           >
-            <RefreshIcon size={13} /> Try again
-          </button>
+            Try again
+          </Button>
         </div>
       </div>
     );
@@ -153,9 +156,15 @@ export function TerminalTab(): JSX.Element {
               {' '}&mdash;{' '}
               the tabs themselves are stored on the server.
             </p>
-            <button type="button" class="button button-small accent" onClick={createFirst}>
-              <PlusIcon size={13} /> New terminal
-            </button>
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<PlusIcon size={13} />}
+              testId="terminal-create-first"
+              onClick={createFirst}
+            >
+              New terminal
+            </Button>
             {terminalsState.terminalShell.value ? (
               <p class="terminal-empty-hint">
                 Shell: <code>{terminalsState.terminalShell.value}</code>
@@ -265,20 +274,22 @@ function TerminalStrip({
             revealTab={revealTab}
           />
         ))}
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="sm"
           class="terminal-new"
-          onClick={() => void create()}
+          icon={<PlusIcon size={12} />}
+          testId="terminal-new"
           disabled={atBudget || creating}
           title={
             atBudget
               ? `At the ${budget}-terminal limit (terminals.max_terminals)`
               : 'New terminal'
           }
+          onClick={() => void create()}
         >
-          <PlusIcon size={12} />
-          <span>New</span>
-        </button>
+          New
+        </Button>
       </div>
       <p class="terminal-count">
         {list.length}/{budget}
@@ -351,36 +362,33 @@ function TerminalChip({
         <span class="terminal-dot" aria-hidden="true" />
         <span class="terminal-chip-label">{terminal.title}</span>
         {terminal.running ? null : (
-          <span class="terminal-chip-badge" title="The shell has exited">
+          <Badge class="terminal-chip-badge" title="The shell has exited">
             exited
-          </span>
+          </Badge>
         )}
       </button>
       {renaming ? (
-        <TerminalRenameInput
-          terminal={terminal}
-          onDone={onDoneRename}
-        />
+        <TerminalRenameInput terminal={terminal} onDone={onDoneRename} />
       ) : (
         <>
-          <button
-            type="button"
+          <IconButton
+            size="sm"
             class="terminal-chip-action"
-            aria-label={`Rename ${terminal.title}`}
+            label={`Rename ${terminal.title}`}
             title="Rename"
+            testId={`terminal-rename-${terminal.id}`}
+            icon={<EditIcon size={11} />}
             onClick={onStartRename}
-          >
-            <EditIcon size={11} />
-          </button>
-          <button
-            type="button"
+          />
+          <IconButton
+            size="sm"
             class="terminal-chip-action"
-            aria-label={`Close ${terminal.title}`}
+            label={`Close ${terminal.title}`}
             title="Close (ends the shell)"
+            testId={`terminal-close-${terminal.id}`}
+            icon={<CloseIcon size={11} />}
             onClick={() => void terminalsState.closeTerminal(terminal.id)}
-          >
-            <CloseIcon size={11} />
-          </button>
+          />
         </>
       )}
       <Menu menu={menu} float label={`Terminal actions for ${terminal.title}`}>
@@ -422,11 +430,12 @@ function TerminalRenameInput({
   };
 
   return (
-    <input
-      ref={inputRef}
+    <Input
+      inputRef={inputRef}
       class="terminal-rename-input"
       value={value}
       aria-label={`Rename ${terminal.title}`}
+      testId="terminal-rename-input"
       maxLength={80}
       onInput={(event) => setValue((event.target as HTMLInputElement).value)}
       onBlur={commit}

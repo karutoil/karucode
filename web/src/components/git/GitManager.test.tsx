@@ -311,7 +311,13 @@ describe('GitManager — full-width source control view', () => {
     await waitFor(() => expect(posts(calls, '/api/git/unstage')).toHaveLength(1));
     expect(posts(calls, '/api/git/unstage')[0]?.body).toEqual({ paths: ['src/plugins/manifest.rs'] });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Stage all Untracked' }));
+    // The group actions are disabled while that unstage is in flight (`busy`), and
+    // the `IconButton` they render from refuses a disabled click - as a browser
+    // does. Wait for the mutation to settle, then stage the group like a person
+    // who saw the buttons come back.
+    const stageAll = screen.getByRole('button', { name: 'Stage all Untracked' }) as HTMLButtonElement;
+    await waitFor(() => expect(stageAll.disabled).toBe(false));
+    fireEvent.click(stageAll);
     await waitFor(() => expect(posts(calls, '/api/git/stage')).toHaveLength(1));
     expect(posts(calls, '/api/git/stage')[0]?.body).toEqual({ paths: ['tests/plugin_lifecycle.rs'] });
   });

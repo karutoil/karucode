@@ -177,7 +177,11 @@ export interface CalloutProps extends BaseUiProps {
   title?: string;
   icon?: JSX.Element;
   actions?: ComponentChildren;
-  role?: 'status' | 'alert';
+  /**
+   * `status`/`alert` announce themselves; `note` is the one a reader is meant
+   * to read in place (a trust boundary beside the control it warns about).
+   */
+  role?: 'status' | 'alert' | 'note';
 }
 
 export function Callout({

@@ -136,7 +136,7 @@
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-2) var(--space-1);
-  color: var(--accent-fill);
+  color: var(--accent-text);
   font-size: var(--fs-tiny);
   font-weight: 600;
   border-radius: var(--radius-sm);

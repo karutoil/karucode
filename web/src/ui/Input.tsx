@@ -52,18 +52,27 @@ export interface InputProps extends Omit<BaseUiProps, 'children'> {
   min?: number | string;
   max?: number | string;
   step?: number | string;
+  /** Upper bound on typed characters, for a field the server also caps. */
+  maxLength?: number;
   autoFocus?: boolean;
   autoComplete?: string;
   spellCheck?: boolean;
   name?: string;
+  /** A `<datalist id>` offering suggestions without forcing a choice. */
+  list?: string;
   inputRef?: Ref<HTMLInputElement>;
   'data-autofocus'?: boolean;
   'data-escape-local'?: boolean;
   'aria-describedby'?: string;
   'aria-label'?: string;
+  'aria-controls'?: string;
   onInput?: JSX.IntrinsicElements['input']['onInput'];
   onChange?: JSX.IntrinsicElements['input']['onChange'];
   onKeyDown?: JSX.IntrinsicElements['input']['onKeyDown'];
+  onKeyUp?: JSX.IntrinsicElements['input']['onKeyUp'];
+  /** IME composition, for a field whose Enter must not submit mid-composition. */
+  onCompositionStart?: JSX.IntrinsicElements['input']['onCompositionStart'];
+  onCompositionEnd?: JSX.IntrinsicElements['input']['onCompositionEnd'];
   onBlur?: JSX.IntrinsicElements['input']['onBlur'];
   onFocus?: JSX.IntrinsicElements['input']['onFocus'];
 }
@@ -82,19 +91,25 @@ export function Input({
   min,
   max,
   step,
+  maxLength,
   autoFocus,
   autoComplete,
   spellCheck,
   name,
+  list,
   inputRef,
   'data-autofocus': dataAutofocus,
   'data-escape-local': dataEscapeLocal,
   id,
   'aria-describedby': ariaDescribedBy,
   'aria-label': ariaLabel,
+  'aria-controls': ariaControls,
   onInput,
   onChange,
   onKeyDown,
+  onKeyUp,
+  onCompositionStart,
+  onCompositionEnd,
   onBlur,
   onFocus,
   testId,
@@ -115,19 +130,25 @@ export function Input({
       min={min}
       max={max}
       step={step}
+      maxLength={maxLength}
       autoFocus={autoFocus}
       autoComplete={autoComplete}
       spellcheck={spellCheck}
+      list={list}
       data-autofocus={dataAutofocus}
       data-escape-local={dataEscapeLocal}
       aria-describedby={ariaDescribedBy}
       aria-label={ariaLabel}
+      aria-controls={ariaControls}
       aria-invalid={invalid || undefined}
       data-invalid={invalid ? 'true' : undefined}
       data-testid={testId}
       onInput={onInput}
       onChange={onChange}
       onKeyDown={onKeyDown}
+      onKeyUp={onKeyUp}
+      onCompositionStart={onCompositionStart}
+      onCompositionEnd={onCompositionEnd}
       onBlur={onBlur}
       onFocus={onFocus}
       class={inputVariants({
@@ -170,6 +191,11 @@ export interface TextareaProps extends Omit<BaseUiProps, 'children'> {
   required?: boolean;
   spellCheck?: boolean;
   name?: string;
+  autoFocus?: boolean;
+  autoComplete?: string;
+  textareaRef?: Ref<HTMLTextAreaElement>;
+  /** Upper bound on typed characters, for a field the product also caps. */
+  maxLength?: number;
   'aria-describedby'?: string;
   'aria-label'?: string;
   onInput?: JSX.IntrinsicElements['textarea']['onInput'];
@@ -190,6 +216,10 @@ export function Textarea({
   readOnly = false,
   required = false,
   spellCheck,
+  autoFocus,
+  autoComplete,
+  textareaRef,
+  maxLength,
   id,
   name,
   'aria-describedby': ariaDescribedBy,
@@ -205,14 +235,18 @@ export function Textarea({
   return (
     <textarea
       id={id}
+      ref={textareaRef}
       name={name}
       value={value}
       defaultValue={defaultValue}
       placeholder={placeholder}
       rows={rows}
+      maxLength={maxLength}
       disabled={disabled}
       readOnly={readOnly}
       required={required}
+      autoFocus={autoFocus}
+      autoComplete={autoComplete}
       spellcheck={spellCheck}
       aria-describedby={ariaDescribedBy}
       aria-label={ariaLabel}

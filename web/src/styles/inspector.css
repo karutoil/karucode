@@ -197,6 +197,16 @@
   color: var(--tab-active-text);
 }
 
+/* A tab is exactly as tall as its strip (44px) and the strip is `overflow-y:
+ * hidden`, so the global ring - drawn `--focus-ring-offset` outside the box - is
+ * cut off at the top and bottom edge and a keyboard user sees only its two ends.
+ * Inset it, like `.palette-item` and `.gitm-nav-tab`: no padding change, so the
+ * strip's height and the tab's hit area stay as measured. */
+.tab:focus-visible {
+  outline-offset: calc(-1 * var(--focus-ring-offset));
+  border-radius: var(--radius-xs);
+}
+
 /* ---------- panel & sections ------------------------------------------ */
 
 .tab-panel {
@@ -209,7 +219,7 @@
 }
 
 .tab-panel:focus-visible {
-  outline-offset: -2px;
+  outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
 .inspector-section {
@@ -270,16 +280,25 @@
 }
 
 .inspector-kicker {
+  /* A kicker row can be narrower than "AGENTS · 4 running · 154 total" plus a
+   * refresh control. Without `min-width: 0` the text was an unshrinkable flex
+   * item and pushed the control out of the pane; now the kicker ellipsises and
+   * the control keeps its seat (DESIGN-SYSTEM §5 rule 9). */
+  min-width: 0;
   margin: 0;
+  overflow: hidden;
   color: var(--text-kicker);
   font-size: var(--fs-micro);
   font-weight: 720;
   letter-spacing: 0.9px;
   line-height: 1.4;
+  text-overflow: ellipsis;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .inspector-kicker-note {
+  min-width: 0;
   margin-left: var(--space-4);
   color: var(--text-subtle);
   font-family: var(--font-mono);
@@ -290,6 +309,7 @@
 }
 
 .inspector-mini {
+  flex: 0 0 auto;
   width: 24px;
   height: 24px;
   border-radius: var(--radius-sm);
@@ -369,6 +389,19 @@
   list-style: none;
 }
 
+/* A windowed tree mounts only the rows in view; these empty `<li>`s stand in for
+ * the rows above and below so the scrollbar still measures the whole listing.
+ * Their height is set inline from the row height in `FileTree.tsx`, so this rule
+ * only has to keep them from being squeezed by the column flex container. */
+.tree-spacer {
+  flex: 0 0 auto;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  pointer-events: none;
+}
+
 .tree-row {
   display: flex;
   align-items: center;
@@ -403,7 +436,7 @@
 }
 
 .tree-row:focus-visible {
-  outline-offset: -2px;
+  outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
 .tree-chevron {
@@ -949,7 +982,7 @@
 
 .agent-card-open:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: 2px;
+  outline-offset: var(--focus-ring-offset);
 }
 
 .agent-card-open-label {
@@ -2048,9 +2081,18 @@
   background: var(--surface-raised);
 }
 
+.context-drawer-head > div {
+  /* The head is a title block beside a fixed-size close control; the block
+   * gives way (and its kicker ellipsises) before the control leaves the pane. */
+  min-width: 0;
+}
+
 .context-drawer-head h2 {
   margin-top: var(--space-1);
   font-size: var(--fs-title);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .context-kicker {

@@ -24,12 +24,14 @@ import {
   Chip,
   IconButton,
   Inline,
+  Skeleton,
   Stack,
   StatusDot,
   Text,
   cn,
   type StatusDotTone,
 } from '../ui';
+import { InspectorEmpty } from './InspectorEmpty';
 import {
   AgentsIcon,
   ArrowRightIcon,
@@ -311,35 +313,44 @@ function statusDotTone(status: AgentStatus): StatusDotTone {
   }
 }
 
+/**
+ * The first read of a project's roster is a round trip. While it is in flight
+ * the tab must not say "No subagents yet": that is a claim about the project,
+ * and the answer has not arrived. Skeleton cards say "coming" and the status
+ * line is what a screen reader hears.
+ */
+function AgentsLoading(): JSX.Element {
+  return (
+    <Stack gap="5" class="agent-list" aria-busy="true">
+      <Text as="p" size="small" tone="muted" role="status">
+        Reading this project's agents…
+      </Text>
+      {[0, 1, 2].map((index) => (
+        <Skeleton class="h-[92px]" key={index} />
+      ))}
+    </Stack>
+  );
+}
+
 function AgentsEmpty({ filtered }: { filtered: boolean }): JSX.Element {
   if (filtered) {
     return (
-      <Stack gap="3" align="start" class="empty-inspector">
-        <Text as="p" size="body" weight="semibold" class="empty-inspector-title">
-          No agents match this filter
-        </Text>
-        <Text as="p" size="small" tone="muted">
-          Clear the status filter to see the rest of this project's agents.
-        </Text>
-        <Button variant="secondary" size="sm" onClick={() => actions.setAgentFilter('all')}>
-          Show all statuses
-        </Button>
-      </Stack>
+      <InspectorEmpty
+        title="No agents match this filter"
+        action={{ label: 'Show all statuses', onClick: () => actions.setAgentFilter('all') }}
+      >
+        Clear the status filter to see the rest of this project's agents.
+      </InspectorEmpty>
     );
   }
   return (
-    <Stack gap="3" align="start" class="empty-inspector">
-      <Text as="p" size="body" weight="semibold" class="empty-inspector-title">
-        No subagents yet
-      </Text>
-      <Text as="p" size="small" tone="muted">
-        Nothing has been delegated in this project. When a session calls <code>spawn_agent</code>, the
-        agent appears here — including agents running in a session you are not looking at.
-      </Text>
-      <Button variant="secondary" size="sm" onClick={() => actions.openSettings()}>
-        Subagent settings
-      </Button>
-    </Stack>
+    <InspectorEmpty
+      title="No subagents yet"
+      action={{ label: 'Subagent settings', onClick: () => actions.openSettings() }}
+    >
+      Nothing has been delegated in this project. When a session calls <code>spawn_agent</code>, the
+      agent appears here — including agents running in a session you are not looking at.
+    </InspectorEmpty>
   );
 }
 
@@ -484,17 +495,19 @@ function AgentCard({
         </span>
         {/* The card's one action, and a real button: the article itself is not
             in the tab order, so Enter/Space on Pause or Stop cannot reach it. */}
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="sm"
           class="agent-card-open"
-          ref={detailsRef}
+          buttonRef={detailsRef}
           title={`Open details for ${agent.name || 'subagent'}`}
           aria-label={`Open details for ${agent.name || 'subagent'}`}
+          testId={`agent-details-${agent.id}`}
           onClick={onOpen}
         >
           <span class="agent-card-open-label">Details</span>
           <ArrowRightIcon size={12} />
-        </button>
+        </Button>
       </div>
 
       <AgentControls agent={agent} />
@@ -794,7 +807,7 @@ export function AgentsTab(): JSX.Element {
     <div class="inspector-section">
       <div class="inspector-kicker-row">
         <span class="inspector-kicker">
-          Agents
+          Agents{' '}
           <span class="inspector-kicker-note">
             {counts.running} running
             {counts.paused > 0 ? ` · ${counts.paused} paused` : ''} · {counts.all} total
@@ -834,12 +847,18 @@ export function AgentsTab(): JSX.Element {
 
       <div class="agent-filters" role="group" aria-label="Filter agents by status">
         {FILTERS.map((chip) => (
+          // A raw `<button>` on purpose, not `Button`: the primitive drops its
+          // `onClick` when `disabled`, and this control keeps both. The disabled
+          // chip still carries its handler deliberately - the count can be zero
+          // while the row is already the active filter - and `AgentsTab.test.tsx`
+          // pins that "disabled" here is a display state, not a dead control.
           <button
             key={chip.id}
             type="button"
             class={cn('agent-filter', filter === chip.id && 'is-active')}
             aria-pressed={filter === chip.id}
             data-status={chip.id === 'all' ? undefined : chip.id}
+            data-testid={`agent-filter-${chip.id}`}
             disabled={chip.id !== 'all' && counts[chip.id] === 0}
             onClick={() => actions.setAgentFilter(chip.id)}
           >
@@ -855,7 +874,9 @@ export function AgentsTab(): JSX.Element {
         </Callout>
       ) : null}
 
-      {visible.length === 0 ? (
+      {visible.length === 0 && loading ? (
+        <AgentsLoading />
+      ) : visible.length === 0 ? (
         <AgentsEmpty filtered={agents.length > 0} />
       ) : (
         <Stack gap="5" class="agent-list">

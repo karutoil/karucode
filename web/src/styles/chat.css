@@ -1236,7 +1236,7 @@
 }
 
 .tool-body:focus-visible {
-  outline-offset: -2px;
+  outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
 .tool-card[data-open='true'] .tool-body {
@@ -2470,7 +2470,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-5);
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+  min-width: 0;
 }
 
 .run-error-banner > .button {

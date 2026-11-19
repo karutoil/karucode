@@ -8,6 +8,7 @@ import {
   setHideOverridden,
 } from '../state/pluginUiPreferences';
 import { Toggle } from './Toggle';
+import { Button } from '../ui';
 import { applyUiPreferences, settingsEscapeHatch, type UiContribution } from './uiContributions';
 
 /**
@@ -132,14 +133,15 @@ export function PluginControls(): JSX.Element {
       <div class="settings-section-head">
         <h4 id="settings-plugin-controls">Controls in the interface</h4>
         {overridden ? (
-          <button
-            type="button"
-            class="button button-small"
-            onClick={() => resetPluginUiPreferences()}
+          <Button
+            variant="secondary"
+            size="sm"
+            testId="plugin-controls-reset"
             title="Honour every plugin's declaration again"
+            onClick={() => resetPluginUiPreferences()}
           >
             Reset to what the plugins ask for
-          </button>
+          </Button>
         ) : null}
       </div>
       <p class="settings-section-note" id="settings-plugin-controls-note">

@@ -1,10 +1,23 @@
 import type { AgentStatus, RunStatus, SessionDetail, SessionSummary } from '../api/types';
-import type { ApprovalView, ChatState, CommandItem, MessageItem, ToolItem } from './chat';
+import type { ApprovalView, ChatState, CommandItem, ToolItem } from './chat';
 
+/**
+ * Every approval still waiting on the reader, in transcript order.
+ *
+ * One pass into one array: the `filter(...).map(...)` this replaces allocated an
+ * intermediate array of items on every frame, and this is called from the
+ * composer's disabled-state chain.
+ */
 export function pendingApprovals(state: ChatState): ApprovalView[] {
-  return state.items
-    .filter((item) => item.kind === 'approval' && item.approval.status === 'pending')
-    .map((item) => (item as { approval: ApprovalView }).approval);
+  const pending: ApprovalView[] = [];
+  const items = state.items;
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    if (item && item.kind === 'approval' && item.approval.status === 'pending') {
+      pending.push(item.approval);
+    }
+  }
+  return pending;
 }
 
 export type ActivityKind = 'idle' | 'thinking' | 'tool' | 'streaming' | 'approval' | 'error' | 'interrupted' | 'cancelled';
@@ -14,35 +27,66 @@ export interface Activity {
   label: string;
 }
 
-/** The composer's status line: names what the agent is doing right now. */
+/**
+ * The composer's status line: names what the agent is doing right now.
+ *
+ * One backwards pass, no copies. This is read on every frame - including every
+ * streamed token - and the obvious shape (`[...items].reverse().find(...)`) cost
+ * two full transcript copies per lookup, on a transcript that reaches thousands
+ * of rows. The scan also stops asking about rows it can no longer use: the
+ * approval count and the newest active row come out of the same loop, so an
+ * approval anywhere in the transcript still wins over a tool that is running.
+ *
+ * The priority order is the transcript's own reading order, newest first:
+ * a pending approval (the run cannot move without the reader), then a running
+ * tool or command, then text still streaming in, then thinking, then whatever
+ * the last settled run did.
+ */
 export function agentActivity(state: ChatState): Activity {
-  const pending = pendingApprovals(state);
-  if (pending.length > 0) {
+  const items = state.items;
+  const running = state.running;
+  let approvals = 0;
+  let active: ToolItem | CommandItem | null = null;
+  let streaming = false;
+
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const item = items[i];
+    if (!item) continue;
+    if (item.kind === 'approval') {
+      if (item.approval.status === 'pending') approvals += 1;
+      continue;
+    }
+    // A settled view still has to count approvals, but nothing else about it
+    // matters once the run is over.
+    if (!running) continue;
+    if (!active && (item.kind === 'tool' || item.kind === 'command') && item.status === 'running') {
+      active = item;
+    }
+    if (
+      !streaming &&
+      item.kind === 'message' &&
+      item.role === 'assistant' &&
+      item.streaming &&
+      item.content !== ''
+    ) {
+      streaming = true;
+    }
+  }
+
+  if (approvals > 0) {
     return {
       kind: 'approval',
-      label: pending.length === 1 ? 'Waiting for approval' : `Waiting for ${pending.length} approvals`,
+      label: approvals === 1 ? 'Waiting for approval' : `Waiting for ${approvals} approvals`,
     };
   }
 
-  if (state.running) {
-    const active = [...state.items]
-      .reverse()
-      .find(
-        (item): item is ToolItem | CommandItem =>
-          (item.kind === 'tool' || item.kind === 'command') && item.status === 'running',
-      );
+  if (running) {
     if (active) {
       return {
         kind: 'tool',
         label: active.kind === 'command' ? 'Running command' : `Running ${active.name}`,
       };
     }
-    const streaming = [...state.items]
-      .reverse()
-      .find(
-        (item): item is MessageItem =>
-          item.kind === 'message' && item.role === 'assistant' && item.streaming && item.content !== '',
-      );
     if (streaming) return { kind: 'streaming', label: 'Streaming' };
     return { kind: 'thinking', label: 'Thinking' };
   }

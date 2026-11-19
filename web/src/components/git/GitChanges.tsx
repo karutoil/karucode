@@ -11,6 +11,7 @@ import {
   ChevronRightIcon,
   UndoIcon,
 } from '../icons';
+import { IconButton, LinkButton } from '../../ui';
 import {
   type GitGroup,
   type GitGroupId,
@@ -89,14 +90,14 @@ function FileRow({
       class={`gitm-row${active ? ' is-active' : ''}`}
       {...contextMenuProps(menu, undefined, () => mainRef.current)}
     >
-      <button
-        ref={mainRef}
-        type="button"
+      <LinkButton
+        buttonRef={mainRef}
+        tone="muted"
         class="gitm-row-main"
         aria-pressed={active}
         aria-label={`${label} ${file.path}`}
-        onClick={onSelect}
         title={`${file.path} — ${label} (${porcelainCode(file)})`}
+        onClick={onSelect}
       >
         <span class={`gitm-badge is-${tone}`} aria-hidden="true">
           {statusLetter(file)}
@@ -106,42 +107,46 @@ function FileRow({
           <span class="gitm-dir">{dir || 'workspace root'}</span>
         </span>
         <span class="gitm-row-label">{label}</span>
-      </button>
+      </LinkButton>
       <span class="gitm-row-actions">
         {group === 'staged' ? (
-          <button
-            type="button"
+          <IconButton
+            size="sm"
             class="gitm-act"
+            label={`Unstage ${file.path}`}
             title="Unstage this file"
-            aria-label={`Unstage ${file.path}`}
+            testId={`git-unstage-${file.path}`}
+            icon={<MinusIcon size={14} />}
             disabled={busy}
             onClick={onUnstage}
-          >
-            <MinusIcon size={14} />
-          </button>
+          />
         ) : (
-          <button
-            type="button"
+          <IconButton
+            size="sm"
             class="gitm-act"
+            label={`Stage ${file.path}`}
             title="Stage this file"
-            aria-label={`Stage ${file.path}`}
+            testId={`git-stage-${file.path}`}
+            icon={<PlusIcon size={14} />}
             disabled={busy}
             onClick={onStage}
-          >
-            <PlusIcon size={14} />
-          </button>
+          />
         )}
         {DISCARDABLE.includes(group) ? (
-          <button
-            type="button"
-            class="gitm-act is-danger"
-            title={group === 'untracked' ? 'Delete this untracked file' : 'Discard the changes in this file'}
-            aria-label={`Discard changes in ${file.path}`}
+          <IconButton
+            size="sm"
+            class="gitm-act is-danger text-danger"
+            label={`Discard changes in ${file.path}`}
+            title={
+              group === 'untracked'
+                ? 'Delete this untracked file'
+                : 'Discard the changes in this file'
+            }
+            testId={`git-discard-${file.path}`}
+            icon={<UndoIcon size={14} />}
             disabled={busy}
             onClick={onDiscard}
-          >
-            <UndoIcon size={14} />
-          </button>
+          />
         ) : null}
       </span>
       <Menu menu={menu} float label={`File actions for ${file.path}`}>
@@ -191,56 +196,54 @@ export function GitChanges({
         return (
           <section class="gitm-group" key={group.id} aria-label={group.label}>
             <header class="gitm-group-head">
-              <button
-                type="button"
+              <LinkButton
+                tone="muted"
                 class="gitm-group-toggle"
                 aria-expanded={open}
-                onClick={() =>
-                  setCollapsed((current) => ({ ...current, [group.id]: open }))
-                }
                 title={group.hint}
+                onClick={() => setCollapsed((current) => ({ ...current, [group.id]: open }))}
               >
                 <span class="gitm-group-chevron" aria-hidden="true">
                   {open ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
                 </span>
                 <span class="gitm-group-label">{group.label}</span>
                 <span class="gitm-group-count">{group.files.length}</span>
-              </button>
+              </LinkButton>
               <span class="gitm-group-actions">
                 {group.id === 'staged' ? (
-                  <button
-                    type="button"
+                  <IconButton
+                    size="sm"
                     class="gitm-act"
+                    label={`Unstage all ${group.label}`}
                     title="Unstage everything in this group"
-                    aria-label={`Unstage all ${group.label}`}
+                    testId={`git-unstage-group-${group.id}`}
+                    icon={<MinusIcon size={14} />}
                     disabled={busy}
                     onClick={() => onUnstageGroup(group)}
-                  >
-                    <MinusIcon size={14} />
-                  </button>
+                  />
                 ) : (
-                  <button
-                    type="button"
+                  <IconButton
+                    size="sm"
                     class="gitm-act"
+                    label={`Stage all ${group.label}`}
                     title="Stage everything in this group"
-                    aria-label={`Stage all ${group.label}`}
+                    testId={`git-stage-group-${group.id}`}
+                    icon={<PlusIcon size={14} />}
                     disabled={busy}
                     onClick={() => onStageGroup(group)}
-                  >
-                    <PlusIcon size={14} />
-                  </button>
+                  />
                 )}
                 {group.id === 'staged' || group.id === 'changes' || group.id === 'untracked' ? (
-                  <button
-                    type="button"
-                    class="gitm-act is-danger"
+                  <IconButton
+                    size="sm"
+                    class="gitm-act is-danger text-danger"
+                    label={`Discard all ${group.label}`}
                     title={`Discard every change in ${group.label}`}
-                    aria-label={`Discard all ${group.label}`}
+                    testId={`git-discard-group-${group.id}`}
+                    icon={<UndoIcon size={14} />}
                     disabled={busy}
                     onClick={() => onDiscardGroup(group)}
-                  >
-                    <UndoIcon size={14} />
-                  </button>
+                  />
                 ) : null}
               </span>
             </header>

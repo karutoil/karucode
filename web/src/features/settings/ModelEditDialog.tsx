@@ -2,7 +2,7 @@ import type { JSX } from 'preact';
 import { useState } from 'preact/hooks';
 import type { ModelEntry, ProviderProfile } from '../../api/types';
 import { ModelVariantsEditor, type VariantsMap } from '../../components/ModelVariantsEditor';
-import { Button, Dialog, Input, Select, Text } from '../../ui';
+import { Button, Input, Overlay, Select, Text } from '../../ui';
 import {
   MODEL_COST_LIMIT,
   MODEL_NAME_LIMIT,
@@ -88,7 +88,18 @@ export function ModelEditDialog({ profile, model, onSave, onClose }: ModelEditDi
   };
 
   return (
-    <Dialog open title={`Edit ${model.id}`} onClose={onClose} class="dialog-model-edit">
+    <Overlay
+      open
+      title={`Edit ${model.id}`}
+      onClose={onClose}
+      // A form with fields: the `standard` measure. `.dialog-model-edit` in
+      // `settings.css` keeps the height cap and lays out the hint, the grid and
+      // the action row as direct children of the surface, which is what
+      // `bodyLayout="contents"` means - the grid is the only scroller.
+      role="standard"
+      class="dialog-model-edit"
+      bodyLayout="contents"
+    >
       <Text as="p" class="field-hint">
         Custom values for this model on {profile.name}. Refreshing the metadata later updates the
         catalog fields but leaves this label untouched.
@@ -218,6 +229,6 @@ export function ModelEditDialog({ profile, model, onSave, onClose }: ModelEditDi
           {saving ? 'Saving…' : 'Save model'}
         </Button>
       </footer>
-    </Dialog>
+    </Overlay>
   );
 }

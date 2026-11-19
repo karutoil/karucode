@@ -5,8 +5,9 @@ import type { SessionAnnotation, SessionSummary } from '../../api/types';
 import { pluginText, UI_REPLACE_NEW_SESSION_LABEL } from '../../components/uiContributions';
 import * as store from '../../state/store';
 import { sessionFacts } from '../../state/sessionFacts';
-import { Dialog } from '../../components/Dialog';
+import { Overlay } from '../../components/Overlay';
 import { PlusIcon } from '../../components/icons';
+import { Button } from '../../ui';
 import { passesFilter, sessionGroup, type SessionFilter } from './helpers';
 import { SessionGroup } from './SessionGroup';
 
@@ -118,10 +119,14 @@ export function SessionList({
             ) : null}
             .
           </p>
-          <button type="button" class="button button-primary" onClick={onCreate}>
-            <PlusIcon size={14} />{' '}
+          <Button
+            variant="primary"
+            icon={<PlusIcon size={14} />}
+            testId="rail-empty-new-session"
+            onClick={onCreate}
+          >
             {pluginText(store.pluginUi.value, UI_REPLACE_NEW_SESSION_LABEL, 'New session')}
-          </button>
+          </Button>
           <p class="rail-hint">
             Create with <kbd>{modKey()}</kbd> + <kbd>N</kbd>, or pick one from the command palette{' '}
             <kbd>{modKey()}</kbd> + <kbd>K</kbd>.
@@ -140,10 +145,13 @@ export function SessionList({
               </>
             )}
           </p>
-          <button type="button" class="button" onClick={onCreate}>
-            <PlusIcon size={14} />{' '}
+          <Button
+            icon={<PlusIcon size={14} />}
+            testId="rail-no-match-new-session"
+            onClick={onCreate}
+          >
             {pluginText(store.pluginUi.value, UI_REPLACE_NEW_SESSION_LABEL, 'New session')}
-          </button>
+          </Button>
         </div>
       ) : (
         groups.map((group) => (
@@ -163,32 +171,40 @@ export function SessionList({
         ))
       )}
 
-      <Dialog open={pendingDelete !== null} title="Delete session?" onClose={closeDelete} class="dialog-confirm">
+      <Overlay
+        open={pendingDelete !== null}
+        role="compact"
+        class="dialog-confirm"
+        title="Delete session?"
+        onClose={closeDelete}
+        bodyLayout="contents"
+        footer={
+          <div class="dialog-actions">
+            <Button data-autofocus onClick={closeDelete}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                const target = pendingDelete?.session;
+                closeDelete();
+                if (target) void onDelete(target.id);
+              }}
+            >
+              Delete session
+            </Button>
+          </div>
+        }
+      >
         {pendingDelete ? (
           <div class="confirm-body">
             <p>
               Delete <strong>{pendingDelete.session.title || 'this session'}</strong>? Its messages, runs and
               approvals are removed. This cannot be undone.
             </p>
-            <div class="dialog-actions">
-              <button type="button" class="button" data-autofocus onClick={closeDelete}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                class="button button-danger"
-                onClick={() => {
-                  const target = pendingDelete.session;
-                  closeDelete();
-                  void onDelete(target.id);
-                }}
-              >
-                Delete session
-              </button>
-            </div>
           </div>
         ) : null}
-      </Dialog>
+      </Overlay>
     </div>
   );
 }

@@ -28,7 +28,6 @@ import {
   tone,
 } from './controlModel';
 import { Badge, Button, IconButton, StatusDot, Text, type StatusDotTone } from '../../ui';
-import '../../styles/control-rail.css';
 
 const FILTERS: { id: Filter; label: string }[] = [
   { id: 'all', label: 'All' },

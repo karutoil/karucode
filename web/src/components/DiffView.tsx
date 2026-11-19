@@ -2,6 +2,7 @@ import type { JSX } from 'preact';
 import { useMemo } from 'preact/hooks';
 import { parseUnifiedDiff, type DiffLine } from '../lib/diff';
 import { ArrowRightIcon, FileCodeIcon, FileIcon } from './icons';
+import { Button } from '../ui';
 
 export interface DiffViewProps {
   diff: string;
@@ -120,9 +121,15 @@ export function DiffView({
             <FileIcon size={13} /> {files === 1 ? '1 file modified' : `${files} files modified`}
           </span>
           {onReview ? (
-            <button type="button" class="review-btn" onClick={onReview}>
-              Review changes <ArrowRightIcon size={12} />
-            </button>
+            <Button
+              size="sm"
+              class="review-btn"
+              iconRight={<ArrowRightIcon size={12} />}
+              testId="review-changes"
+              onClick={onReview}
+            >
+              Review changes
+            </Button>
           ) : null}
         </div>
       ) : null}

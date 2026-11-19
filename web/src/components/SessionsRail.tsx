@@ -8,6 +8,7 @@ import * as railPeek from '../state/railPeek';
 import { invalidateFacts, loadFactsFor } from '../state/sessionFacts';
 import * as store from '../state/store';
 import { PlusIcon, SearchIcon } from './icons';
+import { Button, Input, Keycap } from '../ui';
 import {
   passesFilter,
   PROJECTS_HOVER_CLOSE_MS,
@@ -20,7 +21,6 @@ import { ProjectSwitcher } from '../features/rail/ProjectDropdown';
 import { RailFooter } from '../features/rail/RailFooter';
 import { RailPeek } from '../features/rail/RailPeek';
 import { SessionList, type SessionListProps } from '../features/rail/SessionList';
-import '../styles/workbench-navigation.css';
 
 export {
   passesFilter,
@@ -134,16 +134,17 @@ export function SessionsRail(): JSX.Element {
         {isNarrow ? (
           <>
             <ProjectSwitcher />
-            <button
-              type="button"
-              class="new-session"
+            <Button
+              variant="secondary"
+              class="new-session h-[31px] px-4 rounded-md bg-surface text-text-secondary border-line-strong"
+              testId="phone-control-plane"
               onClick={() => {
                 actions.closeSheets();
                 controlPlaneOpen.value = true;
               }}
             >
               Control plane
-            </button>
+            </Button>
           </>
         ) : null}
         {isNarrow ? null : (
@@ -152,32 +153,36 @@ export function SessionsRail(): JSX.Element {
           </div>
         )}
 
-        <button
-          type="button"
-          class="new-session"
-          onClick={() => actions.startDraftSession()}
+        <Button
+          variant="secondary"
+          class="new-session h-[31px] px-4 rounded-md bg-surface text-text-secondary border-line-strong"
           aria-label={`New session (${modKey()} + N)`}
+          testId="new-session"
+          onClick={() => actions.startDraftSession()}
         >
           <span class="new-left">
             <PlusIcon size={15} /> New session
           </span>
           <span class="shortcut">{modKey()} N</span>
-        </button>
+        </Button>
 
         <label class="side-search">
           <SearchIcon size={15} />
           {/* `data-escape-local`: Escape first clears the query (and a second
             * press closes the sheet on a phone). Without the marker the sheet's
             * capture-phase focus trap would close everything on the first press. */}
-          <input
-            ref={searchRef}
+          <Input
+            inputRef={searchRef}
             type="search"
+            size="sm"
+            class="border-0 bg-transparent px-0 h-full text-label"
             value={query}
             placeholder="Find a session…"
             aria-label="Find a session"
-            autocomplete="off"
-            spellcheck={false}
+            autoComplete="off"
+            spellCheck={false}
             data-escape-local
+            testId="session-search"
             onInput={(event) => setQuery(event.currentTarget.value)}
             onKeyDown={(event) => {
               if (event.key === 'Escape') {
@@ -201,9 +206,7 @@ export function SessionsRail(): JSX.Element {
               }
             }}
           />
-          <span class="keycap" aria-hidden="true">
-            /
-          </span>
+          <Keycap class="keycap">/</Keycap>
         </label>
 
         {/* The mock's `.chips`: one-tap filters over the list, each with its own
@@ -213,19 +216,21 @@ export function SessionsRail(): JSX.Element {
             const count = filterCounts[filter.id] ?? 0;
             if (filter.id !== 'all' && count === 0) return null;
             return (
-              <button
+              <Button
                 key={filter.id}
-                type="button"
-                class={`filter-chip${sessionFilter === filter.id ? ' is-on' : ''}${
-                  filter.id === 'needs' ? ' is-alert' : ''
-                }`}
+                variant="ghost"
+                size="sm"
+                class={`filter-chip h-[24px] px-3 gap-2 text-micro${
+                  sessionFilter === filter.id ? ' is-on' : ''
+                }${filter.id === 'needs' ? ' is-alert' : ''}`}
                 aria-pressed={sessionFilter === filter.id}
                 title={filter.title}
+                testId={`session-filter-${filter.id}`}
                 onClick={() => setSessionFilter(filter.id)}
               >
                 {filter.label}
                 <span class="filter-chip-count">{count}</span>
-              </button>
+              </Button>
             );
           })}
         </div>

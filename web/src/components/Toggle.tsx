@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
 import { useId } from 'preact/hooks';
+import { Text } from '../ui/Layout';
 
 export interface ToggleProps {
   checked: boolean;
@@ -28,6 +29,10 @@ export function Toggle({
   const descriptionId = description ? `toggle-description-${id ?? generated}` : undefined;
   return (
     <div class="toggle-field">
+      {/* The switch stays a plain `<button>`. It is a `switch`, not a pressable
+          control: `role="switch"`, `aria-checked` and the `.toggle`/`.toggle-knob`
+          track are the contract (`Toggle.test.tsx`, the settings browser
+          verifier), and `IconButton` fixes its own role and `aria-pressed`. */}
       <button
         id={id}
         type="button"
@@ -42,14 +47,18 @@ export function Toggle({
       >
         <span class="toggle-knob" />
       </button>
-      <span class="toggle-label">
+      {/* The two lines of copy are the shared `Text`: `size`/`tone`/`weight` are
+          exactly the values `.toggle-label`/`.toggle-description` state
+          (`--fs-label` 600, `--fs-tiny` muted 400), so the stack reads the same
+          while the type scale lives in one place. */}
+      <Text as="span" size="label" weight="semibold" class="toggle-label">
         {label}
         {description ? (
-          <span class="toggle-description" id={descriptionId}>
+          <Text as="span" size="tiny" tone="muted" weight="normal" id={descriptionId} class="toggle-description">
             {description}
-          </span>
+          </Text>
         ) : null}
-      </span>
+      </Text>
     </div>
   );
 }

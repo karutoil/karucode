@@ -228,6 +228,27 @@ describe('the registered renderer', () => {
 });
 
 describe('GoalsPanel', () => {
+  /**
+   * A panel that could not read its own state has exactly one recovery: read
+   * again. Leaving that to the header's refresh button made the error a dead end
+   * for anyone who reads the message and looks for the fix beside it.
+   */
+  it('offers a retry beside a read failure', () => {
+    const refresh = vi.fn();
+    render(
+      <GoalsPanel
+        data={payload({ goals: [], error: 'the goal file is not valid JSON' })}
+        panel={panelTab()}
+        plugin="kc-goals"
+        version="0.1.0"
+        refresh={refresh}
+      />,
+    );
+    expect(screen.getByText('the goal file is not valid JSON')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
   it('draws the goal, its criteria, the check verdict and the evidence', () => {
     render(<GoalsPanel data={payload()} panel={panelTab()} plugin="kc-goals" version="0.1.0" refresh={() => undefined} />);
     expect(screen.getByText('Ship the widget')).toBeTruthy();

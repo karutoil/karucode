@@ -10,6 +10,7 @@ import * as workbench from '../state/workbench';
 import { SessionInfoTab } from './SessionInfoTab';
 import { TabPanel, Tabs, type TabItem } from './Tabs';
 import { AlertIcon, ArrowRightIcon, ChatIcon, CloseIcon, LayersIcon, SettingsIcon } from './icons';
+import { Badge, Button, IconButton } from '../ui';
 
 const SECTION_ITEMS: readonly TabItem<workbench.ContextSection>[] = [
   { id: 'now', label: 'Now' },
@@ -62,10 +63,16 @@ function ResultLink({
   onRevealResult: (tab: InspectorTab) => void;
 }): JSX.Element {
   return (
-    <button type="button" class="context-result-link" onClick={() => onRevealResult(tab)}>
+    <Button
+      variant="ghost"
+      size="sm"
+      class="context-result-link"
+      iconRight={<ArrowRightIcon size={13} />}
+      testId={`context-result-${tab}`}
+      onClick={() => onRevealResult(tab)}
+    >
       <span>{children}</span>
-      <ArrowRightIcon size={13} />
-    </button>
+    </Button>
   );
 }
 
@@ -170,7 +177,7 @@ function NowSection({
       <section class="context-card" aria-labelledby="context-model-title">
         <div class="context-section-heading">
           <h3 id="context-model-title">Model for the next run</h3>
-          <span class="context-badge">{selection.pinned ? 'Session pin' : 'Install default'}</span>
+          <Badge class="context-badge">{selection.pinned ? 'Session pin' : 'Install default'}</Badge>
         </div>
         <dl class="context-facts">
           <Fact label="Model" value={selection.modelId ?? 'Not configured'} />
@@ -244,23 +251,25 @@ function AccessSection(): JSX.Element {
       <section class="context-card" aria-labelledby="context-access-title">
         <div class="context-section-heading">
           <h3 id="context-access-title">Current access policy</h3>
-          {approval ? <span class="context-badge">Approvals: {approval.label}</span> : null}
+          {approval ? <Badge class="context-badge">Approvals: {approval.label}</Badge> : null}
         </div>
         {approval ? (
           <p class="context-policy" title={approval.title}>{approval.title}</p>
         ) : (
           <p class="context-policy">Approval policy has not been read from this install.</p>
         )}
-        <button
-          type="button"
+        <Button
+          size="sm"
           class="button button-small context-settings-link"
+          icon={<SettingsIcon size={13} />}
+          testId="context-approval-settings"
           onClick={() => {
             workbench.closeContext();
             actions.openSettings();
           }}
         >
-          <SettingsIcon size={13} /> Open approval settings
-        </button>
+          Open approval settings
+        </Button>
         <p class="context-note">
           This policy is install-scoped, not a per-message switch. Command allowlists and
           auto-approved paths remain owned by Settings → Approvals.
@@ -334,15 +343,15 @@ export function ContextDrawer({
           <span class="context-kicker">Workbench</span>
           <h2>Context</h2>
         </div>
-        <button
-          type="button"
+        <IconButton
+          size="md"
           class="icon-button context-close"
-          onClick={workbench.closeContext}
-          aria-label="Close context"
+          label="Close context"
+          icon={<CloseIcon />}
           data-autofocus={narrow ? true : undefined}
-        >
-          <CloseIcon />
-        </button>
+          testId="context-close"
+          onClick={workbench.closeContext}
+        />
       </header>
       <Tabs
         items={SECTION_ITEMS}

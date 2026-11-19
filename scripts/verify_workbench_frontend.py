@@ -131,6 +131,30 @@ def main() -> int:
             raise AssertionError(f"no visible control: {name}; available: {detail}")
         evaluate("const el=[...document.querySelectorAll(" + json.dumps(selector) + ")].find((e) => (e.getAttribute('aria-label') || e.textContent || '').replace(/\\s+/g, ' ').trim() === " + json.dumps(name) + " && e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0); el.click(); return true;")
 
+    def click_send() -> None:
+        """Click the composer's Send button, whose name spells the sending chord.
+
+        The chord is the platform's own (`sendChordLong` in
+        `web/src/features/composer/helpers.ts`): `Control + Enter` on Linux and
+        Windows, `Command + Enter` on a Mac. Matched by prefix, so this check does
+        not pin one platform's spelling.
+        """
+        finder = (
+            "const el=[...document.querySelectorAll('button')].find((e) => "
+            "/^Send message \\(/.test(e.getAttribute('aria-label') || '') && "
+            "e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0);"
+        )
+        until = time.time() + 10
+        while time.time() < until and not evaluate(finder + " return !!el;"):
+            time.sleep(0.05)
+        if not evaluate(finder + " return !!el;"):
+            detail = evaluate(
+                "return [...document.querySelectorAll('button')]"
+                ".map((e) => e.getAttribute('aria-label')).filter(Boolean);"
+            )
+            raise AssertionError(f"no visible Send button; available labels: {detail}")
+        evaluate(finder + " el.click(); return true;")
+
     def press_escape() -> None:
         session._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27})
         session._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27})
@@ -363,7 +387,7 @@ def main() -> int:
         input.dispatchEvent(new Event('input', { bubbles: true }));
         return true;
         """)
-        click_button("Send message (Command or Control + Enter)")
+        click_send()
         wait_for_text("Done. The mock provider finished the task.")
         # Built-in themes start with the working steps open: a finished turn
         # arrives with its narration, its run of calls and the calls inside that
@@ -438,7 +462,7 @@ def main() -> int:
         input.dispatchEvent(new Event('input', { bubbles: true }));
         return true;
         """)
-        click_button("Send message (Command or Control + Enter)")
+        click_send()
         until = time.time() + 12
         while time.time() < until and evaluate("return document.querySelectorAll('.process-fold').length;") <= folds_before:
             time.sleep(0.1)
@@ -480,6 +504,10 @@ def main() -> int:
         session.screenshot(out / "workbench-context.png")
         evaluate("document.querySelector('#context-tab-now').click();return true;")
         click_button("Source control", "#workbench-context button")
+        # GitManager is code-split; wait for the lazy chunk to load and paint.
+        until = time.time() + 10
+        while time.time() < until and not evaluate("return !!document.querySelector('#inspector-panel-changes .gitm-page');"):
+            time.sleep(0.05)
         check("Context source-control link opens real working-tree view", evaluate("return !!document.querySelector('#inspector-panel-changes .gitm-page');"))
         wait_for_text("README.md")
         session.screenshot(out / "workbench-review.png")
@@ -596,16 +624,25 @@ def main() -> int:
         evaluate("document.querySelector('#workspace-tab-chat').click();return true;")
 
         # Existing command, themes and session/global actions remain live.
-        evaluate("document.dispatchEvent(new KeyboardEvent('keydown',{key:'k',ctrlKey:true,bubbles:true}));return true;")
+        evaluate("document.dispatchEvent(new KeyboardEvent('keydown',{key:'k',code:'KeyK',ctrlKey:true,bubbles:true}));return true;")
+        until = time.time() + 10
+        while time.time() < until and not evaluate("return !!document.querySelector('.dialog-palette');"):
+            time.sleep(0.05)
         check("command palette opens", evaluate("return !!document.querySelector('.dialog-palette');"))
         press_escape()
         click_button("Task actions")
         click_button("Theme studio", '[role="menuitem"]')
+        until = time.time() + 10
+        while time.time() < until and not evaluate("return !!document.querySelector('.theme-studio');"):
+            time.sleep(0.05)
         check("theme studio opens from Workbench task actions", evaluate("return !!document.querySelector('.theme-studio');"))
         press_escape()
-        evaluate("document.querySelector('.context-header-btn').click();return true;")
-        evaluate("document.querySelector('#context-tab-access').click();return true;")
+        evaluate("document.querySelector('.context-header-btn').click(); return true;")
+        evaluate("document.querySelector('#context-tab-access').click(); return true;")
         click_button("Open approval settings", '#workbench-context button')
+        until = time.time() + 10
+        while time.time() < until and not evaluate("return !!document.querySelector('.dialog-settings');"):
+            time.sleep(0.05)
         check("actual settings open from Access", evaluate("return !!document.querySelector('.dialog-settings');"))
         evaluate("""
         window.__workbenchKeyTrace=[];
@@ -617,7 +654,9 @@ def main() -> int:
         check("Settings dismisses with Escape before navigation continues", evaluate("return !document.querySelector('.dialog-settings');"))
 
         # Collapsed desktop projects still provide the real RailPeek.
-        evaluate("document.dispatchEvent(new KeyboardEvent('keydown',{key:'b',ctrlKey:true,bubbles:true}));return true;")
+        # Commit 07348df changed the toggle shortcut from Ctrl+B (bookmarks in
+        # browsers) to Ctrl+\.
+        evaluate("document.dispatchEvent(new KeyboardEvent('keydown',{key:'\\\\',code:'Backslash',ctrlKey:true,bubbles:true}));return true;")
         check("collapsed mode preserves the project rail", evaluate("return !!document.querySelector('.project-rail');"))
         evaluate("document.querySelector('.project-rail-item-wrap').dispatchEvent(new MouseEvent('mouseenter'));return true;")
         time.sleep(0.4)
@@ -630,6 +669,9 @@ def main() -> int:
         time.sleep(0.3)
         check("phone has no horizontal document overflow", evaluate("return document.documentElement.scrollWidth <= innerWidth + 1;"))
         evaluate("document.getElementById('workspace-tab-changes').click(); return true;")
+        until = time.time() + 10
+        while time.time() < until and not evaluate("return !!document.querySelector('#workspace-panel-changes .gitm-page');"):
+            time.sleep(0.05)
         check("phone can inspect the full existing source-control view", evaluate("return !!document.querySelector('#workspace-panel-changes .gitm-page');"))
         click_button("Conversation")
         check("workspace switch preserves the phone composer draft", evaluate("return document.querySelector('#composer-input').value.includes('draft that must survive');"))

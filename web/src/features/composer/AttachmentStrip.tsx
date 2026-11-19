@@ -1,6 +1,7 @@
 import type { JSX } from 'preact';
 import { CloseIcon, FileIcon } from '../../components/icons';
 import { attachmentSummary, type Attachment } from '../../lib/attachments';
+import { IconButton } from '../../ui';
 
 export function AttachmentStrip({
   attachments,
@@ -27,14 +28,14 @@ export function AttachmentStrip({
             </span>
             <span class="attachment-chip-meta">{attachmentSummary(attachment)}</span>
           </span>
-          <button
-            type="button"
-            class="attachment-chip-remove"
+          <IconButton
+            size="sm"
+            class="attachment-chip-remove w-[24px] h-[24px]"
+            label={`Remove ${attachment.name}`}
+            icon={<CloseIcon size={11} />}
+            testId={`remove-attachment-${attachment.id}`}
             onClick={() => onRemove(attachment.id)}
-            aria-label={`Remove ${attachment.name}`}
-          >
-            <CloseIcon size={11} />
-          </button>
+          />
         </li>
       ))}
     </ul>

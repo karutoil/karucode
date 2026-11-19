@@ -16,6 +16,7 @@ import type {
   CommandItem,
   ErrorItem,
   InterruptedItem,
+  MessageItem,
   NoticeItem,
   ToolItem,
 } from './chat';
@@ -55,26 +56,106 @@ function closeStreaming(items: ChatItem[], keepId?: string): ChatItem[] {
   return changed ? next : items;
 }
 
-function updateItem(
-  state: ChatState,
-  predicate: (item: ChatItem) => boolean,
-  update: (item: ChatItem) => ChatItem,
-): ChatState {
-  let changed = false;
-  const items = state.items.map((item) => {
-    if (!predicate(item)) return item;
-    changed = true;
-    return update(item);
-  });
-  return changed ? { ...state, items } : state;
+/**
+ * `items` with the entry at `index` replaced, every other entry shared.
+ *
+ * A long transcript is thousands of rows and a delta arrives once per token, so
+ * the streaming paths must not copy rows they did not touch. `items.map(...)`
+ * allocated a whole new array *and* made every row look changed to the
+ * renderer's diff; `slice()` copies pointers only, so untouched rows keep their
+ * identity and a memoised row does not re-render.
+ */
+function replaceItemAt(items: readonly ChatItem[], index: number, updated: ChatItem): ChatItem[] {
+  const next = items.slice();
+  next[index] = updated;
+  return next;
 }
 
-function findItem(state: ChatState, predicate: (item: ChatItem) => boolean): ChatItem | undefined {
-  for (let i = state.items.length - 1; i >= 0; i -= 1) {
-    const item = state.items[i];
-    if (item && predicate(item)) return item;
+/**
+ * Index of the last item matching `predicate`, or `-1`.
+ *
+ * Scans from the tail - which is where the live row of a running transcript
+ * almost always sits - and allocates nothing, unlike the
+ * `[...items].reverse().find(...)` this replaces.
+ */
+function findLastIndex(
+  items: readonly ChatItem[],
+  predicate: (item: ChatItem) => boolean,
+): number {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const item = items[i];
+    if (item && predicate(item)) return i;
   }
-  return undefined;
+  return -1;
+}
+
+/**
+ * Replace the one item at `index`.
+ *
+ * The tail of the transcript is where every streaming delta lands, so this is
+ * the per-token path: it swaps one pointer instead of re-mapping the whole
+ * transcript through a predicate.
+ */
+function updateItemAt(
+  state: ChatState,
+  index: number,
+  update: (item: ChatItem) => ChatItem,
+): ChatState {
+  const current = state.items[index];
+  if (!current) return state;
+  return { ...state, items: replaceItemAt(state.items, index, update(current)) };
+}
+
+/**
+ * The assistant segment a `text_delta` / `reasoning_delta` extends, when it is
+ * the newest row.
+ *
+ * A streaming segment is only ever extended while it is the tail: every other
+ * frame that could touch it closes it first (`closeStreaming`). The previous
+ * version looked up the newest streaming message and then compared it with the
+ * tail, which is the same question asked once per token; the tail check answers
+ * it without touching the rest of the transcript.
+ */
+function streamingTail(state: ChatState): { index: number; item: MessageItem } | null {
+  const index = state.items.length - 1;
+  const item = state.items[index];
+  if (item && item.kind === 'message' && item.role === 'assistant' && item.streaming) {
+    return { index, item };
+  }
+  return null;
+}
+
+/**
+ * Turn the card at `callId` into a streaming command card.
+ *
+ * `run_command` arrives as a tool card and is upgraded in place when the runtime
+ * says it is really a shell command; the id and position are kept so the row the
+ * reader is already looking at does not move or remount.
+ */
+function commandFrom(
+  event: Extract<KnownEvent, { type: 'command_started' }>,
+  item: ToolItem | CommandItem,
+): ToolItem | CommandItem {
+  if (item.kind === 'tool') {
+    const command: CommandItem = {
+      kind: 'command',
+      id: item.id,
+      at: item.at,
+      callId: item.callId,
+      command: event.command,
+      cwd: event.cwd,
+      stdout: '',
+      stderr: '',
+      output: '',
+      exitCode: null,
+      status: 'running',
+      truncated: false,
+      durationMs: null,
+      runId: item.runId,
+    };
+    return command;
+  }
+  return { ...item, command: event.command, cwd: event.cwd, status: 'running' as const };
 }
 
 function append(state: ChatState, item: ChatItem): ChatState {
@@ -246,13 +327,16 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
   switch (event.type) {
     case 'run_started': {
       let items = closeStreaming(state.items);
-      const lastUser = findItem(
-        state,
+      // `closeStreaming` keeps the array's order and length, so an index taken
+      // against `state.items` is still valid against the closed copy.
+      const lastUserIndex = findLastIndex(
+        state.items,
         (item) => item.kind === 'message' && item.role === 'user' && (item.runId === null || item.runId === event.run_id),
       );
+      const lastUser = lastUserIndex < 0 ? undefined : state.items[lastUserIndex];
       if (lastUser && lastUser.kind === 'message') {
         if (lastUser.runId !== event.run_id) {
-          items = items.map((item) => (item.id === lastUser.id && item.kind === 'message' ? { ...item, runId: event.run_id } : item));
+          items = replaceItemAt(items, lastUserIndex, { ...lastUser, runId: event.run_id });
         }
       } else if (event.prompt) {
         items = [
@@ -286,19 +370,16 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
       if (event.agent_id) return state;
       if (!event.delta) return seen;
       if (isLateDelta(state, event)) return seen;
-      const current = findItem(
-        state,
-        (item) => item.kind === 'message' && item.role === 'assistant' && item.streaming,
-      );
-      const tail = state.items[state.items.length - 1];
-      if (current && current.kind === 'message' && tail === current) {
+      // The per-token path: extend the newest segment in place. The item stays
+      // the tail, so no scan of the transcript is needed to find it.
+      const tail = streamingTail(state);
+      if (tail) {
         return {
           ...seen,
-          items: state.items.map((item) =>
-            item.id === current.id && item.kind === 'message'
-              ? { ...item, content: item.content + event.delta }
-              : item,
-          ),
+          items: replaceItemAt(state.items, tail.index, {
+            ...tail.item,
+            content: tail.item.content + event.delta,
+          }),
         };
       }
       const items = closeStreaming(state.items);
@@ -326,8 +407,8 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
 
     case 'text_replaced': {
       if (event.agent_id) return state;
-      const answer = findItem(
-        state,
+      const answerIndex = findLastIndex(
+        state.items,
         (item) =>
           item.kind === 'message' &&
           item.role === 'assistant' &&
@@ -335,15 +416,12 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
           item.agentId === null &&
           item.runId === event.run_id,
       );
+      const answer = answerIndex < 0 ? undefined : state.items[answerIndex];
       if (!answer || answer.kind !== 'message') return seen;
       if (answer.content === event.content) return seen;
       return {
         ...seen,
-        items: state.items.map((item) =>
-          item.id === answer.id && item.kind === 'message'
-            ? { ...item, content: event.content }
-            : item
-        ),
+        items: replaceItemAt(state.items, answerIndex, { ...answer, content: event.content }),
       };
     }
 
@@ -353,19 +431,14 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
       // Same late frame as `text_delta`: a reasoning bubble opened after the run
       // settled would stay `streaming` forever, because no terminal frame follows.
       if (isLateDelta(state, event)) return seen;
-      const current = findItem(
-        state,
-        (item) => item.kind === 'message' && item.role === 'assistant' && item.streaming,
-      );
-      const tail = state.items[state.items.length - 1];
-      if (current && current.kind === 'message' && tail === current) {
+      const tail = streamingTail(state);
+      if (tail) {
         return {
           ...seen,
-          items: state.items.map((item) =>
-            item.id === current.id && item.kind === 'message'
-              ? { ...item, reasoning: item.reasoning + event.delta }
-              : item,
-          ),
+          items: replaceItemAt(state.items, tail.index, {
+            ...tail.item,
+            reasoning: tail.item.reasoning + event.delta,
+          }),
         };
       }
       const items = closeStreaming(state.items);
@@ -436,15 +509,23 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
 
     case 'tool_call_started': {
       if (event.agent_id) return state;
-      const existing = state.items.find(
+      const existing = findLastIndex(
+        state.items,
         (item) => (item.kind === 'tool' || item.kind === 'command') && item.callId === event.call_id,
       );
-      if (existing) {
-        const items = state.items.map((item) => {
-          if (item.id !== existing.id) return item;
-          if (item.kind === 'tool') return { ...item, name: event.name, args: event.arguments, status: 'running' as const };
-          return item;
-        });
+      if (existing >= 0) {
+        const current = state.items[existing];
+        // Only a tool card can absorb a started frame; a command card is left as
+        // it is. Copy one pointer, not the whole transcript.
+        const items =
+          current && current.kind === 'tool'
+            ? replaceItemAt(state.items, existing, {
+                ...current,
+                name: event.name,
+                args: event.arguments,
+                status: 'running',
+              })
+            : state.items;
         return { ...seen, items: closeStreaming(items), running: true };
       }
       const item: ToolItem = {
@@ -466,33 +547,16 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
 
     case 'command_started': {
       if (event.agent_id) return state;
-      const existing = state.items.find(
+      const existing = findLastIndex(
+        state.items,
         (item) => (item.kind === 'tool' || item.kind === 'command') && item.callId === event.call_id,
       );
-      if (existing) {
-        const items = state.items.map((item) => {
-          if (item.id !== existing.id) return item;
-          if (item.kind === 'tool') {
-            const command: CommandItem = {
-              kind: 'command',
-              id: item.id,
-              at: item.at,
-              callId: item.callId,
-              command: event.command,
-              cwd: event.cwd,
-              stdout: '',
-              stderr: '',
-              output: '',
-              exitCode: null,
-              status: 'running',
-              truncated: false,
-              durationMs: null,
-              runId: item.runId,
-            };
-            return command;
-          }
-          return { ...item, command: event.command, cwd: event.cwd, status: 'running' as const };
-        });
+      if (existing >= 0) {
+        const current = state.items[existing];
+        const items =
+          current && (current.kind === 'tool' || current.kind === 'command')
+            ? replaceItemAt(state.items, existing, commandFrom(event, current))
+            : state.items;
         return { ...seen, items: closeStreaming(items), running: true };
       }
       const command: CommandItem = {
@@ -516,47 +580,52 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
 
     case 'command_output': {
       if (event.agent_id) return state;
-      return updateItem(
-        { ...seen, items: state.items },
+      // Per-chunk path: the card receiving output is the last command with this
+      // call id, found by a backwards scan and replaced by index.
+      const index = findLastIndex(
+        state.items,
         (item) => item.kind === 'command' && item.callId === event.call_id,
-        (item) => {
-          const command = item as CommandItem;
-          const target = event.stream === 'stderr' ? 'stderr' : 'stdout';
-          const merged = clampOutput(command[target] + event.chunk);
-          return {
-            ...command,
-            [target]: merged.text,
-            truncated: command.truncated || merged.truncated,
-          };
-        },
       );
+      if (index < 0) return seen;
+      return updateItemAt(seen, index, (item) => {
+        const command = item as CommandItem;
+        const target = event.stream === 'stderr' ? 'stderr' : 'stdout';
+        const merged = clampOutput(command[target] + event.chunk);
+        return {
+          ...command,
+          [target]: merged.text,
+          truncated: command.truncated || merged.truncated,
+        };
+      });
     }
 
     case 'command_finished': {
       if (event.agent_id) return state;
-      return updateItem(
-        { ...seen, items: state.items },
+      const index = findLastIndex(
+        state.items,
         (item) => item.kind === 'command' && item.callId === event.call_id,
-        (item) => {
-          const command = item as CommandItem;
-          return {
-            ...command,
-            exitCode: event.exit_code,
-            durationMs: event.duration_ms,
-            truncated: command.truncated || event.truncated,
-            status: event.exit_code === 0 ? 'ok' : 'error',
-          };
-        },
       );
+      if (index < 0) return seen;
+      return updateItemAt(seen, index, (item) => {
+        const command = item as CommandItem;
+        return {
+          ...command,
+          exitCode: event.exit_code,
+          durationMs: event.duration_ms,
+          truncated: command.truncated || event.truncated,
+          status: event.exit_code === 0 ? 'ok' : 'error',
+        };
+      });
     }
 
     case 'tool_call_finished': {
       if (event.agent_id) return state;
       const output = clampOutput(event.output).text;
-      const target = state.items.find(
+      const targetIndex = findLastIndex(
+        state.items,
         (item) => (item.kind === 'tool' || item.kind === 'command') && item.callId === event.call_id,
       );
-      if (!target) {
+      if (targetIndex < 0) {
         const item: ToolItem = {
           kind: 'tool',
           id: `tool:${event.call_id}`,
@@ -573,40 +642,39 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
         };
         return { ...seen, items: [...state.items, item] };
       }
-      return updateItem(
-        { ...seen, items: state.items },
-        (item) => item.id === target.id,
-        (item) => {
-          if (item.kind === 'command') {
-            return {
-              ...item,
-              durationMs: event.duration_ms,
-              truncated: item.truncated || event.truncated,
-              status: event.ok ? item.status : ('error' as const),
-              output: item.output === '' ? output : item.output,
-              stdout: item.stdout === '' ? output : item.stdout,
-            };
-          }
-          // A duplicate/refetch event without images must not erase the preview
-          // the card is already showing, so the old list survives an empty one.
-          const images = event.images && event.images.length > 0 ? event.images : item.kind === 'tool' ? item.images : undefined;
+      return updateItemAt(seen, targetIndex, (item) => {
+        if (item.kind === 'command') {
           return {
             ...item,
-            status: event.ok ? 'ok' : 'error',
-            output,
-            truncated: event.truncated,
             durationMs: event.duration_ms,
-            ...(images ? { images } : {}),
+            truncated: item.truncated || event.truncated,
+            status: event.ok ? item.status : ('error' as const),
+            output: item.output === '' ? output : item.output,
+            stdout: item.stdout === '' ? output : item.stdout,
           };
-        },
-      );
+        }
+        // A duplicate/refetch event without images must not erase the preview
+        // the card is already showing, so the old list survives an empty one.
+        const images = event.images && event.images.length > 0 ? event.images : item.kind === 'tool' ? item.images : undefined;
+        return {
+          ...item,
+          status: event.ok ? 'ok' : 'error',
+          output,
+          truncated: event.truncated,
+          durationMs: event.duration_ms,
+          ...(images ? { images } : {}),
+        };
+      });
     }
 
     case 'approval_requested': {
       const view = approvalView(event.approval, at);
-      const existing = state.items.find((item) => item.kind === 'approval' && item.approval.id === view.id);
-      if (existing) {
-        return updateItem(state, (item) => item.id === existing.id && item.kind === 'approval', (item) => ({
+      const existing = findLastIndex(
+        state.items,
+        (item) => item.kind === 'approval' && item.approval.id === view.id,
+      );
+      if (existing >= 0) {
+        return updateItemAt(state, existing, (item) => ({
           ...(item as ApprovalItem),
           approval: view,
         }));
@@ -617,21 +685,22 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
 
     case 'approval_resolved': {
       const decision: ApprovalDecision = event.decision;
-      return updateItem(
-        seen,
+      const index = findLastIndex(
+        state.items,
         (item) => item.kind === 'approval' && item.approval.id === event.approval_id,
-        (item) => {
-          const approval = item as ApprovalItem;
-          return {
-            ...approval,
-            approval: {
-              ...approval.approval,
-              status: decision === 'expired' ? 'expired' : 'resolved',
-              decision,
-            },
-          };
-        },
       );
+      if (index < 0) return seen;
+      return updateItemAt(seen, index, (item) => {
+        const approval = item as ApprovalItem;
+        return {
+          ...approval,
+          approval: {
+            ...approval.approval,
+            status: decision === 'expired' ? 'expired' : 'resolved',
+            decision,
+          },
+        };
+      });
     }
 
     case 'notice':
@@ -830,14 +899,12 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
         ok: event.state !== 'error',
         messageId: event.message_id,
       };
-      const existing = state.items.findIndex(
+      const existing = findLastIndex(
+        state.items,
         (entry) => entry.kind === 'slash' && entry.messageId === event.message_id,
       );
       if (existing !== -1) {
-        return {
-          ...seen,
-          items: state.items.map((entry, index) => (index === existing ? item : entry)),
-        };
+        return { ...seen, items: replaceItemAt(state.items, existing, item) };
       }
       return { ...seen, items: [...closeStreaming(state.items), item] };
     }

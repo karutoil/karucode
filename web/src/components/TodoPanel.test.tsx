@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/preact';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PluginPanelView } from './PluginPanelView';
 import type { PluginPanelTab } from '../state/store';
@@ -273,9 +273,13 @@ describe('TodoPanel', () => {
 
   it('shows the reason when the plugin could not read the list', () => {
     const data = { error: 'the TODO list at `/w/list.json` is not readable', items: [] };
-    render(<TodoPanel {...{ panel: panel(), plugin: 'kc-todo', version: '0.1.0', data, refresh: () => {} }} />);
+    const refresh = vi.fn();
+    render(<TodoPanel {...{ panel: panel(), plugin: 'kc-todo', version: '0.1.0', data, refresh }} />);
     expect(screen.getByText('Could not read the list')).toBeTruthy();
     expect(screen.getByRole('alert')).toBeTruthy();
+    // The one recovery is another read, offered beside the reason.
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces a carry-over that is still open', () => {

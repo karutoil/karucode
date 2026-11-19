@@ -604,7 +604,11 @@ def main() -> int:
             }
             const rail = document.querySelector('.settings-nav');
             const head = document.querySelector('.settings-pane-head');
-            const footer = document.querySelector('.settings-footer');
+            // The sheet rides the shell's own footer band: `SettingsSheet` passes
+            // its note and its Cancel / Save into `Overlay`, which draws
+            // `.overlay-footer`. `.settings-footer` is kept in the selector only
+            // because older builds drew that band themselves.
+            const footer = document.querySelector('.dialog-settings .overlay-footer, .settings-footer');
             const before = {
               rail: rail.getBoundingClientRect().top,
               head: head.getBoundingClientRect().top,
@@ -932,7 +936,7 @@ def main() -> int:
               const box = item.getBoundingClientRect();
               return box.left < prev.right - 1;
             });
-            const footer = document.querySelector('.settings-footer').getBoundingClientRect();
+            const footer = document.querySelector('.dialog-settings .overlay-footer, .settings-footer').getBoundingClientRect();
             const head = document.querySelector('.settings-pane-head').getBoundingClientRect();
             return {
               shellDirection: getComputedStyle(shell).flexDirection,

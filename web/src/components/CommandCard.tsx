@@ -7,6 +7,7 @@ import { ToolRewind } from './ChatTranscript';
 import { toolStatusLabel } from '../state/selectors';
 import { AlertIcon, CheckIcon, ChevronDownIcon } from './icons';
 import { TpsBadge } from './TpsBadge';
+import { Badge } from '../ui';
 
 export interface CommandCardProps {
   item: CommandItem;
@@ -148,6 +149,9 @@ export function CommandCard({
         data-open={open ? 'true' : 'false'}
         aria-label={`Command ${item.command}`}
       >
+        {/* The head is the whole row and holds the rewind control and the
+          * throughput badge, so it stays a native disclosure: `Button` takes one
+          * icon slot, not a nested button. */}
         <button
           type="button"
           class="command-row-head"
@@ -167,7 +171,7 @@ export function CommandCard({
               {cwd}
             </span>
           ) : null}
-          {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
+          {item.truncated ? <Badge tone="warn" class="badge badge-warn">truncated</Badge> : null}
           <span class="command-row-meta">
             <ToolRewind item={item} onRewind={onRewind} />
             {/* A command's stdio is what arrives while it runs, so its own
@@ -202,6 +206,8 @@ export function CommandCard({
       data-open={open ? 'true' : 'false'}
       aria-label={`Command ${item.command}`}
     >
+      {/* Same shape as the row head: the summary is the whole line and holds
+        * the rewind control and the throughput badge. */}
       <button
         type="button"
         class="command-summary"
@@ -220,7 +226,7 @@ export function CommandCard({
             {cwd}
           </span>
         ) : null}
-        {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
+        {item.truncated ? <Badge tone="warn" class="badge badge-warn">truncated</Badge> : null}
         <ToolRewind item={item} onRewind={onRewind} />
         <TpsBadge
           chars={item.stdout.length + item.stderr.length}

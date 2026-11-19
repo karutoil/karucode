@@ -1,6 +1,8 @@
 import type { JSX } from 'preact';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
+import { Button } from '../ui/Button';
+import { Text } from '../ui/Layout';
 import { ArrowRightIcon, BoltIcon, LockIcon, SearchIcon, SparkIcon } from './icons';
 import { pluginText, UI_REPLACE_GREETING } from './uiContributions';
 
@@ -67,28 +69,36 @@ export function EmptyState({ variant = 'empty' }: EmptyStateProps): JSX.Element 
         <div class="empty-symbol" aria-hidden="true">
           <SparkIcon size={25} />
         </div>
-        <h2 class="empty-title" id="empty-title" data-testid="empty-title">
+        <Text as="h2" id="empty-title" testId="empty-title" size="hero" weight="bold" class="empty-title">
           {greeting}
-        </h2>
-        <p class="empty-copy">
+        </Text>
+        {/* `size`/`tone` are the values `.empty-copy` already states
+            (`--fs-message`, `--muted`): the sentence keeps the quiet voice it was
+            given, and the type scale stops being copied into this file. */}
+        <Text as="p" size="message" tone="muted" class="empty-copy">
           Start with an idea or a task. Karucode can explore your codebase, make changes, run tools, and keep
           you in control.
-        </p>
+        </Text>
         <div class="quick-prompts" aria-label="Suggested prompts">
-          {QUICK_PROMPTS.map((quick) => (
-            <button
-              type="button"
-              class="quick-prompt"
+          {QUICK_PROMPTS.map((quick, index) => (
+            <Button
+              class="quick-prompt h-auto justify-start"
               key={quick.label}
               title={quick.prompt}
+              testId={`quick-prompt-${index}`}
               onClick={() => usePrompt(quick.prompt)}
             >
               <span class="quick-prompt-icon" aria-hidden="true">
                 {quick.icon}
               </span>
-              <span>{quick.label}</span>
+              {/* A starter prompt is a sentence in a row that hugs its content,
+                  while `Button` is a one-line control: `h-auto justify-start`
+                  keep the row from being flattened onto the 30px button height,
+                  and the label opts out of the inherited `nowrap` itself (the
+                  property is inherited, so the row keeps its own). */}
+              <span class="whitespace-normal">{quick.label}</span>
               <ArrowRightIcon size={14} />
-            </button>
+            </Button>
           ))}
         </div>
       </div>

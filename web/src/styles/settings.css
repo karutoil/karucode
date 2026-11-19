@@ -480,12 +480,6 @@
   text-transform: uppercase;
 }
 
-/* A small input that sits on the right of a setting row. */
-.input-inline {
-  flex: 0 0 auto;
-  width: 92px;
-}
-
 .input-range {
   flex: 0 0 auto;
   width: 160px;
@@ -691,12 +685,6 @@
   flex-wrap: wrap;
   gap: var(--space-3);
   list-style: none;
-}
-
-.chip-removable {
-  gap: var(--space-2);
-  height: 22px;
-  padding: 0 var(--space-2) 0 var(--space-3);
 }
 
 .chip-remove {
@@ -946,19 +934,6 @@
   margin-top: var(--space-1);
   accent-color: var(--accent);
   flex: 0 0 auto;
-}
-
-.provider-toggle-text {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  min-width: 0;
-}
-
-.provider-toggle-label {
-  font-size: var(--fs-small);
-  font-weight: 600;
-  color: var(--text);
 }
 
 .provider-toggle .field-hint {
@@ -1216,7 +1191,10 @@
 }
 
 .dialog-catalog {
-  width: min(var(--overlay-w-standard), 100%);
+  /* The measure comes from the surface's role now (`role="wide"` in
+   * `ModelCatalogModal.tsx` -> `.overlay-wide`), not from this class: it used to
+   * pin 620px here, which silently overrode the role and made the dialog a
+   * list-picker at a form's width. Only the height cap is this surface's own. */
   max-height: min(var(--overlay-h-tall), calc(100dvh - var(--space-10) - var(--space-7)));
 }
 
@@ -1866,18 +1844,6 @@
   flex-wrap: wrap;
 }
 
-.update-build-number {
-  font-family: var(--font-mono);
-  font-size: var(--fs-title);
-  color: var(--text);
-}
-
-.update-build-meta {
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  color: var(--muted);
-}
-
 .update-facts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -1915,19 +1881,6 @@
   background: var(--surface-raised);
 }
 
-.update-available-head {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-5);
-  flex-wrap: wrap;
-}
-
-.update-badge {
-  font-size: var(--fs-label);
-  color: var(--accent);
-  font-weight: 600;
-}
-
 .update-notes {
   margin: 0;
   max-height: 180px;
@@ -1953,14 +1906,6 @@
   align-items: center;
   gap: var(--space-6);
   flex-wrap: wrap;
-}
-
-.update-restart {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  font-size: var(--fs-small);
-  color: var(--text-secondary);
 }
 
 .update-command {
@@ -1991,21 +1936,6 @@
 
 .update-interval .input {
   width: 96px;
-}
-
-/* Errors and confirmations share a shape: one line, stated plainly, no icon. */
-.update-error,
-.update-notice {
-  margin: 0;
-  font-size: var(--fs-small);
-}
-
-.update-error {
-  color: var(--danger);
-}
-
-.update-notice {
-  color: var(--text-secondary);
 }
 
 /* The rail's "a newer build exists" chip, beside the version it is newer than. */
@@ -2142,8 +2072,3 @@
   font-size: var(--fs-tiny);
 }
 
-.plugin-setting-notice {
-  margin: 0;
-  color: var(--muted);
-  font-size: var(--fs-tiny);
-}

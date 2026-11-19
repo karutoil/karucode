@@ -4,6 +4,7 @@ import { AlertIcon, LockIcon } from '../../components/icons';
 import { describeApprovals } from '../../lib/approvalCopy';
 import type { Activity } from '../../state/selectors';
 import * as store from '../../state/store';
+import { Button, LinkButton } from '../../ui';
 
 export interface ComposerFooterProps {
   status: Activity;
@@ -45,9 +46,9 @@ export function ComposerFooter({
             <>
               <AlertIcon size={13} />
               <span>{disabledReason}</span>
-              <button type="button" class="link-button" onClick={onOpenSettings}>
+              <LinkButton class="link-button" testId="composer-open-settings" onClick={onOpenSettings}>
                 Open settings
-              </button>
+              </LinkButton>
             </>
           ) : (
             <>
@@ -77,16 +78,18 @@ export function ComposerFooter({
       </span>
 
       {approvals ? (
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="sm"
           class="compose-approvals"
           title={approvals.title}
           aria-label={`Approvals: ${approvals.label}. Open Settings`}
+          iconRight={<LockIcon size={11} />}
+          testId="composer-approvals"
           onClick={onOpenSettings}
         >
           Approvals: {approvals.label}
-          <LockIcon size={11} />
-        </button>
+        </Button>
       ) : null}
     </div>
   );

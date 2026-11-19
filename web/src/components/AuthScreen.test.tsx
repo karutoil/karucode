@@ -132,8 +132,14 @@ describe('AuthScreen', () => {
 
   it('shows the public address the server says it is protecting', async () => {
     stubApi(authStatus({ password_set: true, public_url: 'https://karucode.example.com' }));
-    render(<AuthScreen />);
+    const { container } = render(<AuthScreen />);
     expect(await screen.findByText('https://karucode.example.com')).toBeTruthy();
+    // One sentence. The 4px flex gap separates the two boxes on screen, but the
+    // text a reader copies or a screen reader announces has no gap to rely on,
+    // so the explicit space is the only thing keeping the words apart.
+    expect(container.querySelector('.auth-subtitle')?.textContent).toBe(
+      'Continue to https://karucode.example.com',
+    );
   });
 
   it('lets the password be revealed and hidden again', async () => {

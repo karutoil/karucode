@@ -21,11 +21,13 @@
  *     `components.base` — above Tailwind's Preflight, below the rest of the
  *     components layer, below `utilities`.
  *
- * A handful of sheets are imported by the component that owns them instead
- * (`Notifications`, the control plane). They are listed in
- * `OWNED_BY_A_COMPONENT` with the reason and a size assertion, so the unlayered
- * set cannot grow by accident: the next sheet either joins `index.css` or gets
- * an entry a reviewer has to read.
+ * A few sheets used to be imported by the component that owns them instead
+ * (`Notifications`, the sessions rail, the control plane). Those imports are gone:
+ * every sheet now goes through `index.css`, and `OWNED_BY_A_COMPONENT` below is
+ * the empty list of exceptions a reviewer would have to read before that changes
+ * back. The test that follows is the strict form of the rule — every stylesheet in
+ * `src/styles/` except the three named in `ENTRY_FILES` must appear in `index.css`
+ * with `layer(components)`.
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -40,20 +42,14 @@ const indexCss = read('index.css');
 /**
  * Sheets a component imports itself, and why they are not in `index.css`.
  *
- * They are unlayered today, so a utility still cannot override them — that is
- * the remaining gap of the layer migration, recorded here rather than hidden.
- * Moving them means deciding that the control plane's rules may lose a tie to
- * `layout.css` (they are emitted *before* `index.css` today), which is its own
- * change with its own visual verification.
+ * Empty on purpose, and kept rather than deleted: it is the named exception list
+ * the "every stylesheet is layered" rule below allows, so the next sheet that
+ * wants to skip `index.css` has to add an entry here - a diff a reviewer reads -
+ * instead of quietly importing CSS from a component and landing outside every
+ * layer. `notifications.css`, `workbench-navigation.css` and the four
+ * `control-*.css` were the last six entries; they are in `index.css` now.
  */
-const OWNED_BY_A_COMPONENT = new Map<string, string>([
-  ['notifications.css', 'imported by components/NotificationCenter.tsx'],
-  ['workbench-navigation.css', 'imported by components/SessionsRail.tsx'],
-  ['control-shared.css', 'imported by components/control-plane/ControlPlane.tsx'],
-  ['control-rail.css', 'imported by components/control-plane/ControlRail.tsx'],
-  ['control-overview.css', 'imported by components/control-plane/ControlOverview.tsx'],
-  ['control-session.css', 'imported by components/control-plane/ControlSession.tsx'],
-]);
+const OWNED_BY_A_COMPONENT = new Map<string, string>();
 
 interface ImportStatement {
   file: string;
@@ -76,6 +72,12 @@ function sheets(): string[] {
 
 /** The entry sheet itself: `main.tsx` imports it, and it imports the rest. */
 const ENTRY = 'index.css';
+
+/**
+ * The three files the "every sheet is layered" rule cannot apply to: the entry
+ * that does the importing, and the two sheets it imports unlayered on purpose.
+ */
+const ENTRY_FILES = new Set(['tokens.css', 'tailwind.css', ENTRY]);
 
 /** Stylesheets imported from a module (`import '../styles/x.css'`). */
 function componentImports(): Set<string> {
@@ -144,10 +146,25 @@ describe('the sheets outside index.css are named, not forgotten', () => {
     expect([...OWNED_BY_A_COMPONENT.keys()].sort()).toEqual(fromComponents);
   });
 
-  it('keeps the unlayered set small and gives each entry a reason', () => {
-    // An unlayered sheet outranks the utilities layer, so every entry is a place
-    // a `p-*`/`text-*` utility silently does nothing. It is debt with a name.
-    expect(OWNED_BY_A_COMPONENT.size).toBeLessThanOrEqual(6);
+  it('imports every stylesheet in src/styles with layer(components)', () => {
+    // The rule, in full: no stylesheet may live outside the cascade order. The
+    // three entry files are the exceptions the format itself forces — `tokens.css`
+    // and `tailwind.css` are imported unlayered on purpose (see the first test in
+    // this file) and `index.css` is the entry that does the importing.
+    const entries = indexImports(indexCss);
+    const imported = new Map(entries.map((entry) => [entry.file, entry.layer]));
+    for (const file of sheets()) {
+      if (ENTRY_FILES.has(file)) continue;
+      expect(imported.has(file), `${file} is imported by index.css`).toBe(true);
+      expect(imported.get(file), `${file} is imported with layer(components)`).toBe('components');
+    }
+  });
+
+  it('has no unlayered exception left to declare', () => {
+    // An unlayered sheet outranks the utilities layer, so every entry in the map
+    // above is a place a `p-*`/`text-*` utility silently does nothing. The list is
+    // empty: a new entry is a decision, not a default.
+    expect(OWNED_BY_A_COMPONENT.size).toBe(0);
     for (const [file, reason] of OWNED_BY_A_COMPONENT) {
       expect(reason.length, `${file} has a reason`).toBeGreaterThan(20);
       expect(read(file).length, `${file} exists`).toBeGreaterThan(0);

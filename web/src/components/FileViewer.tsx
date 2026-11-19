@@ -11,9 +11,10 @@ import { highlightCode, languageLabel, MAX_FILE_HIGHLIGHT_CHARS } from '../lib/h
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import * as workspaceTabs from '../state/workspaceTabs';
-import { Dialog } from './Dialog';
+import { Badge, Button, Callout, IconButton, LinkButton, Overlay, Skeleton, Textarea } from '../ui';
+import type { TabItem } from '../components/Tabs';
 import { FilePreview } from './FilePreview';
-import { Tabs, type TabItem } from './Tabs';
+import { Tabs } from './Tabs';
 import {
   CheckIcon,
   CopyIcon,
@@ -135,7 +136,6 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
-  const editorRef = useRef<HTMLTextAreaElement>(null);
   // Keystrokes can arrive while a save is awaiting the server. The completion
   // compares that request's snapshot with this live value before closing anything.
   const latestDraft = useRef('');
@@ -180,10 +180,8 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
     };
   }, [path, projectId, retryKey]);
 
-  useEffect(() => {
-    if (editing) editorRef.current?.focus();
-  }, [editing]);
-
+  // The editor is mounted only while editing, so its own `autoFocus` is what
+  // puts the caret in the buffer; there is no persistent ref to focus.
   const capability = useMemo<FileCapability | null>(
     () =>
       file
@@ -392,26 +390,30 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
         {flags.length > 0 ? (
           <div class="file-flags">
             {flags.map((flag) => (
-              <span key={flag} class="badge badge-warn">
+              <Badge key={flag} tone="warn">
                 {flag}
-              </span>
+              </Badge>
             ))}
           </div>
         ) : null}
         <div class="file-toolbar-actions">
           {editing ? (
             <>
-              <button
-                type="button"
-                class="button button-small button-primary"
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<CheckIcon size={13} />}
+                title="Save this file (Ctrl/Cmd+S)"
+                testId="file-viewer-save"
                 disabled={saving || !dirty}
                 onClick={() => void save()}
               >
-                <CheckIcon size={13} /> {saving ? 'Saving…' : 'Save'}
-              </button>
-              <button
-                type="button"
-                class="button button-small"
+                {saving ? 'Saving…' : 'Save'}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                testId="file-viewer-cancel"
                 disabled={saving}
                 onClick={() => {
                   setDraft(file?.content ?? '');
@@ -421,37 +423,40 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
                 }}
               >
                 Cancel
-              </button>
+              </Button>
             </>
           ) : (
-            <button
-              type="button"
-              class="button button-small"
-              disabled={state !== 'ready' || capability?.canEdit !== true}
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<EditIcon size={13} />}
               title={capability?.editBlockedReason ?? 'Edit this file'}
+              testId="file-viewer-edit"
+              disabled={state !== 'ready' || capability?.canEdit !== true}
               onClick={() => {
                 setDraft(file?.content ?? '');
                 setMode('source');
                 setEditing(true);
               }}
             >
-              <EditIcon size={13} /> Edit
-            </button>
+              Edit
+            </Button>
           )}
-          <button
-            type="button"
-            class="file-action"
-            aria-disabled={dirty}
+          <LinkButton
+            tone="muted"
             title={switchTitle}
+            testId="file-viewer-switch-host"
+            aria-disabled={dirty}
+            class={dirty ? 'opacity-50' : undefined}
             onClick={switchHost}
           >
             <SidebarIcon size={13} />
             {host === 'dialog' ? 'Open in tab' : 'Open in dialog'}
-          </button>
-          <button
-            type="button"
-            class="file-action"
+          </LinkButton>
+          <LinkButton
+            tone="muted"
             title="Copy this file's workspace path"
+            testId="file-viewer-copy-path"
             onClick={() => {
               void copyText(path).then((ok) => {
                 setCopied(ok);
@@ -460,12 +465,13 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
             }}
           >
             <CopyIcon size={13} /> {copied ? 'Copied' : 'Copy path'}
-          </button>
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="Reload file"
+          </LinkButton>
+          <IconButton
+            size="sm"
+            label="Reload file"
             title={dirty ? 'Discard your edits and reload from disk' : 'Reload file'}
+            testId="file-viewer-reload"
+            icon={<RefreshIcon class={state === 'loading' ? 'spin' : undefined} />}
             disabled={saving}
             onClick={() => {
               if (dirty) {
@@ -474,76 +480,94 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
               }
               setRetryKey((key) => key + 1);
             }}
-          >
-            <RefreshIcon class={state === 'loading' ? 'spin' : undefined} />
-          </button>
+          />
         </div>
       </div>
 
       {state === 'loading' ? (
         <div class="file-loading" aria-busy="true" aria-label="Loading file">
-          <div class="skeleton skeleton-code" />
-          <div class="skeleton skeleton-code skeleton-short" />
-          <div class="skeleton skeleton-code" />
+          <Skeleton class="skeleton-code" />
+          <Skeleton class="skeleton-code skeleton-short" />
+          <Skeleton class="skeleton-code" />
         </div>
       ) : null}
 
       {state === 'error' ? (
-        <div class="inline-error" role="alert">
-          <p>{error}</p>
-          <button
-            type="button"
-            class="button button-small"
-            onClick={() => setRetryKey((key) => key + 1)}
-          >
-            Retry
-          </button>
-        </div>
+        <Callout
+          tone="danger"
+          testId="file-viewer-error"
+          class="file-load-error"
+          actions={
+            <Button
+              variant="secondary"
+              size="sm"
+              testId="file-viewer-retry"
+              onClick={() => setRetryKey((key) => key + 1)}
+            >
+              Retry
+            </Button>
+          }
+        >
+          {error}
+        </Callout>
       ) : null}
 
       {confirmDiscard ? (
-        <div class="file-confirm" role="alert">
-          <span>
-            {dirty ? 'Discard your unsaved changes?' : 'Discard your edits and reload from disk?'}
-          </span>
-          <div class="file-confirm-actions">
-            <button
-              type="button"
-              class="button button-small"
-              data-autofocus
-              onClick={() => setConfirmDiscard(false)}
-            >
-              Keep editing
-            </button>
-            <button
-              type="button"
-              class="button button-small button-danger"
-              onClick={() => {
-                setConfirmDiscard(false);
-                if (dirty) onClose();
-                else setRetryKey((key) => key + 1);
-              }}
-            >
-              Discard
-            </button>
-          </div>
-        </div>
+        <Callout
+          tone="warn"
+          testId="file-viewer-confirm-discard"
+          class="file-confirm"
+          actions={
+            <div class="file-confirm-actions">
+              <Button
+                variant="secondary"
+                size="sm"
+                data-autofocus
+                testId="file-viewer-keep-editing"
+                onClick={() => setConfirmDiscard(false)}
+              >
+                Keep editing
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                testId="file-viewer-discard"
+                onClick={() => {
+                  setConfirmDiscard(false);
+                  if (dirty) onClose();
+                  else setRetryKey((key) => key + 1);
+                }}
+              >
+                Discard
+              </Button>
+            </div>
+          }
+        >
+          {dirty ? 'Discard your unsaved changes?' : 'Discard your edits and reload from disk?'}
+        </Callout>
       ) : null}
 
       {saveError ? (
-        <div class="inline-error file-save-error" role="alert">
-          <p>{saveError}</p>
-          {conflict ? (
-            <button
-              type="button"
-              class="button button-small button-danger"
-              disabled={saving}
-              onClick={() => void save(true)}
-            >
-              Overwrite anyway
-            </button>
-          ) : null}
-        </div>
+        <Callout
+          tone="danger"
+          testId="file-viewer-save-error"
+          class="file-save-error"
+          actions={
+            conflict ? (
+              <Button
+                variant="danger"
+                size="sm"
+                testId="file-viewer-overwrite"
+                disabled={saving}
+                onClick={() => void save(true)}
+              >
+                Overwrite anyway
+              </Button>
+            ) : undefined
+          }
+        >
+          {saveError}
+        </Callout>
       ) : null}
 
       {state === 'ready' && file ? (
@@ -570,15 +594,16 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
                 was loaded, which is why it cannot be saved from here.
               </p>
             ) : null}
-            <textarea
-              ref={editorRef}
-              class="file-editor"
-              aria-label={`Edit ${path}`}
-              spellcheck={false}
-              autocomplete="off"
-              autocapitalize="off"
-              wrap="off"
+            <Textarea
+              id="file-editor"
+              class="file-editor border-0 rounded-none px-6 py-6 resize-none"
+              rows={24}
+              spellCheck={false}
+              autoComplete="off"
+              autoFocus
               value={draft}
+              testId="file-viewer-editor"
+              aria-label={`Edit ${path}`}
               onInput={(event) => {
                 latestDraft.current = event.currentTarget.value;
                 setDraft(event.currentTarget.value);
@@ -681,9 +706,9 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
 
   if (host === 'dialog') {
     return (
-      <Dialog open title={path} onClose={close} class="dialog-file">
+      <Overlay open title={path} onClose={close} role="full" class="dialog-file" bodyLayout="contents">
         {body}
-      </Dialog>
+      </Overlay>
     );
   }
   return body;

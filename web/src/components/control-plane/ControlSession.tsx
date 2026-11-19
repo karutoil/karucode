@@ -17,7 +17,6 @@ import {
 } from '../icons';
 import { chatTitle, controlStarter, sessionStatus } from './controlModel';
 import { Button, IconButton, LinkButton, Spinner, StatusDot, type StatusDotTone } from '../../ui';
-import '../../styles/control-session.css';
 
 export interface ControlSessionProps {
   /** The open session's id. */

@@ -142,25 +142,27 @@ exactly like component CSS, because it *is* the same variable.
 (scrollbar thumbs, hairline glyphs) and is unreadable as prose. Use
 `text-muted`.
 
-Two layer rules follow from that:
+Two layer rules follow from that, and `styles/index.css` is the only file that
+decides either:
 
-* element resets live in `@layer base` (`styles/base.css`), so a utility
-  overrides them;
-* every component sheet is imported with `layer(components)` in
-  `styles/index.css`, so a utility overrides an existing `.class` rule too:
-  `class="button px-8"` gets 20px of padding, not `.button`'s 10px. The six
-  sheets a component imports itself (`notifications.css`,
-  `workbench-navigation.css`, the four `control-*.css`) are still unlayered, and
-  an unlayered rule beats every layer whatever the specificity — a utility does
-  nothing there until those move.
+* element resets live in a nested `@layer base` in `base.css`, which becomes
+  `components.base` — above Tailwind's Preflight, below the rest of the
+  components layer — so a utility overrides them;
+* **all 27 component sheets** are imported there with `layer(components)`, so a
+  utility overrides an existing `.class` rule too: `class="button px-8"` gets
+  20px of padding, not `.button`'s 10px. No component module imports a stylesheet
+  itself any more: `notifications.css`, `workbench-navigation.css` and the four
+  `control-*.css` were the last six that did, and they are imported by
+  `index.css` too. `OWNED_BY_A_COMPONENT` in `src/styles/layers.test.ts` is the
+  empty exception list a reviewer would have to add to before that changes back.
 
 Both are enforced statically: `src/styles/ui-contract.test.ts` refuses arbitrary
 values (except geometry such as `w-[320px]`), `text-faint` and every default
 palette class in the TSX, `src/styles/scale.test.ts` refuses raw colours and
 off-scale radii/font sizes/spacing in CSS sheets outside `tokens.css`,
 `src/styles/layers.test.ts` refuses an import without `layer(components)` and any
-sheet that is neither imported by `index.css` nor listed with a reason, and
-`npm run lint` refuses `any` and a `<button>` without an explicit `type`.
+sheet that `index.css` never imports, and `npm run lint` refuses `any` and a
+`<button>` without an explicit `type`.
 
 Theme Studio (Task actions → Theme studio, the project-rail palette button where
 that rail is present, `Ctrl/Cmd+Shift+L`, or Settings → Appearance → Theme and layout) ships

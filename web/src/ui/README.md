@@ -12,8 +12,8 @@ Typed, accessible Preact 11 primitives bound strictly to karucode's runtime desi
 
 ## Exports
 
-- **Actions**: `Button`, `IconButton` (requires `label`), `LinkButton`, `ConfirmDialog`
-- **Forms**: `Field` (auto-wires `htmlFor`, `aria-describedby`, `role="alert"` error), `Input`, `Textarea`, `Select`, `Checkbox`, `Toggle`
+- **Actions**: `Button` (also carries the ARIA a non-`button` widget role needs: `role`, `aria-haspopup`, `aria-controls`, `aria-selected`, `aria-checked`, `tabIndex`), `IconButton` (requires `label`), `LinkButton`, `ConfirmDialog`
+- **Forms**: `Field` (auto-wires `htmlFor`, `aria-describedby`, `role="alert"` error), `Input` (`list` for a `<datalist>`, `aria-controls`), `Textarea`, `Select`, `Checkbox`, `Toggle`
 - **Layout & Type**: `Stack`, `Inline`, `Card`, `Text`, `SectionHeader`, `SettingRow`
 - **Feedback & Status**: `Badge`, `Chip`, `StatusDot`, `Keycap`, `Callout`, `Spinner`, `Skeleton`
 - **Shells**: `Overlay`, `Tabs`, `TabPanel`, `EmptyState`, `ErrorBoundary`, `icons`

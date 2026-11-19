@@ -1,10 +1,12 @@
 import type { JSX } from 'preact';
+import { Suspense } from 'preact/compat';
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import type { ChatItem } from '../state/chat';
 import { copyText } from '../lib/clipboard';
 import { useHeightVariable } from '../lib/dockHeight';
 import { fileName } from '../lib/fileKind';
 import { useHistoryLoader } from '../lib/historyLoader';
+import { lazyNamed } from '../lib/lazyView';
 import { modKey } from '../lib/platform';
 import { useStickyBottom } from '../lib/stickyBottom';
 import type { TreeLoader } from '../lib/mentions';
@@ -15,17 +17,16 @@ import { contextTone, contextUsage, formatContextPercent, totalUsage } from '../
 import * as store from '../state/store';
 import * as workbench from '../state/workbench';
 import * as workspaceTabs from '../state/workspaceTabs';
-import { GitManager } from './git/GitManager';
 import { ChatTranscript } from './ChatTranscript';
 import { Composer } from './Composer';
 import { EmptyState } from './EmptyState';
 import { ErrorBoundary } from './ErrorBoundary';
-import { FileTabView } from './FileViewer';
 import { Inspector } from './Inspector';
 import { ResultResizer } from './ResultResizer';
 import { ContextDrawer } from './ContextDrawer';
 import { WorkbenchTaskMenu } from './WorkbenchTaskMenu';
 import { LiveAnnouncer } from './LiveAnnouncer';
+import { Button, Callout, IconButton, LinkButton, Skeleton } from '../ui';
 import { PluginSlot } from './PluginSlot';
 import { isUiHidden, UI_HIDE_CONTEXT_BUTTON, UI_HIDE_NOTIFICATIONS, UI_HIDE_COMMAND_PALETTE, UI_SLOT_SESSION_HEADER, UI_SLOT_SESSION_HEADER_CHIP } from './uiContributions';
 import { Tabs, type TabItem } from './Tabs';
@@ -55,6 +56,20 @@ import {
  * (`state/workspaceTabs.ts` owns the list and the selection).
  */
 export type WorkspaceView = workspaceTabs.WorkspaceView;
+
+// The two workspace panels that are not the conversation, split out of the
+// entry chunk.
+//
+// Neither is on screen when the app opens: source control is a tab the reader
+// has to select, and a file tab is only created by opening a file. Both keep
+// themselves mounted after the first visit (see `changesMounted` and
+// `mountedFiles` below), so the one asynchronous mount is the first activation
+// and every switch back is synchronous - `lazy` caches the module it resolved.
+const GitManagerLazy = lazyNamed<{ variant?: 'page' | 'panel'; active?: boolean }>(
+  () => import('./git/GitManager'),
+  'GitManager',
+);
+const FileTabViewLazy = lazyNamed<{ path: string }>(() => import('./FileViewer'), 'FileTabView');
 
 /**
  * Plain-text transcript for the "Copy" header action: speaker, message text,
@@ -110,33 +125,38 @@ function BranchChip({ onShowChanges }: { onShowChanges?: () => void }): JSX.Elem
   // The branch name is the accessible name: on a phone the visible text becomes
   // the icon alone, and a button with no text would have no name there.
   return (
-    <button
-      type="button"
+    <Button
+      size="sm"
+      variant="ghost"
       class="head-btn branch-chip"
       aria-label={`Branch ${branch} — open Changes`}
       title={`On branch ${branch} — open Changes`}
+      icon={<BranchIcon size={13} />}
+      testId="branch-chip"
       onClick={onShowChanges}
     >
-      <BranchIcon size={13} />
       <span class="branch-chip-name" title={branch}>
         {branch}
       </span>
-    </button>
+    </Button>
   );
 }
 
 function ProviderBanner(): JSX.Element | null {
   if (store.providerConfigured.value) return null;
   return (
-    <div class="banner banner-warn" role="status">
-      <AlertIcon size={15} />
-      <div class="banner-body">
-        <strong>No model provider configured.</strong> Set a base URL and model before sending a message.
-      </div>
-      <button type="button" class="button button-small" onClick={() => actions.openSettings()}>
-        Open settings
-      </button>
-    </div>
+    <Callout
+      tone="warn"
+      class="banner banner-warn"
+      icon={<AlertIcon size={15} />}
+      actions={
+        <Button size="sm" testId="provider-banner-settings" onClick={() => actions.openSettings()}>
+          Open settings
+        </Button>
+      }
+    >
+      <strong>No model provider configured.</strong> Set a base URL and model before sending a message.
+    </Callout>
   );
 }
 
@@ -147,9 +167,23 @@ function ConnectionBanner(): JSX.Element | null {
   if (!offline && !reconnecting) return null;
   const blocked = connection.stream === 'blocked';
   return (
-    <div class={`banner ${offline || blocked ? 'banner-danger' : 'banner-warn'}`} role="status">
-      <AlertIcon size={15} />
-      <div class="banner-body">
+    <Callout
+      tone={offline || blocked ? 'danger' : 'warn'}
+      class={`banner ${offline || blocked ? 'banner-danger' : 'banner-warn'}`}
+      testId="connection-banner"
+      icon={<AlertIcon size={15} />}
+      actions={
+        <Button
+          size="sm"
+          icon={<RefreshIcon size={13} />}
+          testId="connection-retry"
+          onClick={() => void actions.retryConnection()}
+        >
+          Try again
+        </Button>
+      }
+    >
+      <span class="banner-body">
         {offline ? (
           <>
             <strong>Disconnected from karucode.</strong> Showing the last known state; retrying in the
@@ -166,10 +200,38 @@ function ConnectionBanner(): JSX.Element | null {
           </>
         )}
         {connection.lastError ? <span class="banner-detail">{connection.lastError}</span> : null}
+      </span>
+    </Callout>
+  );
+}
+
+/**
+ * One error, one shape: a kicker naming what failed, the server's own message,
+ * an optional diagnostic line, then the one control that can act on it. The run
+ * banner and the session-load failure were two hand-copied hierarchies for the
+ * same event, so a change to either drifted from the other.
+ */
+function ErrorPanel({
+  kicker,
+  message,
+  detail,
+  action,
+}: {
+  kicker: string;
+  message: string;
+  detail?: string;
+  action?: JSX.Element;
+}): JSX.Element {
+  return (
+    <div class="run-error-banner" role="alert">
+      <div class="run-error-head">
+        <span class="run-error-kicker">
+          <AlertIcon size={14} /> {kicker}
+        </span>
+        {action}
       </div>
-      <button type="button" class="button button-small" onClick={() => void actions.retryConnection()}>
-        <RefreshIcon size={13} /> Retry
-      </button>
+      <p class="run-error-message">{message}</p>
+      {detail ? <p class="run-error-kind">{detail}</p> : null}
     </div>
   );
 }
@@ -178,28 +240,29 @@ function RunErrorBanner(): JSX.Element | null {
   const error = store.chat.value.runError;
   if (!error) return null;
   return (
-    <div class="run-error-banner" role="alert">
-      <div class="run-error-head">
-        <span class="run-error-kicker">
-          <AlertIcon size={14} /> Run failed
-        </span>
-        <button type="button" class="link-button" onClick={actions.dismissRunError}>
+    <ErrorPanel
+      kicker="Run failed"
+      message={error.message}
+      detail={error.kind ? `Kind: ${error.kind}` : undefined}
+      action={
+        <LinkButton class="link-button" testId="dismiss-run-error" onClick={actions.dismissRunError}>
           Dismiss
-        </button>
-      </div>
-      <p class="run-error-message">{error.message}</p>
-      {error.kind ? <p class="run-error-kind">kind: {error.kind}</p> : null}
-    </div>
+        </LinkButton>
+      }
+    />
   );
 }
 
 function ChatSkeleton(): JSX.Element {
+  // The same `Skeleton` primitive the boot screen and the file tree use, so
+  // there is one placeholder in the product rather than a per-view div with a
+  // copied set of properties. `.skeleton-turn` supplies the height only.
   return (
     <div class="chat-skeleton" aria-busy="true" aria-label="Loading conversation">
-      <div class="skeleton skeleton-turn" />
-      <div class="skeleton skeleton-turn skeleton-short" />
-      <div class="skeleton skeleton-turn" />
-      <div class="skeleton skeleton-turn skeleton-short" />
+      <Skeleton class="skeleton-turn" />
+      <Skeleton class="skeleton-turn skeleton-short" />
+      <Skeleton class="skeleton-turn" />
+      <Skeleton class="skeleton-turn skeleton-short" />
     </div>
   );
 }
@@ -303,16 +366,16 @@ function SessionHeader({
 
   return (
     <header class="main-head">
-      <button
-        type="button"
+      <IconButton
+        size="md"
         class="head-btn head-icon sessions-toggle"
-        onClick={actions.toggleRail}
-        aria-label="Toggle session list"
-        aria-expanded={railExpanded}
+        label="Toggle session list"
         title={`Sessions — ${modKey()}+B`}
-      >
-        <MenuIcon size={15} />
-      </button>
+        expanded={railExpanded}
+        icon={<MenuIcon size={15} />}
+        testId="toggle-session-list"
+        onClick={actions.toggleRail}
+      />
 
       {/* The mock's breadcrumb is one line: the project (quiet) / the session
        * (loud), with the activity word as a capsule beside it. The old second
@@ -346,39 +409,42 @@ function SessionHeader({
          * on a phone. The counter is the same derived unread total the tab title
          * shows, so the two can never disagree. */}
         {isUiHidden(store.pluginUi.value, UI_HIDE_NOTIFICATIONS) ? null : (
-        <button
-          type="button"
+        <IconButton
+          size="md"
           class={`head-btn head-icon notifications-head${unreadNotifications > 0 ? ' has-unread' : ''}`}
-          onClick={actions.toggleNotificationCenter}
-          aria-label={
+          label={
             unreadNotifications > 0
               ? `Notifications (${unreadNotifications} unread)`
               : 'Notifications'
           }
           aria-haspopup="dialog"
-          aria-expanded={store.notificationCenterOpen.value}
+          expanded={store.notificationCenterOpen.value}
           title={
             unreadNotifications > 0
               ? `${unreadNotifications} unread notification${unreadNotifications === 1 ? '' : 's'}`
               : 'Notifications'
           }
-        >
-          <BellIcon size={15} />
-          {unreadNotifications > 0 ? (
-            <span class="head-badge" aria-hidden="true">
-              {unreadNotifications > 99 ? '99+' : unreadNotifications}
-            </span>
-          ) : null}
-        </button>
+          icon={
+            <>
+              <BellIcon size={15} />
+              {unreadNotifications > 0 ? (
+                <span class="head-badge" aria-hidden="true">
+                  {unreadNotifications > 99 ? '99+' : unreadNotifications}
+                </span>
+              ) : null}
+            </>
+          }
+          testId="notifications-head"
+          onClick={actions.toggleNotificationCenter}
+        />
         )}
         {!controlPlane && !contextHidden ? (
-          <button
-            type="button"
+          <IconButton
+            size="md"
             class="head-btn context-header-btn"
             data-tone={usage ? contextTone(usage.fraction) : undefined}
-            onClick={() => workbench.openContext('now')}
-            aria-label={usage ? `Session context — ${formatContextPercent(usage.fraction)} of the window used` : 'Session context'}
-            aria-expanded={contextExpanded}
+            label={usage ? `Session context — ${formatContextPercent(usage.fraction)} of the window used` : 'Session context'}
+            expanded={contextExpanded}
             aria-haspopup={narrow ? 'dialog' : undefined}
             aria-controls="workbench-context"
             title={
@@ -386,37 +452,42 @@ function SessionHeader({
                 ? `Context window ${formatContextPercent(usage.fraction)} full — usage and access (${modKey()}+J)`
                 : `Session context, usage and access — ${modKey()}+J`
             }
-          >
-            <ContextUsageRing fraction={usage?.fraction ?? null} />
-            {usage ? <span class="context-header-value">{formatContextPercent(usage.fraction)}</span> : null}
-          </button>
+            icon={
+              <>
+                <ContextUsageRing fraction={usage?.fraction ?? null} />
+                {usage ? <span class="context-header-value">{formatContextPercent(usage.fraction)}</span> : null}
+              </>
+            }
+            testId="session-context"
+            onClick={() => workbench.openContext('now')}
+          />
         ) : null}
         {resultsPopout ? (
-          <button
-            type="button"
+          <IconButton
+            size="md"
             class="head-btn head-icon results-head-btn"
-            onClick={onToggleResults}
-            aria-label={resultsOpen ? 'Close results' : 'Open results'}
-            aria-expanded={resultsOpen}
+            label={resultsOpen ? 'Close results' : 'Open results'}
+            expanded={resultsOpen}
             aria-haspopup="dialog"
             aria-controls="workbench-results"
             title={resultsOpen ? 'Close the results panel' : 'Open Files, Git, Session usage and Agents'}
-          >
-            <PanelIcon size={15} />
-          </button>
+            icon={<PanelIcon size={15} />}
+            testId="results-head"
+            onClick={onToggleResults}
+          />
         ) : null}
         {isUiHidden(store.pluginUi.value, UI_HIDE_COMMAND_PALETTE) ? null : (
-        <button
-          type="button"
+        <IconButton
+          size="md"
           class="head-btn head-icon command-head-btn"
-          onClick={actions.togglePalette}
-          aria-label="Command palette"
+          label="Command palette"
           aria-haspopup="dialog"
           aria-keyshortcuts="Control+K Meta+K"
           title={`Command palette — ${modKey()}+K`}
-        >
-          <SearchIcon size={15} />
-        </button>
+          icon={<SearchIcon size={15} />}
+          testId="command-palette-head"
+          onClick={actions.togglePalette}
+        />
         )}
         <WorkbenchTaskMenu
           canCopy={store.chat.value.items.length > 0 && view === 'chat'}
@@ -716,10 +787,15 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
         >
           <div class="chat-body">
             {scroller.showJump ? (
-              <button type="button" class="jump-latest" onClick={scroller.jumpToLatest}>
-                <ChevronDownIcon size={14} />
+              <Button
+                size="sm"
+                class="jump-latest"
+                icon={<ChevronDownIcon size={14} />}
+                testId="jump-to-latest"
+                onClick={scroller.jumpToLatest}
+              >
                 Jump to latest
-              </button>
+              </Button>
             ) : null}
             <div class="chat-scroll" ref={scroller.scrollRef} tabIndex={0} role="region" aria-label="Transcript">
               <div class="chat-inner">
@@ -731,21 +807,22 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
                 {showLoading ? <ChatSkeleton /> : null}
 
                 {!showLoading && store.chatError.value ? (
-                  <div class="run-error-banner" role="alert">
-                    <div class="run-error-head">
-                      <span class="run-error-kicker">
-                        <AlertIcon size={14} /> Could not load this session
-                      </span>
-                    </div>
-                    <p class="run-error-message">{store.chatError.value}</p>
-                    <button
-                      type="button"
-                      class="button button-small"
-                      onClick={() => currentId && void actions.openSession(currentId, { silent: false, force: true })}
-                    >
-                      <RefreshIcon size={13} /> Retry
-                    </button>
-                  </div>
+                  <ErrorPanel
+                    kicker="Could not load this session"
+                    message={store.chatError.value}
+                    action={
+                      <Button
+                        size="sm"
+                        icon={<RefreshIcon size={13} />}
+                        testId="reload-session"
+                        onClick={() =>
+                          currentId && void actions.openSession(currentId, { silent: false, force: true })
+                        }
+                      >
+                        Try again
+                      </Button>
+                    }
+                  />
                 ) : null}
 
                 {!showLoading && history !== null && history.messages.length > 0 ? (
@@ -796,8 +873,6 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
                 ) : null}
 
                 <RunErrorBanner />
-
-
               </div>
             </div>
           </div>
@@ -838,8 +913,11 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
           >
             {/* The source-control manager owns the whole panel: its two regions
                 scroll independently, so the tabpanel itself is not a scroll host
-                (`.git-workspace` turns that off). */}
-            <GitManager variant="page" active={view === 'changes'} />
+                (`.git-workspace` turns that off). Its chunk is fetched the first
+                * time this tab is selected, not when the app boots. */}
+            <Suspense fallback={null}>
+              <GitManagerLazy variant="page" active={view === 'changes'} />
+            </Suspense>
           </div>
         ) : null}
 
@@ -868,9 +946,13 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
             >
               {mountedFiles.includes(path) ? (
                 // One bad document must not take the tabs beside it down: the
-                // viewer fetches and renders a file someone else wrote.
+                // viewer fetches and renders a file someone else wrote. The
+                // viewer's chunk - and the markdown pipeline behind it - arrives
+                // on the tab's first showing, not with the workspace.
                 <ErrorBoundary scope={`The ${fileName(path)} tab`}>
-                  <FileTabView path={path} />
+                  <Suspense fallback={null}>
+                    <FileTabViewLazy path={path} />
+                  </Suspense>
                 </ErrorBoundary>
               ) : null}
             </div>

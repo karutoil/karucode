@@ -31,6 +31,31 @@ export default defineConfig({
     cssCodeSplit: true,
     sourcemap: false,
     reportCompressedSize: true,
+    rollupOptions: {
+      output: {
+        // Three vendor families, split out so a change to app code does not
+        // invalidate them and so the browser can fetch them alongside the entry
+        // chunk instead of parsing them as part of it.
+        //
+        // Deliberately NOT split: `mermaid` and `@xterm/*` already travel as
+        // their own lazily-imported chunks (`TerminalSurface`, the mermaid
+        // diagram renderer), and there is nothing to gain from regrouping
+        // chunks that are fetched on demand anyway.
+        manualChunks(id: string): string | undefined {
+          if (!id.includes('node_modules')) return undefined;
+          if (/node_modules\/(preact|@preact\/signals)\//.test(id)) return 'vendor-preact';
+          if (
+            /node_modules\/(markdown-it|markdown-it-footnote|markdown-it-task-lists|dompurify)\//.test(
+              id,
+            )
+          ) {
+            return 'vendor-markdown';
+          }
+          if (/node_modules\/highlight\.js\//.test(id)) return 'vendor-highlight';
+          return undefined;
+        },
+      },
+    },
   },
   test: {
     environment: 'jsdom',

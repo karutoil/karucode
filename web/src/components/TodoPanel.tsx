@@ -1,9 +1,10 @@
 import type { JSX } from 'preact';
 import { useState } from 'preact/hooks';
 import { truncate } from '../lib/format';
-import { Badge, Callout, Chip, Inline, Stack, Text } from '../ui';
+import { Badge, Button, Callout, Chip, Inline, Stack, Text } from '../ui';
 import type { FeedbackTone } from '../ui';
 import type { PluginPanelRenderProps, PluginPanelRenderer } from './pluginPanels';
+import { InspectorEmpty } from './InspectorEmpty';
 import {
   AlertIcon,
   CheckIcon,
@@ -416,7 +417,7 @@ function AuditStrip({ audit }: { audit: PanelAudit }): JSX.Element | null {
  * the refresh button and the "read from the plugin at …" footer, so this renders
  * only the list itself.
  */
-export function TodoPanel({ data }: PluginPanelRenderProps): JSX.Element {
+export function TodoPanel({ data, refresh }: PluginPanelRenderProps): JSX.Element {
   const payload = parseTodoPayload(data);
   // `matches` below guarantees this, but a renderer must never throw: a bad
   // payload should degrade, not blank the inspector.
@@ -436,6 +437,14 @@ export function TodoPanel({ data }: PluginPanelRenderProps): JSX.Element {
         title="Could not read the list"
         icon={<AlertIcon size={12} />}
         class="todo-audit todo-audit-warn"
+        // A failed read is the one state with an action: the file may be
+        // half-written while the agent is editing it, so reading again is the
+        // whole of the recovery and it should not need the panel's own refresh.
+        actions={
+          <Button variant="secondary" size="sm" onClick={refresh}>
+            Try again
+          </Button>
+        }
       >
         <Text as="p" size="tiny" mono tone="secondary" class="todo-error-text">
           {payload.error}
@@ -446,15 +455,10 @@ export function TodoPanel({ data }: PluginPanelRenderProps): JSX.Element {
 
   if (payload.items.length === 0) {
     return (
-      <Stack gap="2" class="empty-inspector">
-        <Text as="p" size="body" weight="semibold" class="empty-inspector-title">
-          No plan yet
-        </Text>
-        <Text as="p" size="small" tone="muted">
-          When the agent plans multi-step work it records a task list here, with subtasks and a
-          status for each. Nothing appears until then.
-        </Text>
-      </Stack>
+      <InspectorEmpty title="No plan yet">
+        When the agent plans multi-step work it records a task list here, with subtasks and a
+        status for each. Nothing appears until then.
+      </InspectorEmpty>
     );
   }
 

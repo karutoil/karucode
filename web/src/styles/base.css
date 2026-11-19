@@ -41,19 +41,21 @@
   font-display: swap;
 }
 
-/* Element resets. They live in `@layer base` so a Tailwind utility
+/* Element resets. They live in a nested `@layer base` so a Tailwind utility
  * (`@layer utilities`, declared by `tailwind.css`) can override them; without
  * the layer a reset wins on source order, and `p-4` on a `<p>` does nothing.
- * Class rules in this file and in the other sheets stay unlayered, and an
- * unlayered rule is stronger than any layer whatever the specificity, so the
- * rules that already ship keep winning exactly as they did. Mixed selectors
- * (`kbd, .keycap` below) stay unlayered for the same reason: their class half
- * must not be demoted.
  *
- * `tailwind.css` is imported before this file, so Tailwind's Preflight lands
- * in this same layer ahead of these rules and every declaration here still
- * wins. The heading sizes are the one addition: Preflight flattens `h1..h6`
- * to `font-size: inherit`, which would silently shrink every heading that no
+ * Where this file's rules land is decided once, in `styles/index.css`, which
+ * imports it with `layer(components)` like every other component sheet. A
+ * nested `@layer base` inside that becomes `components.base`: above Tailwind's
+ * own `base` layer (Preflight), below the rest of `components` — so a class rule
+ * still beats a reset — and below `utilities`. Nothing in this file is
+ * unlayered any more: the `.class` rules and the mixed `kbd, .keycap` selector
+ * below sit in `components` itself, one rung above the resets and still under
+ * every utility, which is what lets `p-8` on `.keycap` actually widen it.
+ *
+ * The heading sizes are the one addition: Preflight flattens `h1..h6` to
+ * `font-size: inherit`, which would silently shrink every heading that no
  * component rule sizes, so the browser scale they had before is pinned here
  * (a class or a `text-*` utility still overrides it).
  */
@@ -669,12 +671,6 @@ input.mono {
   color: var(--warn);
 }
 
-.badge-ok {
-  border-color: color-mix(in srgb, var(--success) 35%, transparent);
-  background: color-mix(in srgb, var(--success) 10%, transparent);
-  color: var(--success);
-}
-
 .chip {
   display: inline-flex;
   align-items: center;
@@ -691,15 +687,6 @@ input.mono {
 
 .chip code {
   font-size: var(--fs-tiny);
-}
-
-.chip-ok {
-  border-color: color-mix(in srgb, var(--success) 35%, transparent);
-  color: var(--success);
-}
-
-.chip-muted {
-  color: var(--muted);
 }
 
 /* ---------- loading & messages ---------- */

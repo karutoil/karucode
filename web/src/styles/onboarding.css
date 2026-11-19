@@ -4,6 +4,11 @@
  * The wizard is a full-screen flow, not a dialog: there is no workspace behind it
  * yet. It reuses `full-screen-state` / `state-card` from `overlays.css` and only
  * widens the card and lays out the step rail, the body and the footer.
+ *
+ * The controls inside the steps are `src/ui` primitives (`Field`, `Input`,
+ * `Select`, `Textarea`, `Button`, `Toggle`, `Callout`), so this sheet owns only
+ * the chrome the primitives do not: the card, the rail, the scrolling body, the
+ * summary table and the theme grid.
  */
 
 .onboarding-screen {
@@ -27,8 +32,6 @@
 }
 
 .onboarding-progress {
-  color: var(--muted);
-  font-size: var(--fs-tiny);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
 }
@@ -99,6 +102,11 @@
   outline-offset: 4px;
 }
 
+/* A refusal or a receipt sits between the step's blurb and its fields. */
+.onboarding-alert {
+  margin-top: var(--space-6);
+}
+
 /* Scrolls, so a tall step never pushes the footer off a laptop screen. */
 .onboarding-body {
   flex: 1 1 auto;
@@ -134,153 +142,26 @@
   font-size: 0.9em;
 }
 
-.onboarding-fields {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.onboarding-fields .field-label {
-  margin-top: var(--space-4);
-}
-
-.onboarding-fields .field-label:first-child {
-  margin-top: 0;
-}
-
-.onboarding-textarea {
-  min-height: 72px;
-  resize: vertical;
-  font-family: var(--font-mono);
-  line-height: 1.6;
-}
-
-.onboarding-toggle-row {
-  align-items: center;
-  padding: var(--space-5);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface-raised);
-}
-
-.onboarding-test-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-4);
-  margin-top: var(--space-5);
-}
-
+/* The "Test connection" receipt: an icon and a sentence on one line. */
 .onboarding-test {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  font-size: var(--fs-tiny);
 }
 
-.onboarding-test.is-ok {
-  color: var(--success, var(--accent));
-}
-
-.onboarding-test.is-bad {
-  color: var(--danger);
-}
-
-.onboarding-passkey-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-4);
-  margin-top: var(--space-5);
-  padding-top: var(--space-5);
-  border-top: 1px solid var(--line);
-}
-
+/* The theme picker: a grid of `Button`s, each holding a name and a sentence. */
 .onboarding-choice-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: var(--space-4);
 }
 
-.onboarding-choice-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-
+/* A choice card is a control, not a line of text: the label and the hint stack
+   inside it and the whole card is the target. */
 .onboarding-choice {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+  justify-content: flex-start;
   padding: var(--space-5) var(--space-6);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text-secondary);
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease;
-}
-
-.onboarding-choice:hover {
-  border-color: var(--line-strong);
-  background: var(--surface-raised);
-}
-
-.onboarding-choice.is-selected {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--text);
-}
-
-.onboarding-choice-title {
-  color: var(--text);
-  font-size: var(--fs-label);
-  font-weight: 620;
-}
-
-.onboarding-choice-hint {
-  font-size: var(--fs-tiny);
-  line-height: 1.65;
-}
-
-.onboarding-segment {
-  display: inline-flex;
-  align-self: flex-start;
-  padding: var(--space-1);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface-raised);
-}
-
-.onboarding-segment button {
-  padding: var(--space-3) var(--space-6);
-  border: 0;
-  border-radius: calc(var(--radius-sm) - 2px);
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: var(--fs-tiny);
-  font-weight: 560;
-  cursor: pointer;
-}
-
-.onboarding-segment button.is-selected {
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: var(--shadow-composer);
-}
-
-.onboarding-notice {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-3);
-  margin-top: var(--space-6);
-  padding: var(--space-4) var(--space-5);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--text-secondary);
-  font-size: var(--fs-tiny);
+  white-space: normal;
 }
 
 .onboarding-summary {

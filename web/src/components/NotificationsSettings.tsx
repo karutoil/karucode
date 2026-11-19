@@ -245,9 +245,9 @@ export function NotificationsDeviceSection(): JSX.Element {
         description="Applies to this browser."
         htmlFor="notify-volume"
         control={
-          <input
+          <Input
             id="notify-volume"
-            class="input-range"
+            class="input-range w-full max-w-[160px]"
             type="range"
             min="0"
             max="100"

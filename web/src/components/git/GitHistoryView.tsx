@@ -3,6 +3,7 @@ import { useEffect, useState } from 'preact/hooks';
 import type { GitBranch, GitCommit } from '../../api/types';
 import { relativeTime } from '../../lib/format';
 import { CommitIcon, SearchIcon } from '../icons';
+import { Button, Input, LinkButton, Select } from '../../ui';
 import { GitDiffPane } from './GitDiffPane';
 import type { GitSelection } from './gitModel';
 import type { GitHistoryQuery } from './useGitRepo';
@@ -73,29 +74,28 @@ export function GitHistoryView({
         <div class="gitm-filter-bar">
           <div class="gitm-search-wrap">
             <SearchIcon size={13} />
-            <input
+            <Input
               type="search"
               class="gitm-input"
               placeholder="Search commit messages…"
               aria-label="Search commit messages"
               value={search}
+              testId="git-history-search"
               onInput={(event) => setSearch((event.target as HTMLInputElement).value)}
             />
           </div>
-          <select
+          <Select
             class="gitm-select"
             aria-label="History branch filter"
             value={scope}
+            testId="git-history-scope"
+            options={[
+              { value: 'current', label: 'Current branch' },
+              { value: 'all', label: 'All branches' },
+              ...branches.map((b) => ({ value: b.name, label: b.name })),
+            ]}
             onChange={(event) => setScope((event.target as HTMLSelectElement).value)}
-          >
-            <option value="current">Current branch</option>
-            <option value="all">All branches</option>
-            {branches.map((b) => (
-              <option key={b.name} value={b.name}>
-                {b.name}
-              </option>
-            ))}
-          </select>
+          />
         </div>
 
         <div class="gitm-side-scroll">
@@ -114,8 +114,8 @@ export function GitHistoryView({
                     class={`gitm-row gitm-commit-row${active ? ' is-active' : ''}`}
                     key={commit.id}
                   >
-                    <button
-                      type="button"
+                    <LinkButton
+                      tone="muted"
                       class="gitm-row-main"
                       aria-pressed={active}
                       onClick={() => setSelected(active ? null : commit)}
@@ -142,7 +142,7 @@ export function GitHistoryView({
                           ))}
                         </span>
                       ) : null}
-                    </button>
+                    </LinkButton>
                   </li>
                 );
               })}
@@ -154,41 +154,46 @@ export function GitHistoryView({
       <section class="gitm-main" aria-label="Commit details">
         {selected ? (
           <div class="gitm-commit-actions-bar">
-            <button
-              type="button"
-              class="button button-small"
+            <Button
+              variant="secondary"
+              size="sm"
+              testId="git-history-checkout"
               disabled={busy}
               onClick={() => void onCheckoutDetached(selected.id)}
             >
               Checkout (detached)
-            </button>
-            <button
-              type="button"
-              class="button button-small"
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              testId="git-history-cherry-pick"
               disabled={busy}
               onClick={() => void onCherryPick(selected.id)}
             >
               Cherry-pick
-            </button>
-            <button
-              type="button"
-              class="button button-small"
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              testId="git-history-revert"
               disabled={busy}
               onClick={() => void onRevert(selected.id)}
             >
               Revert
-            </button>
-            <button
-              type="button"
-              class="button button-small"
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              testId="git-history-soft-reset"
               disabled={busy}
               onClick={() => void onReset(selected.short_id, 'soft')}
             >
               Soft reset here
-            </button>
-            <button
-              type="button"
-              class="button button-small button-danger"
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              testId="git-history-hard-reset"
               disabled={busy}
               onClick={() =>
                 onRequestConfirm({
@@ -203,7 +208,7 @@ export function GitHistoryView({
               }
             >
               Hard reset
-            </button>
+            </Button>
 
             <form
               class="gitm-inline-mini"
@@ -215,22 +220,25 @@ export function GitHistoryView({
                 });
               }}
             >
-              <input
+              <Input
                 type="text"
                 class="gitm-input"
                 placeholder="Branch from commit…"
                 aria-label="Create branch from commit"
                 value={branchDraft}
                 disabled={busy}
+                testId="git-history-branch-name"
                 onInput={(event) => setBranchDraft((event.target as HTMLInputElement).value)}
               />
-              <button
+              <Button
                 type="submit"
-                class="button button-small"
+                variant="secondary"
+                size="sm"
+                testId="git-history-branch-create"
                 disabled={busy || branchDraft.trim() === ''}
               >
                 Branch
-              </button>
+              </Button>
             </form>
 
             <form
@@ -243,22 +251,25 @@ export function GitHistoryView({
                 });
               }}
             >
-              <input
+              <Input
                 type="text"
                 class="gitm-input"
                 placeholder="Tag commit…"
                 aria-label="Create tag on commit"
                 value={tagDraft}
                 disabled={busy}
+                testId="git-history-tag-name"
                 onInput={(event) => setTagDraft((event.target as HTMLInputElement).value)}
               />
-              <button
+              <Button
                 type="submit"
-                class="button button-small"
+                variant="secondary"
+                size="sm"
+                testId="git-history-tag-create"
                 disabled={busy || tagDraft.trim() === ''}
               >
                 Tag
-              </button>
+              </Button>
             </form>
           </div>
         ) : null}

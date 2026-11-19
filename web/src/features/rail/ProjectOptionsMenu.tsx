@@ -5,6 +5,7 @@ import { Menu, MenuItem, type MenuController } from '../../lib/menu';
 import * as actions from '../../state/actions';
 import * as store from '../../state/store';
 import { KebabIcon } from '../../components/icons';
+import { IconButton } from '../../ui';
 
 export interface ProjectOptionsMenuProps {
   activeProject: Project | null;
@@ -31,16 +32,19 @@ export function ProjectOptionsMenu({
 
   return (
     <div class="project-switcher-menu-wrap">
-      <button
-        type="button"
-        class="side-mini-btn"
-        aria-label="Project options"
+      <IconButton
+        size="md"
+        class="side-mini-btn w-[28px] h-[28px]"
+        label="Project options"
         title="Project options"
         disabled={!activeProject}
-        {...menu.triggerProps}
-      >
-        <KebabIcon size={15} />
-      </button>
+        buttonRef={menu.triggerProps.ref}
+        aria-haspopup="menu"
+        expanded={menu.triggerProps['aria-expanded']}
+        icon={<KebabIcon size={15} />}
+        testId="project-options-trigger"
+        onClick={menu.triggerProps.onClick}
+      />
       {activeProject ? (
         <Menu menu={menu} label={`Project options for ${activeProject.name}`} class="rail-menu project-switcher-menu">
           <div class="rail-menu-meta">

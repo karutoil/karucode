@@ -485,13 +485,12 @@ What that means for a component:
    is 20px of padding, not `.button`'s 10px. `base.css` keeps its resets in a
    nested `@layer base`, which becomes `components.base` — above Tailwind's
    Preflight, below the rest of `components` (a class rule still beats a reset),
-   below `utilities`. The exceptions are named, not forgotten: six sheets are
-   imported by the component that owns them (`notifications.css`,
-   `workbench-navigation.css` and the four `control-*.css`) and are therefore
-   unlayered, so a utility does nothing there — restyle those with a class rule
-   until they move. `web/src/styles/layers.test.ts` fails an import without the
-   layer and fails a sheet that is neither imported by `index.css` nor given an
-   entry with a reason in that test.
+   below `utilities`. There are no exceptions left: the six sheets that used to be
+   imported by the component that owned them (`notifications.css`,
+   `workbench-navigation.css` and the four `control-*.css`) are imported by
+   `index.css` into the same layer, so no component module imports a stylesheet.
+   `web/src/styles/layers.test.ts` fails an import without the layer, fails a sheet
+   that `index.css` never imports, and fails a new entry in its exception list.
 5. **Two Preflight defaults had to be restored** because the app relied on the
    browser's own: link underlines (`text-decoration-line: underline` in the `a`
    reset) and list markers (`list-style: revert` on `ul`/`ol`, whose bullets

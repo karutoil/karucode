@@ -324,7 +324,7 @@
 
 .gitm-commit-btn:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: 2px;
+  outline-offset: var(--focus-ring-offset);
 }
 
 .gitm-commit-btn:disabled {
@@ -385,7 +385,7 @@
 
 .gitm-group-toggle:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: -2px;
+  outline-offset: calc(-1 * var(--focus-ring-offset));
   border-radius: var(--radius-sm);
 }
 
@@ -488,7 +488,7 @@
 
 .gitm-row-main:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: -2px;
+  outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
 .gitm-row-main.as-static {
@@ -617,7 +617,7 @@
 
 .gitm-act:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: -2px;
+  outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
 .gitm-act.is-danger:hover:not(:disabled) {
@@ -1292,7 +1292,7 @@
 
 .gitm-nav-tab:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: -2px;
+  outline-offset: calc(-1 * var(--focus-ring-offset));
   border-radius: var(--radius-sm);
 }
 

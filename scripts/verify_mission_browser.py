@@ -84,6 +84,13 @@ def main():
             raise AssertionError('browser timeout: ' + body + '\n' + str(js('return document.body.innerText;')))
         def click(label):
             assert wait("const b=[...document.querySelectorAll('button')].find(x => (x.getAttribute('aria-label')||x.innerText).trim() === " + json.dumps(label) + " && !x.disabled); if(b){b.click();return true} return false;"), label
+        def click_send():
+            # The Send button's accessible name spells the sending chord, and the
+            # chord is the platform's own (`sendChordLong` in
+            # `web/src/features/composer/helpers.ts`): `Control + Enter` on this
+            # host, `Command + Enter` on a Mac. Match the prefix so the check does
+            # not pin one platform's spelling.
+            assert wait("const b=[...document.querySelectorAll('button')].find(x => /^Send message \\(/.test(x.getAttribute('aria-label')||'') && !x.disabled); if(b){b.click();return true} return false;"), 'Send button'
         def fill(label, value):
             assert wait("const l=[...document.querySelectorAll('label')].find(x=>x.innerText.trim().startsWith(" + json.dumps(label) + ")); const e=l?.querySelector('input,textarea'); if(!e)return false; e.value=" + json.dumps(value) + "; e.dispatchEvent(new Event('input',{bubbles:true})); return true;")
         click('Open mission control'); click('＋ New mission')
@@ -96,7 +103,7 @@ def main():
         assert len(missions) == 1, missions
         mission_id = missions[0]['id']
         assert js("const e=document.querySelector('.composer-input'); e.value=" + json.dumps('Please draft a task. MISSION_ID=' + mission_id) + "; e.dispatchEvent(new Event('input',{bubbles:true})); return true;")
-        click('Send message (Command or Control + Enter)')
+        click_send()
         wait("return document.body.innerText.includes('Scripted task');", 40)
         mission = http_json(api + '/api/missions?project=' + project['id'])['missions'][0]
         assert len(mission['tasks']) == 1 and mission['tasks'][0]['state'] == 'draft', mission
