@@ -48,7 +48,7 @@ env:
   # Pinned: the fork's `main` after the verification pass merged. A reviewer that changes when
   # someone pushes is not evidence.
   GOBY_REVIEWER_REPO: karutoil/goby
-  GOBY_REVIEWER_REF: 0ee1126f9d26b20f74664e65bfcd507d29986658
+  GOBY_REVIEWER_REF: c71a316641b07492f8492d75e49ed7721e319011
 
 jobs:
   review:
@@ -96,11 +96,13 @@ jobs:
           # A review per push while this is being evaluated. The image default is 1: a later
           # push reuses the first review and the post-merge cleaner takes over.
           GOBY_MAX_ROUNDS: "0"
-          # An 18.5k-line pull request is 146 files to navigate, not 50 turns and not ten
-          # minutes. The deadline still ends the run; the caps only stop being the reason.
-          GOBY_AGENT_TIMEOUT_S: "1200"
-          GOBY_MAX_TURNS: "120"
-          GOBY_MAX_TOOL_CALLS: "200"
+          # An 18.5k-line pull request is 146 files to navigate. The first review with these
+          # knobs spent 120 turns reading the patch in chunks and reported a partial scan; the
+          # brief now points at per-file `git diff`, and the cap is 300 turns. The deadline still
+          # ends the run; the caps only stop being the reason.
+          GOBY_AGENT_TIMEOUT_S: "1500"
+          GOBY_MAX_TURNS: "300"
+          GOBY_MAX_TOOL_CALLS: "400"
           GOBY_VERIFY: advisory
           # Rust probes compile a workspace, not a snippet: the defaults (90s per probe, 300s
           # for the pass) are sized for a five-line script.
