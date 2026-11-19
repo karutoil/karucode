@@ -109,6 +109,37 @@ describe('a browser without AbortSignal.any', () => {
     restoreAny = null;
   });
 
+  it('keeps the caller\'s signal wired while the body is being read', async () => {
+    // Releasing the link when the headers arrive would leave `response.text()`
+    // uncovered: on an engine without `AbortSignal.any` the composed signal is
+    // fed only by that link, so a stalled body would never abort.
+    const controller = new AbortController();
+    let abortedDuringBody = false;
+    const fetchImpl = vi.fn(async (_path: string, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => {
+          // Abort while the body is in flight, as a caller or the deadline would.
+          abortedDuringBody = true;
+          expect(signal.aborted).toBe(false);
+          controller.abort();
+          expect(signal.aborted).toBe(true);
+          return JSON.stringify({ ok: true });
+        },
+      } as unknown as Response;
+    });
+
+    await expect(
+      apiRequest<{ ok: boolean }>('/api/health', {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        signal: controller.signal,
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(abortedDuringBody).toBe(true);
+  });
+
   it('does not leave a listener behind on the caller\'s signal', async () => {
     // A request that completes normally never fires `abort`, so the manual link
     // held one listener per request on a signal the app reuses for its life.

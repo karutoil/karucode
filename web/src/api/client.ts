@@ -158,9 +158,16 @@ function toBodyInit(body: PerformOptions['body']): BodyInit | undefined {
 }
 
 async function performRequest<T>(path: string, options: PerformOptions): Promise<T> {
-  const response = await fetchResponse(path, options);
+  const { response, release } = await fetchResponse(path, options);
 
-  const text = await response.text();
+  // The body is still covered by the deadline and by the caller's abort: the
+  // listeners are handed back only once it has been read.
+  let text: string;
+  try {
+    text = await response.text();
+  } finally {
+    release();
+  }
   let parsed: unknown = undefined;
   if (text.trim() !== '') {
     try {
@@ -188,7 +195,7 @@ async function performRequest<T>(path: string, options: PerformOptions): Promise
  * `ApiError` with the server's message rather than an opaque blob.
  */
 export async function apiRequestBlob(path: string, options: RequestOptions = {}): Promise<Blob> {
-  const response = await fetchResponse(path, {
+  const { response, release } = await fetchResponse(path, {
     method: options.method ?? 'GET',
     headers: options.headers ?? {},
     signal: options.signal,
@@ -198,6 +205,7 @@ export async function apiRequestBlob(path: string, options: RequestOptions = {})
   });
   if (!response.ok) {
     const text = await response.text().catch(() => '');
+    release();
     let parsed: unknown = undefined;
     if (text.trim() !== '') {
       try {
@@ -208,7 +216,12 @@ export async function apiRequestBlob(path: string, options: RequestOptions = {})
     }
     throw responseError(response, parsed, path, options.skipAuthHandler);
   }
-  return response.blob();
+  // The blob body is the one place the deadline still has to cover.
+  try {
+    return await response.blob();
+  } finally {
+    release();
+  }
 }
 
 /** The documented error for a failed response, from its JSON body when there is one. */
@@ -272,7 +285,10 @@ function linkSignals(signals: AbortSignal[]): { signal: AbortSignal; release: ()
 }
 
 /** Fetch with the bearer token, the CSRF header and the request deadline. */
-async function fetchResponse(path: string, options: PerformOptions): Promise<Response> {
+async function fetchResponse(
+  path: string,
+  options: PerformOptions,
+): Promise<{ response: Response; release: () => void }> {
   const method = options.method;
   const headers: Record<string, string> = { Accept: 'application/json', ...options.headers };
   if (method !== 'GET') headers['X-Karucode-Client'] = 'web';
@@ -287,14 +303,20 @@ async function fetchResponse(path: string, options: PerformOptions): Promise<Res
   const linked = options.signal ? linkSignals([options.signal, timeout]) : null;
   const signal = linked ? linked.signal : timeout;
   try {
-    return await fetchImpl(path, {
+    const response = await fetchImpl(path, {
       method,
       headers,
       body: toBodyInit(options.body),
       signal,
       credentials: 'same-origin',
     });
+    // Released by the caller *after* the body is read: a stalled body is exactly
+    // what the deadline is for, and on an engine without `AbortSignal.any` the
+    // composed signal is fed only by this link.
+    return { response, release: linked ? linked.release : () => undefined };
   } catch (error) {
+    // A failed request has no body to cover, so the listeners go back here.
+    linked?.release();
     // The caller's own abort is a deliberate cancellation, not a failure: let it
     // through untouched so callers can keep ignoring it.
     if (options.signal?.aborted) throw error;
@@ -313,10 +335,6 @@ async function fetchResponse(path: string, options: PerformOptions): Promise<Res
       0,
       'network',
     );
-  } finally {
-    // The request is over either way; the caller's signal must not keep this
-    // request's listeners (or this closure) alive until the next abort.
-    linked?.release();
   }
 }
 
