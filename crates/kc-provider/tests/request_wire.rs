@@ -236,7 +236,10 @@ async fn the_session_identity_reaches_the_endpoint_on_the_wire() {
     .await;
 
     let body = server.wait_for_request().await.json();
-    assert_eq!(body["prompt_cache_key"], "s_5a2e9bd3a9c04b2195023f24b4cf7c59");
+    assert_eq!(
+        body["prompt_cache_key"],
+        "s_5a2e9bd3a9c04b2195023f24b4cf7c59"
+    );
     // It is a routing hint, never part of the conversation the model reads.
     assert_eq!(body["messages"].as_array().unwrap().len(), 4);
 }
