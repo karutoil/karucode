@@ -41,7 +41,7 @@ env:
   # Pinned: the fork's `main` after the verification pass merged. A reviewer that changes when
   # someone pushes is not evidence.
   GOBY_REVIEWER_REPO: karutoil/goby
-  GOBY_REVIEWER_REF: 838d4810c837772e51971375c6ba430e1495e056
+  GOBY_REVIEWER_REF: dca0e45379514caba6ae099f5818428db699fdf4
 
 jobs:
   review:
