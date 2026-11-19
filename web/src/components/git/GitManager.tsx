@@ -18,6 +18,7 @@ import {
   UploadIcon,
 } from '../icons';
 import { GitBranchDialog } from './GitBranchDialog';
+import { Button, Callout, IconButton, Input, LinkButton } from '../../ui';
 import { GitBranchesView } from './GitBranchesView';
 import { GitChanges } from './GitChanges';
 import { GitCommitBox } from './GitCommitBox';
@@ -213,12 +214,14 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
   const selectedFile = findFile(selection, files);
 
   const branchChip = (
-    <button
-      type="button"
+    <Button
+      variant="ghost"
+      size="sm"
       class="gitm-branch"
-      onClick={() => setBranchesOpen(true)}
       aria-haspopup="dialog"
+      testId="git-branch-chip"
       title="Switch, create or delete a branch"
+      onClick={() => setBranchesOpen(true)}
     >
       <span class="gitm-branch-glyph" aria-hidden="true">
         <BranchIcon size={13} />
@@ -239,20 +242,19 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
       <span class="gitm-branch-chevron" aria-hidden="true">
         <ChevronDownIcon size={12} />
       </span>
-    </button>
+    </Button>
   );
 
   const refreshButton = (
-    <button
-      type="button"
-      class="icon-button gitm-refresh"
-      aria-label="Refresh git status"
+    <IconButton
+      class="gitm-refresh"
+      label="Refresh git status"
       title="Refresh git status"
+      testId="git-refresh"
+      icon={<RefreshIcon size={14} class={repo.state === 'loading' ? 'spin' : undefined} />}
       disabled={repo.state === 'loading' || busy}
       onClick={repo.refresh}
-    >
-      <RefreshIcon size={14} class={repo.state === 'loading' ? 'spin' : undefined} />
-    </button>
+    />
   );
 
   const notRepo =
@@ -266,12 +268,17 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
 
   const probeError =
     repo.state === 'error' ? (
-      <div class="inline-error" role="alert" key="probe-error">
-        <p>{repo.error}</p>
-        <button type="button" class="button button-small" onClick={repo.refresh}>
-          Retry
-        </button>
-      </div>
+      <Callout
+        tone="danger"
+        key="probe-error"
+        actions={
+          <Button variant="secondary" size="sm" testId="git-probe-retry" onClick={repo.refresh}>
+            Retry
+          </Button>
+        }
+      >
+        {repo.error}
+      </Callout>
     ) : null;
 
   const statusWarning =
@@ -284,12 +291,23 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
     ) : null;
 
   const actionError = repo.actionError ? (
-    <div class="inline-error gitm-action-error" role="alert" key="action-error">
-      <p>{repo.actionError}</p>
-      <button type="button" class="button button-small" onClick={repo.clearActionError}>
-        Dismiss
-      </button>
-    </div>
+    <Callout
+      tone="danger"
+      class="gitm-action-error"
+      key="action-error"
+      actions={
+        <Button
+          variant="secondary"
+          size="sm"
+          testId="git-action-error-dismiss"
+          onClick={repo.clearActionError}
+        >
+          Dismiss
+        </Button>
+      }
+    >
+      {repo.actionError}
+    </Callout>
   ) : null;
 
   const loading =
@@ -382,76 +400,84 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
         <div class="gitm-op-actions">
           {status.operation === 'merge' ? (
             <>
-              <button
-                type="button"
-                class="button button-small button-primary"
+              <Button
+                variant="primary"
+                size="sm"
+                testId="git-merge-continue"
                 disabled={busy || counts.conflicts > 0}
                 onClick={() => void repo.merge({ action: 'continue' })}
               >
                 Continue merge
-              </button>
-              <button
-                type="button"
-                class="button button-small button-danger"
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                testId="git-merge-abort"
                 disabled={busy}
                 onClick={() => void repo.merge({ action: 'abort' })}
               >
                 Abort merge
-              </button>
+              </Button>
             </>
           ) : status.operation === 'rebase' ? (
             <>
-              <button
-                type="button"
-                class="button button-small button-primary"
+              <Button
+                variant="primary"
+                size="sm"
+                testId="git-rebase-continue"
                 disabled={busy || counts.conflicts > 0}
                 onClick={() => void repo.rebase({ action: 'continue' })}
               >
                 Continue
-              </button>
-              <button
-                type="button"
-                class="button button-small"
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                testId="git-rebase-skip"
                 disabled={busy}
                 onClick={() => void repo.rebase({ action: 'skip' })}
               >
                 Skip
-              </button>
-              <button
-                type="button"
-                class="button button-small button-danger"
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                testId="git-rebase-abort"
                 disabled={busy}
                 onClick={() => void repo.rebase({ action: 'abort' })}
               >
                 Abort rebase
-              </button>
+              </Button>
             </>
           ) : status.operation === 'cherry-pick' ? (
             <>
-              <button
-                type="button"
-                class="button button-small button-primary"
+              <Button
+                variant="primary"
+                size="sm"
+                testId="git-cherry-pick-continue"
                 disabled={busy || counts.conflicts > 0}
                 onClick={() => void repo.cherryPick({ action: 'continue' })}
               >
                 Continue
-              </button>
-              <button
-                type="button"
-                class="button button-small"
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                testId="git-cherry-pick-skip"
                 disabled={busy}
                 onClick={() => void repo.cherryPick({ action: 'skip' })}
               >
                 Skip
-              </button>
-              <button
-                type="button"
-                class="button button-small button-danger"
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                testId="git-cherry-pick-abort"
                 disabled={busy}
                 onClick={() => void repo.cherryPick({ action: 'abort' })}
               >
                 Abort
-              </button>
+              </Button>
             </>
           ) : null}
         </div>
@@ -470,13 +496,14 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
           <AlertIcon size={13} /> Git author identity (<code>user.name</code> /{' '}
           <code>user.email</code>) is not configured.
         </span>
-        <button
-          type="button"
-          class="tiny-link"
+        <LinkButton
+          tone="accent"
+          aria-expanded={showIdentityForm}
+          testId="git-identity-toggle"
           onClick={() => setShowIdentityForm((v) => !v)}
         >
           {showIdentityForm ? 'Hide' : 'Configure'}
-        </button>
+        </LinkButton>
       </div>
       {showIdentityForm ? (
         <form
@@ -489,29 +516,33 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
             });
           }}
         >
-          <input
+          <Input
             type="text"
             class="gitm-input"
             placeholder="Your Name"
             aria-label="Git user.name"
             value={idName}
+            testId="git-identity-name"
             onInput={(e) => setIdName((e.target as HTMLInputElement).value)}
           />
-          <input
+          <Input
             type="email"
             class="gitm-input"
             placeholder="you@example.com"
             aria-label="Git user.email"
             value={idEmail}
+            testId="git-identity-email"
             onInput={(e) => setIdEmail((e.target as HTMLInputElement).value)}
           />
-          <button
+          <Button
             type="submit"
-            class="button button-small button-primary"
+            variant="primary"
+            size="sm"
+            testId="git-identity-save"
             disabled={busy || (idName.trim() === '' && idEmail.trim() === '')}
           >
             Save identity
-          </button>
+          </Button>
         </form>
       ) : null}
     </div>
@@ -600,38 +631,45 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
               <>
                 <div class="gitm-sync-bar" role="group" aria-label="Remote sync">
                   {remotesCount === 0 ? (
-                    <button
-                      type="button"
-                      class="button button-small"
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      icon={<GlobeIcon size={12} />}
+                      testId="git-set-remote"
                       disabled={busy}
                       onClick={() => setSection('remotes')}
                     >
-                      <GlobeIcon size={12} /> Set remote
-                    </button>
+                      Set remote
+                    </Button>
                   ) : (
                     <>
-                      <button
-                        type="button"
-                        class="button button-small"
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        testId="git-fetch"
                         disabled={busy}
                         title="Fetch updates from all remotes"
                         onClick={() => void repo.fetch({ all: true, prune: true })}
                       >
                         Fetch
-                      </button>
-                      <button
-                        type="button"
-                        class="button button-small"
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        icon={<DownloadIcon size={12} />}
+                        testId="git-pull"
                         disabled={busy || !status.branch}
                         title="Pull from remote"
                         onClick={() => void repo.pull()}
                       >
-                        <DownloadIcon size={12} /> Pull
+                        Pull
                         {status.behind ? ` ↓${status.behind}` : ''}
-                      </button>
-                      <button
-                        type="button"
-                        class="button button-small button-primary"
+                      </Button>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        icon={<UploadIcon size={12} />}
+                        testId="git-push"
                         disabled={busy || !status.branch}
                         title={
                           status.upstream
@@ -644,11 +682,10 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
                           })
                         }
                       >
-                        <UploadIcon size={12} />{' '}
                         {status.upstream
                           ? `Push${status.ahead ? ` ↑${status.ahead}` : ''}`
                           : 'Publish'}
-                      </button>
+                      </Button>
                     </>
                   )}
                 </div>
@@ -687,6 +724,9 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
             {pageSections.map((item) => {
               const selected = section === item.id;
               return (
+                // A raw `<button role="tab">`, not `Button`: a tab is not a
+                // button to assistive tech, and the strip owns `aria-selected`
+                // and its own selected styling (`.gitm-nav-tab.is-active`).
                 <button
                   key={item.id}
                   type="button"

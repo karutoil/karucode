@@ -64,6 +64,11 @@ export interface StackProps extends BaseUiProps {
   justify?: 'start' | 'center' | 'end' | 'between';
   as?: 'div' | 'section' | 'form' | 'nav' | 'ul';
   onSubmit?: (event: TargetedSubmitEvent<HTMLFormElement>) => void;
+  /**
+   * The column's ARIA role, for a stack that is not a plain `<div>`: a `status`
+   * for a loading pane, a `group` with a name. Mirrors `Inline`'s prop.
+   */
+  role?: JSX.IntrinsicElements['div']['role'];
   'aria-label'?: string;
 }
 
@@ -73,6 +78,7 @@ export function Stack({
   justify,
   as = 'div',
   onSubmit,
+  role,
   'aria-label': ariaLabel,
   id,
   testId,
@@ -92,6 +98,10 @@ export function Stack({
         id={id}
         class={classes}
         data-testid={testId}
+        // A `<form>` accepts only `form`, `none`, `presentation` and `search`,
+        // while `role` is typed for the element a stack usually is. The caller
+        // chose the pairing; the cast keeps the one prop instead of four.
+        role={role as JSX.IntrinsicElements['form']['role']}
         aria-label={ariaLabel}
         onSubmit={onSubmit}
       >
@@ -100,9 +110,19 @@ export function Stack({
     );
   }
 
-  const Tag = as;
+  // Typed as the `<div>` case on purpose: `section`/`nav`/`ul` take the same
+  // props at runtime, but the union of their element types narrows `role` to the
+  // intersection of what all four accept, which excludes `status` - the role a
+  // loading stack needs. The tag actually rendered is still `as`.
+  const Tag = as as 'div';
   return (
-    <Tag id={id} class={classes} data-testid={testId} aria-label={ariaLabel}>
+    <Tag
+      id={id}
+      class={classes}
+      data-testid={testId}
+      role={role}
+      aria-label={ariaLabel}
+    >
       {children}
     </Tag>
   );
@@ -147,6 +167,10 @@ export interface InlineProps extends BaseUiProps {
    */
   role?: JSX.IntrinsicElements['div']['role'];
   'aria-label'?: string;
+  /** The id of the visible label that names the group. */
+  'aria-labelledby'?: string;
+  /** The id of the paragraph that explains the group's selection. */
+  'aria-describedby'?: string;
 }
 
 export function Inline({
@@ -156,6 +180,8 @@ export function Inline({
   wrap,
   role,
   'aria-label': ariaLabel,
+  'aria-labelledby': ariaLabelledBy,
+  'aria-describedby': ariaDescribedBy,
   id,
   testId,
   class: className,
@@ -170,7 +196,15 @@ export function Inline({
   });
 
   return (
-    <div id={id} role={role} aria-label={ariaLabel} class={classes} data-testid={testId}>
+    <div
+      id={id}
+      role={role}
+      aria-label={ariaLabel}
+      aria-labelledby={ariaLabelledBy}
+      aria-describedby={ariaDescribedBy}
+      class={classes}
+      data-testid={testId}
+    >
       {children}
     </div>
   );

@@ -21,8 +21,9 @@ import {
 import { formatDuration, relativeTime } from '../lib/format';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
-import { Badge, Button, Callout, IconButton, Inline, Spinner, Stack, StatusDot, Text, cn } from '../ui';
+import { Badge, Button, Callout, IconButton, Inline, Spinner, StatusDot, Text, cn } from '../ui';
 import { BoltIcon, CpuIcon, RefreshIcon } from './icons';
+import { InspectorEmpty } from './InspectorEmpty';
 
 /**
  * The inspector's **Session** tab: what this session *is* and what it *cost*.
@@ -376,7 +377,7 @@ function AgentsSection({ info }: { info: SessionInfo }): JSX.Element | null {
     <section class="si-section" aria-label="Subagents">
       <div class="inspector-kicker-row">
         <span class="inspector-kicker">
-          Subagents
+          Subagents{' '}
           <span class="inspector-kicker-note">
             {agents.length} total{running > 0 ? ` · ${running} running` : ''}
           </span>
@@ -524,16 +525,11 @@ function RecentRuns({ info }: { info: SessionInfo }): JSX.Element | null {
 
 function EmptyInfo(): JSX.Element {
   return (
-    <Stack gap="2" class="empty-inspector">
-      <Text as="p" size="body" weight="semibold" class="empty-inspector-title">
-        No session open
-      </Text>
-      <Text as="p" size="small" tone="muted">
-        Open or create a session and this tab describes it: how many messages and runs it has,
-        what it spent on input and output tokens, how much of that the prompt cache served, and
-        how full the model's context window is.
-      </Text>
-    </Stack>
+    <InspectorEmpty title="No session open">
+      Open or create a session and this tab describes it: how many messages and runs it has,
+      what it spent on input and output tokens, how much of that the prompt cache served, and
+      how full the model's context window is.
+    </InspectorEmpty>
   );
 }
 

@@ -16,7 +16,6 @@ import type { SessionStatus } from './controlModel';
 import { contextMenuProps, Menu, MenuItem, useMenu } from '../../lib/menu';
 import { copyText } from '../../lib/clipboard';
 import { Badge, Button, Callout, Input, Select, StatusDot, Text, type StatusDotTone } from '../../ui';
-import '../../styles/control-overview.css';
 
 export function modelChoices(config: Config | null): ModelChoice[] {
   if (!config) return [];

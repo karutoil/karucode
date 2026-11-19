@@ -4,6 +4,7 @@ import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { findPanelShapeRenderer, findPluginPanelRenderer, panelPayloadFits, panelPollInterval } from './pluginPanels';
 import { RefreshIcon } from './icons';
+import { Badge, Button, IconButton } from '../ui';
 
 /** Structural caps apply even when every individual string is tiny. */
 export const PANEL_JSON_MAX_DEPTH = 6;
@@ -177,9 +178,9 @@ export function PluginPanelView({ panel }: PluginPanelViewProps): JSX.Element {
       <div class="empty-inspector" role="alert">
         <p class="empty-inspector-title">{title} is unavailable</p>
         <p>{error}</p>
-        <button type="button" class="button button-small" onClick={refresh}>
+        <Button variant="secondary" size="sm" class="mt-6" testId="plugin-panel-retry" onClick={refresh}>
           Try again
-        </button>
+        </Button>
       </div>
     );
   } else if (!state || (state.loading && data === null)) {
@@ -196,9 +197,9 @@ export function PluginPanelView({ panel }: PluginPanelViewProps): JSX.Element {
           A panel payload is capped so one plugin cannot freeze the inspector. Ask the plugin for a
           smaller payload.
         </p>
-        <button type="button" class="button button-small" onClick={refresh}>
+        <Button variant="secondary" size="sm" class="mt-6" testId="plugin-panel-retry" onClick={refresh}>
           Try again
-        </button>
+        </Button>
       </div>
     );
   } else if (drawn && drawn.matches(data)) {
@@ -227,20 +228,20 @@ export function PluginPanelView({ panel }: PluginPanelViewProps): JSX.Element {
       <div class="inspector-kicker-row">
         <span class="inspector-kicker">
           {title}
-          <span class="plugin-panel-badge">
+          <Badge class="plugin-panel-badge">
             {panel.plugin} v{panel.version}
-          </span>
+          </Badge>
         </span>
-        <button
-          type="button"
-          class="icon-button plugin-panel-refresh"
-          onClick={refresh}
-          aria-label={`Refresh ${title}`}
+        <IconButton
+          size="sm"
+          class="plugin-panel-refresh"
+          label={`Refresh ${title}`}
           title="Refresh this panel"
+          testId="plugin-panel-refresh"
+          icon={<RefreshIcon size={13} />}
           disabled={state?.loading === true}
-        >
-          <RefreshIcon size={13} />
-        </button>
+          onClick={refresh}
+        />
       </div>
       {body}
       {state?.fetchedAt ? (

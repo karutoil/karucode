@@ -2,7 +2,8 @@
  *
  * A dialog rather than a drawer: it is read top-to-bottom and then dismissed, and
  * the app already has one modal shell with a focus trap, Escape and a scroll lock
- * (`components/Dialog.tsx`). Every row is a full-width button so the whole line is
+ * (`components/Overlay.tsx`, under the `wide` role). Every row is a full-width
+ * button so the whole line is
  * one target, with the kind chip, the body and where it came from stacked inside it
  * — the shape a notification has on a lock screen, which is the model this is
  * imitating.

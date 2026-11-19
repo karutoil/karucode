@@ -1,11 +1,17 @@
 /* The control plane's shell, and the one variant the plane adds to a shared class.
  *
+ * The sheet is imported by `styles/index.css` into `layer(components)`, after
+ * `layout.css` and `workbench.css` and before the three region sheets — so a
+ * region's rule still wins a tie, and a utility now reaches these rules like it
+ * reaches every other component sheet.
+ *
  * Everything else the plane draws lives in the sheet of the region that draws it
  * (`control-rail`, `control-overview`, `control-session`), which is what lets the
  * three regions be worked on without touching one another's files. What remains
  * here is what no region owns:
  *
  *   - the plane's root element and its two banners, rendered by the shell;
+ *   - the two row wrappers both plane lists use (`.cp-row-body`, `.cp-row-text`);
  *   - `.rail-avatar[data-tone]`, the plane's only addition to a shared class - a
  *     hue per project, because this is the one screen that lists every project at
  *     once. It is a variant, not a second recipe: it sets properties the shared
@@ -79,21 +85,19 @@
   font-size: var(--fs-tiny);
 }
 
-/* ------------------------------------------------------------- quiet text */
-
 /* ------------------------------------------------------- shared roles
  *
- * These roles are drawn by more than one region, so no region sheet may own
- * them: the rail, the overview and the session view all render a project
- * glyph, a status word, a quiet note, a text link and a section kicker.
+ * These rules are drawn by more than one region, so no region sheet may own them:
+ * `.cp-row-body`/`.cp-row-text` wrap the avatar-and-text column in both plane
+ * lists, and `.rail-avatar[data-tone]` tints a project's glyph in both of them.
  *
- * TEMPORARY HOME. §5A of `docs/internal/DESIGN-SYSTEM.md` retires most of
- * these in favour of the workbench's shared primitives - `.status-dot` and
- * `.session-state-<tone>` for the status, `.eyebrow` for the kicker,
- * `.rail-avatar` for the glyph, `.link-button` for the link, `SparkIcon` for
- * the spark. They are gathered here so the three regions can be converted
- * independently without one region deleting a rule another still needs; this
- * file should be empty and deleted when the last of them is adopted.
+ * The rest of this section is gone, not pending: §5A of
+ * `docs/internal/DESIGN-SYSTEM.md` retired the private status word, quiet note,
+ * text link and section kicker in favour of the workbench's shared primitives
+ * (`.status-dot` and `.session-state-<tone>`, `.eyebrow`, `.link-button`,
+ * `SparkIcon`), and the last region was converted with them. What is left is not
+ * temporary: a project hue and a two-element row wrapper are things the workbench
+ * genuinely has no equivalent for.
  */
 
 /* A stable hue per project, as a variant of the shared avatar rather than as a

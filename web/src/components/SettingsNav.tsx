@@ -26,6 +26,7 @@
 import type { JSX } from 'preact';
 import { useRef } from 'preact/hooks';
 import type { TargetedKeyboardEvent } from 'preact';
+import { LinkButton } from '../ui';
 import {
   AgentsIcon,
   BellIcon,
@@ -355,6 +356,12 @@ export function SettingsNav({
       <div class="settings-nav-head">
         <label class="side-search settings-search">
           <SearchIcon size={14} />
+          {/* A raw `<input>` on purpose: `.side-search input` (layout.css) strips
+              the frame and the background because the wrapper *is* the field, and
+              `src/ui`'s `Input` would put its own border/background utilities back
+              on - utilities outrank the components layer, so the two would fight
+              and the utility would win. The field also needs `data-escape-local`,
+              which `Input` does forward, but the geometry is the reason. */}
           <input
             type="search"
             placeholder="Search settings"
@@ -437,9 +444,9 @@ export function SettingsNav({
       {searching && visible.length === 0 ? (
         <div class="settings-nav-empty" role="status">
           <p>No setting matches “{query.trim()}”.</p>
-          <button type="button" class="link-button" onClick={() => onQueryChange('')}>
+          <LinkButton class="link-button" onClick={() => onQueryChange('')}>
             Clear the search
-          </button>
+          </LinkButton>
         </div>
       ) : null}
     </nav>

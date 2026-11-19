@@ -88,6 +88,13 @@ def main():
             raise AssertionError('browser timeout: ' + body + '\n' + str(js('return document.body.innerText;')))
         def click(label):
             assert wait("const b=[...document.querySelectorAll('button')].find(x => (x.getAttribute('aria-label')||x.innerText).trim() === " + json.dumps(label) + " && !x.disabled); if(b){b.click();return true} return false;"), label
+        def click_send():
+            # The Send button's accessible name spells the sending chord, and the
+            # chord is the platform's own (`sendChordLong` in
+            # `web/src/features/composer/helpers.ts`): `Control + Enter` on this
+            # host, `Command + Enter` on a Mac. Match the prefix so the check does
+            # not pin one platform's spelling.
+            assert wait("const b=[...document.querySelectorAll('button')].find(x => /^Send message \\(/.test(x.getAttribute('aria-label')||'') && !x.disabled); if(b){b.click();return true} return false;"), 'Send button'
         created = http_json(api + '/api/projects', 'POST', {'path': str(second), 'name': 'Second project'})
         print('Created second project:', created, flush=True)
         # Reload so the UI project registry includes the newly registered project.
@@ -103,7 +110,7 @@ def main():
         target = next(p for p in http_json(api + '/api/projects')['projects'] if p['path'] == str(second))
         prompt = 'Start target work. PROJECT_ID=' + target['id']
         js("const e=document.querySelector('#composer-input'); e.value=" + json.dumps(prompt) + "; e.dispatchEvent(new Event('input',{bubbles:true})); return true;")
-        click('Send message (Command or Control + Enter)')
+        click_send()
         def find_target():
             return next((s for s in http_json(api + '/api/sessions')['sessions'] if s['title'] == 'Browser target session'), None)
         end = time.monotonic() + 40

@@ -60,7 +60,7 @@ export function BootErrorScreen(): JSX.Element {
           class="mt-8"
           onClick={() => void actions.bootstrap(true)}
         >
-          Retry
+          Try again
         </Button>
       </div>
     </div>

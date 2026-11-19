@@ -906,9 +906,17 @@ export const agentDetailError = signal<string | null>(null);
  * the badge disagree with the server and with the rows underneath it, which
  * already sort and label a paused agent as live.
  */
-export const runningAgents = computed(
-  () => agentsAll.value.filter((agent) => isAgentLive(agent.status)).length,
-);
+export const runningAgents = computed(() => {
+  // Counting loop rather than `filter(...).length`: this runs on every agent
+  // roster update and the intermediate array was thrown away immediately.
+  const list = agentsAll.value;
+  let live = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    const agent = list[i];
+    if (agent && isAgentLive(agent.status)) live += 1;
+  }
+  return live;
+});
 
 /**
  * The open session's counts and token totals, for the inspector's Session tab.

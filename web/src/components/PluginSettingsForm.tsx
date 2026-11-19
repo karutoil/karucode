@@ -20,6 +20,7 @@
  */
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { apiRequest } from '../api/client';
+import { Button, Callout, Checkbox, Field, Inline, Input, LinkButton, Select, Text } from '../ui';
 
 /** One field as the server declares and fills it. */
 export interface PluginSettingField {
@@ -185,122 +186,134 @@ export function PluginSettingsForm({
 
   return (
     <div class="plugin-settings">
-      <button
-        type="button"
+      <LinkButton
+        tone="accent"
         class="plugin-settings-toggle"
         aria-expanded={open}
+        testId="plugin-settings-toggle"
         onClick={() => setOpen((value) => !value)}
       >
         Settings{fields && fields.length > 0 ? ` (${fields.length})` : ''}
-      </button>
+      </LinkButton>
       {open ? (
         <div class="plugin-settings-body">
           {fields === null ? (
-            <p class="muted small">Loading…</p>
+            <Text as="p" size="tiny" tone="muted">
+              Loading…
+            </Text>
           ) : (
             fields.map((field) => {
               const id = `plugin-${plugin}-${field.key}`;
               const problem = problems[field.key];
+              if (field.type === 'bool') {
+                return (
+                  <div class="plugin-setting" key={field.key}>
+                    <Checkbox
+                      id={id}
+                      class="plugin-setting-check"
+                      checked={draft[field.key] === true}
+                      label={field.label}
+                      description={field.help}
+                      onChange={(checked) =>
+                        setDraft((current) => ({ ...current, [field.key]: checked }))
+                      }
+                    />
+                    {problem ? <p class="plugin-setting-error">{problem}</p> : null}
+                  </div>
+                );
+              }
               return (
-                <div class="plugin-setting" key={field.key}>
-                  {field.type === 'bool' ? (
-                    <label class="plugin-setting-check" for={id}>
-                      <input
-                        id={id}
-                        type="checkbox"
-                        checked={draft[field.key] === true}
+                <Field
+                  key={field.key}
+                  class="plugin-setting"
+                  label={field.label}
+                  htmlFor={id}
+                  description={field.help}
+                  error={problem}
+                >
+                  {(a11y) =>
+                    field.type === 'select' ? (
+                      <Select
+                        id={a11y.id}
+                        value={String(draft[field.key] ?? '')}
+                        invalid={a11y.invalid}
+                        aria-describedby={a11y.describedBy}
+                        options={(field.options ?? []).map((option) => ({
+                          value: option.value,
+                          label: option.label || option.value,
+                        }))}
                         onChange={(event) =>
                           setDraft((current) => ({
                             ...current,
-                            [field.key]: (event.currentTarget as HTMLInputElement).checked,
+                            [field.key]: (event.currentTarget as HTMLSelectElement).value,
                           }))
                         }
                       />
-                      <span>{field.label}</span>
-                    </label>
-                  ) : (
-                    <>
-                      <label class="plugin-setting-label" for={id}>
-                        {field.label}
-                      </label>
-                      {field.type === 'select' ? (
-                        <select
-                          id={id}
-                          class="settings-input"
-                          value={String(draft[field.key] ?? '')}
-                          onChange={(event) =>
-                            setDraft((current) => ({
-                              ...current,
-                              [field.key]: (event.currentTarget as HTMLSelectElement).value,
-                            }))
-                          }
-                        >
-                          {(field.options ?? []).map((option) => (
-                            <option value={option.value}>{option.label || option.value}</option>
-                          ))}
-                        </select>
-                      ) : field.type === 'number' ? (
-                        <input
-                          id={id}
-                          class="settings-input"
-                          type="number"
-                          min={field.min ?? undefined}
-                          max={field.max ?? undefined}
-                          value={draft[field.key] === null ? '' : String(draft[field.key] ?? '')}
-                          onInput={(event) => {
-                            const raw = (event.currentTarget as HTMLInputElement).value;
-                            const parsed = raw === '' ? Number.NaN : Number(raw);
-                            setDraft((current) => ({ ...current, [field.key]: parsed }));
-                          }}
-                        />
-                      ) : field.type === 'secret' ? (
-                        <input
-                          id={id}
-                          class="settings-input"
-                          type="password"
-                          autocomplete="new-password"
-                          placeholder={field.configured ? 'Saved — type to replace' : undefined}
-                          value={String(draft[field.key] ?? '')}
-                          onInput={(event) =>
-                            setDraft((current) => ({
-                              ...current,
-                              [field.key]: (event.currentTarget as HTMLInputElement).value,
-                            }))
-                          }
-                        />
-                      ) : (
-                        <input
-                          id={id}
-                          class="settings-input"
-                          type="text"
-                          value={String(draft[field.key] ?? '')}
-                          onInput={(event) =>
-                            setDraft((current) => ({
-                              ...current,
-                              [field.key]: (event.currentTarget as HTMLInputElement).value,
-                            }))
-                          }
-                        />
-                      )}
-                    </>
-                  )}
-                  {field.help ? <p class="plugin-setting-help">{field.help}</p> : null}
-                  {problem ? <p class="plugin-setting-error">{problem}</p> : null}
-                </div>
+                    ) : field.type === 'number' ? (
+                      <Input
+                        id={a11y.id}
+                        type="number"
+                        min={field.min ?? undefined}
+                        max={field.max ?? undefined}
+                        value={draft[field.key] === null ? '' : String(draft[field.key] ?? '')}
+                        invalid={a11y.invalid}
+                        aria-describedby={a11y.describedBy}
+                        onInput={(event) => {
+                          const raw = (event.currentTarget as HTMLInputElement).value;
+                          const parsed = raw === '' ? Number.NaN : Number(raw);
+                          setDraft((current) => ({ ...current, [field.key]: parsed }));
+                        }}
+                      />
+                    ) : field.type === 'secret' ? (
+                      <Input
+                        id={a11y.id}
+                        type="password"
+                        autoComplete="new-password"
+                        placeholder={field.configured ? 'Saved — type to replace' : undefined}
+                        value={String(draft[field.key] ?? '')}
+                        invalid={a11y.invalid}
+                        aria-describedby={a11y.describedBy}
+                        onInput={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            [field.key]: (event.currentTarget as HTMLInputElement).value,
+                          }))
+                        }
+                      />
+                    ) : (
+                      <Input
+                        id={a11y.id}
+                        type="text"
+                        value={String(draft[field.key] ?? '')}
+                        invalid={a11y.invalid}
+                        aria-describedby={a11y.describedBy}
+                        onInput={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            [field.key]: (event.currentTarget as HTMLInputElement).value,
+                          }))
+                        }
+                      />
+                    )
+                  }
+                </Field>
               );
             })
           )}
-          {error ? <p class="plugin-setting-error">{error}</p> : null}
-          {notice ? <p class="plugin-setting-notice">{notice}</p> : null}
-          <button
-            type="button"
-            class="button button-small"
-            onClick={() => void save()}
-            disabled={busy || fields === null || Object.keys(problems).length > 0}
-            title="Saving restarts this plugin so it picks up the new values"
-          >
-            {busy ? 'Saving…' : 'Save and restart'}
-          </button>
+          {error ? <Callout tone="danger">{error}</Callout> : null}
+          {notice ? <Callout tone="success">{notice}</Callout> : null}
+          <Inline justify="end">
+            <Button
+              variant="secondary"
+              size="sm"
+              testId="plugin-settings-save"
+              onClick={() => void save()}
+              disabled={busy || fields === null || Object.keys(problems).length > 0}
+              title="Saving restarts this plugin so it picks up the new values"
+            >
+              {busy ? 'Saving…' : 'Save and restart'}
+            </Button>
+          </Inline>
         </div>
       ) : null}
     </div>

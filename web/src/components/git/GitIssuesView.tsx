@@ -21,6 +21,7 @@ import {
   SearchIcon,
   SparkIcon,
 } from '../icons';
+import { Button, Callout, IconButton, Input, LinkButton, Select, Textarea } from '../../ui';
 import { batchIssuesSessionSpec, issueSessionSpec } from './gitModel';
 import type { ConfirmRequest } from './GitConfirmDialog';
 
@@ -137,9 +138,13 @@ export function GitIssuesView({
         </p>
         {githubStatus.authenticated && !githubStatus.remote_slug ? (
           <div>
-            <button type="button" class="button button-primary" onClick={onOpenRemotes}>
+            <Button
+              variant="primary"
+              testId="git-issues-open-remotes"
+              onClick={onOpenRemotes}
+            >
               Connect or create GitHub remote
-            </button>
+            </Button>
           </div>
         ) : null}
       </div>
@@ -291,71 +296,77 @@ export function GitIssuesView({
       <aside class="gitm-side gitm-gh-side" aria-label="Issues list">
         <div class="gitm-filter-bar">
           <div class="gitm-filter-row">
-            <select
+            <Select
               class="gitm-select"
               aria-label="Issue state"
               value={stateFilter}
+              testId="git-issues-state"
+              options={[
+                { value: 'open', label: 'Open' },
+                { value: 'closed', label: 'Closed' },
+                { value: 'all', label: 'All' },
+              ]}
               onChange={(event) =>
                 setStateFilter((event.target as HTMLSelectElement).value as IssueStateFilter)
               }
-            >
-              <option value="open">Open</option>
-              <option value="closed">Closed</option>
-              <option value="all">All</option>
-            </select>
-            <button
-              type="button"
-              class="button button-small button-primary"
+            />
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<PlusIcon size={12} />}
+              testId="git-issue-new"
               onClick={() => setCreating((v) => !v)}
             >
-              <PlusIcon size={12} /> New issue
-            </button>
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Refresh issues"
+              New issue
+            </Button>
+            <IconButton
+              size="sm"
+              label="Refresh issues"
               title="Refresh issues"
+              testId="git-issues-refresh"
+              icon={<RefreshIcon size={13} class={loading ? 'spin' : undefined} />}
               disabled={loading}
               onClick={fetchIssues}
-            >
-              <RefreshIcon size={13} class={loading ? 'spin' : undefined} />
-            </button>
+            />
           </div>
 
           <div class="gitm-search-wrap">
             <SearchIcon size={13} />
-            <input
+            <Input
               type="search"
               class="gitm-input"
               placeholder="Filter issues by title, #number, label…"
               aria-label="Filter issues"
               value={search}
+              testId="git-issues-search"
               onInput={(event) => setSearch((event.target as HTMLInputElement).value)}
             />
           </div>
 
           {visible.length > 0 ? (
             <div class="gitm-batch-bar">
-              <button
-                type="button"
-                class="button button-small button-primary"
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<SparkIcon size={12} />}
+                testId="git-issues-session-combined"
                 disabled={working || busy}
                 onClick={() => void startCombinedSession()}
               >
-                <SparkIcon size={12} />{' '}
                 {checkedNumbers.size > 0
                   ? `Session for ${targetIssues.length} selected`
                   : `Session for all (${visible.length})`}
-              </button>
+              </Button>
               {targetIssues.length > 1 ? (
-                <button
-                  type="button"
-                  class="button button-small"
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  testId="git-issues-session-separate"
                   disabled={working || busy}
                   onClick={() => void startSeparateSessions()}
                 >
                   1 per issue
-                </button>
+                </Button>
               ) : null}
             </div>
           ) : null}
@@ -363,9 +374,9 @@ export function GitIssuesView({
 
         <div class="gitm-side-scroll">
           {error ? (
-            <div class="inline-error gitm-action-error" role="alert">
-              <p>{error}</p>
-            </div>
+            <Callout tone="danger" class="gitm-action-error">
+              {error}
+            </Callout>
           ) : loading && issues === null ? (
             <p class="gitm-note">Loading issues…</p>
           ) : visible.length === 0 ? (
@@ -380,6 +391,9 @@ export function GitIssuesView({
                 const launchedId = launchedSessions[issue.number];
                 return (
                   <li class={`gitm-row gitm-gh-row${active ? ' is-active' : ''}`} key={issue.number}>
+                    {/* A bare row checkbox: `Checkbox` renders its label as
+                        visible text, and this one's name is the row itself
+                        (`aria-label`), inside the row's flex grid. */}
                     <input
                       type="checkbox"
                       class="gitm-row-check"
@@ -387,8 +401,8 @@ export function GitIssuesView({
                       aria-label={`Select issue #${issue.number}`}
                       onChange={() => toggleChecked(issue.number)}
                     />
-                    <button
-                      type="button"
+                    <LinkButton
+                      tone="muted"
                       class="gitm-row-main"
                       aria-pressed={active}
                       onClick={() => setSelectedNumber(active ? null : issue.number)}
@@ -411,30 +425,31 @@ export function GitIssuesView({
                           {relativeTime(Date.parse(issue.updatedAt))}
                         </span>
                       </span>
-                    </button>
+                    </LinkButton>
                     <div class="gitm-row-actions">
                       {launchedId ? (
-                        <button
-                          type="button"
-                          class="button button-small"
+                        <Button
+                          variant="secondary"
+                          size="sm"
                           title="Open launched session"
+                          testId={`git-issue-open-session-${issue.number}`}
                           onClick={() => {
                             void actions.openSessionInProject(projectId, launchedId);
                           }}
                         >
                           Open
-                        </button>
+                        </Button>
                       ) : (
-                        <button
-                          type="button"
+                        <IconButton
+                          size="sm"
                           class="gitm-act"
+                          label={`Start session for issue #${issue.number}`}
                           title={`Start karucode session for issue #${issue.number}`}
-                          aria-label={`Start session for issue #${issue.number}`}
+                          testId={`git-issue-start-session-${issue.number}`}
+                          icon={<SparkIcon size={13} />}
                           disabled={working || busy}
                           onClick={() => void startSingleSession(issue)}
-                        >
-                          <SparkIcon size={13} />
-                        </button>
+                        />
                       )}
                     </div>
                   </li>
@@ -451,53 +466,57 @@ export function GitIssuesView({
             <h3 class="gitm-card-title">Create issue</h3>
             <div class="gitm-field">
               <label class="gitm-label">Title</label>
-              <input
+              <Input
                 type="text"
                 class="gitm-input"
                 placeholder="Issue summary"
                 value={newTitle}
                 disabled={working}
+                testId="git-issue-new-title"
                 onInput={(e) => setNewTitle((e.target as HTMLInputElement).value)}
               />
             </div>
             <div class="gitm-field">
               <label class="gitm-label">Labels (comma-separated, optional)</label>
-              <input
+              <Input
                 type="text"
                 class="gitm-input"
                 placeholder="bug, enhancement"
                 value={newLabels}
                 disabled={working}
+                testId="git-issue-new-labels"
                 onInput={(e) => setNewLabels((e.target as HTMLInputElement).value)}
               />
             </div>
             <div class="gitm-field">
               <label class="gitm-label">Description</label>
-              <textarea
+              <Textarea
                 class="gitm-message"
                 rows={6}
                 placeholder="Steps to reproduce, expected behavior, or requirements…"
                 value={newBody}
                 disabled={working}
+                testId="git-issue-new-body"
                 onInput={(e) => setNewBody((e.target as HTMLTextAreaElement).value)}
               />
             </div>
             <div class="gitm-setup-actions">
-              <button
-                type="button"
-                class="button"
+              <Button
+                variant="secondary"
+                testId="git-issue-new-cancel"
                 disabled={working}
                 onClick={() => setCreating(false)}
               >
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
                 type="submit"
-                class="button button-primary"
+                variant="primary"
+                testId="git-issue-new-submit"
                 disabled={working || newTitle.trim() === ''}
               >
                 Create issue
-              </button>
+              </Button>
             </div>
           </form>
         ) : selectedNumber === null ? (
@@ -527,18 +546,21 @@ export function GitIssuesView({
                 </p>
               </div>
               <div class="gitm-detail-actions">
-                <button
-                  type="button"
-                  class="button button-small button-primary"
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<SparkIcon size={12} />}
+                  testId="git-issue-detail-session"
                   disabled={working || busy}
                   onClick={() => void startSingleSession(detail)}
                 >
-                  <SparkIcon size={12} /> Start session
-                </button>
+                  Start session
+                </Button>
                 {detail.state === 'OPEN' ? (
-                  <button
-                    type="button"
-                    class="button button-small"
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    testId="git-issue-close"
                     disabled={working || busy}
                     onClick={() =>
                       void setGitHubIssueState(detail.number, 'close', projectId).then(() => {
@@ -548,11 +570,12 @@ export function GitIssuesView({
                     }
                   >
                     Close issue
-                  </button>
+                  </Button>
                 ) : (
-                  <button
-                    type="button"
-                    class="button button-small"
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    testId="git-issue-reopen"
                     disabled={working || busy}
                     onClick={() =>
                       void setGitHubIssueState(detail.number, 'reopen', projectId).then(() => {
@@ -562,7 +585,7 @@ export function GitIssuesView({
                     }
                   >
                     Reopen
-                  </button>
+                  </Button>
                 )}
               </div>
             </header>
@@ -602,23 +625,26 @@ export function GitIssuesView({
               ) : null}
 
               <form class="gitm-comment-form" onSubmit={(e) => void submitComment(e)}>
-                <textarea
+                <Textarea
                   class="gitm-message"
                   rows={3}
                   placeholder="Leave a comment on this issue…"
                   aria-label="Issue comment"
                   value={commentText}
                   disabled={working}
+                  testId="git-issue-comment-body"
                   onInput={(e) => setCommentText((e.target as HTMLTextAreaElement).value)}
                 />
                 <div>
-                  <button
+                  <Button
                     type="submit"
-                    class="button button-small button-primary"
+                    variant="primary"
+                    size="sm"
+                    testId="git-issue-comment-submit"
                     disabled={working || commentText.trim() === ''}
                   >
                     Comment
-                  </button>
+                  </Button>
                 </div>
               </form>
             </div>

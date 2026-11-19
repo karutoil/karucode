@@ -14,12 +14,11 @@ import {
   controlPlaneOpen,
   loadControlOverview,
 } from '../../state/controlPlane';
-import { Dialog } from '../Dialog';
-/* The shell's sheet, imported before the regions below so their CSS lands after
- * it: the shared vocabulary is the base a region sheet may override, and with
- * equal specificity the later sheet wins. The regions import their own sheets, so
- * this is the one place the order is decided. */
-import '../../styles/control-shared.css';
+import { Button, ConfirmDialog, Field, Inline, Input, LinkButton, Overlay, Stack } from '../../ui';
+/* The shell has no sheet of its own any more: `control-shared.css` and the three
+ * region sheets are imported by `styles/index.css` into `layer(components)` in
+ * the order shared -> rail -> overview -> session, so that file - not this one -
+ * is where the cascade order between them is decided. */
 import { ControlRail } from './ControlRail';
 import { ControlOverview, modelChoices } from './ControlOverview';
 import { ControlSession } from './ControlSession';
@@ -385,7 +384,14 @@ export function ControlPlane(): JSX.Element {
 
     <main class="cp-pane">
       {listError ? <div class="cp-error" role="alert">Could not refresh sessions: {listError}. The list may be stale.</div> : null}
-      {error ? <div class="cp-error" role="alert">{error} <button type="button" onClick={() => setError(null)}>Dismiss</button></div> : null}
+      {error ? (
+        <div class="cp-error" role="alert">
+          {error}{' '}
+          <LinkButton testId="cp-error-dismiss" onClick={() => setError(null)}>
+            Dismiss
+          </LinkButton>
+        </div>
+      ) : null}
       {/* A failed read never clears the snapshot: it is marked stale instead. */}
       {staleReason ? <p class="cp-stale" role="status">stale · {staleReason}</p> : null}
       {selected ? <ControlSession
@@ -422,39 +428,59 @@ export function ControlPlane(): JSX.Element {
       />}
     </main>
 
-    <Dialog open={renaming !== null} title="Rename session" onClose={() => setRenaming(null)} class="dialog-confirm">
-      {renaming ? <form
+    {/* Rename: the shared `Overlay` at the compact measure, with the field and
+        the action row in the body so the form keeps its submit behaviour (Enter
+        in the input lands on "Rename"). `bodyLayout="contents"` is what keeps
+        `.confirm-body` as the only padding around the question. */}
+    <Overlay
+      open={renaming !== null}
+      role="compact"
+      title="Rename session"
+      onClose={() => setRenaming(null)}
+      class="dialog-confirm"
+      bodyLayout="contents"
+    >
+      {renaming ? <Stack
+        as="form"
+        gap="4"
         class="confirm-body"
         onSubmit={(event) => { event.preventDefault(); void rename(renaming, renameDraft); }}
       >
-        <label class="field-label" for="cp-rename-input">Title</label>
-        <input
-          id="cp-rename-input"
-          class="input"
-          value={renameDraft}
-          aria-label="Session title"
-          onInput={(event) => setRenameDraft(event.currentTarget.value)}
-        />
-        <div class="dialog-actions">
-          <button type="button" class="button" onClick={() => setRenaming(null)}>Cancel</button>
-          <button type="submit" class="button button-primary">Rename</button>
-        </div>
-      </form> : null}
-    </Dialog>
+        {/* The field's own name stays "Session title" (the row action and the
+            rail's test driver both find it by that), while the visible label
+            reads "Title" because the dialog has already said what it renames. */}
+        <Field label="Title" htmlFor="cp-rename-input">
+          {(a11y) => (
+            <Input
+              id={a11y.id}
+              value={renameDraft}
+              aria-label="Session title"
+              testId="cp-rename-input"
+              onInput={(event) => setRenameDraft((event.target as HTMLInputElement).value)}
+            />
+          )}
+        </Field>
+        <Inline gap="4" justify="end" class="dialog-actions">
+          <Button testId="cp-rename-cancel" onClick={() => setRenaming(null)}>Cancel</Button>
+          <Button type="submit" variant="primary" testId="cp-rename-confirm">Rename</Button>
+        </Inline>
+      </Stack> : null}
+    </Overlay>
 
-    <Dialog open={deleting !== null} title="Delete session?" onClose={() => setDeleting(null)} class="dialog-confirm">
-      {deleting ? <div class="confirm-body">
-        <p>
-          Delete <strong>{chatTitle(deleting)}</strong>? Its messages, runs and approvals are removed.
-          This cannot be undone.
-        </p>
-        <div class="dialog-actions">
-          <button type="button" class="button" data-autofocus onClick={() => setDeleting(null)}>Cancel</button>
-          <button type="button" class="button button-danger" onClick={() => void remove(deleting)}>
-            Delete session
-          </button>
-        </div>
-      </div> : null}
-    </Dialog>
+    {/* Delete: one question with two answers, so it is `ConfirmDialog` - the
+        same compact surface, danger tone, and a busy confirm for the round trip
+        the delete already makes before the snapshot is re-read. */}
+    <ConfirmDialog
+      open={deleting !== null}
+      title="Delete session?"
+      description={deleting
+        ? `Delete “${chatTitle(deleting)}”? Its messages, runs and approvals are removed. This cannot be undone.`
+        : undefined}
+      confirmLabel="Delete session"
+      tone="danger"
+      onClose={() => setDeleting(null)}
+      onConfirm={() => { if (deleting) void remove(deleting); }}
+      testId="cp-delete-session"
+    />
   </div>;
 }

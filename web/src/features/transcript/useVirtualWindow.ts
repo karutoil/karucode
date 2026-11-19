@@ -230,6 +230,13 @@ export function useVirtualWindow({
     ? visibleRange(geometry.offsets, bandTop, bandHeight, overscan)
     : { start: 0, end: entries.length };
 
+  /**
+   * The bottom margin the mounted rows carry, cached for the layout it was read
+   * in: the density token on `<html>` plus the viewport's box. See the measuring
+   * effect for why one reading can serve every row.
+   */
+  const rowMargin = useRef<{ key: string; margin: number; lastMargin: number | null } | null>(null);
+
   // Measure the mounted rows after every commit that can have changed one.
   //
   // Every mounted row is measured, not just the ones in view. No message row is
@@ -253,11 +260,57 @@ export function useVirtualWindow({
     const root = transcriptRef.current;
     const element = viewportRef?.current;
     if (!root || !element) return;
-    let changed = false;
     const rows = root.children;
+    // The gap under a row is a property of the layout, not of the row: every
+    // child of a *windowed* transcript carries the same bottom margin (`.msg` is
+    // `margin: 0 0 var(--space-10)`, the date marker
+    // `margin: var(--space-2) auto var(--space-10)`), and the one rule that
+    // removes it (`.transcript:not(.is-windowed) > :last-child`) cannot match
+    // while this effect runs. `getComputedStyle` forces the style system to
+    // resolve the element it is asked about, so asking all ~200 mounted rows on
+    // every commit spent the scroll in style resolution. Read once from a sample
+    // row instead, and drop the reading when the thing that can change it - the
+    // density token on `<html>` or the viewport's box - has changed. If a row
+    // type ever needs a different gap, key this cache by the row's class too:
+    // nothing below may assume there is only one value.
+    const density = document.documentElement.dataset.density ?? '';
+    const layoutKey = `${density}|${element.clientWidth}x${element.clientHeight}`;
+    let margin = rowMargin.current;
+    if (margin === null || margin.key !== layoutKey) {
+      // A non-last row is the sample: `:last-child` is the only place a bottom
+      // margin is overridden, and that one is answered separately below.
+      const sample = (rows.length > 1 ? rows[1] : rows[0]) as HTMLElement | undefined;
+      margin = {
+        key: layoutKey,
+        margin: sample ? Number.parseFloat(getComputedStyle(sample).marginBottom) || 0 : 0,
+        lastMargin: null,
+      };
+      rowMargin.current = margin;
+    }
+    const lastRow = rows.length > 0 ? (rows[rows.length - 1] as HTMLElement) : null;
+    if (lastRow && margin.lastMargin === null) {
+      // Only the last child can carry the `:last-child` override, and only while
+      // it is mounted. One read per layout, not one per commit.
+      margin.lastMargin =
+        rows.length > 1 ? Number.parseFloat(getComputedStyle(lastRow).marginBottom) || 0 : margin.margin;
+    }
+    const lastMargin = margin.lastMargin ?? margin.margin;
+
+    // One read pass over the mounted rows, before anything writes to the scroll:
+    // a `getBoundingClientRect` *after* a `scrollTop` write flushes layout again
+    // for every row that follows it. The anchor correction below reuses these
+    // boxes, so it cannot read a rect from a different layout than the heights.
+    const scrollTop = element.scrollTop;
+    const boxes: DOMRect[] = [];
+    const keys: (string | null)[] = [];
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index] as HTMLElement;
-      const key = row.getAttribute('data-entry-key');
+      boxes.push(row.getBoundingClientRect());
+      keys.push(row.getAttribute('data-entry-key'));
+    }
+    let changed = false;
+    for (let index = 0; index < boxes.length; index += 1) {
+      const key = keys[index];
       if (!key) continue;
       // The row's *extent*, not its border box: the gap below it is a bottom
       // margin (`--space-10` on `.msg`), which `getBoundingClientRect` leaves
@@ -265,12 +318,10 @@ export function useVirtualWindow({
       // layout by that margin every time the window's start crossed over it; the
       // anchor would correct that, the correction could cross back, and the two
       // would flip each other indefinitely at 32px a frame. The computed margin
-      // is the used value, so `:last-child { margin-bottom: 0 }` (scoped to the
-      // unwindowed transcript) is honoured too, and every row's model height
-      // matches what it occupies in the document.
+      // is the used value, so a last child that does lose it is honoured too, and
+      // every row's model height matches what it occupies in the document.
       const height =
-        row.getBoundingClientRect().height +
-        (Number.parseFloat(getComputedStyle(row).marginBottom) || 0);
+        (boxes[index] as DOMRect).height + (index === boxes.length - 1 ? lastMargin : margin.margin);
       const previous = measured.current.get(key);
       if (previous !== undefined && Math.abs(previous - height) < 1) continue;
       measured.current.set(key, height);
@@ -286,14 +337,15 @@ export function useVirtualWindow({
     // scrolled down while this correction saw "not at the bottom" and held an
     // anchor, scrolling back up. Two positions, same frame, forever.
     if (before && before.key && !followingNewest(element)) {
-      for (const row of rows) {
-        if (row.getAttribute('data-entry-key') !== before.key) continue;
-        const box = row.getBoundingClientRect();
+      const index = keys.indexOf(before.key);
+      if (index !== -1) {
+        const box = boxes[index] as DOMRect;
         // A row's position *in the document* is its screen top plus the scroll.
         // Scrolling alone leaves that constant (moving up by 90px moves the row
         // down the screen by 90px), so any change in it is a layout shift, and
-        // moving the scroll by exactly that much keeps the row still.
-        const shift = box.top - before.top + (element.scrollTop - before.scrollTop);
+        // moving the scroll by exactly that much keeps the row still. The scroll
+        // is the one read at the top of this pass: no write has happened yet.
+        const shift = box.top - before.top + (scrollTop - before.scrollTop);
         if (Number.isFinite(shift) && Math.abs(shift) >= 0.5) {
           // The note carries whether the newest content was on screen *before*
           // this write, which no flag on the hook can supply: the sticky-bottom
@@ -303,7 +355,6 @@ export function useVirtualWindow({
           element.scrollTop += shift;
           noteOwnScroll(element, atBottom);
         }
-        break;
       }
     }
     // Re-read the anchor against the layout this commit left behind, so the next

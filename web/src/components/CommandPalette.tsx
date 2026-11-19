@@ -224,6 +224,14 @@ export function CommandPalette(): JSX.Element | null {
     >
       <div class="palette-search">
         <SearchIcon size={17} />
+        {/* A raw `<input>`, not `src/ui`'s `Input`, and deliberately: the field is
+            a `combobox` for the listbox below (`aria-expanded`,
+            `aria-controls`, `aria-activedescendant`), which `Input`'s prop list
+            does not forward, and `Input` would add its own border/background
+            utilities - utilities outrank the components layer - straight over
+            `.palette-input`, which paints no frame of its own because the rail
+            above it is the cue. `.palette-input` keeps the geometry; this element
+            keeps the ARIA. */}
         <input
           type="text"
           class="palette-input"

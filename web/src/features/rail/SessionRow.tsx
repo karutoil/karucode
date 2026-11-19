@@ -11,6 +11,7 @@ import { sessionStatusView } from '../../state/selectors';
 import * as store from '../../state/store';
 import type { SessionFacts } from '../../state/sessionFacts';
 import { KebabIcon } from '../../components/icons';
+import { IconButton, Input } from '../../ui';
 import { toneClass } from './helpers';
 
 export interface SessionRowProps {
@@ -149,9 +150,10 @@ export function SessionRow({
         >
           {/* `data-escape-local`: Escape cancels the rename here; the sheet's
             * focus trap defers to this control instead of closing the sheet. */}
-          <input
-            ref={inputRef}
-            class="session-rename-input"
+          <Input
+            inputRef={inputRef}
+            size="md"
+            class="session-rename-input h-[30px] px-4 bg-surface border-accent-line max-lg:text-title"
             value={draft}
             aria-label={`Rename session ${session.title}`}
             maxLength={200}
@@ -184,6 +186,9 @@ export function SessionRow({
           />
         </form>
       ) : (
+        // The row itself is not a `Button`: it carries `aria-current`, a
+        // double-click to rename and two structured spans, none of which the
+        // primitive's flat slot model expresses.
         <button
           type="button"
           class="session-open"
@@ -241,14 +246,19 @@ export function SessionRow({
 
       {!editing ? (
         <div class="session-menu-wrap">
-          <button
-            type="button"
-            class="icon-button session-menu-trigger"
-            aria-label={`Actions for ${session.title || 'untitled session'}`}
-            {...menu.triggerProps}
-          >
-            <KebabIcon size={15} />
-          </button>
+          <IconButton
+            size="sm"
+            // `.icon-button` + `.session-menu-trigger` are the shared row-kebab
+            // recipe (24px, revealed on row hover): keep both hooks, let the
+            // primitive own the box.
+            class="icon-button session-menu-trigger w-[24px] h-[24px]"
+            label={`Actions for ${session.title || 'untitled session'}`}
+            buttonRef={menu.triggerProps.ref}
+            aria-haspopup="menu"
+            expanded={menu.triggerProps['aria-expanded']}
+            icon={<KebabIcon size={15} />}
+            onClick={menu.triggerProps.onClick}
+          />
           <Menu
             menu={menu}
             label={`Session actions for ${session.title}`}

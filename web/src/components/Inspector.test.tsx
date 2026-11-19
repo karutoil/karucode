@@ -83,15 +83,23 @@ describe('Workbench result dock', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'Git' }));
     expect(store.inspectorTab.value).toBe('changes');
-    expect(screen.getByTestId('git-result').getAttribute('data-variant')).toBe('page');
+    // The source-control manager travels as its own chunk and is fetched on the
+    // tab's first showing, so its arrival is awaited rather than assumed.
+    await waitFor(() =>
+      expect(screen.getByTestId('git-result').getAttribute('data-variant')).toBe('page'),
+    );
 
     fireEvent.click(screen.getByRole('tab', { name: 'Agents' }));
     expect(store.inspectorTab.value).toBe('agents');
-    expect(screen.getByTestId('agents-result')).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId('agents-result')).toBeTruthy());
 
     fireEvent.click(screen.getByRole('tab', { name: 'Goals' }));
     expect(store.inspectorTab.value).toBe('plugin__kc-goals__goals');
-    expect(screen.getByTestId('plugin-result').getAttribute('data-panel-id')).toBe('plugin__kc-goals__goals');
+    await waitFor(() =>
+      expect(screen.getByTestId('plugin-result').getAttribute('data-panel-id')).toBe(
+        'plugin__kc-goals__goals',
+      ),
+    );
     expect(screen.queryByTestId('agents-result')).toBeNull();
 
     // A disabled active plugin falls back to a real result instead of leaving a
@@ -141,9 +149,12 @@ describe('Workbench result dock', () => {
     expect(screen.getByTestId('plugin-result').getAttribute('data-panel-id')).toBe('plugin__a__b__c');
   });
 
-  it('keeps a selected result mounted while desktop Context opens and closes', () => {
+  it('keeps a selected result mounted while desktop Context opens and closes', async () => {
     store.inspectorTab.value = 'changes';
     render(<><Inspector /><ContextDrawer /></>);
+    // The panel's chunk is fetched on the tab's first showing; past this point
+    // the test is about the panel staying mounted, not about how it arrived.
+    await waitFor(() => expect(screen.getByTestId('git-result')).toBeTruthy());
     const result = screen.getByTestId('git-result');
 
     act(() => workbench.openContext('now'));

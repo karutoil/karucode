@@ -129,7 +129,11 @@ return %s;
 
 # Measures every text node against its composited background, and reports the
 # nodes that fail. Same maths as the audit, so the numbers are comparable.
-MEASURE = """
+#
+# `scope` is injected by `measure_script()`: the whole document for a full screen,
+# or one overlay's root. Measuring the workspace behind an open drawer would count
+# ink the scrim covers as visible text and report a defect the eye cannot see.
+MEASURE_BODY = """
 const srgb = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
 const lum = (r, g, b) => 0.2126 * srgb(r) + 0.7152 * srgb(g) + 0.0722 * srgb(b);
 const parse = (s) => { const m = s.match(/rgba?\\(([^)]+)\\)/); if (!m) return null;
@@ -148,7 +152,7 @@ const ratio = (a, b) => { const l1 = lum(a.r, a.g, a.b), l2 = lum(b.r, b.g, b.b)
   return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05); };
 
 const fails = [], all = [];
-document.querySelectorAll('*').forEach((el) => {
+scope.querySelectorAll('*').forEach((el) => {
   const text = Array.from(el.childNodes).filter((n) => n.nodeType === 3)
     .map((n) => n.textContent.trim()).join(' ').trim();
   if (!text) return;
@@ -170,6 +174,9 @@ document.querySelectorAll('*').forEach((el) => {
     if (node.disabled === true || node.getAttribute?.('aria-disabled') === 'true') { inactive = true; break; }
   }
   if (inactive) return;
+  // A folded `<details>` disclosure hides its children from the reader; measuring
+  // ink behind a closed summary would report contrast on text nobody is seeing.
+  if (el.closest('details:not([open])') && !el.closest('summary')) return;
   const fg = parse(cs.color);
   if (!fg || fg.a === 0) return;
   const r = ratio(fg, effectiveBg(el));
@@ -183,9 +190,9 @@ return { total: all.length, fails: fails.slice(0, 25), failCount: fails.length }
 """
 
 # Anything that overflows its own scroll container without a way to reach it.
-OVERFLOW = """
+OVERFLOW_BODY = """
 const bad = [];
-document.querySelectorAll('*').forEach((el) => {
+scope.querySelectorAll('*').forEach((el) => {
   const cs = getComputedStyle(el);
   if (el.scrollWidth <= el.clientWidth + 2) return;
   const reaches = ['auto', 'scroll', 'visible'].includes(cs.overflowX);
@@ -201,6 +208,29 @@ document.querySelectorAll('*').forEach((el) => {
 });
 return bad.slice(0, 12);
 """
+
+
+def _scoped(body: str, scope: str | None) -> str:
+    """Prefix `body` with the `scope` it walks, or report a missing surface.
+
+    A screen whose root is gone is a failed check, not an empty pass: measuring
+    nothing would otherwise report "0 of 0 below the floor" as a success.
+    """
+    if scope is None:
+        return "const scope = document;\n" + body
+    return (
+        f"const scope = document.querySelector({json.dumps(scope)});\n"
+        "if (!scope) return { missing: true, total: 0, fails: [], failCount: 0 };\n" + body
+    )
+
+
+def measure_script(scope: str | None = None) -> str:
+    return _scoped(MEASURE_BODY, scope)
+
+
+def overflow_script(scope: str | None = None) -> str:
+    return _scoped(OVERFLOW_BODY, scope)
+
 
 # Elements whose right edge disagrees in a row that should be aligned.
 SURFACES = """
@@ -229,16 +259,86 @@ def check(name: str, ok: bool, detail: str = "") -> None:
         print(f"  FAIL {name}{f' — {detail}'}", flush=True)
 
 
+def contrast_detail(measured: dict) -> str:
+    if measured.get("missing"):
+        return "the surface is not on screen"
+    worst = measured["fails"][0] if measured["fails"] else None
+    return f"{measured['failCount']} of {measured['total']} text nodes" + (
+        f", worst {worst['ratio']}:1 at {worst['px']}px \"{worst['text']}\"" if worst else ""
+    )
+
+
 def set_theme(session: Session, theme: str) -> None:
     session.evaluate(SET_THEME % (theme, theme, "'" + theme + "'"))
 
 
+OPEN_THEME_STUDIO = """
+// The rail's own button carries the tooltip that names the chord, so clicking it
+// is the same journey a user takes; the chord is the keyboard path to the same
+// drawer, and the fallback when a layout hides the rail button (the workbench's
+// phone tier folds it into a sheet).
+let opener = document.querySelector('[aria-label="Open theme studio"]');
+if (opener) {
+  opener.click();
+} else {
+  document.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'l', code: 'KeyL', ctrlKey: true, shiftKey: true, bubbles: true,
+  }));
+}
+for (let i = 0; i < 200; i++) {
+  if (document.querySelector('.theme-studio')) return 'open';
+  await new Promise((r) => setTimeout(r, 50));
+}
+return 'timeout';
+"""
+
+OPEN_SOURCE_CONTROL = """
+// The workspace tabs are the way in: `Source control` is the second tab, and its
+// panel is mounted lazily on the first visit, so the wait is for the panel, not
+// for the click.
+const tab = Array.from(document.querySelectorAll('[role=tab]')).find(
+  (node) => /^Source control/.test((node.textContent || '').trim()),
+);
+if (!tab) return 'no Source control tab';
+tab.click();
+for (let i = 0; i < 200; i++) {
+  if (document.querySelector('.gitm-kicker')) return 'open';
+  await new Promise((r) => setTimeout(r, 50));
+}
+return 'timeout';
+"""
+
+# Each screen: the opener, the root whose text must clear the floor, and (for a
+# full-document pass) `None`. An overlay is measured on its own root: the
+# workspace behind its scrim is not text the reader can read or the design owns.
 SCREENS = [
-    ("main", None),
-    ("command-palette", "document.dispatchEvent(new KeyboardEvent('keydown', {key:'k',code:'KeyK',ctrlKey:true,bubbles:true})); await new Promise(r=>setTimeout(r,300)); return 1;"),
-    ("settings", "document.dispatchEvent(new KeyboardEvent('keydown', {key:'k',code:'KeyK',ctrlKey:true,bubbles:true})); await new Promise(r=>setTimeout(r,250));"
-                 "const item=[...document.querySelectorAll('*')].find(e=>e.textContent.trim()==='Open settings'&&e.closest('button,[role=option]'));"
-                 "const target=item&&(item.closest('button,[role=option]')||item); if(target)target.click(); await new Promise(r=>setTimeout(r,600)); return 1;"),
+    {
+        "name": "main",
+        "open": None,
+        "scope": None,
+    },
+    {
+        "name": "command-palette",
+        "open": "document.dispatchEvent(new KeyboardEvent('keydown', {key:'k',code:'KeyK',ctrlKey:true,bubbles:true})); await new Promise(r=>setTimeout(r,300)); return 1;",
+        "scope": None,
+    },
+    {
+        "name": "settings",
+        "open": "document.dispatchEvent(new KeyboardEvent('keydown', {key:'k',code:'KeyK',ctrlKey:true,bubbles:true})); await new Promise(r=>setTimeout(r,250));"
+                "const item=[...document.querySelectorAll('*')].find(e=>e.textContent.trim()==='Open settings'&&e.closest('button,[role=option]'));"
+                "const target=item&&(item.closest('button,[role=option]')||item); if(target)target.click(); await new Promise(r=>setTimeout(r,600)); return 1;",
+        "scope": ".dialog-settings",
+    },
+    {
+        "name": "theme-studio",
+        "open": OPEN_THEME_STUDIO,
+        "scope": ".theme-studio",
+    },
+    {
+        "name": "source-control",
+        "open": OPEN_SOURCE_CONTROL,
+        "scope": None,
+    },
 ]
 
 
@@ -299,39 +399,65 @@ def main() -> int:
                 set_theme(session, theme)
                 session.navigate(args.base)
 
-                measured = session.evaluate(MEASURE)
-                findings[f"{label}:{mode}:main"] = measured
-                session.screenshot(shots / f"{label}-{mode}-main.png")
-                check(
-                    f"{label}/{mode}/main: no text below {FLOOR_TEXT}:1",
-                    measured["failCount"] == 0,
-                    f"{measured['failCount']} of {measured['total']} text nodes"
-                    + (f", worst {measured['fails'][0]['ratio']}:1 at {measured['fails'][0]['px']}px \"{measured['fails'][0]['text']}\"" if measured["fails"] else ""),
-                )
-
-                overflow = session.evaluate(OVERFLOW)
-                findings[f"{label}:{mode}:overflow"] = overflow
-                check(f"{label}/{mode}/main: nothing clipped without a way to scroll", not overflow,
-                      f"{len(overflow)} elements")
-
-                surfaces = session.evaluate(SURFACES)
-                findings[f"{label}:{mode}:surfaces"] = surfaces
-
-                for name, script in SCREENS[1:]:
-                    session.navigate(args.base)
-                    try:
-                        session.evaluate(script)
-                    except SystemExit as error:
-                        print(f"  skip {label}/{mode}/{name}: {error}", flush=True)
-                        continue
+                # The main screen and every surface on top of the same shell:
+                # a full screen with the workspace behind it, or a drawer/sheet
+                # measured on its own root. Each opener is followed by a contrast
+                # pass and a clipping pass, so "looks fine in a screenshot" is
+                # never the answer.
+                for screen in SCREENS:
+                    name, scope = screen["name"], screen["scope"]
+                    prefix = f"{label}/{mode}/{name}"
+                    if screen["open"] is not None:
+                        session.navigate(args.base)
+                        try:
+                            opened = session.evaluate(screen["open"])
+                        except SystemExit as error:
+                            check(f"{prefix}: the surface opens", False, str(error)[:300])
+                            continue
+                        # A string is an opener's verdict ('timeout', 'no tab');
+                        # the two older scripts return 1 once the click landed.
+                        if isinstance(opened, str) and opened != "open":
+                            check(f"{prefix}: the surface opens", False, opened)
+                            continue
                     session.screenshot(shots / f"{label}-{mode}-{name}.png")
-                    result = session.evaluate(MEASURE)
-                    findings[f"{label}:{mode}:{name}"] = result
-                    check(
-                        f"{label}/{mode}/{name}: no text below {FLOOR_TEXT}:1",
-                        result["failCount"] == 0,
-                        f"{result['failCount']} of {result['total']}",
-                    )
+
+                    measured = session.evaluate(measure_script(scope))
+                    findings[f"{label}:{mode}:{name}"] = measured
+                    if measured.get("missing"):
+                        check(f"{prefix}: the surface is on screen", False, f"no {scope}")
+                        continue
+                    check(f"{prefix}: no text below {FLOOR_TEXT}:1",
+                          measured["failCount"] == 0, contrast_detail(measured))
+
+                    clipped = session.evaluate(overflow_script(scope))
+                    findings[f"{label}:{mode}:{name}:overflow"] = clipped
+                    check(f"{prefix}: nothing clipped without a way to scroll",
+                          not clipped, f"{len(clipped)} elements")
+
+                    if screen["open"] is None:
+                        findings[f"{label}:{mode}:main:surfaces"] = session.evaluate(SURFACES)
+
+        # The phone tier: 390×844 is the CSS size of an iPhone 14, and the narrow
+        # layout rearranges the rail, the header and the composer rather than
+        # shrinking them - so both modes get a contrast pass and a clipping pass.
+        for theme in ("ember", "daybreak"):
+            mode = "dark" if theme == "ember" else "light"
+            session._send("Emulation.setDeviceMetricsOverride", {
+                "width": 390, "height": 844, "deviceScaleFactor": 2, "mobile": True,
+            })
+            session.navigate(args.base)
+            set_theme(session, theme)
+            session.navigate(args.base)
+            time.sleep(0.4)
+            measured = session.evaluate(measure_script())
+            findings[f"390x844:{mode}:main"] = measured
+            session.screenshot(shots / f"390x844-{mode}-main.png")
+            check(f"390x844/{mode}/main: no text below {FLOOR_TEXT}:1",
+                  measured["failCount"] == 0, contrast_detail(measured))
+            overflow = session.evaluate(overflow_script())
+            findings[f"390x844:{mode}:overflow"] = overflow
+            check(f"390x844/{mode}/main: nothing clipped without a way to scroll",
+                  not overflow, f"{len(overflow)} elements")
 
         # Narrow viewports: the responsive breakpoints must not overflow.
         for width in (1100, 1024):
@@ -342,7 +468,7 @@ def main() -> int:
                 "width": width, "height": 900, "deviceScaleFactor": 1, "mobile": False,
             })
             time.sleep(0.4)
-            overflow = session.evaluate(OVERFLOW)
+            overflow = session.evaluate(overflow_script())
             findings[f"{width}:overflow"] = overflow
             session.screenshot(shots / f"ember-{width}.png")
             check(f"{width}px: no horizontal clipping", not overflow, f"{len(overflow)} elements")
@@ -362,7 +488,10 @@ def main() -> int:
         "",
         "Generated by `scripts/design_verify.py` against the built bundle in a real",
         "Chromium at true 1920×1080 (1080p) and 2560×1440 (1440p), plus the 1100px",
-        "and 1024px breakpoints, in Ember (dark) and Daybreak (light). The contract is",
+        "and 1024px breakpoints, in Ember (dark) and Daybreak (light). Every size is",
+        "measured on the workspace itself, on the command palette, on the settings",
+        "sheet, on the Theme studio drawer and on the Source control tab; the phone",
+        "tier (390×844) is measured in both modes. The contract is",
         "`docs/internal/DESIGN-SYSTEM.md`.",
         "",
         f"**{len(PASS)} passed, {len(FAIL)} failed.**",
@@ -381,8 +510,6 @@ def main() -> int:
 
     lines += ["", "## Worst contrast offenders", ""]
     for key, value in findings.items():
-        if not key.endswith(("main", "command-palette", "settings")):
-            continue
         if not isinstance(value, dict) or "fails" not in value:
             continue
         lines.append(f"### {key} — {value['failCount']} of {value['total']} below floor")

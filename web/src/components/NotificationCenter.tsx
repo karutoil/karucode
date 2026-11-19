@@ -6,9 +6,8 @@ import { relativeTime } from '../lib/format';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { Button, IconButton, Inline, Text } from '../ui';
-import { Dialog } from './Dialog';
+import { Overlay } from './Overlay';
 import { BellIcon, CheckIcon } from './icons';
-import '../styles/notifications.css';
 
 /** The tone each kind paints: a finished run is news, a failure is a failure. */
 const KIND_TONES: Record<store.NotificationEntry['kind'], string> = {
@@ -196,11 +195,18 @@ export function NotificationCenter(): JSX.Element {
   };
 
   return (
-    <Dialog
+    <Overlay
       open={open}
       title="Notifications"
       onClose={actions.closeNotificationCenter}
+      // A list to read, so the wide measure. `notifications.css` is imported by
+      // `styles/index.css` into `layer(components)` like every other sheet; it
+      // keeps `.notification-center` (the width, already `--overlay-w-wide`, and
+      // the height cap) and owns the list's own scroller, which is why the body
+      // is laid out as a direct child of the surface.
+      role="wide"
       class="notification-center"
+      bodyLayout="contents"
       description={
         unread > 0
           ? `${unread} unread, newest first.`
@@ -259,6 +265,6 @@ export function NotificationCenter(): JSX.Element {
           ))}
         </ul>
       )}
-    </Dialog>
+    </Overlay>
   );
 }

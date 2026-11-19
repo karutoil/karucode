@@ -1,6 +1,6 @@
 import type { JSX } from 'preact';
 import { useEffect, useId, useState } from 'preact/hooks';
-import { Toggle } from './Toggle';
+import { Button, Callout, Select, Text, Textarea, Toggle } from '../ui';
 
 /**
  * Editor for a model entry's `variants` map: which reasoning levels this model
@@ -272,9 +272,9 @@ export function ModelVariantsEditor({
   return (
     <div class="field field-wide model-variants">
       <div class="model-variants-head">
-        <label class="field-label" for={`${id}-toggle`}>
+        <Text as="label" htmlFor={`${id}-toggle`} size="label" weight="semibold">
           Reasoning variants
-        </label>
+        </Text>
         <Toggle
           id={`${id}-toggle`}
           checked={declared}
@@ -283,17 +283,17 @@ export function ModelVariantsEditor({
           label="Declare reasoning levels for this model"
         />
       </div>
-      <p class="field-hint" id={hintId}>
+      <Text as="p" size="tiny" tone="muted" class="model-variants-hint" id={hintId}>
         {declared
           ? 'Only these levels are offered in the composer and accepted on save. Each level sends exactly this body instead of a bare reasoning_effort string. A model that declares variants and offers none allows only “Default”.'
           : 'Not declared: every level (none, minimal, low, medium, high, max) is offered and sent as reasoning_effort = "<level>". Turn this on to send your own body per level — e.g. {"thinking": {"type": "enabled", "budget_tokens": 32000}}.'}
-      </p>
+      </Text>
       {declared ? (
         <div class="model-variants-rows" role="group" aria-label="Declared reasoning levels">
           {rows.length === 0 ? (
-            <p class="model-variants-empty">
+            <Text as="p" size="small" tone="muted" class="model-variants-empty">
               No levels declared — only “Default” applies to this model.
-            </p>
+            </Text>
           ) : null}
           {rows.map((row, index) => {
             // What the reader has typed wins over what the parent holds: an
@@ -305,64 +305,63 @@ export function ModelVariantsEditor({
             return (
               <div class="model-variant-row" key={index}>
                 <div class="model-variant-head">
-                  <select
-                    class="input model-variant-level"
+                  <Select
+                    class="model-variant-level"
                     aria-label={`Level ${index + 1}`}
                     value={row.level}
                     disabled={disabled}
+                    options={VARIANT_LEVELS.map((level) => ({
+                      value: level,
+                      label: variantLabel(level),
+                    }))}
                     onChange={(event) => setRow(index, { level: event.currentTarget.value })}
-                  >
-                    {VARIANT_LEVELS.map((level) => (
-                      <option value={level} key={level}>
-                        {variantLabel(level)}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    class="button button-small model-variant-remove"
+                  />
+                  <Button
+                    size="sm"
+                    class="model-variant-remove"
                     disabled={disabled}
                     aria-label={`Remove level ${index + 1}`}
                     onClick={() => removeRow(index)}
                   >
                     Remove
-                  </button>
+                  </Button>
                 </div>
                 <label class="sr-only" for={bodyId}>
                   Request body for level {index + 1}
                 </label>
-                <textarea
+                <Textarea
                   id={bodyId}
-                  class="input mono model-variant-body"
+                  class="model-variant-body"
                   rows={3}
-                  spellcheck={false}
+                  mono
+                  spellCheck={false}
                   value={bodyText}
                   disabled={disabled}
                   placeholder={'{\n  "thinking": { "type": "enabled", "budget_tokens": 4096 }\n}'}
                   onInput={(event) => setRow(index, { body: event.currentTarget.value })}
                 />
                 {rowError ? (
-                  <p class="field-error" role="alert">
+                  <Text as="p" size="tiny" tone="danger" role="alert" class="model-variant-error">
                     {rowError}
-                  </p>
+                  </Text>
                 ) : null}
               </div>
             );
           })}
-          <button
-            type="button"
-            class="button button-small model-variants-add"
+          <Button
+            size="sm"
+            class="model-variants-add"
             disabled={disabled || rows.length >= VARIANT_LEVELS.length}
             onClick={addRow}
           >
             Add level
-          </button>
+          </Button>
         </div>
       ) : null}
       {error ? (
-        <p class="field-error" role="alert">
+        <Callout tone="danger" role="alert" class="model-variants-error">
           {error}
-        </p>
+        </Callout>
       ) : null}
     </div>
   );

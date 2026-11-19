@@ -2,7 +2,7 @@
 // @kc-title: Use the browser workspace
 // @kc-summary: Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary.
 // @kc-tags: ui, web, frontend, workbench, panels, context, shortcuts, preact, plugins, buttons
-// @kc-applies-to: ui:ProjectRail, ui:project-switcher, ui:mobile-sheet, ui:mobile-layout, ui:mobile-touch-target, ui:mobile-keyboard-inset, env:interactive-widget, route:GET /api/projects/:id/favicon, ui:SessionsRail, ui:RailPeek, ui:ChatView, ui:Composer, ui:TpsBadge, ui:ContextPill, ui:Inspector, ui:ResultResizer, route:PATCH /api/projects/:id/preferences, ui:SessionInfoTab, route:GET /api/sessions/:id/info, file:web/src/components/SessionInfoTab.tsx, file:web/src/lib/sessionInfo.ts, ui:SettingsSheet, ui:NotificationsSection, ui:ToastRegion, ui:NotificationCenter, ui:notification-bell, ui:CommandPalette, ui:FileViewer, ui:FilePreview, ui:RewindDialog, ui:plugin-panel, route:GET /api/workspace/tree, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, file:web/src/components/Dialog.tsx, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, event:session_rewound, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, route:POST /api/plugins/:name/ui/actions/:action, config:plugin_ui, config:ui, file:web/src/components/PluginSlot.tsx, file:web/src/components/uiContributions.ts, file:web/src/components/PluginControls.tsx, file:web/src/state/pluginUiPreferences.ts, file:web/src/components/PluginViews.tsx, file:web/src/components/viewPanelRegister.ts, file:web/src/styles/plugin-views.css, dir:plugins/demos, file:plugins/demos/README.md, file:scripts/verify_plugin_demos.py, cmd:python3 scripts/verify_plugin_demos.py, file:web/src/styles/plugin-slots.css, file:scripts/verify_plugin_ui.py, cmd:python3 scripts/verify_plugin_ui.py, fn:matchUiKeybinding, fn:applyUiPreferences, ui:keybinding, ui:plugin-controls, fn:registerPluginPanelRenderer, ui:PluginSlot, ui:plugin-slot-button, config:[notifications], event:usage, event:notification, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, event:queued_messages, event:steer_applied, ui:AgentsTab, route:GET /api/agents, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, event:agent_spawned, event:agent_paused, event:agent_note, event:agent_message, event:agent_finished, tool:spawn_agent, tool:report_status, file:web/src/components/AgentsTab.tsx, file:web/src/state/agentConsole.ts, file:web/src/components/pluginPanels.ts, file:web/src/state/queues.test.ts, file:web/src/styles/composer.css, file:scripts/verify_queues.py, file:web/src/components/PluginPanelView.tsx, file:web/src/components/RewindDialog.tsx, file:web/src/components/TpsBadge.tsx, file:web/src/components/NotificationsSettings.tsx, file:web/src/styles/mobile.test.ts, file:web/src/state/notifier.ts, file:web/src/state/railPeek.ts, file:web/src/state/notifications.test.ts, file:web/src/components/NotificationCenter.tsx, file:web/src/components/SessionsRail.tsx, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts, file:web/src/lib/tps.ts, file:web/src/state/promptTokens.ts, file:web/src/lib/dockHeight.ts, file:web/src/lib/viewportInset.ts, file:web/src/lib/menu.tsx, ui:context-menu, fn:registerPluginPanelRenderer, event:tool_call_finished, tool:read_file, config:model.supports_images, cmd:npm run dev, cmd:npm run build, cmd:npm run audit, file:web/scripts/audit-gate.mjs, file:web/dist, env:KARUCODE_WEB_DIR, ui:GitManager, ui:GitChanges, ui:GitCommitBox, ui:GitBranchDialog, ui:GitHistory, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, file:web/src/components/git/GitManager.tsx, file:web/src/styles/git.css, ui:WorkbenchTaskMenu, ui:ContextDrawer, file:web/src/components/WorkbenchTaskMenu.tsx, file:web/src/components/ContextDrawer.tsx, file:web/src/state/workbench.ts, file:web/src/lib/approvalCopy.ts, file:web/src/styles/workbench.css, file:web/src/styles/workbench-navigation.css, file:scripts/verify_workbench_frontend.py, cmd:python3 scripts/verify_workbench_frontend.py, ui:ControlPlane, route:GET /api/control/overview, route:GET /api/control/sessions, file:web/src/state/controlPlane.ts, file:web/src/components/control-plane/ControlPlane.tsx, file:web/src/components/control-plane/ControlRail.tsx, file:web/src/components/control-plane/ControlOverview.tsx, file:web/src/components/control-plane/ControlSession.tsx, file:web/src/components/control-plane/controlModel.ts, file:web/src/styles/control-shared.css, file:web/src/styles/control-rail.css, file:web/src/styles/control-overview.css, file:web/src/styles/control-session.css, file:web/src/lib/historyLoader.ts, file:web/src/lib/virtualWindow.ts, file:web/src/components/ChatTranscript.tsx, file:web/src/state/chat.ts, file:web/src/lib/streamingMarkdown.ts, file:web/src/components/Markdown.tsx, file:web/src/components/ThinkingBlock.tsx, ui:streaming-render, file:web/src/api/sharedStream.ts, ui:shared-event-stream, route:GET /api/events, file:web/src/components/ToolCard.tsx, file:web/src/components/CommandCard.tsx, file:scripts/verify_tps_badge.py, cmd:python3 scripts/verify_tps_badge.py, file:web/src/state/draftSession.test.ts, file:scripts/verify_draft_session.py, cmd:python3 scripts/verify_draft_session.py, ui:AuthScreen, ui:Onboarding, route:GET /api/auth/status, route:POST /api/auth/login, route:POST /api/auth/logout, route:POST /api/auth/password, route:GET /api/auth/passkeys, route:POST /api/auth/passkeys, route:POST /api/auth/passkey/options, route:POST /api/auth/passkey/login, route:GET /api/onboarding, route:POST /api/onboarding/complete, file:web/src/components/AuthScreen.tsx, file:web/src/styles/auth.css, file:web/src/components/Onboarding.tsx, file:web/src/components/AccessSettings.tsx, file:web/src/styles/access-settings.css, ui:AccessSettings, ui:access-tab, ui:PluginInstallSection, file:web/src/components/PluginInstallSection.tsx, route:POST /api/plugins/install/preview, route:POST /api/plugins/install, route:GET /api/plugins/install/:id, route:POST /api/plugins/install/:id/cancel, file:web/src/styles/plugin-install.css, ui:Updates, file:web/src/components/UpdateSettings.tsx, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, file:web/src/lib/passkey.ts, file:web/src/styles/onboarding.css, config:[access], ui:results-popout, ui:results-head-btn, ui:context-header-btn, file:scripts/verify_results_popout.py, cmd:python3 scripts/verify_results_popout.py, file:web/src/components/CommandPalette.tsx, file:web/src/lib/paletteMatch.ts, file:web/src/lib/paletteMatch.test.ts, file:web/src/styles/overlays.css, ui:ModelSwitcher, ui:model-picker, ui:project-menu-open, file:web/src/components/ModelSwitcher.tsx, file:web/src/lib/format.ts, fn:formatContextWindow, fn:filterModelOptions, storage:karucode.projectMenuOpen, storage:karucode.inspectorMode, storage:karucode.composerSendKey, ui:composer-send-key, file:scripts/verify_send_key.py, cmd:python3 scripts/verify_send_key.py, ui:SlashMenu, ui:slash-menu, ui:slash-card, ui:Composer-slash-command, route:GET /api/commands, event:command_result, file:web/src/components/SlashMenu.tsx, file:web/src/components/SlashCard.tsx, file:web/src/lib/slash.ts, file:web/src/lib/slash.test.ts, file:web/src/components/Composer.slash.test.tsx, file:web/src/state/slashCommand.test.ts, doc:slash-commands, cmd:npm run lint, file:web/.oxlintrc.json, file:web/src/styles/tailwind.css, file:web/src/styles/ui-contract.test.ts, file:web/src/styles/scale.test.ts, file:web/src/styles/layers.test.ts, file:web/vite.config.ts, dir:web/src/ui, file:web/src/ui/index.ts, file:web/src/ui/README.md, file:web/src/ui/UiGallery.tsx, ui:ui-gallery, file:web/AGENTS.md, dir:web/src/features, dir:web/src/app, dir:web/src/state/actions, dir:web/src/api/endpoints, dir:web/src/api/types
+// @kc-applies-to: ui:ProjectRail, ui:project-switcher, ui:mobile-sheet, ui:mobile-layout, ui:mobile-touch-target, ui:mobile-keyboard-inset, env:interactive-widget, route:GET /api/projects/:id/favicon, ui:SessionsRail, ui:RailPeek, ui:ChatView, ui:Composer, ui:TpsBadge, ui:ContextPill, ui:Inspector, ui:ResultResizer, route:PATCH /api/projects/:id/preferences, ui:SessionInfoTab, route:GET /api/sessions/:id/info, file:web/src/components/SessionInfoTab.tsx, file:web/src/lib/sessionInfo.ts, ui:SettingsSheet, ui:NotificationsSection, ui:ToastRegion, ui:NotificationCenter, ui:notification-bell, ui:CommandPalette, ui:FileViewer, ui:FilePreview, ui:RewindDialog, ui:plugin-panel, route:GET /api/workspace/tree, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, file:web/src/components/Dialog.tsx, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, event:session_rewound, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, route:POST /api/plugins/:name/ui/actions/:action, config:plugin_ui, config:ui, file:web/src/components/PluginSlot.tsx, file:web/src/components/uiContributions.ts, file:web/src/components/PluginControls.tsx, file:web/src/state/pluginUiPreferences.ts, file:web/src/components/PluginViews.tsx, file:web/src/components/viewPanelRegister.ts, file:web/src/styles/plugin-views.css, dir:plugins/demos, file:plugins/demos/README.md, file:scripts/verify_plugin_demos.py, cmd:python3 scripts/verify_plugin_demos.py, file:web/src/styles/plugin-slots.css, file:scripts/verify_plugin_ui.py, cmd:python3 scripts/verify_plugin_ui.py, fn:matchUiKeybinding, fn:applyUiPreferences, ui:keybinding, ui:plugin-controls, fn:registerPluginPanelRenderer, ui:PluginSlot, ui:plugin-slot-button, config:[notifications], event:usage, event:notification, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, event:queued_messages, event:steer_applied, ui:AgentsTab, route:GET /api/agents, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, event:agent_spawned, event:agent_paused, event:agent_note, event:agent_message, event:agent_finished, tool:spawn_agent, tool:report_status, file:web/src/components/AgentsTab.tsx, file:web/src/state/agentConsole.ts, file:web/src/components/pluginPanels.ts, file:web/src/state/queues.test.ts, file:web/src/styles/composer.css, file:scripts/verify_queues.py, file:web/src/components/PluginPanelView.tsx, file:web/src/components/RewindDialog.tsx, file:web/src/components/TpsBadge.tsx, file:web/src/components/NotificationsSettings.tsx, file:web/src/styles/mobile.test.ts, file:web/src/state/notifier.ts, file:web/src/state/railPeek.ts, file:web/src/state/notifications.test.ts, file:web/src/components/NotificationCenter.tsx, file:web/src/components/SessionsRail.tsx, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts, file:web/src/lib/tps.ts, file:web/src/state/promptTokens.ts, file:web/src/lib/dockHeight.ts, file:web/src/lib/viewportInset.ts, file:web/src/lib/menu.tsx, ui:context-menu, fn:registerPluginPanelRenderer, event:tool_call_finished, tool:read_file, config:model.supports_images, cmd:npm run dev, cmd:npm run build, cmd:npm run audit, file:web/scripts/audit-gate.mjs, file:web/dist, env:KARUCODE_WEB_DIR, ui:GitManager, ui:GitChanges, ui:GitCommitBox, ui:GitBranchDialog, ui:GitHistory, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, file:web/src/components/git/GitManager.tsx, file:web/src/styles/git.css, ui:WorkbenchTaskMenu, ui:ContextDrawer, file:web/src/components/WorkbenchTaskMenu.tsx, file:web/src/components/ContextDrawer.tsx, file:web/src/state/workbench.ts, file:web/src/lib/approvalCopy.ts, file:web/src/styles/workbench.css, file:web/src/styles/workbench-navigation.css, file:scripts/verify_workbench_frontend.py, cmd:python3 scripts/verify_workbench_frontend.py, ui:ControlPlane, route:GET /api/control/overview, route:GET /api/control/sessions, file:web/src/state/controlPlane.ts, file:web/src/components/control-plane/ControlPlane.tsx, file:web/src/components/control-plane/ControlRail.tsx, file:web/src/components/control-plane/ControlOverview.tsx, file:web/src/components/control-plane/ControlSession.tsx, file:web/src/components/control-plane/controlModel.ts, file:web/src/styles/control-shared.css, file:web/src/styles/control-rail.css, file:web/src/styles/control-overview.css, file:web/src/styles/control-session.css, file:web/src/lib/historyLoader.ts, file:web/src/lib/virtualWindow.ts, file:web/src/components/ChatTranscript.tsx, file:web/src/state/chat.ts, file:web/src/lib/streamingMarkdown.ts, file:web/src/components/Markdown.tsx, file:web/src/components/ThinkingBlock.tsx, ui:streaming-render, file:web/src/api/sharedStream.ts, ui:shared-event-stream, route:GET /api/events, file:web/src/components/ToolCard.tsx, file:web/src/components/CommandCard.tsx, file:scripts/verify_tps_badge.py, cmd:python3 scripts/verify_tps_badge.py, file:web/src/state/draftSession.test.ts, file:scripts/verify_draft_session.py, cmd:python3 scripts/verify_draft_session.py, ui:AuthScreen, ui:Onboarding, route:GET /api/auth/status, route:POST /api/auth/login, route:POST /api/auth/logout, route:POST /api/auth/password, route:GET /api/auth/passkeys, route:POST /api/auth/passkeys, route:POST /api/auth/passkey/options, route:POST /api/auth/passkey/login, route:GET /api/onboarding, route:POST /api/onboarding/complete, file:web/src/components/AuthScreen.tsx, file:web/src/styles/auth.css, file:web/src/components/Onboarding.tsx, file:web/src/components/AccessSettings.tsx, file:web/src/styles/access-settings.css, ui:AccessSettings, ui:access-tab, ui:PluginInstallSection, file:web/src/components/PluginInstallSection.tsx, route:POST /api/plugins/install/preview, route:POST /api/plugins/install, route:GET /api/plugins/install/:id, route:POST /api/plugins/install/:id/cancel, file:web/src/styles/plugin-install.css, ui:Updates, file:web/src/components/UpdateSettings.tsx, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, file:web/src/lib/passkey.ts, file:web/src/styles/onboarding.css, config:[access], ui:results-popout, ui:results-head-btn, ui:context-header-btn, file:scripts/verify_results_popout.py, cmd:python3 scripts/verify_results_popout.py, file:web/src/components/CommandPalette.tsx, file:web/src/lib/paletteMatch.ts, file:web/src/lib/paletteMatch.test.ts, file:web/src/styles/overlays.css, ui:ModelSwitcher, ui:model-picker, ui:project-menu-open, file:web/src/components/ModelSwitcher.tsx, file:web/src/lib/format.ts, fn:formatContextWindow, fn:filterModelOptions, storage:karucode.projectMenuOpen, storage:karucode.inspectorMode, storage:karucode.composerSendKey, ui:composer-send-key, file:scripts/verify_send_key.py, cmd:python3 scripts/verify_send_key.py, ui:SlashMenu, ui:slash-menu, ui:slash-card, ui:Composer-slash-command, route:GET /api/commands, event:command_result, file:web/src/components/SlashMenu.tsx, file:web/src/components/SlashCard.tsx, file:web/src/lib/slash.ts, file:web/src/lib/slash.test.ts, file:web/src/components/Composer.slash.test.tsx, file:web/src/state/slashCommand.test.ts, doc:slash-commands, cmd:npm run lint, file:web/.oxlintrc.json, file:web/src/styles/tailwind.css, file:web/src/styles/ui-contract.test.ts, file:web/src/styles/scale.test.ts, file:web/src/styles/layers.test.ts, file:web/vite.config.ts, dir:web/src/ui, file:web/src/ui/index.ts, file:web/src/ui/README.md, file:web/src/ui/UiGallery.tsx, ui:ui-gallery, file:web/AGENTS.md, dir:web/src/features, dir:web/src/app, dir:web/src/state/actions, dir:web/src/api/endpoints, dir:web/src/api/types, file:web/src/lib/lazyView.ts, file:web/src/app/GlobalOverlays.tsx, file:web/src/app/WorkbenchLayout.tsx, file:web/src/components/FileTree.tsx, file:web/src/state/eventReducer.ts, file:web/src/state/selectors.ts, file:web/src/features/transcript/useVirtualWindow.ts, file:web/src/lib/mentions.ts, ui:FileTree, fn:lazyNamed, fn:agentActivity, fn:activeMention
 //
 // # Sign-in and first run
 //
@@ -1176,14 +1176,15 @@
 // resolves to nothing at all. `web/src/styles/ui-contract.test.ts` fails a TSX
 // file that writes one of those anyway, so a Theme Studio change keeps
 // repainting a utility. Cascade layers settle the order: `styles/index.css`
-// imports `tokens.css` and `tailwind.css` unlayered and every component sheet
-// with `layer(components)`, so a utility now overrides a component's `.class`
-// rule as well as the element resets in `base.css` — those sit in a nested
-// `@layer base`, which lands in `components.base`, above Tailwind's Preflight and
-// below the rest of the components layer. A sheet imported by the component that
-// owns it instead (`notifications.css`, `workbench-navigation.css`, the four
-// `control-*.css`) is still unlayered and outranks every utility; a utility there
-// does nothing, so restyle those with a class rule.
+// imports `tokens.css` and `tailwind.css` unlayered and *every* component sheet
+// with `layer(components)`, so a utility overrides a component's `.class` rule as
+// well as the element resets in `base.css` — those sit in a nested `@layer base`,
+// which lands in `components.base`, above Tailwind's Preflight and below the rest
+// of the components layer. No component imports a stylesheet itself any more:
+// `notifications.css`, `workbench-navigation.css` and the four `control-*.css`
+// were the last six and are imported by `index.css` too, so nothing in the app
+// sits outside the cascade order and `styles/layers.test.ts` fails a sheet that
+// tries.
 //
 // ## Frontend structure and UI primitives
 //
@@ -1194,6 +1195,11 @@
 //   `SectionHeader`, `SettingRow`, `Badge`, `Chip`, `StatusDot`, `Keycap`,
 //   `Callout`, `Spinner`, `Skeleton`, plus graduated `Overlay`, `Dialog`, `Tabs`,
 //   `TabPanel`, `EmptyState`, `ErrorBoundary`, `icons`, and `variants()`/`cn()`).
+//   Every overlay in the product is an `Overlay` (a `role` names the measure) or
+//   a `ConfirmDialog`; `<Dialog>` survives as the compatibility export behind
+//   them with **no product caller left** — the notification centre, the artifact
+//   card and the two models.dev surfaces were the last four — so it is kept for
+//   the export and for the tests that pin its old class-to-measure table.
 //   New UI imports from `src/ui` first rather than hand-rolling raw `<button>`,
 //   `<input>`, `<select>` or bespoke spacing rules; `web/AGENTS.md` holds the full
 //   frontend agent contract. In dev (`npm run dev`), `?ui-gallery=1` mounts
@@ -1213,6 +1219,79 @@
 //   4px/10px CSS floor; `web/src/styles/layers.test.ts` enforces `layer(components)`
 //   ordering; and `node web/scripts/design-audit.mjs` reports any remaining
 //   stylesheet drift.
+//
+// ## The entry chunk and code splitting
+//
+// What a reader downloads before the conversation appears is kept small on
+// purpose: a surface behind a sign-in state, a keybinding or a tab travels as
+// its own chunk and arrives on first use. `web/src/lib/lazyView.ts` is the one
+// helper — `lazyNamed(loader, name)` wraps Preact's `lazy` and reshapes the
+// module's *named* export into `{ default }`, since `lazy` hands the namespace
+// object straight to `createElement` and every view here exports by name. The
+// module is cached once resolved, so only the first open is asynchronous. Each
+// call site supplies its own `<Suspense>` fallback:
+//
+// * **`AuthScreen`** and **`Onboarding`** (`web/src/app.tsx`) — the boot edges,
+//   split so a chat never downloads the wizard's six steps. Fallback: the boot
+//   skeleton the loading state already shows.
+// * **`ControlPlane`** (`web/src/app/WorkbenchLayout.tsx`) — mission control is
+//   the heaviest screen in the app (three regions, its own snapshot store and a
+//   poll) and lives behind one button. Its fallback holds the grid cell, so the
+//   rail and the chat column do not reflow when the chunk lands.
+// * **The six global overlays** (`web/src/app/GlobalOverlays.tsx`) —
+//   `SettingsSheet`, `ThemeStudio`, `FileViewer`, `RewindDialog`,
+//   `NotificationCenter` and `CommandPalette` are each split *and* mounted only
+//   while their signal says they are open, so a closed sheet costs nothing at
+//   all. That is safe because none of them owns a global keybinding or a
+//   background read: `Mod+K`, `Mod+Shift+L`, Escape and the "a dialog is open,
+//   ignore shortcuts" guard live in `app/useGlobalKeybindings.ts`, and each
+//   overlay's own effects are already gated on `open`. `ToastRegion` stays eager
+//   and outside every boundary — it is how a crash is reported, and a toast must
+//   not wait for a chunk.
+// * **The inspector's three heavy panels** (`web/src/components/Inspector.tsx`) —
+//   `GitManager`, `AgentsTab` and a plugin panel, one chunk per tab, with a
+//   `Skeleton` fallback because `TabPanel` mounts a tab only once it is selected.
+// * **`GitManager` and `FileTabView`** in the conversation's workspace views
+//   (`web/src/components/ChatView.tsx`). Both keep themselves mounted after the
+//   first visit, so the one asynchronous mount is the first activation and the
+//   fallback can be empty.
+//
+// Vendors are split separately by `manualChunks` in `web/vite.config.ts`:
+// `vendor-preact` (`preact`, `@preact/signals`), `vendor-markdown` (`markdown-it`,
+// its footnote and task-list plugins, `dompurify`) and `vendor-highlight`
+// (`highlight.js`) change only when those packages do, so an app-code change
+// does not invalidate the browser's copy. `mermaid` and `@xterm/*` are
+// deliberately *not* in that map — they already arrive as their own lazily
+// imported chunks (`TerminalSurface`, the diagram renderer).
+//
+// ## What runs on every keystroke, scroll and token
+//
+// * **The file tree** (`web/src/components/FileTree.tsx`) owns exactly *one*
+//   `useMenu()` for the whole tree: a row reports which node was pressed and the
+//   menu opens at the pointer, where a menu per row meant a controller, an open
+//   state and a pointer snapshot per `treeitem` — a thousand each before one was
+//   opened. Above 150 visible rows the tree mounts a **vertical window** (8 rows
+//   of overscan, spacer rows keeping the scrollbar honest) instead of everything;
+//   at or below it every row is mounted, which is also what keeps a tree rendered
+//   with no layout yet (`clientHeight === 0`, every jsdom test) showing all of
+//   it. `ROW_HEIGHT` (29px) and `.tree-row` in `styles/inspector.css` have to
+//   change together.
+// * **The reducer** (`web/src/state/eventReducer.ts`) extends a streaming row
+//   only while it is the newest one: `streamingTail` reads the tail instead of
+//   searching for the newest streaming message on every token, `updateItemAt`
+//   swaps one pointer rather than re-mapping the transcript, and `findLastIndex`
+//   scans from the tail without allocating the `[...items].reverse()` copy.
+// * **The composer's status line** (`agentActivity` in
+//   `web/src/state/selectors.ts`) is one backwards pass that counts pending
+//   approvals and finds the newest active row in the same loop, because it is
+//   re-read on every frame including every streamed token.
+// * **The transcript window** (`web/src/features/transcript/useVirtualWindow.ts`)
+//   reads a row's bottom margin from one sample row and caches it against the
+//   layout it was read in (`data-density` on `<html>` plus the viewport's box)
+//   instead of asking `getComputedStyle` about every mounted row on every commit.
+// * **Mention completion** (`activeMention` in `web/src/lib/mentions.ts`) bounds
+//   its forward scan at `MENTION_TOKEN_LIMIT` (512) characters: a token that has
+//   not ended by then is a paste, not a workspace path, and opens no menu.
 //
 // For the focused real-browser Workbench check, first run `npm run build` in `web/`
 // and build `target/debug/karucode` with `cargo build -p kc-server --bin karucode`.
@@ -1287,22 +1366,41 @@
 // the generated `docs/internal/web-ui.md`.
 
 import type { JSX } from 'preact';
+import { Suspense } from 'preact/compat';
 import { GlobalOverlays } from './app/GlobalOverlays';
 import { useAppBoot } from './app/useAppBoot';
 import { useGlobalKeybindings } from './app/useGlobalKeybindings';
 import { WorkbenchLayout } from './app/WorkbenchLayout';
-import { AuthScreen } from './components/AuthScreen';
 import { BootErrorScreen, BootSkeleton } from './components/BootScreens';
-import { Onboarding } from './components/Onboarding';
+import { lazyNamed } from './lib/lazyView';
 import * as store from './state/store';
+
+// The two screens behind `boot` are the once-per-install edges of the app: a
+// sign-in form and the first-run wizard. Neither is on the path to a chat, so
+// they travel as their own chunks and the boot skeleton is what shows while one
+// arrives — a chat never downloads the wizard's six steps.
+const AuthScreenLazy = lazyNamed(() => import('./components/AuthScreen'), 'AuthScreen');
+const OnboardingLazy = lazyNamed(() => import('./components/Onboarding'), 'Onboarding');
 
 export function App(): JSX.Element {
   useAppBoot();
   useGlobalKeybindings();
 
   if (store.boot.value === 'loading') return <BootSkeleton />;
-  if (store.boot.value === 'auth') return <AuthScreen />;
-  if (store.boot.value === 'onboarding') return <Onboarding />;
+  if (store.boot.value === 'auth') {
+    return (
+      <Suspense fallback={<BootSkeleton />}>
+        <AuthScreenLazy />
+      </Suspense>
+    );
+  }
+  if (store.boot.value === 'onboarding') {
+    return (
+      <Suspense fallback={<BootSkeleton />}>
+        <OnboardingLazy />
+      </Suspense>
+    );
+  }
   if (store.boot.value === 'error') return <BootErrorScreen />;
 
   return (

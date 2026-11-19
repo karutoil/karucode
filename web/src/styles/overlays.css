@@ -378,13 +378,6 @@ body
   border-bottom: 1px solid var(--line);
 }
 
-.dialog-headings {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
 .dialog-title {
   overflow-wrap: anywhere;
   color: var(--text);
@@ -916,7 +909,7 @@ body
 }
 
 .file-code-scroll:focus-visible {
-  outline-offset: -2px;
+  outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
 /* ---------- file viewer: view tabs, preview, editor --------------------- */
@@ -1100,6 +1093,13 @@ body
 }
 
 .file-save-error {
+  margin: var(--space-5) var(--space-7) 0;
+}
+
+/* The load failure is a `Callout` with the same inset as the save failure: it is
+ * the same kind of message, one that replaces the document instead of sitting
+ * under it. */
+.file-load-error {
   margin: var(--space-5) var(--space-7) 0;
 }
 
@@ -1307,24 +1307,6 @@ body
   background: var(--surface-raised);
   color: var(--text-secondary);
   font-size: 0.9em;
-}
-
-.state-error {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-4);
-  margin-top: var(--space-7);
-  padding: var(--space-5) var(--space-6);
-  border: 1px solid var(--danger);
-  border-radius: var(--radius-sm);
-  background: var(--danger-bg);
-  color: var(--danger);
-  font-size: var(--fs-label);
-}
-
-.state-error svg {
-  flex: 0 0 auto;
-  margin-top: var(--space-1);
 }
 
 .state-footnote {
@@ -1581,42 +1563,6 @@ body
   line-height: 1.55;
 }
 
-.rewind-note {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.rewind-note-label {
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  font-weight: var(--weight-kicker);
-  letter-spacing: var(--tracking-kicker);
-  text-transform: uppercase;
-}
-
-.rewind-note-input {
-  width: 100%;
-  resize: vertical;
-  font-family: inherit;
-  font-size: var(--fs-small);
-  line-height: 1.6;
-}
-
-.rewind-toggle {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-4);
-  color: var(--text-secondary);
-  font-size: var(--fs-small);
-  cursor: pointer;
-}
-
-.rewind-toggle input {
-  margin: var(--space-1) 0 0;
-  accent-color: var(--accent);
-}
-
 .rewind-empty {
   margin: var(--space-3) 0 0;
   color: var(--muted);
@@ -1646,27 +1592,6 @@ body
   border-bottom: 0;
 }
 
-.rewind-file-action {
-  align-self: start;
-  padding: 0 var(--space-3);
-  border-radius: var(--radius-pill);
-  font-size: var(--fs-micro);
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  line-height: 1.7;
-}
-
-.rewind-file-action.is-restore {
-  color: var(--success);
-  background: var(--success-bg);
-}
-
-.rewind-file-action.is-remove {
-  color: var(--danger);
-  background: var(--danger-bg);
-}
-
 .rewind-file-path {
   color: var(--text);
   font-size: var(--fs-small);
@@ -1691,20 +1616,3 @@ body
   background: color-mix(in srgb, var(--warn) 5%, transparent);
 }
 
-.rewind-warn {
-  margin: var(--space-5) 0 0;
-  padding: var(--space-4) var(--space-6);
-  border-left: 2px solid var(--warn);
-  color: var(--warn);
-  font-size: var(--fs-tiny);
-  line-height: 1.6;
-}
-
-.rewind-error {
-  margin: 0;
-  padding: var(--space-4) var(--space-6);
-  border-left: 2px solid var(--danger);
-  color: var(--danger);
-  font-size: var(--fs-small);
-  line-height: 1.6;
-}

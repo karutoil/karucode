@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/preact';
 import { useRef } from 'preact/hooks';
 import type { JSX } from 'preact';
@@ -213,6 +213,45 @@ describe('windowed transcript', () => {
     const fresh = rows(container).filter((row) => row.classList.contains('is-fresh'));
     expect(fresh).toHaveLength(1);
     expect(fresh[0]?.textContent).toContain('a brand new question');
+  });
+
+  it('reads the row margin once per layout instead of once per mounted row', async () => {
+    // A row's extent is its box plus the gap below it, and `getComputedStyle`
+    // forces the style system to resolve the row it is asked about. Asking every
+    // mounted row on every commit spent the scroll in style resolution, so the
+    // margin is sampled once and reused until the layout (density, viewport) it
+    // was read under changes.
+    const real = window.getComputedStyle.bind(window);
+    const sampled: Element[] = [];
+    const spy = vi.spyOn(window, 'getComputedStyle').mockImplementation(((
+      element: Element,
+      pseudo?: string | null,
+    ) => {
+      if (element.parentElement?.classList.contains('transcript')) sampled.push(element);
+      return real(element, pseudo ?? undefined);
+    }) as typeof window.getComputedStyle);
+    try {
+      const { container } = render(<Harness items={conversation(100)} />);
+      await waitFor(() => expect(rows(container).length).toBeGreaterThan(0));
+      // A window of this many rows makes the difference unambiguous: one read
+      // per row would be dozens here.
+      // A real window of rows, so one read per row would be several here.
+      expect(rows(container).length).toBeGreaterThan(3);
+      // The sample row and the last child, once each - not one per row.
+      expect(sampled.length).toBeLessThanOrEqual(2);
+
+      // Scrolling remounts the window and runs the measuring effect again on the
+      // new rows. The reading is still valid for this layout, so the style
+      // system is not asked again: this is the part that used to cost a
+      // resolution per row per commit.
+      const viewport = container.querySelector('#probe-viewport') as HTMLElement;
+      viewport.scrollTop = 0;
+      fireEvent.scroll(viewport);
+      await waitFor(() => expect(container.textContent).toContain('question 0'));
+      expect(sampled.length).toBeLessThanOrEqual(2);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('moves the scroll by the layout shift a measurement caused, not by its estimate', async () => {

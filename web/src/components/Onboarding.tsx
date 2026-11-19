@@ -2,14 +2,26 @@ import type { JSX } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { toErrorMessage } from '../api/client';
 import * as api from '../api/endpoints';
-import type { ApprovalMode, TunnelKind } from '../api/types';
-import { createPasskey, PasskeyError, passkeySupported } from '../lib/passkey';
+import type { ApprovalMode } from '../api/types';
+import { AccessStep } from '../features/onboarding/AccessStep';
+import { AppearanceStep } from '../features/onboarding/AppearanceStep';
+import { ApprovalsStep } from '../features/onboarding/ApprovalsStep';
+import { ProviderStep } from '../features/onboarding/ProviderStep';
+import { StepRail } from '../features/onboarding/StepRail';
+import { SummaryStep } from '../features/onboarding/SummaryStep';
+import { WelcomeStep } from '../features/onboarding/WelcomeStep';
+import {
+  DEFAULT_BASE_URL,
+  STEPS,
+  defaultPasskeyName,
+  type AccessDraft,
+  type ProviderTestResult,
+} from '../features/onboarding/steps';
+import { createPasskey, PasskeyError } from '../lib/passkey';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
-import * as THEME from '../theme';
-import type { ThemeDensity, ThemeToolStyle, ThemeThinking } from '../theme';
-import { AlertIcon, CheckIcon, KeyIcon } from './icons';
-import { Toggle } from './Toggle';
+import { AlertIcon, CheckIcon } from './icons';
+import { Button, Callout, Text } from '../ui';
 
 /**
  * The first-run wizard.
@@ -24,97 +36,10 @@ import { Toggle } from './Toggle';
  * It runs once. `GET /api/onboarding` decides, the completion marker lives in the
  * server's settings table, and "Skip" records the same marker - a wizard that
  * reappears on every reload is worse than no wizard.
+ *
+ * This component owns the flow (which step, what has been typed, what a save
+ * writes); each step body lives in `features/onboarding/` and is presentational.
  */
-
-type StepId = 'welcome' | 'provider' | 'appearance' | 'approvals' | 'access' | 'done';
-
-const STEPS: { id: StepId; title: string; blurb: string }[] = [
-  {
-    id: 'welcome',
-    title: 'Welcome to karucode',
-    blurb: 'Four decisions in six short steps: the model, the look, the approvals and how this server is reached.',
-  },
-  {
-    id: 'provider',
-    title: 'Connect a model provider',
-    blurb: 'karucode talks to any OpenAI-compatible endpoint. Nothing works until this does.',
-  },
-  {
-    id: 'appearance',
-    title: 'Make it yours',
-    blurb: 'Theme, density and how tool calls are drawn. Stored in this browser.',
-  },
-  {
-    id: 'approvals',
-    title: 'Decide what the agent may do alone',
-    blurb: 'This is the human gate. It applies to every project and every session.',
-  },
-  {
-    id: 'access',
-    title: 'Who can reach this server',
-    blurb:
-      'A password or passkey, and — if you reach karucode through a tunnel — the name it answers to.',
-  },
-  {
-    id: 'done',
-    title: 'Ready',
-    blurb: 'Everything you chose is saved. You can change any of it later in Settings.',
-  },
-];
-
-const APPROVAL_CHOICES: { value: ApprovalMode; label: string; description: string }[] = [
-  {
-    value: 'ask',
-    label: 'Ask me (recommended)',
-    description: 'Shell commands and file changes wait for your approval.',
-  },
-  {
-    value: 'ask_commands',
-    label: 'Ask for shell commands only',
-    description: 'File writes inside the project are allowed; commands still ask.',
-  },
-  {
-    value: 'read_only',
-    label: 'Read only',
-    description: 'The agent may look, never change. Useful for a first cautious session.',
-  },
-  {
-    value: 'auto',
-    label: 'Never ask',
-    description: 'Everything is allowed and recorded. Only for a disposable machine.',
-  },
-];
-
-const TUNNELS: { value: TunnelKind; label: string; description: string }[] = [
-  {
-    value: 'none',
-    label: 'No tunnel',
-    description: 'Reached directly on this machine or your own network.',
-  },
-  {
-    value: 'cloudflare',
-    label: 'Cloudflare Tunnel',
-    description:
-      'cloudflared forwards from this machine. Cloudflare’s published proxy ranges are trusted automatically.',
-  },
-  {
-    value: 'custom',
-    label: 'Another reverse proxy',
-    description: 'nginx, Caddy, Traefik, Tailscale — name the addresses it forwards from.',
-  },
-];
-
-const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
-
-interface AccessDraft {
-  enabled: boolean;
-  domain: string;
-  tunnel: TunnelKind;
-  proxies: string;
-  password: string;
-  confirm: string;
-}
-
 export function Onboarding(): JSX.Element {
   const [step, setStep] = useState(0);
   const state = store.onboarding.value;
@@ -128,14 +53,7 @@ export function Onboarding(): JSX.Element {
   const [model, setModel] = useState(config?.model.model ?? '');
   const [keyStored, setKeyStored] = useState(Boolean(config?.model.api_key_set));
   const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<
-    { ok: boolean; message: string; models: string[] } | null
-  >(null);
-
-  // ---- appearance step state -------------------------------------------
-  const [toolStyle, setToolStyleLocal] = useState<ThemeToolStyle>(THEME.activeTheme.value.toolStyle);
-  const [density, setDensityLocal] = useState<ThemeDensity>(THEME.activeTheme.value.density);
-  const [thinking, setThinkingLocal] = useState<ThemeThinking>(THEME.activeTheme.value.thinking);
+  const [testResult, setTestResult] = useState<ProviderTestResult | null>(null);
 
   // ---- approvals step state --------------------------------------------
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>(
@@ -337,6 +255,8 @@ export function Onboarding(): JSX.Element {
   }
 
   const finishing = current.id === 'done';
+  const patchAccess = (patch: Partial<AccessDraft>): void =>
+    setAccess((draft) => ({ ...draft, ...patch }));
 
   return (
     <div class="full-screen-state onboarding-screen">
@@ -346,485 +266,99 @@ export function Onboarding(): JSX.Element {
             <span class="brand-dot" aria-hidden="true" />
             <span class="brand-name">karucode</span>
           </div>
-          <span class="onboarding-progress" aria-live="polite">
+          <Text as="span" size="tiny" tone="muted" class="onboarding-progress" aria-live="polite">
             Step {step + 1} of {STEPS.length}
-          </span>
+          </Text>
         </div>
 
-        <ol class="onboarding-rail" aria-label="Setup steps">
-          {STEPS.map((entry, index) => (
-            <li
-              key={entry.id}
-              class={
-                index < step
-                  ? 'onboarding-rail-item is-done'
-                  : index === step
-                    ? 'onboarding-rail-item is-current'
-                    : 'onboarding-rail-item'
-              }
-              aria-current={index === step ? 'step' : undefined}
-            >
-              <span class="onboarding-rail-dot" aria-hidden="true">
-                {index < step ? <CheckIcon size={11} /> : index + 1}
-              </span>
-              <span class="onboarding-rail-label">{entry.title}</span>
-            </li>
-          ))}
-        </ol>
+        <StepRail step={step} />
 
+        {/* A bare `<h1>` rather than `Text`: the step change moves focus here so
+            the new step is announced, and `Text` takes neither a ref nor a
+            `tabIndex`. */}
         <h1 class="state-title onboarding-title" tabIndex={-1} ref={headingRef}>
           {current.title}
         </h1>
-        <p class="state-body">{current.blurb}</p>
+        <Text as="p" size="small" tone="muted" class="state-body">
+          {current.blurb}
+        </Text>
 
         {error ? (
-          <div class="state-error" role="alert">
-            <AlertIcon size={15} />
-            <span>{error}</span>
-          </div>
+          <Callout
+            tone="danger"
+            role="alert"
+            icon={<AlertIcon size={15} />}
+            class="onboarding-alert"
+          >
+            {error}
+          </Callout>
         ) : null}
         {notice && !error ? (
-          <div class="onboarding-notice" role="status">
-            <CheckIcon size={14} />
-            <span>{notice}</span>
-          </div>
+          <Callout
+            tone="success"
+            role="status"
+            icon={<CheckIcon size={14} />}
+            class="onboarding-alert"
+          >
+            {notice}
+          </Callout>
         ) : null}
 
         <div class="onboarding-body">
-          {current.id === 'welcome' ? (
-            <ul class="onboarding-points">
-              <li>
-                <strong>Bring an endpoint.</strong> Any OpenAI-compatible API works: OpenAI,
-                OpenRouter, a local gateway, a self-hosted vLLM.
-              </li>
-              <li>
-                <strong>Point it at a project.</strong> A project is a directory; every session in
-                it is confined to that directory.
-              </li>
-              <li>
-                <strong>You stay in charge.</strong> Approvals decide what runs without asking.
-              </li>
-              {state?.workspace ? (
-                <li>
-                  Working directory: <code>{state.workspace}</code>
-                </li>
-              ) : null}
-            </ul>
-          ) : null}
+          {current.id === 'welcome' ? <WelcomeStep workspace={state?.workspace} /> : null}
 
           {current.id === 'provider' ? (
-            <div class="onboarding-fields">
-              <label class="field-label" for="onboarding-provider">
-                Provider
-              </label>
-              <select
-                id="onboarding-provider"
-                class="input"
-                value={provider}
-                onInput={(event) => setProvider(event.currentTarget.value)}
-              >
-                {(config?.available_providers?.length
-                  ? config.available_providers
-                  : ['openai_compatible']
-                ).map((id) => (
-                  <option value={id} key={id}>
-                    {id}
-                  </option>
-                ))}
-              </select>
-
-              <label class="field-label" for="onboarding-base-url">
-                Base URL
-              </label>
-              <input
-                id="onboarding-base-url"
-                class="input mono"
-                type="url"
-                spellcheck={false}
-                value={baseUrl}
-                onInput={(event) => setBaseUrl(event.currentTarget.value)}
-                placeholder="https://api.openai.com/v1"
-              />
-              <p class="field-hint">
-                The endpoint root, ending in <code>/v1</code> for most providers.
-              </p>
-
-              <label class="field-label" for="onboarding-api-key">
-                API key
-              </label>
-              <input
-                id="onboarding-api-key"
-                class="input mono"
-                type="password"
-                autoComplete="off"
-                spellcheck={false}
-                value={apiKey}
-                onInput={(event) => setApiKey(event.currentTarget.value)}
-                placeholder={keyStored ? 'A key is already stored — leave blank to keep it' : 'sk-…'}
-              />
-              <p class="field-hint">
-                Stored on the server, never rendered back. Leave blank for a local endpoint that
-                takes no key.
-              </p>
-
-              <label class="field-label" for="onboarding-model">
-                Model
-              </label>
-              <input
-                id="onboarding-model"
-                class="input mono"
-                spellcheck={false}
-                value={model}
-                onInput={(event) => setModel(event.currentTarget.value)}
-                placeholder="gpt-4o-mini"
-                list={testResult?.models.length ? 'onboarding-model-options' : undefined}
-              />
-              {testResult?.models.length ? (
-                <datalist id="onboarding-model-options">
-                  {testResult.models.map((name) => (
-                    <option value={name} key={name} />
-                  ))}
-                </datalist>
-              ) : null}
-
-              <div class="onboarding-test-row">
-                <button
-                  type="button"
-                  class="button button-small"
-                  disabled={testing || model.trim() === ''}
-                  onClick={() => void runTest()}
-                >
-                  {testing ? 'Testing…' : 'Test connection'}
-                </button>
-                {testResult ? (
-                  <span
-                    class={testResult.ok ? 'onboarding-test is-ok' : 'onboarding-test is-bad'}
-                    role="status"
-                  >
-                    {testResult.ok ? <CheckIcon size={13} /> : <AlertIcon size={13} />}
-                    {testResult.message}
-                  </span>
-                ) : null}
-              </div>
-            </div>
+            <ProviderStep
+              provider={provider}
+              baseUrl={baseUrl}
+              apiKey={apiKey}
+              model={model}
+              keyStored={keyStored}
+              availableProviders={config?.available_providers ?? []}
+              testing={testing}
+              testResult={testResult}
+              onProviderChange={setProvider}
+              onBaseUrlChange={setBaseUrl}
+              onApiKeyChange={setApiKey}
+              onModelChange={setModel}
+              onTest={() => void runTest()}
+            />
           ) : null}
 
-          {current.id === 'appearance' ? (
-            <div class="onboarding-fields">
-              <span class="field-label">Theme</span>
-              <div class="onboarding-choice-grid">
-                {THEME.themeLibrary.value.slice(0, 6).map((entry) => (
-                  <button
-                    type="button"
-                    key={entry.id}
-                    class={
-                      // `baseThemeId`, not `activeThemeId`: picking a density or
-                      // tool style promotes the theme to a draft, and a draft's
-                      // id is `draft` - which made the highlight vanish the
-                      // moment any option beside it was touched.
-                      THEME.baseThemeId.value === entry.id
-                        ? 'onboarding-choice is-selected'
-                        : 'onboarding-choice'
-                    }
-                    aria-pressed={THEME.baseThemeId.value === entry.id}
-                    onClick={() => THEME.selectTheme(entry.id)}
-                  >
-                    <span class="onboarding-choice-title">{entry.name}</span>
-                    {entry.description ? (
-                      <span class="onboarding-choice-hint">{entry.description}</span>
-                    ) : null}
-                  </button>
-                ))}
-              </div>
-
-              <span class="field-label">Tool calls</span>
-              <div class="onboarding-segment" role="group" aria-label="Tool call appearance">
-                <button
-                  type="button"
-                  class={toolStyle === 'rows' ? 'is-selected' : ''}
-                  aria-pressed={toolStyle === 'rows'}
-                  onClick={() => {
-                    setToolStyleLocal('rows');
-                    THEME.setToolStyle('rows');
-                  }}
-                >
-                  Rows
-                </button>
-                <button
-                  type="button"
-                  class={toolStyle === 'cards' ? 'is-selected' : ''}
-                  aria-pressed={toolStyle === 'cards'}
-                  onClick={() => {
-                    setToolStyleLocal('cards');
-                    THEME.setToolStyle('cards');
-                  }}
-                >
-                  Cards
-                </button>
-              </div>
-              <p class="field-hint">
-                Rows keep a turn with many calls compact; cards give each call its own block.
-              </p>
-
-              <span class="field-label">Density</span>
-              <div class="onboarding-segment" role="group" aria-label="Density">
-                {(['compact', 'comfortable', 'spacious'] as ThemeDensity[]).map((value) => (
-                  <button
-                    type="button"
-                    key={value}
-                    class={density === value ? 'is-selected' : ''}
-                    aria-pressed={density === value}
-                    onClick={() => {
-                      setDensityLocal(value);
-                      THEME.setDensity(value);
-                    }}
-                  >
-                    {value.charAt(0).toUpperCase() + value.slice(1)}
-                  </button>
-                ))}
-              </div>
-
-              <span class="field-label">Model reasoning</span>
-              <div class="onboarding-segment" role="group" aria-label="Thinking visibility">
-                {(['collapsed', 'preview', 'expanded'] as ThemeThinking[]).map((value) => (
-                  <button
-                    type="button"
-                    key={value}
-                    class={thinking === value ? 'is-selected' : ''}
-                    aria-pressed={thinking === value}
-                    onClick={() => {
-                      setThinkingLocal(value);
-                      THEME.setThinking(value);
-                    }}
-                  >
-                    {value.charAt(0).toUpperCase() + value.slice(1)}
-                  </button>
-                ))}
-              </div>
-              <p class="field-hint">
-                Changes apply immediately and live in this browser, not in the server config.
-              </p>
-            </div>
-          ) : null}
+          {current.id === 'appearance' ? <AppearanceStep /> : null}
 
           {current.id === 'approvals' ? (
-            <div class="onboarding-choice-list" role="radiogroup" aria-label="Approval mode">
-              {APPROVAL_CHOICES.map((choice) => (
-                <button
-                  type="button"
-                  key={choice.value}
-                  role="radio"
-                  aria-checked={approvalMode === choice.value}
-                  class={
-                    approvalMode === choice.value
-                      ? 'onboarding-choice is-selected'
-                      : 'onboarding-choice'
-                  }
-                  onClick={() => setApprovalMode(choice.value)}
-                >
-                  <span class="onboarding-choice-title">{choice.label}</span>
-                  <span class="onboarding-choice-hint">{choice.description}</span>
-                </button>
-              ))}
-            </div>
+            <ApprovalsStep mode={approvalMode} onChange={setApprovalMode} />
           ) : null}
 
           {current.id === 'access' ? (
-            <div class="onboarding-fields">
-              <div class="setting-row onboarding-toggle-row">
-                <div class="setting-copy">
-                  <span class="setting-name">Require sign-in</span>
-                  <span class="setting-hint">
-                    A password or passkey before the web UI answers. Leave off for a loopback-only
-                    install.
-                  </span>
-                </div>
-                <Toggle
-                  checked={access.enabled}
-                  label="Require sign-in"
-                  onChange={(next) => setAccess((draft) => ({ ...draft, enabled: next }))}
-                />
-              </div>
-
-              {passwordSet ? (
-                <p class="field-hint">
-                  A password is already set. Change it later in Settings → Access.
-                </p>
-              ) : (
-                <>
-                  <label class="field-label" for="onboarding-password">
-                    Password
-                  </label>
-                  <input
-                    id="onboarding-password"
-                    class="input"
-                    type="password"
-                    autoComplete="new-password"
-                    value={access.password}
-                    onInput={(event) =>
-                      setAccess((draft) => ({ ...draft, password: event.currentTarget.value }))
-                    }
-                  />
-                  <label class="field-label" for="onboarding-password-confirm">
-                    Confirm password
-                  </label>
-                  <input
-                    id="onboarding-password-confirm"
-                    class="input"
-                    type="password"
-                    autoComplete="new-password"
-                    value={access.confirm}
-                    onInput={(event) =>
-                      setAccess((draft) => ({ ...draft, confirm: event.currentTarget.value }))
-                    }
-                  />
-                  <p class="field-hint">
-                    At least {store.authStatus.value?.min_password_len ?? 10} characters. Setting a
-                    password turns sign-in on for this server.
-                  </p>
-                  {access.confirm !== '' && access.password !== access.confirm ? (
-                    <p class="field-error" role="alert">
-                      The two passwords do not match.
-                    </p>
-                  ) : null}
-                </>
-              )}
-
-              <div class="onboarding-passkey-row">
-                <button
-                  type="button"
-                  class="button button-small"
-                  disabled={passkeyBusy || !passkeySupported()}
-                  onClick={() => void addPasskey()}
-                >
-                  <KeyIcon size={14} />
-                  {passkeyBusy ? ' Waiting for your device…' : ' Add a passkey instead'}
-                </button>
-                <span class="field-hint">
-                  {passkeyCount > 0
-                    ? `${passkeyCount} passkey${passkeyCount === 1 ? '' : 's'} registered.`
-                    : passkeySupported()
-                      ? 'Fingerprint, face, screen lock or a security key.'
-                      : 'This browser cannot create a passkey; use a password.'}
-                </span>
-              </div>
-
-              <label class="field-label" for="onboarding-domain">
-                Public address (optional)
-              </label>
-              <input
-                id="onboarding-domain"
-                class="input mono"
-                type="url"
-                spellcheck={false}
-                placeholder="https://karucode.example.com"
-                value={access.domain}
-                onInput={(event) =>
-                  setAccess((draft) => ({ ...draft, domain: event.currentTarget.value }))
-                }
-              />
-              <p class="field-hint">
-                The address people type to reach this server. It is added to the allowed hosts, and
-                passkeys are bound to it.
-              </p>
-
-              <label class="field-label" for="onboarding-tunnel">
-                How is it reached?
-              </label>
-              <select
-                id="onboarding-tunnel"
-                class="input"
-                value={access.tunnel}
-                onInput={(event) =>
-                  setAccess((draft) => ({
-                    ...draft,
-                    tunnel: event.currentTarget.value as TunnelKind,
-                  }))
-                }
-              >
-                {TUNNELS.map((tunnel) => (
-                  <option value={tunnel.value} key={tunnel.value}>
-                    {tunnel.label}
-                  </option>
-                ))}
-              </select>
-              <p class="field-hint">
-                {TUNNELS.find((tunnel) => tunnel.value === access.tunnel)?.description}
-              </p>
-
-              {access.tunnel !== 'none' ? (
-                <>
-                  <label class="field-label" for="onboarding-proxies">
-                    Trusted proxy addresses (optional)
-                  </label>
-                  <textarea
-                    id="onboarding-proxies"
-                    class="input mono onboarding-textarea"
-                    rows={3}
-                    spellcheck={false}
-                    placeholder={'10.0.0.0/8\n172.17.0.1'}
-                    value={access.proxies}
-                    onInput={(event) =>
-                      setAccess((draft) => ({ ...draft, proxies: event.currentTarget.value }))
-                    }
-                  />
-                  <p class="field-hint">
-                    One IP or CIDR per line. Forwarded headers are only believed from these
-                    addresses
-                    {access.tunnel === 'cloudflare'
-                      ? '; Cloudflare’s own ranges are always included for a Cloudflare tunnel.'
-                      : '.'}{' '}
-                    Loopback is always trusted.
-                  </p>
-                </>
-              ) : null}
-            </div>
+            <AccessStep
+              access={access}
+              passwordSet={passwordSet}
+              passkeyCount={passkeyCount}
+              passkeyBusy={passkeyBusy}
+              minPasswordLength={store.authStatus.value?.min_password_len ?? 10}
+              onPatch={patchAccess}
+              onAddPasskey={() => void addPasskey()}
+            />
           ) : null}
 
           {current.id === 'done' ? (
-            <dl class="onboarding-summary">
-              <div>
-                <dt>Model</dt>
-                <dd>
-                  {config?.model.model || model || '—'}
-                  {config?.model.base_url ? ` via ${config.model.base_url}` : ''}
-                </dd>
-              </div>
-              <div>
-                <dt>Approvals</dt>
-                <dd>
-                  {APPROVAL_CHOICES.find((choice) => choice.value === approvalMode)?.label ??
-                    approvalMode}
-                </dd>
-              </div>
-              <div>
-                <dt>Sign-in</dt>
-                <dd>
-                  {access.enabled
-                    ? hasCredential
-                      ? 'Required — a password or passkey is set'
-                      : 'Required — but no credential is set yet'
-                    : 'Off (anyone who can reach the port)'}
-                </dd>
-              </div>
-              <div>
-                <dt>Address</dt>
-                <dd>{access.domain.trim() || 'this browser’s own origin'}</dd>
-              </div>
-              <div>
-                <dt>Tunnel</dt>
-                <dd>{TUNNELS.find((tunnel) => tunnel.value === access.tunnel)?.label}</dd>
-              </div>
-            </dl>
+            <SummaryStep
+              model={config?.model.model || model}
+              baseUrl={config?.model.base_url ?? ''}
+              approvalMode={approvalMode}
+              access={access}
+              hasCredential={hasCredential}
+            />
           ) : null}
         </div>
 
         <div class="onboarding-footer">
           <div class="onboarding-footer-left">
             {step > 0 && !finishing ? (
-              <button
-                type="button"
-                class="button button-ghost"
+              <Button
+                variant="ghost"
                 disabled={busy}
                 onClick={() => {
                   setError(null);
@@ -832,45 +366,23 @@ export function Onboarding(): JSX.Element {
                 }}
               >
                 Back
-              </button>
+              </Button>
             ) : null}
             {!finishing ? (
-              <button type="button" class="button button-ghost" disabled={busy} onClick={() => void skip()}>
+              <Button variant="ghost" disabled={busy} onClick={() => void skip()}>
                 Skip setup
-              </button>
+              </Button>
             ) : null}
           </div>
-          <button
-            type="button"
-            class="button button-primary"
+          <Button
+            variant="primary"
             disabled={busy || !canContinue}
             onClick={() => void next()}
           >
-            {busy
-              ? 'Saving…'
-              : finishing
-                ? 'Start working'
-                : current.id === 'done'
-                  ? 'Finish'
-                  : 'Continue'}
-          </button>
+            {busy ? 'Saving…' : finishing ? 'Start working' : 'Continue'}
+          </Button>
         </div>
       </div>
     </div>
   );
-}
-
-/** A readable default label for a passkey, from what the browser will admit to. */
-function defaultPasskeyName(): string {
-  try {
-    const agent = navigator.userAgent;
-    if (/iPhone|iPad/.test(agent)) return 'iPhone or iPad';
-    if (/Macintosh/.test(agent)) return 'Mac (Touch ID)';
-    if (/Windows/.test(agent)) return 'Windows Hello';
-    if (/Android/.test(agent)) return 'Android passkey';
-    if (/Linux/.test(agent)) return 'This device';
-  } catch {
-    // No navigator (tests, or a hardened browser): the server has a default too.
-  }
-  return 'Passkey';
 }

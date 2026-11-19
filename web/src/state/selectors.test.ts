@@ -1,13 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentStatus, RunStatus, SessionSummary } from '../api/types';
-import { emptyChatState } from './chat';
+import {
+  emptyChatState,
+  type ApprovalItem,
+  type ChatState,
+  type CommandItem,
+  type MessageItem,
+  type ToolItem,
+} from './chat';
 import {
   AGENT_STATUS_LABEL,
+  agentActivity,
   agentStatusLabel,
   agentStatusTone,
   contextTone,
   contextUsage,
   formatContextPercent,
+  pendingApprovals,
   runStatusLabel,
   sessionStatusView,
   totalUsage,
@@ -221,3 +230,202 @@ describe('agentStatusTone', () => {
   });
 });
 
+
+describe('pendingApprovals', () => {
+  it('returns only the approvals still waiting, in transcript order', () => {
+    const state = chat([
+      approval('ap_1'),
+      message({ id: 'm_1', role: 'user', content: 'go' }),
+      approval('ap_2', 'resolved'),
+      approval('ap_3'),
+    ]);
+    expect(pendingApprovals(state).map((view) => view.id)).toEqual(['ap_1', 'ap_3']);
+  });
+
+  it('is empty for a transcript with no approvals', () => {
+    expect(pendingApprovals(chat([message({ content: 'hi' })]))).toEqual([]);
+  });
+});
+
+describe('agentActivity', () => {
+  it('says a pending approval wins, even over a tool that is still running', () => {
+    // The run cannot move without the reader, so this is the one thing the
+    // composer must say whatever else is happening - and the approval may sit
+    // anywhere in the transcript, not just at the end.
+    const state = chat(
+      [approval('ap_1'), tool({ status: 'running' }), message({ streaming: true, content: 'text' })],
+      { running: true },
+    );
+    expect(agentActivity(state)).toEqual({ kind: 'approval', label: 'Waiting for approval' });
+  });
+
+  it('counts the approvals it is waiting for', () => {
+    const state = chat([approval('ap_1'), tool(), approval('ap_2')], { running: true });
+    expect(agentActivity(state)).toEqual({ kind: 'approval', label: 'Waiting for 2 approvals' });
+  });
+
+  it('says a running tool, naming it', () => {
+    const state = chat([message({ streaming: true, content: 'text' }), tool({ status: 'running' })], {
+      running: true,
+    });
+    expect(agentActivity(state)).toEqual({ kind: 'tool', label: 'Running read_file' });
+  });
+
+  it('says a running command without inventing a tool name', () => {
+    const state = chat([command({ status: 'running' })], { running: true });
+    expect(agentActivity(state)).toEqual({ kind: 'tool', label: 'Running command' });
+  });
+
+  it('ignores a settled tool card left in the transcript', () => {
+    const state = chat([message({ streaming: true, content: 'text' }), tool({ status: 'ok' })], {
+      running: true,
+    });
+    expect(agentActivity(state)).toEqual({ kind: 'streaming', label: 'Streaming' });
+  });
+
+  it('says Streaming only once there is text to read', () => {
+    // An open segment with nothing in it yet is a thinking bubble, not text.
+    expect(agentActivity(chat([message({ streaming: true, content: '' })], { running: true }))).toEqual({
+      kind: 'thinking',
+      label: 'Thinking',
+    });
+    expect(
+      agentActivity(chat([message({ streaming: true, content: 'reasoning only', role: 'assistant' })], { running: true })),
+    ).toEqual({ kind: 'streaming', label: 'Streaming' });
+  });
+
+  it('says Thinking for a run with nothing on screen yet', () => {
+    expect(agentActivity(chat([], { running: true }))).toEqual({ kind: 'thinking', label: 'Thinking' });
+  });
+
+  it('reports how the last run settled once nothing is running', () => {
+    expect(agentActivity(chat([], { runStatus: 'interrupted' }))).toEqual({
+      kind: 'interrupted',
+      label: 'Interrupted',
+    });
+    expect(agentActivity(chat([], { runStatus: 'cancelled' }))).toEqual({
+      kind: 'cancelled',
+      label: 'Stopped',
+    });
+    expect(agentActivity(chat([], { runStatus: 'failed' }))).toEqual({
+      kind: 'error',
+      label: 'Run failed',
+    });
+    expect(
+      agentActivity(chat([], { runError: { runId: 'r_1', message: 'boom', kind: null } })),
+    ).toEqual({ kind: 'error', label: 'Run failed' });
+    expect(agentActivity(chat([], { runStatus: 'completed' }))).toEqual({
+      kind: 'idle',
+      label: 'Ready',
+    });
+  });
+
+  it('keeps waiting on an approval after the run has finished', () => {
+    expect(agentActivity(chat([approval('ap_1')], { runStatus: 'completed' }))).toEqual({
+      kind: 'approval',
+      label: 'Waiting for approval',
+    });
+  });
+
+  it('reads a long transcript without reordering or copying it', () => {
+    // The scan is backwards and allocation-free; an in-place `reverse()` would
+    // corrupt the transcript, and a 1,000-row transcript is an ordinary session.
+    const items = Array.from({ length: 1_000 }, (_, index) =>
+      message({ id: `m_${index}`, role: 'user', content: `turn ${index}` }),
+    );
+    const state = chat([approval('ap_1'), ...items, tool({ status: 'running' })], { running: true });
+    expect(agentActivity(state)).toEqual({ kind: 'approval', label: 'Waiting for approval' });
+    expect(state.items[0]?.kind).toBe('approval');
+    expect(state.items[state.items.length - 1]?.kind).toBe('tool');
+
+    const settled = chat(items, {});
+    expect(agentActivity(settled)).toEqual({ kind: 'idle', label: 'Ready' });
+    expect(settled.items[0]?.id).toBe('m_0');
+    expect(settled.items[settled.items.length - 1]?.id).toBe('m_999');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Transcript fixtures
+// ---------------------------------------------------------------------------
+
+function chat(items: ChatState['items'], overrides: Partial<ChatState> = {}): ChatState {
+  return { ...emptyChatState('s_ab12'), items, ...overrides };
+}
+
+function message(overrides: Partial<MessageItem> = {}): MessageItem {
+  return {
+    kind: 'message',
+    id: 'm_1',
+    at: 0,
+    role: 'assistant',
+    content: '',
+    reasoning: '',
+    streaming: false,
+    runId: 'r_1',
+    agentId: null,
+    ...overrides,
+  };
+}
+
+function tool(overrides: Partial<ToolItem> = {}): ToolItem {
+  return {
+    kind: 'tool',
+    id: 'tool:c_1',
+    at: 0,
+    callId: 'c_1',
+    name: 'read_file',
+    args: {},
+    status: 'running',
+    output: '',
+    truncated: false,
+    durationMs: null,
+    runId: 'r_1',
+    images: [],
+    ...overrides,
+  };
+}
+
+function command(overrides: Partial<CommandItem> = {}): CommandItem {
+  return {
+    kind: 'command',
+    id: 'cmd:c_2',
+    at: 0,
+    callId: 'c_2',
+    command: 'ls',
+    cwd: '/w',
+    stdout: '',
+    stderr: '',
+    output: '',
+    exitCode: null,
+    status: 'running',
+    truncated: false,
+    durationMs: null,
+    runId: 'r_1',
+    ...overrides,
+  };
+}
+
+function approval(
+  id: string,
+  status: ApprovalItem['approval']['status'] = 'pending',
+): ApprovalItem {
+  return {
+    kind: 'approval',
+    id: `approval:${id}`,
+    at: 0,
+    approval: {
+      id,
+      kind: 'file_write',
+      title: 'Write?',
+      detail: 'write_file',
+      payload: {},
+      session_id: 's_ab12',
+      run_id: 'r_1',
+      agent_id: null,
+      status,
+      decision: null,
+      created_at: 0,
+    },
+  };
+}

@@ -121,6 +121,18 @@ export function rankMentions(
 }
 
 /**
+ * How far a mention token may reach, in characters.
+ *
+ * A mention is a workspace path the user typed, and the deepest path this index
+ * can hold is well under this. The bound exists because the token used to be
+ * closed by scanning forward to the next whitespace, one character at a time:
+ * pasting a single-line file into the composer and then typing `@` scanned tens
+ * of megabytes on *every keystroke*. A token longer than this is a paste, not a
+ * path, so it opens no menu.
+ */
+const MENTION_TOKEN_LIMIT = 512;
+
+/**
  * The `@token` the caret is currently inside, if any.
  *
  * Accepts both `@src/main.ts` and `@"my notes/plan.md"`; the `@` must start a
@@ -165,8 +177,21 @@ export function activeMention(text: string, caret: number): ActiveMention | null
 
   const from = at + 1;
   if (position < from) return null;
+  // Everything typed after the `@` is the query, and the token cannot be longer
+  // than a path: a caret this far past the `@` means the user is not typing a
+  // mention at all (a pasted line, a `@` left in prose), so there is nothing to
+  // complete and nothing worth scanning.
+  if (position - at > MENTION_TOKEN_LIMIT) return null;
   let end = from;
-  while (end < text.length && !/\s/.test(text[end] as string)) end += 1;
+  // Bounded: the only thing this loop learns is where the token ends, and a
+  // token that has not ended `MENTION_TOKEN_LIMIT` characters past the caret is
+  // a paste. Unbounded it read every character of a 10MB one-line paste on every
+  // keystroke.
+  const scanTo = Math.min(text.length, position + MENTION_TOKEN_LIMIT);
+  while (end < scanTo && !/\s/.test(text[end] as string)) end += 1;
+  // Stopped at the bound rather than at whitespace: the token runs further than
+  // a mention can, so its real end is unknown and it is not a mention.
+  if (end === scanTo && scanTo < text.length) return null;
   if (position > end) return null;
   const query = text.slice(from, Math.min(position, end));
   if (query.includes('\n')) return null;

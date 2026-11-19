@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
 import { contextTone, formatContextPercent, type ContextUsage } from '../../state/selectors';
+import { Button } from '../../ui';
 
 /**
  * The provider-reported `57.4%` context-window reading is also the Usage entry
@@ -41,15 +42,17 @@ export function ContextPill({
     );
   }
   return (
-    <button
-      type="button"
+    <Button
+      variant="ghost"
+      size="sm"
       class="context-pill"
       data-tone={tone}
       title={title}
       aria-label={ariaLabel}
+      testId="context-pill"
       onClick={() => onOpenUsage()}
     >
       {content}
-    </button>
+    </Button>
   );
 }

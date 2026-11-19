@@ -1049,35 +1049,54 @@ describe('ChatTranscript rerender cost', () => {
     // pause inside the loop is one sample, and averaging it in makes the
     // comparison depend on what else the machine was doing rather than on what a
     // token costs. That is what made this test flake under a parallel run.
-    const perToken = (): number => {
-      const samples: number[] = [];
-      for (let index = 0; index < 10; index += 1) {
-        const start = performance.now();
-        content += 'token ';
-        act(() => {
-          view.rerender(
-            <ChatTranscript
-              items={items()}
-              resolvingApprovals={approvals}
-              onApprovalDecision={onApprovalDecision}
-            />,
-          );
-        });
-        samples.push(performance.now() - start);
-      }
-      samples.sort((a, b) => a - b);
-      return samples[Math.floor(samples.length / 2)]!;
+    /** One streamed token: exactly the rerender a delta costs on the hot path. */
+    const token = (): number => {
+      const started = performance.now();
+      content += 'token ';
+      act(() => {
+        view.rerender(
+          <ChatTranscript items={items()} resolvingApprovals={approvals} onApprovalDecision={onApprovalDecision} />,
+        );
+      });
+      return performance.now() - started;
+    };
+    const perToken = (samples = 15): number => {
+      // Two tokens are rendered before anything is timed. They are the first
+      // renders of this component: template compilation, the style/layout
+      // caches and the memo entries behind every block are all built here, and
+      // timing them made `early` depend on how busy the machine was when the
+      // test started - the half of this test that used to flake.
+      token();
+      token();
+      const measured: number[] = [];
+      for (let index = 0; index < samples; index += 1) measured.push(token());
+      measured.sort((a, b) => a - b);
+      return measured[Math.floor(measured.length / 2)] as number;
     };
 
     const early = perToken();
     while (content.length < 150_000) content += paragraph;
+    // Catch the transcript up with the jump before timing: the render below is
+    // the same work one token does, and it is the one that pays for the 150 KiB
+    // of settled blocks that arrived at once. Leaving it in the first late
+    // sample measured a paragraph landing, not a token.
     act(() => {
       view.rerender(
         <ChatTranscript items={items()} resolvingApprovals={approvals} onApprovalDecision={onApprovalDecision} />,
       );
     });
-    const late = perToken();
-
-    expect(late).toBeLessThan(Math.max(early * 3, early + 2));
+    // The ratio is what makes this true on any machine: before the settled/live
+    // split a token re-parsed the whole answer, so this ratio tracked the
+    // answer's length (~30x by 150 KiB). The absolute term is the jitter
+    // allowance - a token here costs a millisecond or two, so 5ms against 6ms is
+    // a scheduler stall on a machine running the rest of the suite in parallel,
+    // not the growth this test exists to catch.
+    const bound = Math.max(early * 3, early + 3);
+    let late = perToken();
+    // One remeasure before failing. A stall that lands on the median of the
+    // first pass and not on the second is the machine; a real regression is
+    // there both times, because it is the cost of every token, not of one.
+    if (!(late < bound)) late = Math.min(late, perToken());
+    expect(late).toBeLessThan(bound);
   });
 });

@@ -13,6 +13,7 @@ import {
   UndoIcon,
   UploadIcon,
 } from '../icons';
+import { Button, Checkbox, IconButton, Input, LinkButton } from '../../ui';
 import { branchNameProblem } from './gitModel';
 import type { ConfirmRequest } from './GitConfirmDialog';
 
@@ -103,12 +104,13 @@ export function GitBranchesView({
                 {branches.length} local · {remoteBranches.length} remote
               </p>
             </div>
-            <input
+            <Input
               type="search"
               class="gitm-input gitm-search-compact"
               placeholder="Filter branches…"
               aria-label="Filter branches"
               value={filter}
+              testId="git-branch-filter"
               onInput={(event) => setFilter((event.target as HTMLInputElement).value)}
             />
           </div>
@@ -123,22 +125,26 @@ export function GitBranchesView({
               });
             }}
           >
-            <input
+            <Input
               type="text"
               class="gitm-input"
               placeholder="New branch name (creates & switches)"
               aria-label="Create branch name"
               value={newBranch}
               disabled={busy}
+              testId="git-branch-new-name"
               onInput={(event) => setNewBranch((event.target as HTMLInputElement).value)}
             />
-            <button
+            <Button
               type="submit"
-              class="button button-primary"
+              variant="primary"
+              size="sm"
+              icon={<PlusIcon size={13} />}
+              testId="git-branch-create"
               disabled={busy || branchProblem !== null || newBranch.trim() === ''}
             >
-              <PlusIcon size={13} /> Create
-            </button>
+              Create
+            </Button>
           </form>
           {branchProblem ? (
             <p class="gitm-field-error" role="status">
@@ -174,12 +180,13 @@ export function GitBranchesView({
                           });
                         }}
                       >
-                        <input
+                        <Input
                           type="text"
                           class="gitm-input"
                           aria-label={`Rename ${branch.name}`}
                           value={renaming.next}
                           disabled={busy}
+                          testId={`git-branch-rename-input-${branch.name}`}
                           onInput={(event) =>
                             setRenaming({
                               old: branch.name,
@@ -187,16 +194,23 @@ export function GitBranchesView({
                             })
                           }
                         />
-                        <button type="submit" class="button button-small button-primary" disabled={busy}>
+                        <Button
+                          type="submit"
+                          variant="primary"
+                          size="sm"
+                          testId="git-branch-rename-save"
+                          disabled={busy}
+                        >
                           Rename
-                        </button>
-                        <button
-                          type="button"
-                          class="button button-small"
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          testId="git-branch-rename-cancel"
                           onClick={() => setRenaming(null)}
                         >
                           Cancel
-                        </button>
+                        </Button>
                       </form>
                     ) : (
                       <span class="gitm-ref-meta">
@@ -208,50 +222,55 @@ export function GitBranchesView({
                   <div class="gitm-ref-actions">
                     {!isCurrent ? (
                       <>
-                        <button
-                          type="button"
-                          class="button button-small"
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          testId={`git-branch-switch-${branch.name}`}
                           disabled={busy}
                           onClick={() => void onCheckout(branch.name)}
                         >
                           Switch
-                        </button>
-                        <button
-                          type="button"
-                          class="button button-small"
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          testId={`git-branch-merge-${branch.name}`}
                           disabled={busy}
                           title={`Merge ${branch.name} into ${status?.branch ?? 'HEAD'}`}
                           onClick={() => void onMerge(branch.name)}
                         >
                           Merge
-                        </button>
-                        <button
-                          type="button"
-                          class="button button-small"
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          testId={`git-branch-rebase-${branch.name}`}
                           disabled={busy}
                           title={`Rebase ${status?.branch ?? 'HEAD'} onto ${branch.name}`}
                           onClick={() => void onRebase(branch.name)}
                         >
                           Rebase
-                        </button>
+                        </Button>
                       </>
                     ) : null}
-                    <button
-                      type="button"
+                    <IconButton
+                      size="sm"
                       class="gitm-act"
-                      aria-label={`Rename branch ${branch.name}`}
+                      label={`Rename branch ${branch.name}`}
                       title="Rename branch"
+                      testId={`git-branch-rename-${branch.name}`}
+                      icon={<EditIcon size={13} />}
                       disabled={busy}
                       onClick={() => setRenaming({ old: branch.name, next: branch.name })}
-                    >
-                      <EditIcon size={13} />
-                    </button>
+                    />
                     {!isCurrent ? (
-                      <button
-                        type="button"
-                        class="gitm-act is-danger"
-                        aria-label={`Delete branch ${branch.name}`}
+                      <IconButton
+                        size="sm"
+                        class="gitm-act is-danger text-danger"
+                        label={`Delete branch ${branch.name}`}
                         title="Delete branch"
+                        testId={`git-branch-delete-${branch.name}`}
+                        icon={<TrashIcon size={13} />}
                         disabled={busy}
                         onClick={() =>
                           onRequestConfirm({
@@ -264,9 +283,7 @@ export function GitBranchesView({
                             },
                           })
                         }
-                      >
-                        <TrashIcon size={13} />
-                      </button>
+                      />
                     ) : null}
                   </div>
                 </li>
@@ -287,14 +304,15 @@ export function GitBranchesView({
                       </span>
                     </div>
                     <div class="gitm-ref-actions">
-                      <button
-                        type="button"
-                        class="button button-small"
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        testId={`git-remote-branch-checkout-${rb.name}`}
                         disabled={busy}
                         onClick={() => void onCheckout(rb.name, { track: true })}
                       >
                         Checkout
-                      </button>
+                      </Button>
                     </div>
                   </li>
                 ))}
@@ -330,31 +348,36 @@ export function GitBranchesView({
                 });
               }}
             >
-              <input
+              <Input
                 type="text"
                 class="gitm-input"
                 placeholder="v1.0.0"
                 aria-label="New tag name"
                 value={newTag}
                 disabled={busy}
+                testId="git-tag-new-name"
                 onInput={(event) => setNewTag((event.target as HTMLInputElement).value)}
               />
-              <input
+              <Input
                 type="text"
                 class="gitm-input"
                 placeholder="Annotation message (optional)"
                 aria-label="Tag annotation message"
                 value={tagMessage}
                 disabled={busy}
+                testId="git-tag-new-message"
                 onInput={(event) => setTagMessage((event.target as HTMLInputElement).value)}
               />
-              <button
+              <Button
                 type="submit"
-                class="button button-primary"
+                variant="primary"
+                size="sm"
+                icon={<PlusIcon size={13} />}
+                testId="git-tag-create"
                 disabled={busy || newTag.trim() === ''}
               >
-                <PlusIcon size={13} /> Tag HEAD
-              </button>
+                Tag HEAD
+              </Button>
             </form>
             {tagList.length === 0 ? (
               <p class="gitm-hint">No tags yet.</p>
@@ -373,26 +396,26 @@ export function GitBranchesView({
                       </span>
                     </div>
                     <div class="gitm-ref-actions">
-                      <button
-                        type="button"
+                      <IconButton
+                        size="sm"
                         class="gitm-act"
+                        label={`Push tag ${tag.name}`}
                         title={`Push tag ${tag.name}`}
-                        aria-label={`Push tag ${tag.name}`}
+                        testId={`git-tag-push-${tag.name}`}
+                        icon={<UploadIcon size={13} />}
                         disabled={busy}
                         onClick={() => void onManageTag({ action: 'push', name: tag.name })}
-                      >
-                        <UploadIcon size={13} />
-                      </button>
-                      <button
-                        type="button"
-                        class="gitm-act is-danger"
+                      />
+                      <IconButton
+                        size="sm"
+                        class="gitm-act is-danger text-danger"
+                        label={`Delete tag ${tag.name}`}
                         title={`Delete tag ${tag.name}`}
-                        aria-label={`Delete tag ${tag.name}`}
+                        testId={`git-tag-delete-${tag.name}`}
+                        icon={<TrashIcon size={13} />}
                         disabled={busy}
                         onClick={() => void onManageTag({ action: 'delete', name: tag.name })}
-                      >
-                        <TrashIcon size={13} />
-                      </button>
+                      />
                     </div>
                   </li>
                 ))}
@@ -423,34 +446,33 @@ export function GitBranchesView({
               }}
             >
               <div class="gitm-inline-create">
-                <input
+                <Input
                   type="text"
                   class="gitm-input"
                   placeholder="Stash message (optional)"
                   aria-label="Stash message"
                   value={stashMessage}
                   disabled={busy}
+                  testId="git-stash-message"
                   onInput={(event) => setStashMessage((event.target as HTMLInputElement).value)}
                 />
-                <button
+                <Button
                   type="submit"
-                  class="button button-primary"
+                  variant="primary"
+                  size="sm"
+                  testId="git-stash-create"
                   disabled={busy || (status?.files.length ?? 0) === 0}
                 >
                   Stash changes
-                </button>
+                </Button>
               </div>
-              <label class="gitm-check">
-                <input
-                  type="checkbox"
-                  checked={stashUntracked}
-                  disabled={busy}
-                  onChange={(event) =>
-                    setStashUntracked((event.target as HTMLInputElement).checked)
-                  }
-                />
-                <span>Include untracked files</span>
-              </label>
+              <Checkbox
+                class="gitm-check"
+                checked={stashUntracked}
+                disabled={busy}
+                label="Include untracked files"
+                onChange={(checked) => setStashUntracked(checked)}
+              />
             </form>
 
             {stashList.length === 0 ? (
@@ -459,8 +481,8 @@ export function GitBranchesView({
               <ul class="gitm-ref-list">
                 {stashList.map((entry) => (
                   <li class="gitm-ref-row" key={entry.ref}>
-                    <button
-                      type="button"
+                    <LinkButton
+                      tone="muted"
                       class="gitm-stash-inspect"
                       onClick={() => onInspectStash(entry)}
                     >
@@ -468,33 +490,35 @@ export function GitBranchesView({
                       <span class="gitm-ref-meta">
                         {entry.subject} · {relativeTime(entry.timestamp * 1000)}
                       </span>
-                    </button>
+                    </LinkButton>
                     <div class="gitm-ref-actions">
-                      <button
-                        type="button"
+                      <IconButton
+                        size="sm"
                         class="gitm-act"
+                        label={`Apply ${entry.ref}`}
                         title={`Apply ${entry.ref}`}
-                        aria-label={`Apply ${entry.ref}`}
+                        testId={`git-stash-apply-${entry.ref}`}
+                        icon={<CheckIcon size={13} />}
                         disabled={busy}
                         onClick={() => void onStash('apply', { index: entry.index })}
-                      >
-                        <CheckIcon size={13} />
-                      </button>
-                      <button
-                        type="button"
+                      />
+                      <IconButton
+                        size="sm"
                         class="gitm-act"
+                        label={`Pop ${entry.ref}`}
                         title={`Pop ${entry.ref}`}
-                        aria-label={`Pop ${entry.ref}`}
+                        testId={`git-stash-pop-${entry.ref}`}
+                        icon={<UndoIcon size={13} />}
                         disabled={busy}
                         onClick={() => void onStash('pop', { index: entry.index })}
-                      >
-                        <UndoIcon size={13} />
-                      </button>
-                      <button
-                        type="button"
-                        class="gitm-act is-danger"
+                      />
+                      <IconButton
+                        size="sm"
+                        class="gitm-act is-danger text-danger"
+                        label={`Drop ${entry.ref}`}
                         title={`Drop ${entry.ref}`}
-                        aria-label={`Drop ${entry.ref}`}
+                        testId={`git-stash-drop-${entry.ref}`}
+                        icon={<TrashIcon size={13} />}
                         disabled={busy}
                         onClick={() =>
                           onRequestConfirm({
@@ -506,9 +530,7 @@ export function GitBranchesView({
                             },
                           })
                         }
-                      >
-                        <TrashIcon size={13} />
-                      </button>
+                      />
                     </div>
                   </li>
                 ))}

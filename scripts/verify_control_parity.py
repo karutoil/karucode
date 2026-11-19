@@ -498,6 +498,26 @@ def main() -> int:
                 break
             time.sleep(0.25)
 
+        # The session reads `failed` before the run does: the retry ladder keeps the
+        # `runs` row at `running` for a few more seconds, and the plane's "Running
+        # now" section is drawn from exactly those rows. Measuring the overview
+        # while a run is still retrying would report a perfectly good `.empty-state`
+        # as missing, so wait for the server to settle first - this harness is
+        # measuring the class each section draws, not how long a failure retries.
+        deadline = time.monotonic() + 60
+        still_running: list = []
+        while time.monotonic() < deadline:
+            still_running = http_json(api + "/api/control/overview").get("running") or []
+            if not still_running:
+                break
+            time.sleep(0.5)
+        if still_running:
+            print(
+                f"  note: {len(still_running)} run(s) still marked running 60s later; "
+                "the overview's empty state cannot be drawn",
+                flush=True,
+            )
+
         session.cdp("Page.navigate", {"url": api + "/"})
         wait("return !!document.querySelector('.app');", 30)
 
@@ -632,18 +652,43 @@ def main() -> int:
             "missing: " + ", ".join(missing) if missing else "row/icon-button/status-dot/filter-chip/menu/side-head/side-footer/group-label",
         )
 
+        # Bounded wait for the plane's own poll to land on the settled snapshot: a
+        # section with no rows draws `.empty-state`, and the class is what this
+        # check is about, not the instant the poll returns.
+        settle = time.monotonic() + 20
+        while time.monotonic() < settle and not js(
+            "return !!document.querySelector('.cp-overview .empty-state');"
+        ):
+            time.sleep(0.25)
+
         overview_adopted = js(
             """
-            const out = {};
+            const out = { counts: {}, sections: [] };
+            const overview = document.querySelector('.cp-overview');
             out.eyebrow = !!document.querySelector('.cp-overview .eyebrow');
             out.metric = !!document.querySelector('.cp-overview .metric, .cp-overview .metric-num');
             out.button = !!document.querySelector('.cp-overview .button');
             out.emptyState = !!document.querySelector('.cp-overview .empty-state, .cp-overview .empty-title');
             out.agentCard = !!document.querySelector('.cp-overview .agent-card');
+            // What the three lists were holding at this moment: the empty state is
+            // drawn per section, so "missing" only means something alongside the
+            // counts that decided it.
+            for (const section of (overview ? overview.querySelectorAll('.cp-section') : [])) {
+              out.sections.push({
+                label: (section.querySelector('.cp-section-head .eyebrow') || {}).textContent || '',
+                badge: (section.querySelector('.cp-section-head .badge') || {}).textContent || '',
+                empty: !!section.querySelector('.empty-state, .empty-title'),
+                rows: section.querySelectorAll('.cp-cards > *, .cp-table > .cp-table-row, .cp-projects > *').length,
+              });
+            }
             return JSON.stringify(out);
             """
         )
         overview = json.loads(overview_adopted)
+        # The diagnostic half of the answer, not a role: popped before the
+        # adoption verdict is computed so an empty dict cannot read as "absent".
+        sections = overview.pop("sections", [])
+        overview.pop("counts", None)
         overview_missing = sorted(k for k, v in overview.items() if not v)
         # `agentCard` only exists when an agent is live, so it is reported, not
         # required: an empty install has no card to draw.
@@ -651,7 +696,7 @@ def main() -> int:
         check(
             "the overview adopts the workbench's shared primitives",
             not required_missing,
-            "missing: " + ", ".join(required_missing)
+            "missing: " + ", ".join(required_missing) + f" ({json.dumps(sections)})"
             if required_missing
             else "eyebrow/metric/button/empty-state"
             + ("" if overview.get("agentCard") else " (no live agent to draw a card for)"),

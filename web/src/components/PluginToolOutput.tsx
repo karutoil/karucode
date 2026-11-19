@@ -2,6 +2,7 @@ import { useState } from 'preact/hooks';
 import type { PluginDiagnostics } from '../api/types';
 import { clearPluginToolOutput, decidePluginToolOutput } from '../api/endpoints';
 import { toErrorMessage } from '../api/client';
+import { Button, Callout, Input } from '../ui';
 
 /**
  * The per-plugin tool-output budget: what applies, and the one control that
@@ -134,42 +135,63 @@ export function PluginToolOutputRow({ plugin, onChanged }: PluginToolOutputRowPr
           <label class="sr-only" for={`budget-${plugin.name}`}>
             Bytes to allow
           </label>
-          <input
+          <Input
             id={`budget-${plugin.name}`}
+            class="w-full max-w-[16ch]"
             type="number"
             min={MIN_BYTES}
             max={budget.ceiling_bytes}
             step={1000}
             value={value}
+            disabled={busy}
+            testId="plugin-budget-bytes"
             onInput={(event) => {
               setEditing(true);
               setDraft((event.target as HTMLInputElement).value);
             }}
-            disabled={busy}
           />
-          <button type="button" class="button button-small" onClick={() => answer(true)} disabled={busy}>
+          <Button
+            variant="secondary"
+            size="sm"
+            testId="plugin-budget-allow"
+            disabled={busy}
+            onClick={() => answer(true)}
+          >
             Allow
-          </button>
-          <button type="button" class="button button-small" onClick={() => answer(false)} disabled={busy}>
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            testId="plugin-budget-refuse"
+            disabled={busy}
+            onClick={() => answer(false)}
+          >
             Refuse
-          </button>
+          </Button>
         </div>
       ) : decision ? (
         <span class="diagnostics-meta">
-          <button
-            type="button"
-            class="button button-small"
+          <Button
+            variant="secondary"
+            size="sm"
+            testId="plugin-budget-change"
+            disabled={busy}
             onClick={() => {
               setEditing(true);
               setDraft(String(budget.granted_bytes ?? budget.effective_bytes));
             }}
-            disabled={busy}
           >
             Change
-          </button>
-          <button type="button" class="button button-small" onClick={clear} disabled={busy}>
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            testId="plugin-budget-clear"
+            disabled={busy}
+            onClick={clear}
+          >
             Clear
-          </button>
+          </Button>
         </span>
       ) : null}
       {editing && !pending ? (
@@ -177,34 +199,44 @@ export function PluginToolOutputRow({ plugin, onChanged }: PluginToolOutputRowPr
           <label class="sr-only" for={`budget-${plugin.name}`}>
             Bytes to allow
           </label>
-          <input
+          <Input
             id={`budget-${plugin.name}`}
+            class="w-full max-w-[16ch]"
             type="number"
             min={MIN_BYTES}
             max={budget.ceiling_bytes}
             step={1000}
             value={value}
-            onInput={(event) => setDraft((event.target as HTMLInputElement).value)}
             disabled={busy}
+            testId="plugin-budget-bytes"
+            onInput={(event) => setDraft((event.target as HTMLInputElement).value)}
           />
-          <button type="button" class="button button-small" onClick={() => answer(true)} disabled={busy}>
+          <Button
+            variant="secondary"
+            size="sm"
+            testId="plugin-budget-grant"
+            disabled={busy}
+            onClick={() => answer(true)}
+          >
             Grant
-          </button>
+          </Button>
         </div>
       ) : null}
       {needsAdmin ? (
-        <input
+        <Input
           type="password"
+          class="w-full max-w-[24ch]"
           placeholder="Admin token"
           value={adminToken}
-          onInput={(event) => setAdminToken((event.target as HTMLInputElement).value)}
           aria-label="Admin token"
+          testId="plugin-budget-admin-token"
+          onInput={(event) => setAdminToken((event.target as HTMLInputElement).value)}
         />
       ) : null}
       {error ? (
-        <span class="diagnostics-error" role="alert">
+        <Callout tone="danger" testId="plugin-budget-error">
           {error}
-        </span>
+        </Callout>
       ) : null}
     </div>
   );

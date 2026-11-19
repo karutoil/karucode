@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { WorkspaceEntry } from '../api/types';
 import { contextMenuProps, Menu, MenuItem, useMenu } from '../lib/menu';
 import { copyText } from '../lib/clipboard';
@@ -28,6 +28,42 @@ type FileKind = 'folder' | 'rust' | 'ts' | 'md' | 'file';
 
 /** Guards against a server listing that claims a directory is its own child. */
 const MAX_TREE_DEPTH = 32;
+
+/**
+ * One row's outer height, in CSS pixels.
+ *
+ * Windowed rendering turns a row index into a scroll offset, so this has to agree
+ * with `.tree-row { height: 29px }` in `styles/inspector.css`. Change both
+ * together: a drift of a pixel or two is invisible until the spacers have
+ * accumulated it, and then the scrollbar jumps as rows mount and unmount.
+ */
+const ROW_HEIGHT = 29;
+
+/**
+ * Above this many visible rows the tree mounts a window instead of everything.
+ *
+ * A workspace with a few hundred expanded files used to mount a `treeitem` per
+ * file — each one carrying its own menu controller, what used to be a hook and
+ * two pieces of state per row. Below the threshold the whole list is cheaper
+ * than the bookkeeping, and mounting everything also means a tree rendered with
+ * no layout yet (`clientHeight === 0`, which is every jsdom test) still shows
+ * every row.
+ */
+const WINDOW_THRESHOLD = 150;
+
+/** Rows kept mounted on each side of the viewport, so fast scrolling does not
+ *  paint a blank band before the next scroll event lands. */
+const OVERSCAN = 8;
+
+/** The handlers that wire a row to the tree's one menu. */
+type RowMenuProps = ReturnType<typeof contextMenuProps>;
+
+interface RowWindow {
+  /** First flat-list index mounted. */
+  start: number;
+  /** One past the last flat-list index mounted. */
+  end: number;
+}
 
 function fileKind(name: string): FileKind {
   const dot = name.lastIndexOf('.');
@@ -95,27 +131,52 @@ function absolutePath(rootPath: string, path: string): string | null {
   return `${root}/${rest}`;
 }
 
+/**
+ * The nearest ancestor that scrolls vertically, or `null`.
+ *
+ * The tree does not own its scroller: `WorkspaceTab` renders it inside the
+ * inspector's `.tab-panel`, which is the element that actually scrolls, and any
+ * wrapper in between could be the one. Windowed rendering needs that element's
+ * height and scroll offset, so it is found rather than assumed — and "not found"
+ * (jsdom, where no stylesheet is applied and nothing has a height) simply means
+ * the tree mounts every row, which is what the tests and a layout-less render
+ * want.
+ */
+function findScrollParent(el: HTMLElement | null): HTMLElement | null {
+  for (let node = el?.parentElement ?? null; node; node = node.parentElement) {
+    const overflowY = window.getComputedStyle(node).overflowY;
+    if (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') return node;
+  }
+  return null;
+}
+
 interface TreeRowProps {
   node: FlatNode;
-  /** The workspace root the listing is relative to, as `FileTree` received it. */
-  rootPath: string;
+  /** Position in the flat list, for `aria-posinset` and the window's bookkeeping. */
+  index: number;
+  /** Size of the whole flat list, for `aria-setsize`. */
+  total: number;
   expanded: boolean;
   loading: boolean;
   tabbable: boolean;
   selected: boolean;
-  onActivate: (node: FlatNode) => void;
+  /** Right-click and touch long-press, wired to the tree's single menu. */
+  menuProps: RowMenuProps;
+  onActivate: (entry: WorkspaceEntry) => void;
   onFocusRow: (path: string) => void;
-  onOpenInTab?: (path: string) => void;
 }
 
 /**
- * One tree row: the `treeitem` and its right-click menu.
+ * One tree row: the `treeitem`, and nothing else.
  *
- * This is its own component because a menu is per row — it opens at *this* row's
- * pointer and returns focus to *this* row, so one controller cannot serve the
- * list. The row has no kebab (a tree of hundreds of rows would be hundreds of
- * buttons), so the menu is pointer-anchored only: `float`, portalled onto the
- * menu layer where no scroller in the inspector can clip it.
+ * Rows are presentational on purpose. The context menu they open belongs to
+ * `FileTree`, which owns exactly one `useMenu()` for the whole tree — a menu per
+ * row was a controller, a piece of open state and a pointer snapshot per
+ * `treeitem`, so a thousand expanded files meant a thousand of each before a
+ * single one was opened. A row now only reports *which* node was pressed; the
+ * menu opens at the pointer, and focus returns to the pressed row (there is no
+ * kebab to return to, and a tree of hundreds of rows would be hundreds of
+ * buttons), because `contextMenuProps` falls back to the event's `currentTarget`.
  *
  * Nothing here is the only path to an action. A file still opens on click and on
  * Enter/Space, a directory still expands the same way, and the path is in the
@@ -124,46 +185,31 @@ interface TreeRowProps {
  */
 function TreeRow({
   node,
-  rootPath,
+  index,
+  total,
   expanded,
   loading,
   tabbable,
   selected,
+  menuProps,
   onActivate,
   onFocusRow,
-  onOpenInTab,
 }: TreeRowProps): JSX.Element {
   const { entry, depth } = node;
   const isDir = entry.kind === 'dir';
   const kind: FileKind = isDir ? 'folder' : fileKind(entry.name);
-  const menu = useMenu();
-  // Focus returns to the row itself: it is the focusable `treeitem` a keyboard
-  // user would have activated, and this menu has no kebab to return to.
-  const rowRef = useRef<HTMLLIElement>(null);
-  const absolute = absolutePath(rootPath, entry.path);
-  // One form or two. When the absolute path is not derivable the two items would
-  // copy the same string, so the second is dropped rather than duplicated.
-  const twoForms = absolute !== null && absolute !== entry.path;
-
-  const copyPath = async (): Promise<void> => {
-    const copied = await copyText(absolute ?? entry.path);
-    store.pushToast(copied ? 'Path copied.' : 'Could not copy the path.',
-      copied ? 'success' : 'error');
-  };
-
-  const copyRelativePath = async (): Promise<void> => {
-    const copied = await copyText(entry.path);
-    store.pushToast(copied ? 'Relative path copied.' : 'Could not copy the relative path.',
-      copied ? 'success' : 'error');
-  };
 
   return (
     <li
-      ref={rowRef}
       role="treeitem"
       aria-level={depth + 1}
       aria-expanded={isDir ? expanded : undefined}
       aria-selected={selected}
+      /* A tree that mounts only the rows in view still has to tell assistive
+       * technology where each row sits: the browser can only count the rows that
+       * are in the DOM, which after windowing is not the tree. */
+      aria-posinset={index + 1}
+      aria-setsize={total}
       data-tree-path={entry.path}
       tabIndex={tabbable ? 0 : -1}
       class={`tree-row${isDir ? ' is-dir' : ' is-file'}${expanded ? ' is-open' : ''}${
@@ -180,10 +226,10 @@ function TreeRow({
       title={entry.path}
       onClick={() => {
         onFocusRow(entry.path);
-        onActivate(node);
+        onActivate(entry);
       }}
       onFocus={() => onFocusRow(entry.path)}
-      {...contextMenuProps(menu, undefined, () => rowRef.current)}
+      {...menuProps}
     >
       <span class={`tree-chevron${expanded ? ' is-open' : ''}`} aria-hidden="true">
         {isDir ? <ChevronRightIcon size={12} /> : null}
@@ -198,37 +244,6 @@ function TreeRow({
           <ArrowRightIcon size={12} />
         </span>
       ) : null}
-      <Menu menu={menu} float label={`${isDir ? 'Folder' : 'File'} actions for ${entry.name}`}>
-        {/* A directory has no **Open**: expanding one is the row's own click and
-          * Enter, and "Open" would be a second word for the same thing. */}
-        {isDir ? null : (
-          <MenuItem menu={menu} action={{ label: 'Open', onSelect: () => onActivate(node) }} />
-        )}
-        {isDir || !onOpenInTab ? null : (
-          <MenuItem
-            menu={menu}
-            action={{ label: 'Open in a tab', onSelect: () => onOpenInTab(entry.path) }}
-          />
-        )}
-        <MenuItem
-          menu={menu}
-          action={{
-            label: 'Copy path',
-            title: absolute ?? entry.path,
-            onSelect: () => void copyPath(),
-          }}
-        />
-        {twoForms ? (
-          <MenuItem
-            menu={menu}
-            action={{
-              label: 'Copy relative path',
-              title: entry.path,
-              onSelect: () => void copyRelativePath(),
-            }}
-          />
-        ) : null}
-      </Menu>
     </li>
   );
 }
@@ -247,10 +262,77 @@ export function FileTree({
   const [focusedPath, setFocusedPath] = useState<string | null>(null);
   const container = useRef<HTMLUListElement>(null);
 
+  // One menu for the whole tree. `menuNode` is the row it describes: the row that
+  // was right-clicked (or long-pressed) most recently.
+  const menu = useMenu();
+  const [menuNode, setMenuNode] = useState<FlatNode | null>(null);
+  /** The path `menuNode` holds, so a second press on the same row is not a
+   *  state write — a touch press arms the menu on `pointerdown`, before the
+   *  long-press timer even fires. */
+  const armedPath = useRef<string | null>(null);
+
+  // Rebuilt only when the listing, a loaded directory or the expansion set
+  // changes: `flatten` walks every expanded directory, so running it on each
+  // render made every keystroke in the tree cost a walk of the whole listing.
   const visible = useMemo(
     () => flatten(rootEntries, 0, children, expanded),
     [rootEntries, children, expanded],
   );
+
+  /** The window, or `null` while the list is not windowed. */
+  const [rowWindow, setRowWindow] = useState<RowWindow | null>(null);
+  const scroller = useRef<HTMLElement | null>(null);
+  /** Read by `measure`, which must not be re-created when the list grows. */
+  const totalRef = useRef(visible.length);
+  totalRef.current = visible.length;
+  /** A row the keyboard asked for that is not mounted yet; focused once it is. */
+  const pendingFocus = useRef<string | null>(null);
+
+  /**
+   * Re-derive the window from the scroller's geometry.
+   *
+   * Two rect reads per scroll event: `getBoundingClientRect` is the only way to
+   * learn where the list starts inside a scroller it does not own, and the
+   * subtraction (`list top - scroller top + scrollTop`) is that position in the
+   * scroller's own scroll coordinates, which is what a row index translates to.
+   */
+  const measure = useCallback((): void => {
+    const list = container.current;
+    const parent = list ? findScrollParent(list) : null;
+    scroller.current = parent;
+    if (!list || !parent) {
+      setRowWindow((current) => (current === null ? current : null));
+      return;
+    }
+    const height = parent.clientHeight;
+    if (height <= 0) {
+      setRowWindow((current) => (current === null ? current : null));
+      return;
+    }
+    const listTop = list.getBoundingClientRect().top - parent.getBoundingClientRect().top
+      + parent.scrollTop;
+    const first = Math.max(0, Math.floor((parent.scrollTop - listTop) / ROW_HEIGHT));
+    const rowsOnScreen = Math.ceil(height / ROW_HEIGHT) + 1;
+    const start = Math.max(0, first - OVERSCAN);
+    const end = Math.min(totalRef.current, first + rowsOnScreen + OVERSCAN);
+    setRowWindow((current) =>
+      current && current.start === start && current.end === end ? current : { start, end });
+  }, []);
+
+  // Measured once the rows are in the DOM, then on every scroll and resize.
+  // A container that has no height yet (a collapsed inspector, a layout-less
+  // test) leaves `rowWindow` null and the tree renders every row.
+  useLayoutEffect(() => {
+    measure();
+    const parent = scroller.current;
+    if (!parent) return;
+    parent.addEventListener('scroll', measure, { passive: true });
+    window.addEventListener('resize', measure);
+    return () => {
+      parent.removeEventListener('scroll', measure);
+      window.removeEventListener('resize', measure);
+    };
+  }, [measure]);
 
   useEffect(() => {
     if (focusedPath !== null && !visible.some((node) => node.entry.path === focusedPath)) {
@@ -258,23 +340,112 @@ export function FileTree({
     }
   }, [focusedPath, visible]);
 
+  const rowElement = (path: string): HTMLElement | null =>
+    Array.from(container.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? [])
+      .find((item) => item.dataset.treePath === path) ?? null;
+
+  /** Scroll the scroller so the row at `index` is inside the window, then
+   *  re-measure: the focused row has to exist in the DOM before it can take
+   *  focus, so a windowed tree cannot focus a row it has not mounted. */
+  const revealRow = (index: number): void => {
+    const list = container.current;
+    const parent = scroller.current;
+    if (!list || !parent) return;
+    const listTop = list.getBoundingClientRect().top - parent.getBoundingClientRect().top
+      + parent.scrollTop;
+    const top = listTop + index * ROW_HEIGHT;
+    const bottom = top + ROW_HEIGHT;
+    const viewTop = parent.scrollTop;
+    const viewBottom = viewTop + parent.clientHeight;
+    if (top < viewTop) parent.scrollTop = Math.max(0, top - ROW_HEIGHT);
+    else if (bottom > viewBottom) parent.scrollTop = bottom - parent.clientHeight + ROW_HEIGHT;
+    else return;
+    // The browser also fires `scroll` here, but not synchronously and not in a
+    // layout-less test: measuring now is what makes the row exist by the time
+    // this keypress's render has committed.
+    measure();
+  };
+
   const focusNode = (path: string | null): void => {
     setFocusedPath(path);
+    pendingFocus.current = path;
     if (!path) return;
-    const element = Array.from(
-      container.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? [],
-    ).find((item) => item.dataset.treePath === path);
-    element?.focus();
+    const mounted = rowElement(path);
+    if (mounted) {
+      pendingFocus.current = null;
+      mounted.focus();
+      return;
+    }
+    const index = visible.findIndex((node) => node.entry.path === path);
+    if (index >= 0) revealRow(index);
   };
+
+  // A row that was windowed out when the keyboard asked for it is focused as
+  // soon as the window includes it. Cheap enough to re-check on every commit:
+  // it returns immediately unless a focus is pending.
+  useLayoutEffect(() => {
+    const path = pendingFocus.current;
+    if (path === null) return;
+    const element = rowElement(path);
+    if (!element) return;
+    pendingFocus.current = null;
+    element.focus();
+  });
 
   const currentIndex = Math.max(
     0,
     visible.findIndex((node) => node.entry.path === focusedPath),
   );
 
-  const activate = (node: FlatNode): void => {
-    if (node.entry.kind === 'dir') onToggleDir(node.entry);
-    else onOpenFile(node.entry.path);
+  const activate = (entry: WorkspaceEntry): void => {
+    if (entry.kind === 'dir') onToggleDir(entry);
+    else onOpenFile(entry.path);
+  };
+
+  // The helpers are shared; which row they act on is the menu's own `menuNode`.
+  const sharedMenuProps = contextMenuProps(menu);
+  const armMenu = useCallback((node: FlatNode): void => {
+    if (armedPath.current === node.entry.path) return;
+    armedPath.current = node.entry.path;
+    setMenuNode(node);
+  }, []);
+
+  const menuPropsFor = (node: FlatNode): RowMenuProps => ({
+    onContextMenu: (event: MouseEvent): void => {
+      armMenu(node);
+      sharedMenuProps.onContextMenu(event);
+    },
+    onPointerDown: (event: PointerEvent): void => {
+      // A finger that rests opens this row's menu 450ms later, inside the shared
+      // helpers, where the node is no longer known — so arm it now. A mouse
+      // press is a select-drag, never a menu gesture.
+      if (event.pointerType !== 'mouse') armMenu(node);
+      sharedMenuProps.onPointerDown(event);
+    },
+    onPointerMove: sharedMenuProps.onPointerMove,
+    onPointerUp: sharedMenuProps.onPointerUp,
+    onPointerCancel: sharedMenuProps.onPointerCancel,
+  });
+
+  const menuEntry = menuNode?.entry ?? null;
+  const menuIsDir = menuEntry?.kind === 'dir';
+  const menuAbsolute = menuEntry ? absolutePath(rootPath, menuEntry.path) : null;
+  // One form or two. When the absolute path is not derivable the two items would
+  // copy the same string, so the second is dropped rather than duplicated.
+  const menuTwoForms = menuEntry !== null && menuAbsolute !== null && menuAbsolute !== menuEntry.path;
+
+  const copyMenuPath = async (): Promise<void> => {
+    if (!menuEntry) return;
+    const copied = await copyText(menuAbsolute ?? menuEntry.path);
+    store.pushToast(copied ? 'Path copied.' : 'Could not copy the path.',
+      copied ? 'success' : 'error');
+  };
+
+  const copyMenuRelativePath = async (): Promise<void> => {
+    if (!menuEntry) return;
+    const copied = await copyText(menuEntry.path);
+    store.pushToast(copied ? 'Relative path copied.' : 'Could not copy the relative path.',
+      copied ? 'success' : 'error');
   };
 
   if (rootEntries.length === 0) {
@@ -285,77 +456,152 @@ export function FileTree({
     );
   }
 
+  // Windowed only while the scroller has a height, and only past the threshold
+  // where mounting everything starts to cost more than the window does. The
+  // range is clamped here rather than in `measure`, because the list can shrink
+  // (a directory collapsed) between measurements.
+  const windowed = rowWindow !== null && visible.length > WINDOW_THRESHOLD;
+  const start = windowed ? Math.min(rowWindow.start, Math.max(0, visible.length - 1)) : 0;
+  const end = windowed ? Math.min(Math.max(rowWindow.end, start + 1), visible.length) : visible.length;
+  const shown = windowed ? visible.slice(start, end) : visible;
+
   return (
-    <ul
-      class="tree"
-      role="tree"
-      aria-label={`Workspace files in ${rootPath}`}
-      ref={container}
-      onKeyDown={(event) => {
-        const node = visible[currentIndex];
-        if (!node) return;
-        if (event.key === 'ArrowDown') {
-          event.preventDefault();
-          const next = visible[Math.min(visible.length - 1, currentIndex + 1)];
-          if (next) focusNode(next.entry.path);
-        } else if (event.key === 'ArrowUp') {
-          event.preventDefault();
-          const previous = visible[Math.max(0, currentIndex - 1)];
-          if (previous) focusNode(previous.entry.path);
-        } else if (event.key === 'Home') {
-          event.preventDefault();
-          const first = visible[0];
-          if (first) focusNode(first.entry.path);
-        } else if (event.key === 'End') {
-          event.preventDefault();
-          const last = visible[visible.length - 1];
-          if (last) focusNode(last.entry.path);
-        } else if (event.key === 'ArrowRight') {
-          event.preventDefault();
-          if (node.entry.kind === 'dir') {
-            if (!expanded.has(node.entry.path)) onToggleDir(node.entry);
-            else {
-              const child = visible[currentIndex + 1];
-              if (child && child.depth > node.depth) focusNode(child.entry.path);
+    <>
+      <ul
+        class="tree"
+        role="tree"
+        aria-label={`Workspace files in ${rootPath}`}
+        ref={container}
+        onKeyDown={(event) => {
+          const node = visible[currentIndex];
+          if (!node) return;
+          if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            const next = visible[Math.min(visible.length - 1, currentIndex + 1)];
+            if (next) focusNode(next.entry.path);
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            const previous = visible[Math.max(0, currentIndex - 1)];
+            if (previous) focusNode(previous.entry.path);
+          } else if (event.key === 'Home') {
+            event.preventDefault();
+            const first = visible[0];
+            if (first) focusNode(first.entry.path);
+          } else if (event.key === 'End') {
+            event.preventDefault();
+            const last = visible[visible.length - 1];
+            if (last) focusNode(last.entry.path);
+          } else if (event.key === 'ArrowRight') {
+            event.preventDefault();
+            if (node.entry.kind === 'dir') {
+              if (!expanded.has(node.entry.path)) onToggleDir(node.entry);
+              else {
+                const child = visible[currentIndex + 1];
+                if (child && child.depth > node.depth) focusNode(child.entry.path);
+              }
             }
+          } else if (event.key === 'ArrowLeft') {
+            event.preventDefault();
+            if (node.entry.kind === 'dir' && expanded.has(node.entry.path)) {
+              onToggleDir(node.entry);
+              return;
+            }
+            if (node.depth === 0) return;
+            const parentPath = node.entry.path.includes('/')
+              ? node.entry.path.slice(0, node.entry.path.lastIndexOf('/'))
+              : '.';
+            for (let index = currentIndex - 1; index >= 0; index -= 1) {
+              const candidate = visible[index];
+              if (candidate && candidate.entry.path === parentPath) {
+                focusNode(candidate.entry.path);
+                break;
+              }
+            }
+          } else if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            activate(node.entry);
           }
-        } else if (event.key === 'ArrowLeft') {
-          event.preventDefault();
-          if (node.entry.kind === 'dir' && expanded.has(node.entry.path)) {
-            onToggleDir(node.entry);
-            return;
-          }
-          if (node.depth === 0) return;
-          const parentPath = node.entry.path.includes('/')
-            ? node.entry.path.slice(0, node.entry.path.lastIndexOf('/'))
-            : '.';
-          const parent = [...visible]
-            .reverse()
-            .find((candidate) => candidate.entry.path === parentPath);
-          if (parent) focusNode(parent.entry.path);
-        } else if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          activate(node);
-        }
-      }}
-    >
-      {visible.map((node) => {
-        const isDir = node.entry.kind === 'dir';
-        return (
-          <TreeRow
-            key={`${node.entry.kind}:${node.entry.path}`}
-            node={node}
-            rootPath={rootPath}
-            expanded={isDir && expanded.has(node.entry.path)}
-            loading={isDir && loading.has(node.entry.path)}
-            tabbable={focusedPath === null ? node === visible[0] : focusedPath === node.entry.path}
-            selected={focusedPath === node.entry.path}
-            onActivate={activate}
-            onFocusRow={setFocusedPath}
-            onOpenInTab={onOpenFileInTab}
+        }}
+      >
+        {/* Spacer rows keep the scrollbar honest: a windowed tree must occupy the
+            height of the whole list, or scrolling would end early. `presentation`
+            keeps them out of the accessibility tree — they are geometry, not
+            content. */}
+        {start > 0 ? (
+          <li
+            role="presentation"
+            aria-hidden="true"
+            class="tree-spacer"
+            style={{ height: `${start * ROW_HEIGHT}px` }}
           />
-        );
-      })}
-    </ul>
+        ) : null}
+        {shown.map((node, offset) => {
+          const index = start + offset;
+          const isDir = node.entry.kind === 'dir';
+          return (
+            <TreeRow
+              key={`${node.entry.kind}:${node.entry.path}`}
+              node={node}
+              index={index}
+              total={visible.length}
+              expanded={isDir && expanded.has(node.entry.path)}
+              loading={isDir && loading.has(node.entry.path)}
+              tabbable={focusedPath === null ? index === 0 : focusedPath === node.entry.path}
+              selected={focusedPath === node.entry.path}
+              menuProps={menuPropsFor(node)}
+              onActivate={activate}
+              onFocusRow={(path) => {
+                pendingFocus.current = null;
+                setFocusedPath(path);
+              }}
+            />
+          );
+        })}
+        {end < visible.length ? (
+          <li
+            role="presentation"
+            aria-hidden="true"
+            class="tree-spacer"
+            style={{ height: `${(visible.length - end) * ROW_HEIGHT}px` }}
+          />
+        ) : null}
+      </ul>
+      {/* One menu for the tree, portalled onto the menu layer (`float`) where no
+          scroller in the inspector can clip it. Mounted outside the `ul` so the
+          tree's children stay `treeitem`s and spacers. */}
+      {menuEntry ? (
+        <Menu menu={menu} float label={`${menuIsDir ? 'Folder' : 'File'} actions for ${menuEntry.name}`}>
+          {/* A directory has no **Open**: expanding one is the row's own click and
+            * Enter, and "Open" would be a second word for the same thing. */}
+          {menuIsDir ? null : (
+            <MenuItem menu={menu} action={{ label: 'Open', onSelect: () => activate(menuEntry) }} />
+          )}
+          {menuIsDir || !onOpenFileInTab ? null : (
+            <MenuItem
+              menu={menu}
+              action={{ label: 'Open in a tab', onSelect: () => onOpenFileInTab?.(menuEntry.path) }}
+            />
+          )}
+          <MenuItem
+            menu={menu}
+            action={{
+              label: 'Copy path',
+              title: menuAbsolute ?? menuEntry.path,
+              onSelect: () => void copyMenuPath(),
+            }}
+          />
+          {menuTwoForms ? (
+            <MenuItem
+              menu={menu}
+              action={{
+                label: 'Copy relative path',
+                title: menuEntry.path,
+                onSelect: () => void copyMenuRelativePath(),
+              }}
+            />
+          ) : null}
+        </Menu>
+      ) : null}
+    </>
   );
 }

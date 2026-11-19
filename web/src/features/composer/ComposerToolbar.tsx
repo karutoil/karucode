@@ -10,6 +10,7 @@ import {
 } from '../../components/uiContributions';
 import { ArrowUpIcon, PaperclipIcon, StopIcon } from '../../components/icons';
 import * as store from '../../state/store';
+import { Button, IconButton } from '../../ui';
 import { QUEUE_TITLE } from './helpers';
 import { QueueModeToggle } from './QueueTray';
 
@@ -55,16 +56,16 @@ export function ComposerToolbar({
       <div class="compose-configuration">
         <div class="composer-controls compose-bar-left">
           {isUiHidden(store.pluginUi.value, UI_HIDE_COMPOSER_ATTACH) ? null : (
-            <button
-              type="button"
-              class="compose-plus"
-              onClick={() => fileInput.current?.click()}
-              disabled={!canType}
-              aria-label="Attach files"
+            <IconButton
+              size="sm"
+              class="compose-plus w-[24px] h-[24px] pointer-coarse:w-[40px] pointer-coarse:h-[40px]"
+              label="Attach files"
               title={attachTitle}
-            >
-              <PaperclipIcon size={15} />
-            </button>
+              disabled={!canType}
+              icon={<PaperclipIcon size={15} />}
+              testId="compose-attach"
+              onClick={() => fileInput.current?.click()}
+            />
           )}
           <div
             class="composer-session-pins"
@@ -94,8 +95,9 @@ export function ComposerToolbar({
             {hasContent && slashCommand === null ? (
               <QueueModeToggle mode={queueMode} onChange={onQueueModeChange} />
             ) : null}
-            <button
+            <Button
               type="submit"
+              variant="primary"
               class="button button-primary button-queue"
               disabled={!canQueue && !canCommand}
               aria-label={
@@ -106,26 +108,28 @@ export function ComposerToolbar({
                     : `Queue this follow-up for the next turn (${sendChordLong})`
               }
               title={slashCommand !== null ? `Run /${slashCommand.name}` : QUEUE_TITLE[queueMode]}
+              icon={<ArrowUpIcon size={13} />}
+              testId="compose-queue"
             >
-              <ArrowUpIcon size={13} />
               {slashCommand !== null ? 'Run' : queueMode === 'steer' ? 'Steer' : 'Queue'}
-            </button>
+            </Button>
           </div>
-          <button
-            type="button"
+          <Button
+            variant="stop"
             class="button button-stop"
             onClick={onStop}
             disabled={stopping}
-            aria-busy={stopping}
+            loading={stopping}
             aria-label={stopping ? 'Stopping… (Escape)' : 'Stop run (Escape)'}
             title={stopping ? 'Stopping…' : 'Stop (Escape)'}
-          >
-            <StopIcon size={13} />
-          </button>
+            icon={<StopIcon size={13} />}
+            testId="compose-stop"
+          />
         </>
       ) : (
-        <button
+        <Button
           type="submit"
+          variant="primary"
           class="button button-primary button-send"
           disabled={!canSend && !canCommand}
           aria-label={
@@ -138,9 +142,9 @@ export function ComposerToolbar({
               ? `Run /${slashCommand.name} (${sendChordLong})`
               : `Send (${sendChordLong})`
           }
-        >
-          <ArrowUpIcon size={14} />
-        </button>
+          icon={<ArrowUpIcon size={14} />}
+          testId="compose-send"
+        />
       )}
     </div>
   );

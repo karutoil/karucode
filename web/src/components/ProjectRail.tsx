@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX, TargetedSubmitEvent } from 'preact';
 import type { Project } from '../api/types';
 import { modKey } from '../lib/platform';
@@ -6,7 +6,8 @@ import { Menu, MenuItem, useMenu } from '../lib/menu';
 import * as actions from '../state/actions';
 import * as railPeek from '../state/railPeek';
 import * as store from '../state/store';
-import { Dialog } from './Dialog';
+import { Overlay } from './Overlay';
+import { Button, Field, IconButton, Input } from '../ui';
 import { controlPlaneOpen } from '../state/controlPlane';
 import {
   AgentsIcon,
@@ -28,7 +29,6 @@ import {
   UI_HIDE_RAIL_FOOTER,
   UI_REPLACE_APP_NAME,
 } from './uiContributions';
-import '../styles/rail.css';
 
 /**
  * Discord-style initials: first letter of each word, at most two characters.
@@ -121,7 +121,6 @@ interface AddProjectDialogProps {
  * delete a project, and they must not be reachable only by mouse.
  */
 export function AddProjectDialog({ open, onClose }: AddProjectDialogProps): JSX.Element {
-  const fieldId = useId();
   const [path, setPath] = useState('');
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -157,64 +156,66 @@ export function AddProjectDialog({ open, onClose }: AddProjectDialogProps): JSX.
   };
 
   return (
-    <Dialog open={open} title="Add project" onClose={onClose} class="project-rail-dialog">
+    <Overlay
+      open={open}
+      role="standard"
+      class="project-rail-dialog"
+      title="Add project"
+      onClose={onClose}
+      // The form is the surface: its own padding and column layout sit directly
+      // in the overlay's flex column, exactly as they did under `Dialog`.
+      bodyLayout="contents"
+    >
       <form class="project-rail-form" onSubmit={(event) => void submit(event)} noValidate>
-        <div class="field">
-          <label class="field-label" for={`${fieldId}-path`}>
-            Project path
-          </label>
-          <input
-            id={`${fieldId}-path`}
-            class="input mono"
-            type="text"
-            value={path}
-            spellcheck={false}
-            autocomplete="off"
-            placeholder="/home/you/project"
-            aria-required="true"
-            aria-invalid={error ? 'true' : undefined}
-            aria-describedby={`${fieldId}-path-hint${error ? ` ${fieldId}-error` : ''}`}
-            data-autofocus
-            onInput={(event) => setPath(event.currentTarget.value)}
-          />
-          <p class="field-hint" id={`${fieldId}-path-hint`}>
-            Absolute directory on the machine running kc-server. A leading ~ is not expanded.
-          </p>
-        </div>
+        {/* `Field` owns the label, the hint and the error, and hands the control the
+          * ids they need: one error never drifts from the input it is about. */}
+        <Field
+          label="Project path"
+          description="Absolute directory on the machine running kc-server. A leading ~ is not expanded."
+          error={error ?? undefined}
+        >
+          {({ id, describedBy, invalid }) => (
+            <Input
+              id={id}
+              value={path}
+              mono
+              required
+              placeholder="/home/you/project"
+              autoComplete="off"
+              spellCheck={false}
+              invalid={invalid}
+              aria-describedby={describedBy}
+              data-autofocus
+              testId="add-project-path"
+              onInput={(event) => setPath(event.currentTarget.value)}
+            />
+          )}
+        </Field>
 
-        <div class="field">
-          <label class="field-label" for={`${fieldId}-name`}>
-            Display name (optional)
-          </label>
-          <input
-            id={`${fieldId}-name`}
-            class="input"
-            type="text"
-            value={name}
-            maxLength={120}
-            autocomplete="off"
-            placeholder="Defaults to the folder name"
-            onInput={(event) => setName(event.currentTarget.value)}
-          />
-          <p class="field-hint">Leave empty to use the folder name.</p>
-        </div>
-
-        {error ? (
-          <p class="field-error" id={`${fieldId}-error`} role="alert">
-            {error}
-          </p>
-        ) : null}
+        <Field label="Display name (optional)" description="Leave empty to use the folder name.">
+          {({ id }) => (
+            <Input
+              id={id}
+              value={name}
+              maxLength={120}
+              autoComplete="off"
+              placeholder="Defaults to the folder name"
+              testId="add-project-name"
+              onInput={(event) => setName(event.currentTarget.value)}
+            />
+          )}
+        </Field>
 
         <div class="dialog-actions">
-          <button type="button" class="button" onClick={onClose}>
+          <Button onClick={onClose} testId="add-project-cancel">
             Cancel
-          </button>
-          <button type="submit" class="button button-primary" disabled={busy}>
+          </Button>
+          <Button type="submit" variant="primary" loading={busy} testId="add-project-submit">
             {busy ? 'Adding…' : 'Add project'}
-          </button>
+          </Button>
         </div>
       </form>
-    </Dialog>
+    </Overlay>
   );
 }
 
@@ -225,7 +226,6 @@ interface RenameProjectDialogProps {
 }
 
 export function RenameProjectDialog({ project, open, onClose }: RenameProjectDialogProps): JSX.Element {
-  const fieldId = useId();
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -264,45 +264,47 @@ export function RenameProjectDialog({ project, open, onClose }: RenameProjectDia
   };
 
   return (
-    <Dialog open={open} title="Rename project" onClose={onClose} class="project-rail-dialog">
+    <Overlay
+      open={open}
+      role="standard"
+      class="project-rail-dialog"
+      title="Rename project"
+      onClose={onClose}
+      bodyLayout="contents"
+    >
       <form class="project-rail-form" onSubmit={(event) => void submit(event)} noValidate>
-        <div class="field">
-          <label class="field-label" for={`${fieldId}-name`}>
-            Project name
-          </label>
-          <input
-            id={`${fieldId}-name`}
-            ref={inputRef}
-            class="input"
-            type="text"
-            value={draft}
-            maxLength={120}
-            autocomplete="off"
-            aria-required="true"
-            aria-invalid={error ? 'true' : undefined}
-            aria-describedby={error ? `${fieldId}-error` : undefined}
-            data-autofocus
-            onInput={(event) => setDraft(event.currentTarget.value)}
-          />
-          <p class="field-hint">{project ? `Showing in the rail as ${project.path}` : ''}</p>
-        </div>
-
-        {error ? (
-          <p class="field-error" id={`${fieldId}-error`} role="alert">
-            {error}
-          </p>
-        ) : null}
+        <Field
+          label="Project name"
+          description={project ? `Showing in the rail as ${project.path}` : undefined}
+          error={error ?? undefined}
+        >
+          {({ id, describedBy, invalid }) => (
+            <Input
+              id={id}
+              inputRef={inputRef}
+              value={draft}
+              required
+              maxLength={120}
+              autoComplete="off"
+              invalid={invalid}
+              aria-describedby={describedBy}
+              data-autofocus
+              testId="rename-project-name"
+              onInput={(event) => setDraft(event.currentTarget.value)}
+            />
+          )}
+        </Field>
 
         <div class="dialog-actions">
-          <button type="button" class="button" onClick={onClose}>
+          <Button onClick={onClose} testId="rename-project-cancel">
             Cancel
-          </button>
-          <button type="submit" class="button button-primary" disabled={busy}>
+          </Button>
+          <Button type="submit" variant="primary" loading={busy} testId="rename-project-submit">
             {busy ? 'Saving…' : 'Save name'}
-          </button>
+          </Button>
         </div>
       </form>
-    </Dialog>
+    </Overlay>
   );
 }
 
@@ -337,7 +339,31 @@ export function DeleteProjectDialog({ project, open, onClose }: DeleteProjectDia
   };
 
   return (
-    <Dialog open={open} title="Delete project?" onClose={onClose} class="dialog-confirm">
+    <Overlay
+      open={open}
+      role="compact"
+      class="dialog-confirm"
+      title="Delete project?"
+      onClose={onClose}
+      bodyLayout="contents"
+      // Cancel keeps the initial focus: the question is destructive, so the
+      // keyboard lands on the answer that changes nothing.
+      footer={
+        <div class="dialog-actions">
+          <Button data-autofocus onClick={onClose} testId="delete-project-cancel">
+            Cancel
+          </Button>
+          <Button
+            variant="danger"
+            loading={busy}
+            onClick={() => void confirm()}
+            testId="delete-project-confirm"
+          >
+            {busy ? 'Deleting…' : 'Delete project'}
+          </Button>
+        </div>
+      }
+    >
       {project ? (
         <div class="project-rail-delete-body">
           <p>
@@ -358,17 +384,9 @@ export function DeleteProjectDialog({ project, open, onClose }: DeleteProjectDia
               {error}
             </p>
           ) : null}
-          <div class="dialog-actions">
-            <button type="button" class="button" data-autofocus onClick={onClose}>
-              Cancel
-            </button>
-            <button type="button" class="button button-danger" disabled={busy} onClick={() => void confirm()}>
-              {busy ? 'Deleting…' : 'Delete project'}
-            </button>
-          </div>
         </div>
       ) : null}
-    </Dialog>
+    </Overlay>
   );
 }
 
@@ -456,6 +474,10 @@ export function ProjectRail(): JSX.Element {
     <>
       <nav class="project-rail" aria-label="Projects" data-testid="project-rail">
         <div class="project-rail-brand">
+          {/* The brand lockup is not an icon button: it is a 34px gradient tile with
+            * its own shadow and mono lettering (`.brand-mark` in `rail.css`), and a
+            * primitive's ink utilities would repaint it flat. It keeps its own
+            * element and the `.control-plane-trigger` hook the verifiers look for. */}
           <button type="button" class="brand-mark control-plane-trigger" title="Control plane" aria-label="Open control plane" aria-pressed={controlPlaneOpen.value} onClick={() => { controlPlaneOpen.value = true; }}>
             <span data-testid="brand-name">{appName}</span><span>.</span>
           </button>
@@ -504,6 +526,9 @@ export function ProjectRail(): JSX.Element {
                   onMouseEnter={() => railPeek.openPeek(project.id)}
                   onMouseLeave={() => railPeek.schedulePeekClose()}
                 >
+                  {/* The 42px project tile is its own recipe: a left pill anchored
+                    * to the wrapper, an active fill, a right-click menu and
+                    * `aria-current` - none of which a 30px icon button carries. */}
                   <button
                     type="button"
                     ref={active ? activeButtonRef : undefined}
@@ -538,20 +563,19 @@ export function ProjectRail(): JSX.Element {
                       the same menu, so the actions are reachable without leaving
                       the pointer where it is. */}
                   {active ? (
-                    <button
-                      type="button"
-                      class="project-rail-kebab"
-                      aria-label={`Project actions for ${project.name}`}
+                    <IconButton
+                      size="sm"
+                      class="project-rail-kebab w-[24px] h-[24px]"
+                      label={`Project actions for ${project.name}`}
                       title={`Project actions for ${project.name}`}
                       aria-haspopup="menu"
-                      aria-expanded={menu.open && menuFor === project.id}
+                      expanded={menu.open && menuFor === project.id}
+                      icon={<KebabIcon size={13} />}
                       onClick={(event) => {
                         if (menu.open && menuFor === project.id) menu.close(false);
                         else openTileMenu(project, event.currentTarget);
                       }}
-                    >
-                      <KebabIcon size={13} />
-                    </button>
+                    />
                   ) : null}
                 </li>
               );
@@ -559,15 +583,15 @@ export function ProjectRail(): JSX.Element {
           </ul>
 
           <div class="project-rail-add-row">
-            <button
-              type="button"
-              class="project-rail-add"
-              aria-label="Add project"
+            <IconButton
+              size="md"
+              class="project-rail-add w-[35px] h-[35px]"
+              label="Add project"
               title="Add project"
+              icon={<PlusIcon size={17} />}
+              testId="project-rail-add"
               onClick={() => setDialog('add')}
-            >
-              <PlusIcon size={17} />
-            </button>
+            />
           </div>
         </div>
 
@@ -579,45 +603,48 @@ export function ProjectRail(): JSX.Element {
             * avatar is gone — see `settingsHides` for the rule. */}
           {isUiHidden(store.pluginUi.value, UI_HIDE_RAIL_FOOTER) ? null : (
             <>
-          <button
-            type="button"
-            class="rail-tool rail-tool-accent"
+          <IconButton
+            size="md"
+            class="rail-tool rail-tool-accent w-[32px] h-[32px] text-accent-text"
+            label="Open theme studio"
             data-tip={`Theme studio · ${modKey()} Shift L`}
-            aria-label="Open theme studio"
             aria-haspopup="dialog"
             aria-keyshortcuts="Control+Shift+L Meta+Shift+L"
+            icon={<PaletteIcon size={15} />}
+            testId="rail-theme-studio"
             onClick={actions.openThemeStudio}
-          >
-            <PaletteIcon size={15} />
-          </button>
+          />
           {isUiHidden(store.pluginUi.value, UI_HIDE_COMMAND_PALETTE) ? null : (
-          <button
-            type="button"
-            class="rail-tool"
+          <IconButton
+            size="md"
+            class="rail-tool w-[32px] h-[32px]"
+            label="Open command palette"
             data-tip={`Command palette · ${modKey()} K`}
-            aria-label="Open command palette"
             aria-haspopup="dialog"
             aria-keyshortcuts="Control+K Meta+K"
+            icon={<SearchIcon size={15} />}
+            testId="rail-command-palette"
             onClick={actions.togglePalette}
-          >
-            <SearchIcon size={15} />
-          </button>
+          />
           )}
             </>
           )}
-          <button
-            type="button"
-            class="rail-avatar"
+          <IconButton
+            size="sm"
+            // `.rail-avatar` sizes and letters the "KC" tile; the primitive owns
+            // the ink, so the fill it used to take from the stylesheet is asked
+            // for with the same tokens here.
+            class="rail-avatar bg-raised border-line-strong text-text"
+            label="Open settings"
             data-tip="Settings"
-            aria-label="Open settings"
             aria-haspopup="dialog"
+            icon={<span>KC</span>}
+            testId="rail-settings"
             onClick={(event) => {
               event.currentTarget.focus();
               actions.openSettings();
             }}
-          >
-            KC
-          </button>
+          />
         </div>
 
         {menuProject ? (

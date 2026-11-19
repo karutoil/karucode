@@ -7,8 +7,9 @@ import type { ToolItem } from '../state/chat';
 import type { ChatTranscriptProps } from './ChatTranscript';
 import { ToolRewind } from './ChatTranscript';
 import { toolStatusLabel } from '../state/selectors';
-import { Dialog } from './Dialog';
+import { Overlay } from './Overlay';
 import { TpsBadge } from './TpsBadge';
+import { Badge, Button } from '../ui';
 import {
   AlertIcon,
   BoltIcon,
@@ -161,14 +162,15 @@ function ToolImages({ images, tool }: { images: ImageAttachment[]; tool: string 
         return (
           <figure class="tool-image" key={`${image.name ?? 'image'}-${index}`}>
             {src ? (
-              <button
-                type="button"
+              <Button
+                variant="ghost"
                 class="tool-image-button"
-                onClick={() => setEnlarged(index)}
                 aria-label={`Enlarge ${label}`}
+                testId={`tool-image-open-${index}`}
+                onClick={() => setEnlarged(index)}
               >
                 <img src={src} alt={label} loading="lazy" data-testid="tool-image" />
-              </button>
+              </Button>
             ) : (
               <p class="muted small tool-image-note">
                 {image.media_type || 'image'} cannot be previewed here
@@ -178,8 +180,12 @@ function ToolImages({ images, tool }: { images: ImageAttachment[]; tool: string 
           </figure>
         );
       })}
-      <Dialog
+      {/* The lightbox is an object to look at, not a question: `full` measure, no
+        * footer and the shell's own close control. Rendered through `Overlay`, so
+        * it still portals out of the transcript's paint containment. */}
+      <Overlay
         open={current !== null}
+        role="full"
         title={current ? imageLabel(current) : 'Image'}
         onClose={() => setEnlarged(null)}
         class="image-dialog"
@@ -187,7 +193,7 @@ function ToolImages({ images, tool }: { images: ImageAttachment[]; tool: string 
         {current ? (
           <img class="dialog-image" src={imageDataUrl(current) ?? ''} alt={imageLabel(current)} />
         ) : null}
-      </Dialog>
+      </Overlay>
     </div>
   );
 }
@@ -304,6 +310,9 @@ export function ToolCard({
         data-open={open ? 'true' : 'false'}
         aria-label={`${item.name} tool call`}
       >
+        {/* The row head is the whole line and holds the rewind control and the
+          * throughput badge, so it stays a native disclosure rather than a
+          * `Button` with one icon slot. */}
         <button
           type="button"
           class="tool-row-head"
@@ -322,7 +331,7 @@ export function ToolCard({
           </span>
           <span class="tool-row-name">{item.name}</span>
           {summary !== '' ? <span class="tool-row-args">{summary}</span> : null}
-          {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
+          {item.truncated ? <Badge tone="warn" class="badge badge-warn">truncated</Badge> : null}
           <span class="tool-row-meta">
             <ToolRewind item={item} onRewind={onRewind} />
             {duration ? <span class="tool-row-duration">{duration}</span> : null}
@@ -374,7 +383,7 @@ export function ToolCard({
           <span class="tool-name">{item.name}</span>
           {summary !== '' ? <span class="tool-args">{summary}</span> : null}
         </span>
-        {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
+        {item.truncated ? <Badge tone="warn" class="badge badge-warn">truncated</Badge> : null}
         <ToolRewind item={item} onRewind={onRewind} />
         {/* Live output throughput for the call itself: a tool's result is the
             text it produces, so that is what the badge counts while it runs.
@@ -396,16 +405,18 @@ export function ToolCard({
 
       <div class="tool-foot">
         <span class="tool-duration">{footerNote(item, duration)}</span>
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="sm"
           class="tool-expand"
           aria-expanded={open}
           aria-controls={bodyId}
+          iconRight={<ChevronDownIcon size={12} />}
+          testId="tool-expand"
           onClick={() => setOpen((previous) => !previous)}
         >
           {open ? 'Show less' : lines.length > 0 ? 'Show output' : 'Show details'}
-          <ChevronDownIcon size={12} />
-        </button>
+        </Button>
       </div>
     </section>
   );

@@ -26,6 +26,7 @@ import {
   Input,
   Keycap,
   LinkButton,
+  Overlay,
   SectionHeader,
   Select,
   SettingRow,
@@ -43,6 +44,7 @@ import {
   type CalloutTone,
   type ConfirmDialogTone,
   type FeedbackTone,
+  type OverlayRole,
   type StatusDotTone,
   type SurfaceTone,
   type TabItem,
@@ -84,12 +86,35 @@ const TEXT_TONES: readonly TextTone[] = [
   'info',
 ];
 
-const CARD_SURFACES: readonly Extract<SurfaceTone, 'surface' | 'raised' | 'inset' | 'sunken'>[] = [
+const CARD_SURFACES: readonly SurfaceTone[] = [
+  'bg',
   'surface',
   'raised',
   'inset',
   'sunken',
+  'rail',
 ];
+
+const OVERLAY_ROLES: readonly OverlayRole[] = [
+  'compact',
+  'standard',
+  'wide',
+  'tall',
+  'drawer',
+  'full',
+  'palette',
+];
+
+/** What each measure is *for*, so the gallery reads as documentation. */
+const OVERLAY_ROLE_NOTES: Record<OverlayRole, string> = {
+  compact: 'A question with buttons — confirmations, rewind. 480px, top-anchored.',
+  standard: 'A form with fields — project, branch, model edit, a skill. 620px.',
+  wide: 'A list to read or pick from — the catalog, the notification centre. 860px.',
+  tall: 'A two-pane configuration document — Settings. 960px, capped height.',
+  drawer: 'The same document, slid in from the right — the Theme studio. 620px.',
+  full: 'An object to look at — a file, an artifact, an image. Up to 1200px, 92dvh.',
+  palette: 'A search field over a list — the command palette. 560px, top-anchored.',
+};
 
 const FEEDBACK_TONES: readonly FeedbackTone[] = [
   'neutral',
@@ -196,25 +221,36 @@ export function UiGallery(): JSX.Element {
   const [chips, setChips] = useState<readonly GalleryChipItem[]>(INITIAL_CHIPS);
   const [activeTab, setActiveTab] = useState<GalleryTabId>('overview');
 
+  const [overlayRole, setOverlayRole] = useState<OverlayRole | null>(null);
+  const [overlayStatus, setOverlayStatus] = useState<string>('none');
+
+  // One paint per change: the handlers only move state, and this effect owns
+  // `applyTheme`. Calling it from a handler as well painted the same theme twice
+  // (once eagerly, once on the re-render) and let the two disagree whenever the
+  // state move was batched away.
   useEffect(() => {
     applyTheme(buildGalleryTheme(themeId, mode, density));
   }, [themeId, mode, density]);
 
   const handleThemeChange = (nextId: string): void => {
+    // A built-in theme carries its own mode, so choosing one moves both, the
+    // same way the Theme Studio does.
     const next = findBuiltin(nextId) ?? DEFAULT_THEME;
     setThemeId(next.id);
     setMode(next.mode);
-    applyTheme(buildGalleryTheme(next.id, next.mode, density));
   };
 
   const handleModeChange = (nextMode: ThemeMode): void => {
     setMode(nextMode);
-    applyTheme(buildGalleryTheme(themeId, nextMode, density));
   };
 
   const handleDensityChange = (nextDensity: ThemeDensity): void => {
     setDensity(nextDensity);
-    applyTheme(buildGalleryTheme(themeId, mode, nextDensity));
+  };
+
+  const handleCloseOverlay = (): void => {
+    if (overlayRole) setOverlayStatus(`closed (${overlayRole})`);
+    setOverlayRole(null);
   };
 
   const handleCloseConfirm = (): void => {
@@ -300,6 +336,17 @@ export function UiGallery(): JSX.Element {
                 onChange={(event) => handleDensityChange(event.currentTarget.value as ThemeDensity)}
               />
             </Inline>
+
+            <Text
+              as="span"
+              size="micro"
+              mono
+              tone="secondary"
+              testId="gallery-theme-summary"
+              class="uppercase tracking-widest"
+            >
+              {themeId} · {mode} · {density}
+            </Text>
           </Inline>
         </div>
       </header>
@@ -527,6 +574,29 @@ export function UiGallery(): JSX.Element {
                 </Field>
 
                 <Field
+                  label="Max output tokens"
+                  description="Row layout pairs a short control with its label."
+                  layout="row"
+                  testId="gallery-field-row"
+                >
+                  {({ id, describedBy, invalid }) => (
+                    <Input
+                      id={id}
+                      aria-describedby={describedBy}
+                      invalid={invalid}
+                      size="sm"
+                      type="number"
+                      defaultValue={4096}
+                      min={256}
+                      max={16384}
+                      step={256}
+                      class="w-[120px]"
+                      testId="gallery-input-row"
+                    />
+                  )}
+                </Field>
+
+                <Field
                   label="System instructions"
                   description="Resizable multiline textarea."
                   testId="gallery-field-textarea"
@@ -644,7 +714,7 @@ export function UiGallery(): JSX.Element {
               <SectionHeader
                 eyebrow="03 · Typography & Surfaces"
                 title="Type scale, tones, cards & setting rows"
-                description="All 11 Text sizes from micro to hero, all 8 readable Text tones, Card surface rungs, and SettingRow."
+                description="All 11 Text sizes from micro to hero, all 8 readable Text tones, the Stack/Inline spacing primitives, all six Card surfaces, and SettingRow."
                 actions={<Badge tone="neutral">Text · Card · SettingRow</Badge>}
               />
 
@@ -685,9 +755,42 @@ export function UiGallery(): JSX.Element {
 
               <Stack gap="3">
                 <Text as="h4" size="label" tone="secondary" weight="semibold">
+                  Stack & Inline
+                </Text>
+                <Card surface="inset" padding="4">
+                  <Stack gap="4" testId="gallery-stack-demo">
+                    <Stack gap="2">
+                      <Text size="tiny" tone="muted">
+                        Stack · gap 2 · column
+                      </Text>
+                      <Inline gap="2" wrap>
+                        <Badge tone="neutral">Stack</Badge>
+                        <Badge tone="neutral">Inline</Badge>
+                        <Badge tone="neutral">Card</Badge>
+                      </Inline>
+                    </Stack>
+                    <Stack gap="2">
+                      <Text size="tiny" tone="muted">
+                        Inline · gap 3 · align center · justify between
+                      </Text>
+                      <Inline gap="3" align="center" justify="between" wrap testId="gallery-inline-between">
+                        <Text size="small" tone="secondary">
+                          Left edge
+                        </Text>
+                        <Text size="small" tone="secondary">
+                          Right edge
+                        </Text>
+                      </Inline>
+                    </Stack>
+                  </Stack>
+                </Card>
+              </Stack>
+
+              <Stack gap="3">
+                <Text as="h4" size="label" tone="secondary" weight="semibold">
                   Card surface ladder
                 </Text>
-                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   {CARD_SURFACES.map((surface) => (
                     <Card key={surface} surface={surface} padding="4" testId={`gallery-card-${surface}`}>
                       <Stack gap="2">
@@ -821,11 +924,11 @@ export function UiGallery(): JSX.Element {
                 </Text>
                 <Inline gap="6" wrap align="center">
                   <Inline gap="1" align="center">
-                    <Keycap>Ctrl</Keycap>
+                    <Keycap testId="gallery-keycap-ctrl">Ctrl</Keycap>
                     <Text size="tiny" tone="muted">+</Text>
-                    <Keycap>Shift</Keycap>
+                    <Keycap testId="gallery-keycap-shift">Shift</Keycap>
                     <Text size="tiny" tone="muted">+</Text>
-                    <Keycap>L</Keycap>
+                    <Keycap testId="gallery-keycap-l">L</Keycap>
                   </Inline>
                   <Inline gap="3" align="center">
                     <Spinner size={14} label="Loading small" testId="gallery-spinner-sm" />
@@ -911,6 +1014,45 @@ export function UiGallery(): JSX.Element {
               </Stack>
             </Stack>
           </Card>
+
+          <Card as="section" surface="surface" padding="6" testId="gallery-section-overlays">
+            <Stack gap="6">
+              <SectionHeader
+                eyebrow="05 · Shells"
+                title="Overlay: one shell, seven measures"
+                description="The same three-band document for every dialog. The role names the measure and anchor; the portal, focus trap, Escape, backdrop close and focus restore belong to the shell, not the caller."
+                actions={<Badge tone="neutral">Overlay</Badge>}
+              />
+
+              <Stack gap="3">
+                <Text as="h4" size="label" tone="secondary" weight="semibold">
+                  Preview each role
+                </Text>
+                <Inline gap="3" wrap align="center">
+                  {OVERLAY_ROLES.map((role) => (
+                    <Button
+                      key={role}
+                      size="sm"
+                      variant="secondary"
+                      testId={`gallery-open-overlay-${role}`}
+                      onClick={() => setOverlayRole(role)}
+                    >
+                      {role}
+                    </Button>
+                  ))}
+                  <Text size="small" tone="muted" testId="gallery-overlay-status">
+                    Last overlay: {overlayStatus}
+                  </Text>
+                </Inline>
+              </Stack>
+
+              <Callout tone="info" title="What the shell owns" icon={<icons.SparkIcon size={15} />}>
+                Escape and the backdrop dismiss the surface, the close control is the shared
+                IconButton, and the footer note sits beside the actions instead of growing a
+                second heading line.
+              </Callout>
+            </Stack>
+          </Card>
         </Stack>
       </main>
 
@@ -934,6 +1076,31 @@ export function UiGallery(): JSX.Element {
           Dialog body rendered inside <Text as="code" mono size="small">ConfirmDialog</Text>.
         </Text>
       </ConfirmDialog>
+
+      <Overlay
+        open={overlayRole !== null}
+        role={overlayRole ?? 'standard'}
+        title={`Overlay · ${overlayRole ?? 'standard'}`}
+        description={OVERLAY_ROLE_NOTES[overlayRole ?? 'standard']}
+        footerNote="Escape, the backdrop, or the close button dismisses this surface."
+        onClose={handleCloseOverlay}
+        footer={
+          <Button size="sm" variant="secondary" testId="gallery-overlay-done" onClick={handleCloseOverlay}>
+            Done
+          </Button>
+        }
+      >
+        <Stack gap="3">
+          <Text size="small" tone="secondary">
+            The body is the only scroller. A role here is a measure and an anchor, never a
+            width, so two surfaces of the same kind cannot drift apart.
+          </Text>
+          <Inline gap="2" align="center">
+            <Badge tone="accent">{overlayRole ?? 'standard'}</Badge>
+            <Keycap>Esc</Keycap>
+          </Inline>
+        </Stack>
+      </Overlay>
     </div>
   );
 }

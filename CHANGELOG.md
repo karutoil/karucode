@@ -40,6 +40,19 @@ matters to an operator says which behaviour changed, not which number.
 
 ### Changed
 
+- **The frontend is unified onto `src/ui/`, code-split, and performance-hardened.**
+  Heavy and conditional surfaces (`AuthScreen`, `Onboarding`, `ControlPlane`,
+  `SettingsSheet`, `ThemeStudio`, `FileViewer`, `RewindDialog`, `NotificationCenter`,
+  `CommandPalette`, `GitManager`, `FileTabView`, `AgentsTab`, `PluginPanelView`)
+  now load on demand behind `Suspense` (`lazyNamed` + vendor `manualChunks`),
+  cutting the initial JS entry chunk from 1,051.84 kB to 469.64 kB (145.03 kB
+  gzip). All remaining UI surfaces and overlays migrated onto `src/ui/` and
+  `Overlay`/`ConfirmDialog` with zero `<Dialog>` product callers remaining, all
+  27 component CSS sheets now sit inside `layer(components)`, and hot-path
+  bottlenecks in `eventReducer`, `agentActivity`, `useVirtualWindow`,
+  `activeMention`, and `FileTree` (single shared context menu + virtualized
+  rows above 150 entries) were resolved.
+
 - **The `auto` approval mode is called "Approve All" in the UI.** The stored
   value, the config key, the env var and the API field stay `auto` — only the
   wording a person reads changed (the Settings select and its warning, the

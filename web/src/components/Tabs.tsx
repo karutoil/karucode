@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef } from 'preact/hooks';
 import type { JSX, TargetedKeyboardEvent } from 'preact';
+import { IconButton } from '../ui/Button';
 import { CloseIcon } from './icons';
 
 export interface TabItem<T extends string> {
@@ -130,6 +131,12 @@ export function Tabs<T extends string>({
     >
       {items.map((item) => {
         const selected = item.id === active;
+        // The tab itself stays a plain `<button>`: `Button`/`IconButton` own a
+        // fixed set of props, and a tab needs the roving `tabIndex`, `role="tab"`,
+        // `aria-selected` and `aria-controls` none of them accept. The strip's
+        // contract (one tab in the tab order, arrow keys move selection) is
+        // asserted in `Tabs.test.tsx`, so it is spelled out here rather than
+        // squeezed through a primitive that would drop it.
         const tab = (
           <button
             key={item.id}
@@ -163,15 +170,18 @@ export function Tabs<T extends string>({
         return (
           <div key={item.id} class="tab-slot" role="presentation">
             {tab}
-            <button
-              type="button"
+            {/* The close glyph is the shared `IconButton`; `.tab-close` keeps the
+                slot's own geometry hook. It is a sibling, never a child, of the
+                tab button: a button inside a button is invalid markup and the
+                inner click would activate the tab as well. */}
+            <IconButton
               class="tab-close"
-              aria-label={`Close ${item.label}`}
+              size="sm"
+              label={`Close ${item.label}`}
               title={`Close ${item.label}`}
+              icon={<CloseIcon size={11} />}
               onClick={() => onClose(item.id)}
-            >
-              <CloseIcon size={11} />
-            </button>
+            />
           </div>
         );
       })}

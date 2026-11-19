@@ -9,6 +9,7 @@ import { activeTheme, contrastRatio, mix, normalizeHex, rgbToHex } from '../them
 import * as terminalsState from '../state/terminals';
 import { TerminalSocket, type TerminalSocketStatus } from '../state/terminalSocket';
 import { RefreshIcon } from './icons';
+import { Button } from '../ui';
 
 /**
  * One terminal's xterm instance and its socket.
@@ -508,14 +509,17 @@ export function TerminalSurface({
           {terminal.cwd}
         </span>
         <div class="terminal-meta-actions">
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="sm"
             class="terminal-action"
-            onClick={() => void restart()}
+            icon={<RefreshIcon size={12} />}
             title="Kill the shell and start a new one in the same directory"
+            testId="terminal-restart"
+            onClick={() => void restart()}
           >
-            <RefreshIcon size={12} /> Restart
-          </button>
+            Restart
+          </Button>
         </div>
       </div>
 
@@ -525,16 +529,28 @@ export function TerminalSurface({
             The shell exited{exited >= 0 ? ` with code ${exited}` : ''}. The tab stays; reopen it
             to start a new shell in the same directory.
           </span>
-          <button type="button" class="button button-small" onClick={reconnect}>
-            <RefreshIcon size={13} /> Reconnect
-          </button>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<RefreshIcon size={13} />}
+            testId="terminal-reconnect"
+            onClick={reconnect}
+          >
+            Reconnect
+          </Button>
         </div>
       ) : status === 'failed' || status === 'closed' ? (
         <div class="terminal-exit" role="status">
           <span>{detail ?? toErrorMessage('The connection to the shell closed.')}</span>
-          <button type="button" class="button button-small" onClick={reconnect}>
-            <RefreshIcon size={13} /> Reconnect
-          </button>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<RefreshIcon size={13} />}
+            testId="terminal-reconnect"
+            onClick={reconnect}
+          >
+            Reconnect
+          </Button>
         </div>
       ) : null}
 

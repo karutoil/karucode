@@ -58,6 +58,16 @@ const CLASS_ROLES: Readonly<Record<string, OverlayRole>> = {
  * studio, the palette, the file viewer) keep doing so, which is exactly what
  * `Overlay bodyLayout="contents"` expresses — the children are laid out as direct
  * children of the surface, with no `.overlay-body` scroller wrapped around them.
+ *
+ * As of the notification-centre/artifact/settings migration, **no product surface
+ * imports this file any more**: `NotificationCenter`, `ArtifactCard`,
+ * `ModelEditDialog` and `ModelCatalogModal` were the last four and they call
+ * `Overlay` directly with a named role. What still reaches it is the compat
+ * export in `src/ui/index.ts` and the cases that pin the old props to their
+ * measures (`Overlay.test.tsx`, `ProjectRail.test.tsx`, `SessionsRail.test.tsx`).
+ * Deleting this file, its `src/ui` export and those three cases is the follow-up;
+ * it is kept here because the class→role table is the record of what each
+ * pre-`Overlay` dialog measured, and its deletion is a separate decision.
  */
 export function Dialog({
   open,

@@ -31,6 +31,7 @@ import {
   SearchIcon,
   SparkIcon,
 } from '../icons';
+import { Button, Callout, Checkbox, IconButton, Input, LinkButton, Select, Textarea } from '../../ui';
 import { batchPullsSessionSpec, pullSessionSpec } from './gitModel';
 import type { ConfirmRequest } from './GitConfirmDialog';
 
@@ -193,9 +194,9 @@ export function GitPullRequestsView({
         </p>
         {githubStatus.authenticated && !githubStatus.remote_slug ? (
           <div>
-            <button type="button" class="button button-primary" onClick={onOpenRemotes}>
+            <Button variant="primary" testId="git-prs-open-remotes" onClick={onOpenRemotes}>
               Connect or create GitHub remote
-            </button>
+            </Button>
           </div>
         ) : null}
       </div>
@@ -328,66 +329,73 @@ export function GitPullRequestsView({
       <aside class="gitm-side gitm-gh-side" aria-label="Pull requests list">
         <div class="gitm-filter-bar">
           <div class="gitm-filter-row">
-            <select
+            <Select
               class="gitm-select"
               aria-label="Pull request state"
               value={stateFilter}
+              testId="git-prs-state"
+              options={[
+                { value: 'open', label: 'Open' },
+                { value: 'closed', label: 'Closed' },
+                { value: 'merged', label: 'Merged' },
+                { value: 'all', label: 'All' },
+              ]}
               onChange={(event) => setStateFilter((event.target as HTMLSelectElement).value as PrStateFilter)}
-            >
-              <option value="open">Open</option>
-              <option value="closed">Closed</option>
-              <option value="merged">Merged</option>
-              <option value="all">All</option>
-            </select>
-            <button
-              type="button"
-              class="button button-small button-primary"
+            />
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<PlusIcon size={12} />}
+              testId="git-pr-new"
               onClick={() => setCreating((v) => !v)}
             >
-              <PlusIcon size={12} /> New PR
-            </button>
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Refresh pull requests"
+              New PR
+            </Button>
+            <IconButton
+              size="sm"
+              label="Refresh pull requests"
               title="Refresh pull requests"
+              testId="git-prs-refresh"
+              icon={<RefreshIcon size={13} class={loading ? 'spin' : undefined} />}
               disabled={loading}
               onClick={fetchPulls}
-            >
-              <RefreshIcon size={13} class={loading ? 'spin' : undefined} />
-            </button>
+            />
           </div>
           <div class="gitm-search-wrap">
             <SearchIcon size={13} />
-            <input
+            <Input
               type="search"
               class="gitm-input"
               placeholder="Filter PRs by title, #number, branch…"
               aria-label="Filter pull requests"
               value={search}
+              testId="git-prs-search"
               onInput={(event) => setSearch((event.target as HTMLInputElement).value)}
             />
           </div>
 
           {visible.length > 0 ? (
             <div class="gitm-batch-bar">
-              <button
-                type="button"
-                class="button button-small button-primary"
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<SparkIcon size={12} />}
+                testId="git-prs-session-combined"
                 disabled={working || busy}
                 onClick={() => void startCombinedSession()}
               >
-                <SparkIcon size={12} /> Session for all ({visible.length})
-              </button>
+                Session for all ({visible.length})
+              </Button>
               {visible.length > 1 ? (
-                <button
-                  type="button"
-                  class="button button-small"
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  testId="git-prs-session-separate"
                   disabled={working || busy}
                   onClick={() => void startSeparateSessions()}
                 >
                   1 per PR
-                </button>
+                </Button>
               ) : null}
             </div>
           ) : null}
@@ -395,9 +403,9 @@ export function GitPullRequestsView({
 
         <div class="gitm-side-scroll">
           {error ? (
-            <div class="inline-error gitm-action-error" role="alert">
-              <p>{error}</p>
-            </div>
+            <Callout tone="danger" class="gitm-action-error">
+              {error}
+            </Callout>
           ) : loading && pulls === null ? (
             <p class="gitm-note">Loading pull requests…</p>
           ) : visible.length === 0 ? (
@@ -410,8 +418,8 @@ export function GitPullRequestsView({
                 const launchedId = launchedSessions[pr.number];
                 return (
                   <li class={`gitm-row gitm-gh-row${active ? ' is-active' : ''}`} key={pr.number}>
-                    <button
-                      type="button"
+                    <LinkButton
+                      tone="muted"
                       class="gitm-row-main"
                       aria-pressed={active}
                       onClick={() => setSelectedNumber(active ? null : pr.number)}
@@ -440,30 +448,31 @@ export function GitPullRequestsView({
                           {relativeTime(Date.parse(pr.updatedAt))}
                         </span>
                       </span>
-                    </button>
+                    </LinkButton>
                     <div class="gitm-row-actions">
                       {launchedId ? (
-                        <button
-                          type="button"
-                          class="button button-small"
+                        <Button
+                          variant="secondary"
+                          size="sm"
                           title="Open launched session"
+                          testId={`git-pr-open-session-${pr.number}`}
                           onClick={() => {
                             void actions.openSessionInProject(projectId, launchedId);
                           }}
                         >
                           Open
-                        </button>
+                        </Button>
                       ) : (
-                        <button
-                          type="button"
+                        <IconButton
+                          size="sm"
                           class="gitm-act"
+                          label={`Start session for PR #${pr.number}`}
                           title={`Start karucode session for PR #${pr.number}`}
-                          aria-label={`Start session for PR #${pr.number}`}
+                          testId={`git-pr-start-session-${pr.number}`}
+                          icon={<SparkIcon size={13} />}
                           disabled={working || busy}
                           onClick={() => void startSingleSession(pr)}
-                        >
-                          <SparkIcon size={13} />
-                        </button>
+                        />
                       )}
                     </div>
                   </li>
@@ -480,75 +489,82 @@ export function GitPullRequestsView({
             <h3 class="gitm-card-title">Create pull request</h3>
             <div class="gitm-field">
               <label class="gitm-label">Title</label>
-              <input
+              <Input
                 type="text"
                 class="gitm-input"
                 placeholder="feat: describe your change"
                 value={newTitle}
                 disabled={working}
+                testId="git-pr-new-title"
                 onInput={(e) => setNewTitle((e.target as HTMLInputElement).value)}
               />
             </div>
             <div class="gitm-field-grid">
               <div class="gitm-field">
                 <label class="gitm-label">Base branch</label>
-                <select
+                <Select
                   class="gitm-select"
+                  aria-label="Base branch"
                   value={newBase}
                   disabled={working}
+                  testId="git-pr-new-base"
+                  options={[
+                    ...branches.map((b) => ({ value: b.name, label: b.name })),
+                    ...(branches.some((b) => b.name === newBase)
+                      ? []
+                      : [{ value: newBase, label: newBase }]),
+                  ]}
                   onChange={(e) => setNewBase((e.target as HTMLSelectElement).value)}
-                >
-                  {branches.map((b) => (
-                    <option key={b.name} value={b.name}>
-                      {b.name}
-                    </option>
-                  ))}
-                  {!branches.some((b) => b.name === newBase) ? (
-                    <option value={newBase}>{newBase}</option>
-                  ) : null}
-                </select>
+                />
               </div>
               <div class="gitm-field">
                 <label class="gitm-label">Head branch</label>
-                <input type="text" class="gitm-input" value={currentBranch ?? ''} disabled />
+                <Input
+                  type="text"
+                  class="gitm-input"
+                  aria-label="Head branch"
+                  value={currentBranch ?? ''}
+                  disabled
+                  testId="git-pr-new-head"
+                />
               </div>
             </div>
             <div class="gitm-field">
               <label class="gitm-label">Description</label>
-              <textarea
+              <Textarea
                 class="gitm-message"
                 rows={5}
                 placeholder="What changed and how was it verified?"
                 value={newBody}
                 disabled={working}
+                testId="git-pr-new-body"
                 onInput={(e) => setNewBody((e.target as HTMLTextAreaElement).value)}
               />
             </div>
-            <label class="gitm-check">
-              <input
-                type="checkbox"
-                checked={newDraft}
-                disabled={working}
-                onChange={(e) => setNewDraft((e.target as HTMLInputElement).checked)}
-              />
-              <span>Create as draft</span>
-            </label>
+            <Checkbox
+              class="gitm-check"
+              checked={newDraft}
+              disabled={working}
+              label="Create as draft"
+              onChange={(checked) => setNewDraft(checked)}
+            />
             <div class="gitm-setup-actions">
-              <button
-                type="button"
-                class="button"
+              <Button
+                variant="secondary"
+                testId="git-pr-new-cancel"
                 disabled={working}
                 onClick={() => setCreating(false)}
               >
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
                 type="submit"
-                class="button button-primary"
+                variant="primary"
+                testId="git-pr-new-submit"
                 disabled={working || newTitle.trim() === ''}
               >
                 Create pull request
-              </button>
+              </Button>
             </div>
           </form>
         ) : selectedNumber === null ? (
@@ -586,27 +602,31 @@ export function GitPullRequestsView({
                 </p>
               </div>
               <div class="gitm-detail-actions">
-                <button
-                  type="button"
-                  class="button button-small button-primary"
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<SparkIcon size={12} />}
+                  testId="git-pr-detail-session"
                   disabled={working || busy}
                   onClick={() => void startSingleSession(detail)}
                 >
-                  <SparkIcon size={12} /> Start session
-                </button>
-                <button
-                  type="button"
-                  class="button button-small"
+                  Start session
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  testId="git-pr-checkout"
                   disabled={working || busy}
                   onClick={() => void onCheckoutPull(detail.number)}
                 >
                   Checkout
-                </button>
+                </Button>
                 {detail.state === 'OPEN' ? (
                   <>
-                    <button
-                      type="button"
-                      class="button button-small"
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      testId="git-pr-merge"
                       disabled={working || busy}
                       onClick={() =>
                         onRequestConfirm({
@@ -628,10 +648,11 @@ export function GitPullRequestsView({
                       }
                     >
                       Merge
-                    </button>
-                    <button
-                      type="button"
-                      class="button button-small button-danger"
+                    </Button>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      testId="git-pr-close"
                       disabled={working || busy}
                       onClick={() =>
                         void setGitHubPullState(detail.number, 'close', projectId).then(() => {
@@ -641,12 +662,13 @@ export function GitPullRequestsView({
                       }
                     >
                       Close
-                    </button>
+                    </Button>
                   </>
                 ) : detail.state === 'CLOSED' ? (
-                  <button
-                    type="button"
-                    class="button button-small"
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    testId="git-pr-reopen"
                     disabled={working || busy}
                     onClick={() =>
                       void setGitHubPullState(detail.number, 'reopen', projectId).then(() => {
@@ -656,26 +678,30 @@ export function GitPullRequestsView({
                     }
                   >
                     Reopen
-                  </button>
+                  </Button>
                 ) : null}
               </div>
             </header>
 
             <div class="gitm-subtabs">
-              <button
-                type="button"
-                class={`button button-small${detailTab === 'overview' ? ' button-primary' : ''}`}
+              <Button
+                variant={detailTab === 'overview' ? 'primary' : 'secondary'}
+                size="sm"
+                aria-pressed={detailTab === 'overview'}
+                testId="git-pr-tab-overview"
                 onClick={() => setDetailTab('overview')}
               >
                 Overview
-              </button>
-              <button
-                type="button"
-                class={`button button-small${detailTab === 'diff' ? ' button-primary' : ''}`}
+              </Button>
+              <Button
+                variant={detailTab === 'diff' ? 'primary' : 'secondary'}
+                size="sm"
+                aria-pressed={detailTab === 'diff'}
+                testId="git-pr-tab-diff"
                 onClick={() => loadPullDiff(detail.number)}
               >
                 Files diff ({detail.changedFiles ?? 0})
-              </button>
+              </Button>
             </div>
 
             {detailTab === 'diff' ? (
@@ -734,23 +760,26 @@ export function GitPullRequestsView({
                 ) : null}
 
                 <form class="gitm-comment-form" onSubmit={(e) => void submitComment(e)}>
-                  <textarea
+                  <Textarea
                     class="gitm-message"
                     rows={3}
                     placeholder="Leave a comment on this pull request…"
                     aria-label="Pull request comment"
                     value={commentText}
                     disabled={working}
+                    testId="git-pr-comment-body"
                     onInput={(e) => setCommentText((e.target as HTMLTextAreaElement).value)}
                   />
                   <div>
-                    <button
+                    <Button
                       type="submit"
-                      class="button button-small button-primary"
+                      variant="primary"
+                      size="sm"
+                      testId="git-pr-comment-submit"
                       disabled={working || commentText.trim() === ''}
                     >
                       Comment
-                    </button>
+                    </Button>
                   </div>
                 </form>
               </div>

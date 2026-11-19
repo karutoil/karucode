@@ -70,9 +70,26 @@ export interface ButtonProps extends BaseUiProps, VariantProps<typeof buttonVari
   title?: string;
   buttonRef?: Ref<HTMLButtonElement>;
   'data-autofocus'?: boolean;
+  /** A status the stylesheet keys on, for a control whose active state is toned. */
+  'data-status'?: string;
   'aria-label'?: string;
   'aria-expanded'?: boolean;
   'aria-pressed'?: boolean;
+  /** The tone a caller's own stylesheet paints (`[data-tone]`, e.g. the context pill). */
+  'data-tone'?: string;
+  /**
+   * A non-`button` role, for the two places a `<button>` carries a widget role:
+   * a listbox row (`option`) and a radio inside a `radiogroup`.
+   */
+  role?: JSX.IntrinsicElements['button']['role'];
+  'aria-haspopup'?: JSX.IntrinsicElements['button']['aria-haspopup'];
+  'aria-controls'?: string;
+  /** The selected state of a `role="option"` row. */
+  'aria-selected'?: boolean;
+  /** The checked state of a `role="radio"` control. */
+  'aria-checked'?: boolean;
+  /** Roving-tab-stop position; a listbox keeps exactly one row at `0`. */
+  tabIndex?: number;
 }
 
 function SpinnerIcon(): JSX.Element {
@@ -116,9 +133,17 @@ export function Button({
   title,
   buttonRef,
   'data-autofocus': dataAutofocus,
+  'data-status': dataStatus,
   'aria-label': ariaLabel,
   'aria-expanded': ariaExpanded,
   'aria-pressed': ariaPressed,
+  'data-tone': dataTone,
+  role,
+  'aria-haspopup': ariaHasPopup,
+  'aria-controls': ariaControls,
+  'aria-selected': ariaSelected,
+  'aria-checked': ariaChecked,
+  tabIndex,
   testId,
   class: className,
   id,
@@ -135,11 +160,19 @@ export function Button({
       data-size={size}
       data-testid={testId}
       data-autofocus={dataAutofocus}
+      data-status={dataStatus}
+      data-tone={dataTone}
       disabled={isDisabled}
+      role={role}
+      tabIndex={tabIndex}
       aria-busy={loading ? 'true' : undefined}
       aria-label={ariaLabel}
       aria-expanded={ariaExpanded}
       aria-pressed={ariaPressed}
+      aria-haspopup={ariaHasPopup}
+      aria-controls={ariaControls}
+      aria-selected={ariaSelected}
+      aria-checked={ariaChecked}
       title={title}
       onClick={isDisabled ? undefined : onClick}
     >
@@ -162,6 +195,16 @@ export interface IconButtonProps
   title?: string;
   buttonRef?: Ref<HTMLButtonElement>;
   'aria-haspopup'?: JSX.IntrinsicElements['button']['aria-haspopup'];
+  'aria-controls'?: string;
+  'aria-keyshortcuts'?: string;
+  /**
+   * The rail's hover tooltip (`[data-tip]::after` in `rail.css`). An icon button
+   * has no text to show under a pointer, and the accessible name is `label`, so a
+   * migrated rail control keeps the tooltip it shipped with.
+   */
+  'data-tip'?: string;
+  /** The tone a caller's own stylesheet paints (`[data-tone]`, e.g. the context ring). */
+  'data-tone'?: string;
   'data-autofocus'?: boolean;
   onClick?: MouseEventHandler<HTMLButtonElement>;
 }
@@ -177,6 +220,10 @@ export function IconButton({
   title,
   buttonRef,
   'aria-haspopup': ariaHasPopup,
+  'aria-controls': ariaControls,
+  'aria-keyshortcuts': ariaKeyShortcuts,
+  'data-tip': dataTip,
+  'data-tone': dataTone,
   'data-autofocus': dataAutofocus,
   onClick,
   testId,
@@ -192,10 +239,14 @@ export function IconButton({
       data-size={size}
       data-testid={testId}
       data-autofocus={dataAutofocus}
+      data-tip={dataTip}
+      data-tone={dataTone}
       aria-label={label}
       aria-pressed={pressed}
       aria-expanded={expanded}
       aria-haspopup={ariaHasPopup}
+      aria-controls={ariaControls}
+      aria-keyshortcuts={ariaKeyShortcuts}
       disabled={disabled}
       title={title}
       onClick={disabled ? undefined : onClick}
@@ -211,6 +262,17 @@ export interface LinkButtonProps extends BaseUiProps, VariantProps<typeof linkBu
   title?: string;
   buttonRef?: Ref<HTMLButtonElement>;
   'aria-label'?: string;
+  /** A disclosure's state, for link-style toggles that open a panel. */
+  'aria-expanded'?: boolean;
+  'aria-controls'?: string;
+  /** The selected state of a link-style row that acts as a toggle. */
+  'aria-pressed'?: boolean;
+  /**
+   * Refused-but-still-focusable, for an action that explains itself through
+   * `title` instead of vanishing: a `disabled` element gets no pointer events,
+   * so its tooltip never shows.
+   */
+  'aria-disabled'?: boolean;
   onClick?: MouseEventHandler<HTMLButtonElement>;
   children?: ComponentChildren;
 }
@@ -222,6 +284,10 @@ export function LinkButton({
   title,
   buttonRef,
   'aria-label': ariaLabel,
+  'aria-expanded': ariaExpanded,
+  'aria-controls': ariaControls,
+  'aria-pressed': ariaPressed,
+  'aria-disabled': ariaDisabled,
   onClick,
   testId,
   class: className,
@@ -237,6 +303,10 @@ export function LinkButton({
       data-tone={tone}
       data-testid={testId}
       aria-label={ariaLabel}
+      aria-expanded={ariaExpanded}
+      aria-controls={ariaControls}
+      aria-pressed={ariaPressed}
+      aria-disabled={ariaDisabled}
       disabled={disabled}
       title={title}
       onClick={disabled ? undefined : onClick}

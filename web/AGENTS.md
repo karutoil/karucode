@@ -19,7 +19,7 @@ Always pass `testId` (`data-testid`) on interactive controls used in user workfl
 
 - `src/styles/tokens.css` is the **only** place raw colours, radii, spacing (`--space-*`), and font sizes (`--fs-*`) are defined.
 - `src/styles/tailwind.css` resets every default Tailwind scale (`--color-*: initial`, `--spacing-*: initial`, `--radius-*: initial`, `--text-*: initial`, `--font-*: initial`, `--shadow-*: initial`) and maps karucode tokens via `@theme inline`.
-- `src/styles/index.css` imports `tokens.css` and `tailwind.css` unlayered, then imports shared component sheets with `layer(components)` (`base.css` puts element resets in `@layer base`, which becomes `components.base` below utilities). Six component-owned sheets (`notifications.css`, `workbench-navigation.css`, and the four `control-*.css` files) are still unlayered and outrank utilities; restyle those with CSS classes until migrated.
+- `src/styles/index.css` imports `tokens.css` and `tailwind.css` unlayered, then imports every component sheet with `layer(components)` (`base.css` puts element resets in `@layer base`, which becomes `components.base` below utilities). No component module imports a stylesheet any more: a sheet that skips the entry lands outside every layer and outranks the utilities.
 
 Static checks fail CI on violations:
 
@@ -36,7 +36,8 @@ src/
   app/             App shell hooks & layout (WorkbenchLayout, GlobalOverlays,
                    useAppBoot, useGlobalKeybindings)
   features/        Decomposed feature modules:
-                     access/     composer/     rail/     settings/     transcript/
+                     access/     composer/     rail/     settings/     theme-studio/
+                     transcript/
   components/      Top-level feature views, git/, control-plane/, graduated shells
   state/           Signals store, eventReducer.ts, actions/ (barrel: actions.ts)
   api/             HTTP client, sharedStream.ts, endpoints/ (barrel: endpoints.ts),

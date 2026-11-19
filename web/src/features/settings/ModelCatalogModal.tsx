@@ -3,7 +3,7 @@ import { useEffect, useState } from 'preact/hooks';
 import type { CatalogModel, CatalogProviderSummary, ModelEntry, ProviderProfile } from '../../api/types';
 import { RefreshIcon } from '../../components/icons';
 import * as actions from '../../state/actions';
-import { Button, Callout, Chip, Dialog, Input, Skeleton, Text } from '../../ui';
+import { Button, Callout, Chip, Input, Overlay, Skeleton, Text } from '../../ui';
 import { catalogModelMeta } from './providerHelpers';
 import { Field } from './SharedControls';
 
@@ -120,12 +120,17 @@ export function CatalogPickerDialog({ profile, existingIds, onAdd, onClose }: Ca
   const addable = models.filter((model) => selected.includes(model.id) && !existingIds.includes(model.id)).length;
 
   return (
-    <Dialog
+    <Overlay
       open
       title={`models.dev: ${profile.name}`}
       onClose={onClose}
+      // A list to read or pick from: the `wide` measure. `.dialog-catalog` in
+      // `settings.css` keeps the height cap and the body, which scrolls itself
+      // (`.catalog-body`), so it is a direct child of the surface.
+      role="wide"
       class="dialog-catalog"
       labelId="catalog-title"
+      bodyLayout="contents"
     >
       <div class="catalog-body">
         {stage === 'providers' ? (
@@ -298,6 +303,6 @@ export function CatalogPickerDialog({ profile, existingIds, onAdd, onClose }: Ca
           </div>
         </footer>
       </div>
-    </Dialog>
+    </Overlay>
   );
 }

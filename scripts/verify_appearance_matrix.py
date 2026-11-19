@@ -73,6 +73,9 @@ drawer.querySelectorAll('*').forEach(el=>{
   const cs=getComputedStyle(el),r=el.getBoundingClientRect();
   if(cs.display==='none'||cs.visibility==='hidden'||Number(cs.opacity)===0||r.width<2||r.height<2)return;
   if(el.closest(':disabled,[aria-disabled=true]'))return;
+  // A folded `<details>` disclosure hides its children from the reader; measuring
+  // ink behind a closed summary would report contrast on text nobody is seeing.
+  if(el.closest('details:not([open])')&&!el.closest('summary'))return;
   const fg=parse(cs.color),bg=background(el);if(!fg||!bg)return;
   const value=Math.round(ratio(fg,bg)*100)/100;
   const row={text:text.slice(0,60),ratio:value,px:parseFloat(cs.fontSize),cls:String(el.className).slice(0,80)};
@@ -131,10 +134,11 @@ for(const [axis,value] of Object.entries(args)){
   control.value=String(value);
   control.dispatchEvent(new Event(control.type==='range'?'input':'change',{bubbles:true}));
 }
-await new Promise(r=>setTimeout(r,100));
+await new Promise(r=>setTimeout(r,250));
 // Custom-property inheritance and lazy transcript work settle at paint, not when
 // the button's onclick returns. Measure a settled frame, including under load.
 await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+await new Promise(r=>setTimeout(r,50));
 return (() => {%s})();
 """
 
@@ -288,7 +292,24 @@ def main() -> int:
         for start, target in (("ember", "light"), ("daybreak", "dark")):
             set_controls(session, 390, **{f"preset-{start}": ""})
             set_controls(session, 390, **{f"mode-{target}": ""})
-            result = session.evaluate("[...document.querySelectorAll('.theme-mini-action')].find(b=>b.textContent.trim()==='Reset colours').click(); await new Promise(r=>setTimeout(r,200)); await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))); return 1;")
+            # The Theme studio's own controls are `src/ui/` buttons now, so the
+            # reset row is found by its label inside the drawer rather than by the
+            # old `.theme-mini-action` link class alone (that class is still on the
+            # button, but naming it first would not notice a swap to a plain
+            # `LinkButton`).
+            result = session.evaluate(
+                """
+                const reset = Array.from(
+                  document.querySelectorAll('.theme-studio button, .theme-studio .theme-mini-action'),
+                ).find((node) => (node.textContent || '').replace(/\\s+/g, ' ').trim() === 'Reset colours');
+                if (!reset) return 'missing reset control';
+                reset.click();
+                await new Promise(r=>setTimeout(r,200));
+                await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+                return 'clicked';
+                """
+            )
+            check(f"reset-{start}-to-{target}: the reset control is on screen", result == "clicked", result)
             state = session.evaluate(DRAWER_STATE)
             audit(session, f"reset-{start}-to-{target}", state, contrast=True, capture=True)
 

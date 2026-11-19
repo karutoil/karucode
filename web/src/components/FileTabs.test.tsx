@@ -126,7 +126,10 @@ describe('file tabs in the workspace strip', () => {
     const panel = document.getElementById('workspace-panel-file:docs%2Fguide.md');
     expect(panel).not.toBeNull();
     expect(panel?.hidden).toBe(false);
-    expect(panel?.querySelector('.file-status-path')?.textContent).toBe('docs/guide.md');
+    // The viewer is its own chunk, fetched the first time a file tab is shown.
+    await waitFor(() =>
+      expect(panel?.querySelector('.file-status-path')?.textContent).toBe('docs/guide.md'),
+    );
     await waitFor(() =>
       expect(panel?.querySelector('.markdown h1')?.textContent).toBe('Guide'),
     );
@@ -230,7 +233,12 @@ describe('file tabs in the workspace strip', () => {
       expect(element).not.toBeNull();
       return element as HTMLElement;
     });
-    fireEvent.click(within(panel).getByRole('button', { name: /edit/i }));
+    // Edit stays disabled until the file has loaded, and the `Button` it renders
+    // from refuses a disabled click - the way a browser does. Wait for the
+    // document, then open the editor.
+    const edit = within(panel).getByRole('button', { name: /edit/i }) as HTMLButtonElement;
+    await waitFor(() => expect(edit.disabled).toBe(false));
+    fireEvent.click(edit);
     await waitFor(() => expect(panel.querySelector('textarea')).not.toBeNull());
     const editor = panel.querySelector('textarea') as HTMLTextAreaElement;
     fireEvent.input(editor, { target: { value: '# Guide\n\nunsaved' } });
@@ -258,7 +266,11 @@ describe('file tabs in the workspace strip', () => {
       store.fileViewerPath.value = 'docs/guide.md';
     });
     const dialog = await screen.findByRole('dialog');
-    fireEvent.click(await within(dialog).findByRole('button', { name: /edit/i }));
+    // The editor opens only once the file has loaded; `Button` refuses a click
+    // while it is disabled, so wait for that first.
+    const edit = await within(dialog).findByRole('button', { name: /edit/i });
+    await waitFor(() => expect((edit as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(edit);
     await waitFor(() => expect(dialog.querySelector('textarea')).not.toBeNull());
     const editor = dialog.querySelector('textarea') as HTMLTextAreaElement;
     fireEvent.input(editor, { target: { value: '# Edited' } });

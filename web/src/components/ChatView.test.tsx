@@ -433,12 +433,18 @@ describe('ChatView workspace tabs', () => {
     const panel = document.getElementById('workspace-panel-changes');
     expect(panel).not.toBeNull();
     expect(panel?.hidden).toBe(false);
+    // The manager travels as its own chunk and is fetched on this first visit:
+    // wait for it, because what the test is about (staying mounted afterwards)
+    // starts once it is there.
+    await waitFor(() => expect(panel?.querySelector('.gitm-page')).not.toBeNull());
     // The page variant is the full manager: header, commit box and diff region.
-    expect(panel?.querySelector('.gitm-page')).not.toBeNull();
     expect(panel?.querySelector('.gitm-kicker')?.textContent).toBe('Source control');
     expect(panel?.querySelector('.gitm-title')?.textContent).toBe('Working tree');
-    // A failed probe is reported with a retry, not an empty tree.
-    await waitFor(() => expect(panel?.querySelector('.inline-error')).not.toBeNull());
+    // A failed probe is reported with a retry, not an empty tree. The probe
+    // error is the shared `Callout` now, so the retry's test id is the hook.
+    await waitFor(() =>
+      expect(panel?.querySelector('[data-testid="git-probe-retry"]')).not.toBeNull(),
+    );
 
     fireEvent.click(tab(/^Conversation/));
     expect(document.getElementById('workspace-panel-changes')?.hidden).toBe(true);
@@ -970,6 +976,63 @@ describe('ChatView composer dock', () => {
     // see-through dock and the way back to the newest message.
     expect(panel().getAttribute('data-reading-history')).toBe('true');
     expect(jumpButton()).not.toBeNull();
+  });
+});
+
+describe('ChatView error states', () => {
+  beforeEach(() => {
+    resetAppState();
+    terminalState.resetTerminalState();
+    ResizeObserverStub.reset();
+    vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  });
+
+  afterEach(() => {
+    resetAppState();
+    terminalState.resetTerminalState();
+    ResizeObserverStub.reset();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * A failed run and a failed session read are different events with one shape:
+   * a kicker naming what failed, the server's message, and the one control that
+   * can act on it. They used to be two hand-copied banners, which is how the run
+   * banner's diagnostic line read "kind: …" with a lowercase label.
+   */
+  it('states a run failure, its kind and the one control that acts on it', () => {
+    renderChat();
+    act(() => {
+      store.chat.value = {
+        ...store.chat.value,
+        runError: { runId: 'r_x', message: 'provider returned 500', kind: 'provider' },
+      };
+    });
+
+    const panel = document.querySelector('.run-error-banner');
+    expect(panel?.getAttribute('role')).toBe('alert');
+    expect(panel?.querySelector('.run-error-kicker')?.textContent?.trim()).toBe('Run failed');
+    expect(panel?.querySelector('.run-error-message')?.textContent).toBe('provider returned 500');
+    expect(panel?.querySelector('.run-error-kind')?.textContent).toBe('Kind: provider');
+    expect(screen.getByRole('button', { name: 'Dismiss' })).not.toBeNull();
+  });
+
+  it('offers a retry when the session itself could not be read', () => {
+    store.chatError.value = 'the session could not be read';
+    renderChat();
+
+    const panel = document.querySelector('.run-error-banner');
+    expect(panel?.getAttribute('role')).toBe('alert');
+    expect(panel?.querySelector('.run-error-kicker')?.textContent?.trim()).toBe(
+      'Could not load this session',
+    );
+    expect(panel?.querySelector('.run-error-message')?.textContent).toBe(
+      'the session could not be read',
+    );
+    // Recovery is a control inside the panel, not a paragraph telling the reader
+    // to reload the page. "Try again" is the app's word for this action.
+    expect(within(panel as HTMLElement).getByRole('button', { name: /Try again/ })).not.toBeNull();
   });
 });
 

@@ -1014,3 +1014,162 @@ describe('applyEventToChat — state truthfulness', () => {
     expect(replayed.items.some((item) => item.kind === 'notice' && item.message === 'queued while reading')).toBe(true);
   });
 });
+
+describe('applyEventToChat — streaming hot paths', () => {
+  /** A live transcript with a user turn, a finished tool card, and a streaming answer on the tail. */
+  function streamingTranscript(): ChatState {
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(current, event(2, 'text_delta', { delta: 'first' }));
+    current = applyEventToChat(
+      current,
+      event(3, 'tool_call_started', { call_id: 'call_1', name: 'read_file', arguments: {} }),
+    );
+    current = applyEventToChat(
+      current,
+      event(4, 'tool_call_finished', { call_id: 'call_1', name: 'read_file', ok: true, output: 'x' }),
+    );
+    return applyEventToChat(current, event(5, 'text_delta', { delta: 'hello' }));
+  }
+
+  it('extends the streaming tail and leaves every earlier row identical', () => {
+    const before = streamingTranscript();
+    expect(before.items).toHaveLength(4);
+
+    const next = applyEventToChat(before, event(6, 'text_delta', { delta: ' world' }));
+
+    // Every row before the tail is the *same object*: a transcript is thousands
+    // of rows and a delta arrives per token, so re-mapping it per token made the
+    // renderer diff the whole conversation for one word.
+    expect(next.items).toHaveLength(before.items.length);
+    for (let i = 0; i < before.items.length - 1; i += 1) {
+      expect(next.items[i]).toBe(before.items[i]);
+    }
+    const tail = next.items[next.items.length - 1];
+    expect(tail).not.toBe(before.items[before.items.length - 1]);
+    expect(tail?.kind === 'message' ? tail.content : '').toBe('hello world');
+  });
+
+  it('extends the reasoning tail without copying the rest of the transcript', () => {
+    const before = streamingTranscript();
+    const next = applyEventToChat(before, event(6, 'reasoning_delta', { delta: 'thinking' }));
+
+    for (let i = 0; i < before.items.length - 1; i += 1) {
+      expect(next.items[i]).toBe(before.items[i]);
+    }
+    const tail = next.items[next.items.length - 1];
+    expect(tail?.kind === 'message' ? tail.reasoning : '').toBe('thinking');
+    // Reasoning stays on the same segment as the text it accompanies.
+    expect(tail?.kind === 'message' ? tail.content : '').toBe('hello');
+    expect(next.items).toHaveLength(before.items.length);
+  });
+
+  it('opens a new segment when the tail is no longer streaming', () => {
+    // The tail check is the whole lookup now, so the "tail is closed" case has to
+    // still start a fresh segment rather than append to a settled one.
+    let current = streamingTranscript();
+    current = applyEventToChat(current, event(6, 'notice', { level: 'info', message: 'a note' }));
+    const closed = current;
+    const next = applyEventToChat(closed, event(7, 'text_delta', { delta: 'later' }));
+
+    expect(next.items).toHaveLength(closed.items.length + 1);
+    const tail = next.items[next.items.length - 1];
+    expect(tail?.kind === 'message' ? tail.content : '').toBe('later');
+  });
+
+  it('appends command output to the one card that owns the call id', () => {
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'run it' }));
+    current = applyEventToChat(current, event(2, 'command_started', { call_id: 'c1', command: 'ls', cwd: '/w' }));
+    current = applyEventToChat(current, event(3, 'notice', { level: 'info', message: 'noise after the card' }));
+    const before = current;
+    const cardIndex = before.items.findIndex((item) => item.kind === 'command');
+
+    const next = applyEventToChat(current, event(4, 'command_output', { call_id: 'c1', chunk: 'a\n', stream: 'stdout' }));
+    const again = applyEventToChat(next, event(5, 'command_output', { call_id: 'c1', chunk: 'b\n', stream: 'stderr' }));
+
+    // The rows around the card are shared, even though the card is not the tail.
+    for (let i = 0; i < before.items.length; i += 1) {
+      if (i === cardIndex) continue;
+      expect(again.items[i]).toBe(before.items[i]);
+    }
+    const card = again.items[cardIndex];
+    expect(card?.kind === 'command' ? card.stdout : null).toBe('a\n');
+    expect(card?.kind === 'command' ? card.stderr : null).toBe('b\n');
+    expect(again.items).toHaveLength(before.items.length);
+  });
+
+  it('replaces a streaming answer that is not the last row, and only that row', () => {
+    // `text_replaced` arrives with the run's final normalised text; the answer is
+    // found by scanning back, which has to work after a notice landed behind it.
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(current, event(2, 'text_delta', { delta: 'partial' }));
+    current = applyEventToChat(current, event(3, 'notice', { level: 'info', message: 'a note' }));
+    const before = current;
+    const answerIndex = before.items.findIndex(
+      (item) => item.kind === 'message' && item.role === 'assistant',
+    );
+
+    const next = applyEventToChat(current, event(4, 'text_replaced', { content: 'final answer' }));
+
+    expect(next.items).toHaveLength(before.items.length);
+    for (let i = 0; i < before.items.length; i += 1) {
+      if (i === answerIndex) continue;
+      expect(next.items[i]).toBe(before.items[i]);
+    }
+    const answer = next.items[answerIndex];
+    expect(answer?.kind === 'message' ? answer.content : '').toBe('final answer');
+  });
+
+  it('finishes the tool card it was told about, not the newest one', () => {
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(current, event(2, 'tool_call_started', { call_id: 'a', name: 'read_file', arguments: {} }));
+    current = applyEventToChat(current, event(3, 'tool_call_started', { call_id: 'b', name: 'grep', arguments: {} }));
+    const before = current;
+
+    const next = applyEventToChat(
+      current,
+      event(4, 'tool_call_finished', { call_id: 'a', name: 'read_file', ok: true, output: 'contents' }),
+    );
+
+    const first = next.items.find((item) => item.kind === 'tool' && item.callId === 'a');
+    const second = next.items.find((item) => item.kind === 'tool' && item.callId === 'b');
+    expect(first?.kind === 'tool' ? first.output : '').toBe('contents');
+    expect(first?.kind === 'tool' ? first.status : '').toBe('ok');
+    // The other card keeps its identity: finishing one call must not copy it.
+    expect(second).toBe(before.items.find((item) => item.kind === 'tool' && item.callId === 'b'));
+  });
+
+  it('resolves the approval it was told about and shares every other row', () => {
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(current, event(2, 'tool_call_started', { call_id: 'a', name: 'write_file', arguments: {} }));
+    current = applyEventToChat(current, event(3, 'notice', { level: 'info', message: 'a note' }));
+    const approvalEvent = event(4, 'approval_requested', {
+      approval: {
+        id: 'ap_1',
+        kind: 'file_write',
+        title: 'Write?',
+        detail: 'write_file',
+        payload: {},
+        session_id: 's_ab12',
+        run_id: 'r_x',
+        agent_id: null,
+      },
+    });
+    current = applyEventToChat(current, approvalEvent);
+    const before = current;
+    const approvalIndex = before.items.findIndex((item) => item.kind === 'approval');
+
+    const next = applyEventToChat(
+      current,
+      event(5, 'approval_resolved', { approval_id: 'ap_1', decision: 'allow_once' }),
+    );
+
+    expect(next.items).toHaveLength(before.items.length);
+    for (let i = 0; i < before.items.length; i += 1) {
+      if (i === approvalIndex) continue;
+      expect(next.items[i]).toBe(before.items[i]);
+    }
+    const resolved = next.items[approvalIndex];
+    expect(resolved?.kind === 'approval' ? resolved.approval.status : '').toBe('resolved');
+    expect(resolved?.kind === 'approval' ? resolved.approval.decision : null).toBe('allow_once');
+  });
+});

@@ -1,6 +1,7 @@
 import type { JSX } from 'preact';
 import { useId, useState } from 'preact/hooks';
 import { AlertIcon, BranchIcon, GitIcon } from '../icons';
+import { Button, Checkbox, Input, Select } from '../../ui';
 import { branchNameProblem } from './gitModel';
 
 export interface GitInitViewProps {
@@ -86,7 +87,7 @@ export function GitInitView({ error, busy, onInit }: GitInitViewProps): JSX.Elem
               </label>
               <div class="gitm-input-icon">
                 <BranchIcon size={13} />
-                <input
+                <Input
                   id={branchId}
                   type="text"
                   class="gitm-input"
@@ -106,38 +107,34 @@ export function GitInitView({ error, busy, onInit }: GitInitViewProps): JSX.Elem
               <label class="gitm-label" for={templateId}>
                 .gitignore template
               </label>
-              <select
+              <Select
                 id={templateId}
                 class="gitm-select"
                 value={template}
                 disabled={busy}
+                options={GITIGNORE_OPTIONS.map((option) => ({
+                  value: option.id,
+                  label: option.label,
+                }))}
                 onChange={(event) => setTemplate((event.target as HTMLSelectElement).value)}
-              >
-                {GITIGNORE_OPTIONS.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+              />
             </div>
           </div>
 
-          <label class="gitm-check">
-            <input
-              type="checkbox"
-              checked={initialCommit}
-              disabled={busy}
-              onChange={(event) => setInitialCommit((event.target as HTMLInputElement).checked)}
-            />
-            <span>Create initial commit with existing files</span>
-          </label>
+          <Checkbox
+            class="gitm-check"
+            checked={initialCommit}
+            disabled={busy}
+            label="Create initial commit with existing files"
+            onChange={(checked) => setInitialCommit(checked)}
+          />
 
           {initialCommit ? (
             <div class="gitm-field">
               <label class="gitm-label" for={messageId}>
                 Initial commit message
               </label>
-              <input
+              <Input
                 id={messageId}
                 type="text"
                 class="gitm-input"
@@ -149,13 +146,14 @@ export function GitInitView({ error, busy, onInit }: GitInitViewProps): JSX.Elem
           ) : null}
 
           <div class="gitm-setup-actions">
-            <button
+            <Button
               type="submit"
-              class="button button-primary"
+              variant="primary"
+              testId="git-init-submit"
               disabled={busy || branchProblem !== null}
             >
               Initialize repository
-            </button>
+            </Button>
           </div>
         </form>
       </div>

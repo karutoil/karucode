@@ -1,6 +1,7 @@
 import type { JSX } from 'preact';
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import type { GitStatus } from '../../api/types';
+import { Button, Checkbox, Textarea } from '../../ui';
 import { canCommit } from './gitModel';
 
 export interface GitCommitBoxProps {
@@ -86,16 +87,12 @@ export function GitCommitBox({
       <label class="sr-only" for={messageId}>
         Commit message
       </label>
-      <textarea
+      <Textarea
         id={messageId}
-        ref={textRef}
+        textareaRef={textRef}
         class="gitm-message"
         rows={variant === 'page' ? 3 : 2}
-        placeholder={
-          branch
-            ? `Message (commit on ${branch})`
-            : 'Commit message'
-        }
+        placeholder={branch ? `Message (commit on ${branch})` : 'Commit message'}
         value={message}
         disabled={submitting}
         onInput={(event) => setMessage((event.target as HTMLTextAreaElement).value)}
@@ -107,21 +104,26 @@ export function GitCommitBox({
       />
 
       <div class="gitm-commit-row">
-        <label class="gitm-amend" title="Rewrite the previous commit instead of adding one">
-          <input
-            type="checkbox"
-            checked={amend}
-            onChange={(event) => setAmend((event.target as HTMLInputElement).checked)}
-          />
-          <span>Amend</span>
-        </label>
-        <button type="submit" class="gitm-commit-btn" disabled={disabled}>
+        <Checkbox
+          class="gitm-amend"
+          checked={amend}
+          label="Amend"
+          onChange={(checked) => setAmend(checked)}
+        />
+        <Button
+          type="submit"
+          variant="primary"
+          size="sm"
+          class="gitm-commit-btn"
+          testId="git-commit-submit"
+          disabled={disabled}
+        >
           {busy === null
             ? amend
               ? 'Amend commit'
               : 'Commit'
             : busy}
-        </button>
+        </Button>
       </div>
 
       <p class="gitm-commit-hint" role="status">

@@ -133,11 +133,12 @@
 }
 
 /* One consequence worth knowing before writing a component. `index.css` imports
- * every component sheet with `layer(components)`, so a utility *can* override an
- * existing `.class` rule — that is the whole point of the layer, and
- * `src/styles/layers.test.ts` fails a sheet that is imported without it. Six
- * sheets are still imported by the component that owns them
- * (`notifications.css`, `workbench-navigation.css`, the four `control-*.css`)
- * and are therefore unlayered: an unlayered rule beats any layer, so a utility
- * does nothing on those. Until they move, restyle them with a class rule, and
- * put `p-*`/`gap-*` in the markup only where the cascade reaches. */
+ * every component sheet with `layer(components)` — all of them, including the six
+ * that used to be imported by the component that owned them (`notifications.css`,
+ * `workbench-navigation.css`, the four `control-*.css`) — so a utility *can*
+ * override an existing `.class` rule, which is the whole point of the layer.
+ * `src/styles/layers.test.ts` fails a sheet that is imported without it, and now
+ * also fails a sheet in `src/styles/` that `index.css` never imports. Where a
+ * surface's own rule has to beat a utility, it needs a descendant (`.cp-chat
+ * .chat-inner`) plus `!important` - or, better, the utility should be dropped from
+ * the markup. */

@@ -12,6 +12,7 @@ import {
   SearchIcon,
   SettingsIcon,
 } from './icons';
+import { IconButton, Keycap } from '../ui';
 
 export interface WorkbenchTaskMenuProps {
   canCopy: boolean;
@@ -41,15 +42,18 @@ export function WorkbenchTaskMenu({
 
   return (
     <div class="workbench-task-menu">
-      <button
-        type="button"
+      <IconButton
+        size="md"
         class="head-btn head-icon"
-        aria-label="Task actions"
+        label="Task actions"
         title="Task actions"
-        {...menu.triggerProps}
-      >
-        <KebabIcon size={15} />
-      </button>
+        buttonRef={menu.triggerProps.ref}
+        aria-haspopup="menu"
+        expanded={menu.triggerProps['aria-expanded']}
+        icon={<KebabIcon size={15} />}
+        testId="workbench-task-menu"
+        onClick={menu.triggerProps.onClick}
+      />
       <Menu menu={menu} label="Task and workspace actions" class="workbench-task-menu-popover">
         <MenuItem
           menu={menu}
@@ -73,7 +77,7 @@ export function WorkbenchTaskMenu({
             onSelect: actions.togglePalette,
           }}
         >
-          <SearchIcon size={13} /> Commands <kbd>{modKey()} K</kbd>
+          <SearchIcon size={13} /> Commands <Keycap>{modKey()} K</Keycap>
         </MenuItem>
         <span class="workbench-task-menu-rule" role="separator" />
         <MenuItem

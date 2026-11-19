@@ -1,20 +1,19 @@
 import type { JSX } from 'preact';
+import { Suspense } from 'preact/compat';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { getGitStatus } from '../api/endpoints';
 import type { GitStatus } from '../api/types';
 import { useFocusTrap } from '../lib/dom';
 import { pluralise } from '../lib/format';
+import { lazyNamed } from '../lib/lazyView';
 import * as actions from '../state/actions';
 import type { InspectorTab } from '../state/store';
 import * as store from '../state/store';
 import * as workbench from '../state/workbench';
 import { TabPanel, Tabs, type TabItem } from './Tabs';
 import { WorkspaceTab } from './WorkspaceTab';
-import { GitManager } from './git/GitManager';
 import { changeCounts } from './git/gitModel';
 import { SessionInfoTab, sessionInfoTooltip } from './SessionInfoTab';
-import { AgentsTab } from './AgentsTab';
-import { PluginPanelView } from './PluginPanelView';
 import { PluginSlot } from './PluginSlot';
 import { uniqueHostedPanels } from './pluginPanels';
 import {
@@ -26,6 +25,42 @@ import {
   visibleTabs,
 } from './uiContributions';
 import { BranchIcon, CircleCheckIcon, CloseIcon, PanelIcon, pluginPanelIcon } from './icons';
+import { IconButton, Skeleton, Stack } from '../ui';
+
+// The three heavy result panels, split out of the entry chunk.
+//
+// `TabPanel` mounts a panel only while its tab is selected (see `Tabs.tsx`), so
+// these are already "mounted on first visit". What changes here is *when the
+// code arrives*: source control, the agents table and a plugin panel cost
+// nothing until the reader picks that tab, and `lazy` caches the module so every
+// later switch to it is synchronous.
+const GitManagerLazy = lazyNamed<{ variant?: 'page' | 'panel' }>(
+  () => import('./git/GitManager'),
+  'GitManager',
+);
+const AgentsTabLazy = lazyNamed(() => import('./AgentsTab'), 'AgentsTab');
+const PluginPanelViewLazy = lazyNamed<{ panel: store.PluginPanelTab }>(
+  () => import('./PluginPanelView'),
+  'PluginPanelView',
+);
+
+/**
+ * A lazy panel's chunk arrives after the tab is clicked. `fallback={null}` left
+ * the pane blank for that window, which reads as "this tab has nothing to show";
+ * a skeleton says the panel is coming. Same primitive the boot screen uses, so
+ * there is one placeholder in the product.
+ */
+function PanelFallback(): JSX.Element {
+  return (
+    // `aria-busy` + a name, the same contract `BootSkeleton` states, so a
+    // placeholder announces itself rather than reading as an empty pane.
+    <Stack gap="4" class="inspector-section" aria-busy="true" aria-label="Loading panel">
+      <Skeleton class="h-[18px] w-[120px]" />
+      <Skeleton class="h-[64px]" />
+      <Skeleton class="h-[64px]" />
+    </Stack>
+  );
+}
 
 /**
  * The hide target of a built-in inspector tab, or null for a plugin tab.
@@ -189,11 +224,10 @@ export function Inspector(): JSX.Element {
               * one of them: it lives in the session header, so it stays reachable
               * whether this panel is docked, popped out or closed. */}
             <PluginSlot slot={UI_SLOT_INSPECTOR_HEADER} />
-            <button
-              type="button"
+            <IconButton
+              size="md"
               class="icon-button inspector-quick"
-              onClick={actions.toggleInspector}
-              aria-label={isNarrow ? 'Close inspector' : popout ? 'Close results panel' : 'Collapse inspector'}
+              label={isNarrow ? 'Close inspector' : popout ? 'Close results panel' : 'Collapse inspector'}
               title={
                 isNarrow
                   ? 'Close the results sheet'
@@ -201,10 +235,11 @@ export function Inspector(): JSX.Element {
                     ? 'Close the results panel'
                     : 'Show or hide the results dock'
               }
+              icon={isNarrow || popout ? <CloseIcon /> : <PanelIcon />}
               data-autofocus={isNarrow && isSheetOpen && !contextOpen ? true : undefined}
-            >
-              {isNarrow || popout ? <CloseIcon /> : <PanelIcon />}
-            </button>
+              testId="inspector-quick"
+              onClick={actions.toggleInspector}
+            />
           </div>
         </div>
 
@@ -228,14 +263,18 @@ export function Inspector(): JSX.Element {
         </TabPanel>
         <TabPanel idPrefix="inspector" id="changes" active={active === 'changes'}>
           <div class="result-git">
-            <GitManager variant="page" />
+            <Suspense fallback={<PanelFallback />}>
+              <GitManagerLazy variant="page" />
+            </Suspense>
           </div>
         </TabPanel>
         <TabPanel idPrefix="inspector" id="session" active={active === 'session'}>
           <SessionInfoTab />
         </TabPanel>
         <TabPanel idPrefix="inspector" id="agents" active={active === 'agents'}>
-          <AgentsTab />
+          <Suspense fallback={<PanelFallback />}>
+            <AgentsTabLazy />
+          </Suspense>
         </TabPanel>
         {pluginTabs.map((panel) => (
           <TabPanel
@@ -244,7 +283,9 @@ export function Inspector(): JSX.Element {
             id={panel.hosted_id}
             active={active === panel.hosted_id}
           >
-            <PluginPanelView panel={panel} />
+            <Suspense fallback={<PanelFallback />}>
+              <PluginPanelViewLazy panel={panel} />
+            </Suspense>
           </TabPanel>
         ))}
 

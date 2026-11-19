@@ -16,7 +16,7 @@ import { renderMermaid } from '../lib/mermaid';
 import { hasSvgElement, prepareSvg, sanitizeSvg } from '../lib/svg';
 import * as store from '../state/store';
 import { activeTheme } from '../theme';
-import { Dialog } from './Dialog';
+import { Overlay } from './Overlay';
 import { useWorkspaceObjectUrl } from './FilePreview';
 import {
   AlertIcon,
@@ -767,12 +767,19 @@ export function ArtifactCard({ spec }: { spec: ArtifactSpec }): JSX.Element {
       >
         {announcement}
       </span>
-      <Dialog
+      {/* An object to look at: the `full` measure (`.dialog-artifact` in
+          `artifacts.css` keeps the width and the `dvh` cap), with the body laid
+          out as a direct child because `.artifact-expanded` is its own scroller.
+          Every control inside is a `Button`/raw `type="button"` that closes over
+          the card's stores, so nothing had to change to move off `Dialog`. */}
+      <Overlay
         open={expanded}
         title={title}
         description={describeArtifact(spec)}
         onClose={() => setExpanded(false)}
+        role="full"
         class="dialog-artifact"
+        bodyLayout="contents"
       >
         <div class="artifact-expanded">
           <ArtifactPreview
@@ -783,7 +790,7 @@ export function ArtifactCard({ spec }: { spec: ArtifactSpec }): JSX.Element {
             onShowSource={showSource}
           />
         </div>
-      </Dialog>
+      </Overlay>
     </div>
   );
 }

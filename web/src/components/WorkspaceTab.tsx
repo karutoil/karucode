@@ -294,7 +294,7 @@ export function WorkspaceTab(): JSX.Element {
 
   const copyPath = (): void => {
     void copyText(workspace).then((ok) => {
-      if (ok) store.pushToast('Workspace path copied', 'success', 2600);
+      if (ok) store.pushToast('Workspace path copied.', 'success', 2600);
       else store.pushToast('Could not copy the workspace path.', 'error');
     });
   };
@@ -334,7 +334,9 @@ export function WorkspaceTab(): JSX.Element {
       {state === 'loading' ? (
         <div class="tree-loading-skeleton" aria-busy="true" aria-label="Loading file tree">
           {[0, 1, 2, 3, 4].map((index) => (
-            <Skeleton class="skeleton-tree-row h-[24px]" key={index} />
+            // `.skeleton-tree-row` carries the row height, so the placeholder is
+            // sized in one place rather than in a class and a literal.
+            <Skeleton class="skeleton-tree-row" key={index} />
           ))}
         </div>
       ) : null}
@@ -346,7 +348,7 @@ export function WorkspaceTab(): JSX.Element {
           class="inline-error"
           actions={
             <Button variant="secondary" size="sm" onClick={() => setRefreshKey((key) => key + 1)}>
-              Retry
+              Try again
             </Button>
           }
         >

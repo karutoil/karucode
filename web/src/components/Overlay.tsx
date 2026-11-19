@@ -2,6 +2,7 @@ import type { ComponentChildren } from 'preact';
 import { useId, useRef } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import { useFocusTrap } from '../lib/dom';
+import { IconButton } from '../ui/Button';
 import { CloseIcon } from './icons';
 
 /**
@@ -92,8 +93,10 @@ export interface OverlayProps {
  * closes, and one scrim for the whole family (`.dialog-backdrop`, thinned in
  * light mode and owned by `overlays.css`).
  *
- * `Dialog.tsx` is the same contract under the old name and props, so the call
- * sites that predate this file keep working while they migrate onto `role`.
+ * `Dialog.tsx` is the same contract under the old name and props. It has no
+ * product caller left — the notification centre, the artifact card and the two
+ * models.dev surfaces were the last four — and survives for the compat export and
+ * the tests that pin the old class→measure table.
  */
 export function Overlay({
   open,
@@ -146,14 +149,21 @@ export function Overlay({
                 </p>
               ) : null}
             </div>
-            <button
-              type="button"
+            {/* One close button for every dialog, drawn by the shared
+                `IconButton`: it owns the target size, the transparent edge and
+                the hover fill. `.overlay-close` stays on the element because it
+                is the hook other surfaces and the browser verifiers look for
+                (`scripts/verify_modal_family.py`), and because a component sheet
+                that still wants to tint its own header keeps a class to key on.
+                The name stays "Close dialog": it says *what* it closes, which
+                matters when a toast or a sheet is on screen beside the modal. */}
+            <IconButton
               class="overlay-close"
+              label="Close dialog"
+              icon={<CloseIcon size={14} />}
+              testId="overlay-close"
               onClick={onClose}
-              aria-label="Close dialog"
-            >
-              <CloseIcon size={14} />
-            </button>
+            />
           </header>
         ) : (
           <>

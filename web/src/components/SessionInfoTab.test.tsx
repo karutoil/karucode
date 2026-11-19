@@ -220,6 +220,11 @@ describe('SessionInfoTab', () => {
     // the role are both "reviewer" here, so scope to the name element.
     const agentCard = container.querySelector('.si-agent');
     expect(agentCard?.querySelector('.si-agent-name')?.textContent).toBe('reviewer');
+    // The kicker and its count note are one sentence: without the explicit
+    // space, JSX's newline handling glued them into "Subagents1 total".
+    expect(
+      container.querySelector('.si-section[aria-label="Subagents"] .inspector-kicker')?.textContent,
+    ).toBe('Subagents 1 total');
     // The agent's own tokens (8k in + 0.9k out), its cache rate and its duration.
     const agentValues = [...(agentCard?.querySelectorAll('.si-agent-meta dd') ?? [])].map(
       (node) => node.textContent ?? '',

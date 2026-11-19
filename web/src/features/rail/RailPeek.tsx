@@ -7,6 +7,7 @@ import * as railPeek from '../../state/railPeek';
 import { loadFactsFor } from '../../state/sessionFacts';
 import * as store from '../../state/store';
 import { CloseIcon, FolderIcon, PanelIcon, PlusIcon } from '../../components/icons';
+import { Button, IconButton } from '../../ui';
 import { SessionList } from './SessionList';
 
 /**
@@ -109,52 +110,54 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
               </span>
             </h2>
             <div class="side-head-actions">
-              <button
-                type="button"
-                class="side-mini-btn"
-                aria-label="Pin the session list open"
+              <IconButton
+                size="md"
+                class="side-mini-btn w-[28px] h-[28px]"
+                label="Pin the session list open"
                 aria-keyshortcuts="Control+B Meta+B"
                 title={`Pin the session list open — ${modKey()} B`}
+                icon={<PanelIcon size={15} />}
+                testId="peek-pin"
                 onClick={() => {
                   railPeek.closePeek();
                   // The rail is collapsed by definition while peeking, so this
                   // toggle is what shows it for real.
                   actions.toggleRail();
                 }}
-              >
-                <PanelIcon size={15} />
-              </button>
-              <button
-                type="button"
-                class="side-mini-btn"
-                aria-label="Close the session preview"
+              />
+              <IconButton
+                size="md"
+                class="side-mini-btn w-[28px] h-[28px]"
+                label="Close the session preview"
                 title="Close (Esc)"
+                icon={<CloseIcon size={15} />}
+                testId="peek-close"
                 onClick={railPeek.closePeek}
-              >
-                <CloseIcon size={15} />
-              </button>
+              />
             </div>
           </div>
         </div>
 
         {isCurrent ? (
-          <button
-            type="button"
-            class="new-session"
+          <Button
+            variant="secondary"
+            class="new-session h-[31px] px-4 rounded-md bg-surface text-text-secondary border-line-strong"
             onClick={startDraft}
             aria-label={`New session (${modKey()} + N)`}
+            testId="peek-new-session"
           >
             <span class="new-left">
               <PlusIcon size={15} />{' '}
               {pluginText(store.pluginUi.value, UI_REPLACE_NEW_SESSION_LABEL, 'New session')}
             </span>
             <span class="shortcut">{modKey()} N</span>
-          </button>
+          </Button>
         ) : (
-          <button
-            type="button"
-            class="new-session"
+          <Button
+            variant="secondary"
+            class="new-session h-[31px] px-4 rounded-md bg-surface text-text-secondary border-line-strong"
             aria-label={`Open ${project?.name ?? 'this project'}`}
+            testId="peek-open-project"
             onClick={() => {
               railPeek.closePeek();
               void actions.switchProject(projectId);
@@ -163,7 +166,7 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
             <span class="new-left">
               <FolderIcon size={15} /> Open this project
             </span>
-          </button>
+          </Button>
         )}
 
         <nav class="session-nav" aria-label={`Sessions in ${project?.name ?? 'this project'}`}>
@@ -171,13 +174,12 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
             <div class="rail-empty" role="status">
               <p class="rail-empty-title">Could not read those sessions</p>
               <p class="rail-empty-body">{error}</p>
-              <button
-                type="button"
-                class="button"
+              <Button
+                testId="peek-retry"
                 onClick={() => void railPeek.loadPeekSessions(projectId, true)}
               >
                 Try again
-              </button>
+              </Button>
             </div>
           ) : (
             <SessionList

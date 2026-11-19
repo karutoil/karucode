@@ -5,6 +5,7 @@ import { getGitCommit, getGitDiff, getGitStashDetail } from '../../api/endpoints
 import type { GitCommitDetail, GitDiff, GitFile, GitStashDetail } from '../../api/types';
 import { relativeTime } from '../../lib/format';
 import { DiffView } from '../DiffView';
+import { Button, Callout, LinkButton } from '../../ui';
 import { AlertIcon, FileCodeIcon, MinusIcon, PlusIcon, UndoIcon } from '../icons';
 import {
   type GitSelection,
@@ -147,14 +148,17 @@ function DiffSkeleton({ label }: { label: string }): JSX.Element {
 
 function DiffError({ message, onRetry }: { message: string; onRetry: () => void }): JSX.Element {
   return (
-    <div class="inline-error" role="alert">
-      <p>
-        <AlertIcon size={13} /> {message}
-      </p>
-      <button type="button" class="button button-small" onClick={onRetry}>
-        Retry
-      </button>
-    </div>
+    <Callout
+      tone="danger"
+      icon={<AlertIcon size={13} />}
+      actions={
+        <Button variant="secondary" size="sm" testId="git-diff-retry" onClick={onRetry}>
+          Retry
+        </Button>
+      }
+    >
+      {message}
+    </Callout>
   );
 }
 
@@ -226,9 +230,9 @@ export function GitDiffPane({
               {commit.commit ? `${commit.commit.author} · ${relativeTime(commit.commit.timestamp * 1000)}` : 'commit'}
             </p>
           </div>
-          <button type="button" class="link-button" onClick={onClear}>
+          <LinkButton tone="muted" onClick={onClear}>
             Close
-          </button>
+          </LinkButton>
         </header>
         {commit.state === 'loading' ? (
           <DiffSkeleton label="Loading the commit" />
@@ -275,9 +279,9 @@ export function GitDiffPane({
             <h3 class="gitm-detail-title">{selection.ref}</h3>
             <p class="gitm-detail-sub">{selection.subject}</p>
           </div>
-          <button type="button" class="link-button" onClick={onClear}>
+          <LinkButton tone="muted" onClick={onClear}>
             Close
-          </button>
+          </LinkButton>
         </header>
         {stash.state === 'loading' ? (
           <DiffSkeleton label={`Loading ${selection.ref}`} />
@@ -337,69 +341,79 @@ export function GitDiffPane({
         </div>
         <div class="gitm-detail-actions">
           {onOpenFile ? (
-            <button
-              type="button"
-              class="button button-small"
-              onClick={() => onOpenFile(selection.path)}
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<FileCodeIcon size={13} />}
               title="Open file in workspace tab"
+              testId="git-diff-open-file"
+              onClick={() => onOpenFile(selection.path)}
             >
-              <FileCodeIcon size={13} /> Open file
-            </button>
+              Open file
+            </Button>
           ) : null}
           {conflicted && onResolveConflict ? (
             <>
-              <button
-                type="button"
-                class="button button-small"
+              <Button
+                variant="secondary"
+                size="sm"
+                testId="git-resolve-ours"
                 disabled={busy}
                 onClick={() => onResolveConflict(selection.path, 'ours')}
               >
                 Accept ours
-              </button>
-              <button
-                type="button"
-                class="button button-small"
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                testId="git-resolve-theirs"
                 disabled={busy}
                 onClick={() => onResolveConflict(selection.path, 'theirs')}
               >
                 Accept theirs
-              </button>
+              </Button>
             </>
           ) : null}
           {file ? (
             <>
               {staged ? (
-                <button
-                  type="button"
-                  class="button button-small"
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<MinusIcon size={13} />}
+                  testId="git-diff-unstage"
                   disabled={busy}
                   onClick={() => onUnstage([selection.path])}
                 >
-                  <MinusIcon size={13} /> Unstage
-                </button>
+                  Unstage
+                </Button>
               ) : (
-                <button
-                  type="button"
-                  class="button button-small"
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<PlusIcon size={13} />}
+                  testId="git-diff-stage"
                   disabled={busy}
                   onClick={() => onStage([selection.path])}
                 >
-                  <PlusIcon size={13} /> Stage
-                </button>
+                  Stage
+                </Button>
               )}
-              <button
-                type="button"
-                class="button button-small button-danger-ghost"
+              <Button
+                variant="danger-ghost"
+                size="sm"
+                icon={<UndoIcon size={13} />}
+                testId="git-diff-discard"
                 disabled={busy}
                 onClick={() => onDiscard(file, staged)}
               >
-                <UndoIcon size={13} /> Discard
-              </button>
+                Discard
+              </Button>
             </>
           ) : null}
-          <button type="button" class="link-button" onClick={onClear}>
+          <LinkButton tone="muted" onClick={onClear}>
             Close
-          </button>
+          </LinkButton>
         </div>
       </header>
 

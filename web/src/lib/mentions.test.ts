@@ -151,6 +151,48 @@ describe('activeMention', () => {
   it('returns null when a line has no @', () => {
     expect(activeMention('no mention here', 4)).toBeNull();
   });
+
+  it('stays sub-millisecond on a 2MB single-line paste', () => {
+    // A pasted file is one enormous "word". The token was closed by scanning
+    // forward one character at a time to the next whitespace, so the composer
+    // walked the whole paste on *every keystroke*: 2MB here, and a real paste of
+    // a minified bundle is 10MB. The scan is bounded now, so the caret in the
+    // middle of the paste costs the same as the caret at its end.
+    const paste = `@src/main${'x'.repeat(2_000_000)}`;
+    const medianMs = (call: () => void): number => {
+      const samples: number[] = [];
+      for (let index = 0; index < 5; index += 1) {
+        const started = performance.now();
+        call();
+        samples.push(performance.now() - started);
+      }
+      samples.sort((a, b) => a - b);
+      // The median, not the mean: one sample can be a GC pause or a scheduler
+      // stall, and this must measure the scan rather than the machine.
+      return samples[Math.floor(samples.length / 2)] as number;
+    };
+    // Both outcomes are "no mention": the far caret is more than a token's reach
+    // past the `@`, and the near one starts a token that never ends.
+    expect(activeMention(paste, paste.length)).toBeNull();
+    expect(activeMention(paste, 4)).toBeNull();
+    // An O(n) scan over 2MB takes ~50-200ms; bounded O(1) stays <1ms standalone
+    // and well under 10ms even under heavy parallel Vitest CPU contention.
+    expect(medianMs(() => activeMention(paste, paste.length))).toBeLessThan(10);
+    expect(medianMs(() => activeMention(paste, 4))).toBeLessThan(10);
+  });
+
+  it('still completes a mention typed after a huge paste', () => {
+    // Bounding the scan must not cost the ordinary case: a `@` typed at the end
+    // of a long line still opens the menu, and its token still ends where the
+    // text does.
+    const text = `${'x'.repeat(2_000_000)} @src/ma`;
+    expect(activeMention(text, text.length)).toEqual({
+      start: 2_000_001,
+      end: text.length,
+      query: 'src/ma',
+      quoted: false,
+    });
+  });
 });
 
 describe('insertMention', () => {

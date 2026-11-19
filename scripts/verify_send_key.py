@@ -53,6 +53,16 @@ ROOT = Path(__file__).resolve().parent.parent
 MOD_CTRL = 2
 MOD_SHIFT = 8
 
+# The Send button's accessible name spells the sending chord the way the platform
+# spells it: `sendChordLong` in `web/src/features/composer/helpers.ts` says
+# `Command + Enter` on an Apple platform and `Control + Enter` everywhere else.
+# Chromium reads `navigator.platform`, so the host this script runs on decides.
+SEND_LABEL_LONG = (
+    "Send message (Command + Enter)"
+    if sys.platform == "darwin"
+    else "Send message (Control + Enter)"
+)
+
 
 def free_port() -> int:
     with socket.socket() as sock:
@@ -477,7 +487,7 @@ def main() -> int:
         )
         check(
             "the Send button names the chord",
-            state["sendLabel"] == "Send message (Command or Control + Enter)",
+            state["sendLabel"] == SEND_LABEL_LONG,
             repr(state["sendLabel"]),
         )
 

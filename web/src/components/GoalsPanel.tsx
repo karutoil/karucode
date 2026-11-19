@@ -658,7 +658,20 @@ export function GoalsPanel({ data, refresh }: PluginPanelRenderProps): JSX.Eleme
       </Inline>
 
       {parsed.error ? (
-        <Callout tone="danger" role="alert" icon={<AlertIcon />} class="goals-note goals-note-bad">
+        <Callout
+          tone="danger"
+          role="alert"
+          icon={<AlertIcon />}
+          class="goals-note goals-note-bad"
+          // The plugin could not read its own state; reading again is the only
+          // recovery, so it is a control here rather than a header refresh the
+          // reader has to find.
+          actions={
+            <Button variant="secondary" size="sm" onClick={refresh}>
+              Try again
+            </Button>
+          }
+        >
           {parsed.error}
         </Callout>
       ) : null}

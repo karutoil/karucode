@@ -187,3 +187,50 @@ Remaining and deliberate:
 - **Terminal, git diff, todo and goals are still outside the automated browser
   matrix**; they are measured by hand in both modes in this pass (0 failures in
   the inspector and git panels) but not gated.
+
+---
+
+## 6. Unification and performance pass (after `f8d241d`)
+
+`f8d241d` introduced the typed UI library, the token-only Tailwind mapping and
+the cascade-layer contract. The pass that followed finished the three migrations
+that commit left open and paid down the per-frame costs the transcript had been
+carrying. No new colours, roles or themes were added: this is adoption and speed,
+and the numbers below are from `npm run build` and the measurements quoted in the
+source comments.
+
+| Item | Before | After |
+| --- | --- | --- |
+| Overlays | four product surfaces still rendered the raw `<Dialog>` shell | every overlay is an `Overlay` (its `role` names the measure) or a `ConfirmDialog`; `<Dialog>` has **no product caller left** and survives as the compatibility export plus the tests that pin its old class→measure table |
+| Cascade layers | six sheets were imported by the component that owned them, so their rules sat outside every layer and a utility did nothing there | `styles/index.css` imports all **27** component sheets with `layer(components)`; `OWNED_BY_A_COMPONENT` in `styles/layers.test.ts` is the empty exception list a reviewer would have to add to before that changes back |
+| Entry chunk | **1,051.84 kB** (329.83 kB gzip) — one file for the whole app | **469.64 kB** (145.04 kB gzip): `AuthScreen`, `Onboarding`, `ControlPlane`, the six `GlobalOverlays` (`SettingsSheet`, `ThemeStudio`, `FileViewer`, `RewindDialog`, `NotificationCenter`, `CommandPalette`), `GitManager`, `FileTabView`, `AgentsTab` and `PluginPanelView` each travel as their own chunk through `web/src/lib/lazyView.ts` (`lazyNamed` + `Suspense`), and `web/vite.config.ts` splits `vendor-preact`, `vendor-markdown` and `vendor-highlight` |
+
+Two details that make the split safe rather than merely smaller: the overlays are
+mounted only while their signal says they are open (none of them owns a global
+keybinding or a background read — those live in `app/useGlobalKeybindings.ts`),
+and the inspector's lazily loaded tabs show a `Skeleton` instead of a blank pane
+while the chunk arrives. `ToastRegion` stays eager and outside every boundary,
+because it is how a crash is reported.
+
+Per-frame work, by what each path allocates or reads:
+
+| Path | Was | Now |
+| --- | --- | --- |
+| File tree (`FileTree.tsx`) | a `useMenu()` controller, an open flag and a pointer snapshot per `treeitem`; every row mounted | one `useMenu()` for the whole tree — rows are presentational and report which node was pressed — and above **150** visible rows the tree mounts a vertical window (8 rows of overscan, spacer rows keeping the scrollbar honest) |
+| Streamed token (`state/eventReducer.ts`) | searched the transcript for the newest streaming message, then re-mapped every item to replace one | `streamingTail` reads the tail, `updateItemAt` swaps one pointer, `findLastIndex` scans backwards without the `[...items].reverse()` copy |
+| Composer status line (`agentActivity`, `state/selectors.ts`) | `[...items].reverse().find(...)` — two full transcript copies per lookup, re-read on every frame | one backwards pass that counts pending approvals and finds the newest active row in the same loop |
+| Transcript window (`features/transcript/useVirtualWindow.ts`) | `getComputedStyle` on every mounted row (~200) on every commit to read the bottom margin | one sample row, cached against the layout it was read in (`data-density` on `<html>` plus the viewport's box) |
+| `@` completion (`activeMention`, `lib/mentions.ts`) | scanned forward to the next whitespace — tens of megabytes per keystroke after pasting a one-line file | bounded at `MENTION_TOKEN_LIMIT` (512) characters; a token that has not ended by then opens no menu |
+
+Deliberately not claimed:
+
+- **The 500 kB warning `npm run build` prints is not the workspace.** It is
+  `elk` (1,513 kB) and `mermaid.core` (640 kB), both reached only through the
+  diagram renderer's own dynamic imports, plus `TerminalSurface` (343 kB), which
+  is loaded on first terminal use.
+- **Windowing the file tree changes what is in the DOM**, so a browser check that
+  asserts on a row far down an expanded tree has to scroll to it first. Below 150
+  rows nothing changed.
+- **`Dialog.tsx` is dead product code kept on purpose.** Deleting it is a
+  separate decision: the compat export in `web/src/ui/index.ts` and the pinned
+  tests both reference it.
