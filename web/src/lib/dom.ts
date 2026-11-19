@@ -315,19 +315,15 @@ export function useFocusTrap(
         if (!keepsFocus) {
           const landmark = lastResortFocusTarget(container);
           if (landmark) {
-            const hadTabIndex = landmark.hasAttribute('tabindex');
-            if (!hadTabIndex) landmark.tabIndex = -1;
+            // `tabindex="-1"` is left in place rather than removed afterwards.
+            // In Blink, removing it while the element is focused hands focus back
+            // to `body` - on the next task, on a timer, on a frame, every way
+            // (measured); only keeping it keeps the focus. And on a landmark it is
+            // exactly the right state: programmatically focusable, out of the Tab
+            // order. `main#chat-main` already carries it, so this adds nothing
+            // there and only gives the same property to a landmark that lacked it.
+            if (!landmark.hasAttribute('tabindex')) landmark.tabIndex = -1;
             landmark.focus({ preventScroll: true });
-            // `tabindex="-1"` was ours, not the landmark's: leaving it behind is a
-            // permanent edit to the shell made from a transient surface. Removing
-            // it in the same task as `focus()` hands focus back to `body` in Blink
-            // (the element stops being focusable), so the shell's own attribute is
-            // put back on the next task, once the focus has settled.
-            if (!hadTabIndex) {
-              const restore = (): void => landmark.removeAttribute('tabindex');
-              if (typeof queueMicrotask === 'function') queueMicrotask(restore);
-              else window.setTimeout(restore, 0);
-            }
           }
         }
       }

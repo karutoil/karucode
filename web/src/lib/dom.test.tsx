@@ -534,10 +534,11 @@ describe('useFocusTrap: nesting and focus restoration', () => {
     unmount();
     expect(document.activeElement).not.toBe(document.body);
     expect(document.activeElement).toBe(main);
-    // Focusable by programmatic focus only: the attribute is the trap's, and it
-    // is handed back on the next task (removing it in the same task as
-    // `focus()` drops focus in Blink), so the landmark is left as it was found.
-    await waitFor(() => expect(main.hasAttribute('tabindex')).toBe(false));
+    // Focusable by programmatic focus only. The attribute stays: in Blink,
+    // removing it while the landmark is focused hands focus back to `body`, and
+    // `tabindex="-1"` on a landmark is the state we want anyway - focusable by
+    // script, out of the Tab order.
+    expect(main.getAttribute('tabindex')).toBe('-1');
   });
 
   it('leaves a landmark’s own tabindex alone', async () => {
