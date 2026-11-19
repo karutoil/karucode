@@ -536,6 +536,11 @@ def wait_for_port(port: int, timeout: float = 30.0) -> None:
     raise SystemExit(f"geckodriver never listened on port {port}")
 
 
+def describe_offset(value: object) -> str:
+    """A measurement that may never have happened, said so out loud."""
+    return "not measured" if value is None else px(value)
+
+
 def px(value: float) -> str:
     return f"{value:g}px"
 
@@ -726,14 +731,16 @@ def main() -> int:
             f"tbody found={(metrics.get('table') or {}).get('fixtureTbody')}) "
             f"th position={ (metrics.get('table') or {}).get('thPosition') } "
             f"after scrollTop={sticky.get('scrolled')}: th top {sticky.get('thTop')} "
-            f"vs wrap top {sticky.get('wrapTop')} (offset {px(sticky.get('stuckOffsetPx') or 0)}), "
+            f"vs wrap top {sticky.get('wrapTop')} "
+            f"(offset {describe_offset(sticky.get('stuckOffsetPx'))}), "
             f"border-bottom {sticky.get('borderBottom')}"
         )
         check(
             "the sticky header stays pinned to the wrap in Gecko",
             ((metrics.get("table") or {}).get("thPosition") in ("sticky", "-webkit-sticky"))
-            and abs(int(sticky.get("stuckOffsetPx") if sticky.get("stuckOffsetPx") is not None else 99)) <= 1,
-            f"offset {px(sticky.get('stuckOffsetPx') or 0)} "
+            and sticky.get("stuckOffsetPx") is not None
+            and abs(int(sticky["stuckOffsetPx"])) <= 1,
+            f"offset {describe_offset(sticky.get('stuckOffsetPx'))} "
             f"after scrolling {px(sticky.get('scrolled') or 0)}",
         )
 
@@ -754,8 +761,14 @@ def main() -> int:
                     break
             # Only a row counts as a measured ring: a scrollport has no ring to
             # judge, and recording it would pass the check on the wrong element.
+            # A walk that lands on neither is a miss, not a pass.
             if found and found.get("rowTop") is not None:
                 measured_rings.append(found)
+            else:
+                note(
+                    f"focus ring: the Tab walk from {starter} landed on "
+                    f"{found.get('focused') if found else 'nothing'} - not a row"
+                )
         for found in measured_rings:
             note(
                 f"focus ring on {found.get('focused')} (focus-visible={found.get('focusVisible')}): "
@@ -783,10 +796,14 @@ def main() -> int:
         if browser is not None:
             if args.screenshot is not None:
                 # Take it before the session dies: the fixture is only reachable
-                # while the driver is alive.
-                args.screenshot.write_bytes(b"")
-                size = browser.screenshot(args.screenshot)
-                print(f"  screenshot: {args.screenshot} ({size} bytes)", flush=True)
+                # while the driver is alive. A failed capture must not leave an
+                # empty file behind, nor replace whatever brought us here.
+                try:
+                    size = browser.screenshot(args.screenshot)
+                except Exception as error:  # noqa: BLE001 - a diagnostic, not a result
+                    note(f"screenshot failed: {error}")
+                else:
+                    print(f"  screenshot: {args.screenshot} ({size} bytes)", flush=True)
             browser.quit()
         server.shutdown()
         # Stop only the driver this run started, by its own process handle: a

@@ -60,6 +60,8 @@ const MAX_CACHED = 4;
 const MAX_CACHED_CHARS = 4 * 1024 * 1024;
 
 const cache = new Map<string, PreparedSvg>();
+/** What each cached entry was charged against the byte budget. */
+const sizes = new Map<string, number>();
 let cachedChars = 0;
 
 /**
@@ -85,13 +87,17 @@ export function prepareSvg(source: string): PreparedSvg {
   const size = source.length + html.length;
   if (size > MAX_CACHED_CHARS) return prepared;
   cache.set(source, prepared);
+  sizes.set(source, size);
   cachedChars += size;
   while (cache.size > MAX_CACHED || cachedChars > MAX_CACHED_CHARS) {
     const oldest = cache.keys().next();
     if (oldest.done) break;
-    const entry = cache.get(oldest.value);
     cache.delete(oldest.value);
-    cachedChars -= oldest.value.length + (entry?.html.length ?? 0);
+    // Subtract what this entry was charged, not what a fresh measurement of a
+    // possibly-already-gone entry would say: a running total that drifts is a
+    // budget that stops meaning anything.
+    cachedChars -= sizes.get(oldest.value) ?? 0;
+    sizes.delete(oldest.value);
   }
   return prepared;
 }
@@ -99,5 +105,6 @@ export function prepareSvg(source: string): PreparedSvg {
 /** Drop everything prepared. Used by the tests, which must not leak state. */
 export function resetSvgCache(): void {
   cache.clear();
+  sizes.clear();
   cachedChars = 0;
 }
