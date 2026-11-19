@@ -1029,8 +1029,8 @@ like the Access tab's key management. `Stop` cancels a running job.
 | `Ctrl/Cmd+K` | command palette |
 | `Ctrl/Cmd+N` | new conversation (a draft until its first message) |
 | `Ctrl/Cmd+\` | collapse/restore the task rail; collapsed desktop keeps project peeking |
-| `Ctrl/Cmd+Shift+X` | open/close Workbench Context (Now / Usage / Access), outside the control plane |
-| `Ctrl/Cmd+Shift+L` | open or close the Theme studio |
+| `Ctrl/Cmd+Shift+X` | open/close Workbench Context (Now / Usage / Access), outside the control plane, and not from inside a text field |
+| `Ctrl/Cmd+Shift+L` | open or close the Theme studio (not from inside a text field) |
 | `/` | focus the session search |
 | `Enter` / `Ctrl/Cmd+Enter` | send (or queue) the draft - which of the two sends is the **Composer send key** setting; the other starts a new line, and `Shift+Enter` always does |
 | `Up`/`Down` | move through the `@`-mention suggestions |
@@ -1046,8 +1046,11 @@ Firefox reader who presses it also gets a new window.
 Inside a text field the shell takes only its own modifier: `⌘` on Apple
 platforms, `Ctrl` elsewhere. So `⌘K` opens the palette from the composer,
 while a bare `Ctrl+K` on macOS stays kill-to-end-of-line and never reaches a
-command. `Mod+N` is the exception: it starts a new conversation, so it never
-fires from a field on any platform.
+command. Three chords are the exception and never fire while the caret is in a
+field on any platform: `Mod+N` (a new conversation), `Mod+Shift+L` (Theme
+studio) and `Mod+Shift+X` (Context drawer), all of which are text chords in the
+engines karucode runs in. `Mod+Shift+X` is also left alone when the control
+plane owns that drawer, so the keystroke is not swallowed for nothing.
 
 ## Mobile
 
