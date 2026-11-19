@@ -93,6 +93,9 @@ jobs:
           GOBY_PR: ${{ github.event.pull_request.number || inputs.pr }}
           GOBY_HEAD: ${{ github.event.pull_request.head.sha || inputs.head }}
           GOBY_BASE: ${{ github.event.pull_request.base.sha || inputs.base }}
+          # A review per push while this is being evaluated. The image default is 1: a later
+          # push reuses the first review and the post-merge cleaner takes over.
+          GOBY_MAX_ROUNDS: "0"
           GOBY_VERIFY: advisory
           # Rust probes compile a workspace, not a snippet: the defaults (90s per probe, 300s
           # for the pass) are sized for a five-line script.
@@ -105,6 +108,6 @@ jobs:
             -e GOBY_REPO -e GOBY_PR -e GOBY_HEAD -e GOBY_BASE \
             -e GITHUB_TOKEN -e OPENAI_API_KEY \
             -e GOBY_PROVIDER -e GOBY_UPSTREAM -e GOBY_MODEL \
-            -e GOBY_VERIFY -e GOBY_GATE \
+            -e GOBY_VERIFY -e GOBY_GATE -e GOBY_MAX_ROUNDS \
             -e GOBY_PROBE_TIMEOUT_S -e GOBY_VERIFY_BUDGET_S -e GOBY_MAX_PROBES \
             goby-review
