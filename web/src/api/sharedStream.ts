@@ -264,7 +264,11 @@ export function startSharedEventStream(options: EventStreamOptions): EventStream
       onStatus: (next, detail) => {
         state = next;
         options.onStatus?.(next, detail);
-        post({ kind: 'status', from: id, state: next, detail });
+        // A tab that has handed the election on is not the one to ask: its
+        // `idle` describes a stream it deliberately stopped, and relaying it
+        // would drop every follower's badge out of "Live" until the real
+        // leader's next heartbeat repairs it.
+        if (leader !== null) post({ kind: 'status', from: id, state: next, detail });
       },
       onOpen: () => {
         options.onOpen?.();
@@ -311,8 +315,12 @@ export function startSharedEventStream(options: EventStreamOptions): EventStream
    */
   const yieldLeadership = (to: string): void => {
     post({ kind: 'closing', from: id });
-    leader?.stop();
+    // Detach first: `stop()` reports `idle` synchronously, and relaying that
+    // would tell every follower the retiring tab's stream had died. A tab that
+    // has announced `closing` posts nothing more.
+    const retiring = leader;
     leader = null;
+    retiring?.stop();
     heartbeatTimer = clear(heartbeatTimer);
     role = 'follower';
     leaderId = to;
@@ -325,8 +333,11 @@ export function startSharedEventStream(options: EventStreamOptions): EventStream
   const onPageHide = (): void => {
     if (stopped || leader === null) return;
     post({ kind: 'closing', from: id });
-    leader.stop();
+    // Same as `yieldLeadership`: detach before stopping, so the `idle` this
+    // reports is ours alone and is not relayed to the followers.
+    const leaving = leader;
     leader = null;
+    leaving.stop();
     role = 'idle';
     leaderId = null;
     dropElectionTimers();

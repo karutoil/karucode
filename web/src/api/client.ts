@@ -234,9 +234,13 @@ function responseError(
  * The manual link below is what `any` does: the first abort wins and carries its
  * own reason, so a caller cancellation stays an `AbortError`.
  */
-function linkSignals(signals: AbortSignal[]): AbortSignal {
+function linkSignals(signals: AbortSignal[]): { signal: AbortSignal; release: () => void } {
   const anyFn = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
-  if (typeof anyFn === 'function') return anyFn.call(AbortSignal, signals);
+  if (typeof anyFn === 'function') {
+    // `AbortSignal.any` detaches its own listeners once it aborts, and the
+    // composite is garbage once the request is over.
+    return { signal: anyFn.call(AbortSignal, signals), release: () => undefined };
+  }
 
   const controller = new AbortController();
   const links = new Map<AbortSignal, () => void>();
@@ -255,13 +259,16 @@ function linkSignals(signals: AbortSignal[]): AbortSignal {
     // An input that is already aborted must not be waited on.
     if (signal.aborted) {
       fire(signal);
-      return controller.signal;
+      return { signal: controller.signal, release: detach };
     }
     const handler = (): void => fire(signal);
     links.set(signal, handler);
     signal.addEventListener('abort', handler, { once: true });
   }
-  return controller.signal;
+  // A request that completes normally never fires `abort`, so without this the
+  // caller's signal keeps a listener for the life of the page - one per request,
+  // on a signal the app reuses. The caller releases when the request settles.
+  return { signal: controller.signal, release: detach };
 }
 
 /** Fetch with the bearer token, the CSRF header and the request deadline. */
@@ -277,7 +284,8 @@ async function fetchResponse(path: string, options: PerformOptions): Promise<Res
   // would keep `chatLoading` true and the skeleton up with no way out. The
   // caller's own signal still wins, so an explicit abort stays an AbortError.
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-  const signal = options.signal ? linkSignals([options.signal, timeout]) : timeout;
+  const linked = options.signal ? linkSignals([options.signal, timeout]) : null;
+  const signal = linked ? linked.signal : timeout;
   try {
     return await fetchImpl(path, {
       method,
@@ -305,6 +313,10 @@ async function fetchResponse(path: string, options: PerformOptions): Promise<Res
       0,
       'network',
     );
+  } finally {
+    // The request is over either way; the caller's signal must not keep this
+    // request's listeners (or this closure) alive until the next abort.
+    linked?.release();
   }
 }
 

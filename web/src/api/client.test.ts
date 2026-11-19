@@ -109,6 +109,30 @@ describe('a browser without AbortSignal.any', () => {
     restoreAny = null;
   });
 
+  it('does not leave a listener behind on the caller\'s signal', async () => {
+    // A request that completes normally never fires `abort`, so the manual link
+    // held one listener per request on a signal the app reuses for its life.
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, 'addEventListener');
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+
+    await apiRequest('/api/health', {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      signal: controller.signal,
+    });
+
+    const added = add.mock.calls.filter(([type]) => type === 'abort').length;
+    const removed = remove.mock.calls.filter(([type]) => type === 'abort').length;
+    expect(added).toBe(1);
+    expect(removed).toBe(added);
+  });
+
   it('still sends the request and returns its body', async () => {
     const fetchImpl = vi.fn(
       async () =>
