@@ -46,6 +46,7 @@ export function ControlPlane(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
+  const [mobileTab, setMobileTab] = useState<'overview' | 'sessions'>('overview');
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
   const [draft, setDraft] = useState('');
@@ -356,7 +357,29 @@ export function ControlPlane(): JSX.Element {
     controlPlaneOpen.value = false;
   };
 
-  return <div class={`control-plane cp${selected ? ' detail-open' : ''}`}>
+  return <div class={`control-plane cp${selected ? ' detail-open' : ''}`} data-mobile-tab={mobileTab}>
+    {store.narrowViewport.value && !selected ? (
+      <div class="cp-mobile-tabs" role="tablist" aria-label="Control plane view">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mobileTab === 'overview'}
+          class={`cp-mobile-tab${mobileTab === 'overview' ? ' is-active' : ''}`}
+          onClick={() => setMobileTab('overview')}
+        >
+          Overview
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mobileTab === 'sessions'}
+          class={`cp-mobile-tab${mobileTab === 'sessions' ? ' is-active' : ''}`}
+          onClick={() => setMobileTab('sessions')}
+        >
+          Sessions ({sessions.length})
+        </button>
+      </div>
+    ) : null}
     {/* `tabIndex={-1}` + the mount effect: opening the plane used to leave focus
         in the app's project rail, so the next nine tabs walked the rail behind
         this screen before reaching it. Focusing the region itself puts the

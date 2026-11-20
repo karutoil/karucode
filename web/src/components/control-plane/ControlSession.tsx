@@ -1,4 +1,5 @@
 import type { JSX } from 'preact';
+import { useState } from 'preact/hooks';
 import type { AgentSummary, ControlChatSummary, Project, SessionSummary } from '../../api/types';
 import { isAgentLive } from '../../api/types';
 import * as actions from '../../state/actions';
@@ -13,6 +14,7 @@ import {
   ChevronDownIcon,
   ChevronLeftIcon,
   ExternalIcon,
+  PanelIcon,
   SparkIcon,
 } from '../icons';
 import { chatTitle, controlStarter, sessionStatus } from './controlModel';
@@ -326,6 +328,7 @@ export function ControlSession({
     ? null
     : projects.find((item) => item.id === chosen?.project_id) ?? null;
   const status = chosen ? sessionStatus(chosen) : null;
+  const [showDetails, setShowDetails] = useState(false);
   return <section class="cp-session" aria-label="Open session">
     <header class="main-head cp-session-head">
       <IconButton
@@ -365,12 +368,21 @@ export function ControlSession({
               aria-label="Open in project"
               onClick={onOpenInProject}
             >Open in project</Button>}
+        <IconButton
+          size="sm"
+          class="head-btn head-icon cp-inspector-toggle"
+          label={showDetails ? 'Hide details' : 'Show details'}
+          title={showDetails ? 'Hide details' : 'Show details'}
+          icon={<PanelIcon size={14} />}
+          expanded={showDetails}
+          onClick={() => setShowDetails(!showDetails)}
+        />
       </div>
     </header>
 
     {opening && !chosen ? <div class="cp-loading"><Spinner size={14} />Opening session…</div> : null}
     {ready
-      ? <div class="cp-session-body">
+      ? <div class="cp-session-body" data-inspector-open={showDetails ? 'true' : 'false'}>
           <div class="cp-chat"><ChatView
             mode="control-plane"
             emptyContent={control ? <ControlChatIntro projects={projects} onStart={(project) => actions.fillComposer(controlStarter(project))} /> : undefined}

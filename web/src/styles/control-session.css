@@ -199,6 +199,9 @@
     border-top: 0;
     border-left: 1px solid var(--line);
   }
+  .cp-inspector-toggle {
+    display: none !important;
+  }
 }
 
 /* Stacked: what is happening now comes before the session's static facts. A chat
@@ -253,6 +256,18 @@
     height: auto;
     flex: 1 1 auto;
     min-height: 0;
+  }
+
+  /* On mobile, the inspector is toggled via the details button; when closed,
+   * the conversation owns 100% of the pane and the composer is anchored to
+   * the bottom of the screen. */
+  .cp-session-body:not([data-inspector-open='true']) .cp-inspector {
+    display: none;
+  }
+  .cp-session-body[data-inspector-open='true'] .cp-inspector {
+    display: flex;
+    flex: 0 0 auto;
+    max-height: min(48dvh, 400px);
   }
 }
 

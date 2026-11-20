@@ -654,6 +654,7 @@
   justify-content: space-between;
   gap: var(--space-4);
   min-height: 44px;
+  padding-inline: var(--space-6);
 }
 
 .rail-sheet-title {
@@ -701,6 +702,19 @@
     width: 44px;
     height: 44px;
     opacity: 1;
+  }
+
+  .session-row {
+    min-height: 44px;
+  }
+
+  .project-switcher-item {
+    min-height: 44px;
+  }
+
+  .side-search {
+    min-height: 44px;
+    height: auto;
   }
 
   /* The tile's kebab keeps its corner but has to hang further out of a 42px

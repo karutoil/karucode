@@ -1123,7 +1123,7 @@ describe('SessionsRail project switcher (phones)', () => {
     // sheet; the sheet has to be able to close itself now.
     const close = vi.spyOn(actions, 'closeSheets').mockImplementation(() => undefined);
     render(<SessionsRail />);
-    fireEvent.click(screen.getByRole('button', { name: 'Close sessions panel' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close sessions' }));
     expect(close).toHaveBeenCalledTimes(1);
     close.mockRestore();
   });

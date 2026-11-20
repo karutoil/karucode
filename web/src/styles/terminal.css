@@ -455,3 +455,11 @@
     height: 44px;
   }
 }
+
+@media (max-width: 640px), (pointer: coarse) {
+  /* iOS auto-zooms any focused field with font-size < 16px. The terminal's hidden
+   * textarea is where input is typed, so it must be at least 16px. */
+  .terminal-host .xterm-helper-textarea {
+    font-size: var(--fs-title) !important;
+  }
+}

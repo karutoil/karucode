@@ -2205,8 +2205,8 @@
 .diff-text {
   flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
+  text-overflow: clip;
   white-space: pre;
 }
 
@@ -2842,6 +2842,21 @@
     display: none;
   }
 
+  .quick-prompts {
+    gap: var(--space-5);
+  }
+
+  .quick-prompt {
+    font-size: var(--fs-small);
+    line-height: 1.45;
+  }
+
+  .quick-prompt-icon,
+  .quick-prompt > svg:last-child {
+    align-self: flex-start;
+    margin-top: var(--space-1);
+  }
+
   /* Cards used to indent by 35px to line up under the (now gone) avatar body.
    * With the avatar column gone they line up flush with the text instead. */
   .transcript > :is(.tool-card, .command-card, .approval-card, .diff-preview, .notice, .run-error) {
@@ -3054,14 +3069,27 @@
     border-color: var(--line);
   }
 
-  /* Call-level rewind was `display: none` with a `:hover`/`:focus-within` reveal.
-   * Neither can fire on a touch screen - `:hover` never latches, and a
-   * `display: none` child cannot take focus - so rewinding one tool call simply
-   * did not exist on a phone. Always present there instead. */
+  .msg-top > .rewind-button span {
+    display: none;
+  }
+
+  /* Call-level rewind stays hidden when collapsed to avoid stealing header width.
+   * It is revealed when the tool card/row is expanded. */
   .rewind-tool {
+    display: none;
+  }
+
+  .tool-card[data-open='true'] .rewind-tool,
+  .tool-row[data-open='true'] .rewind-tool,
+  .command-card[data-open='true'] .rewind-tool,
+  .command-row[data-open='true'] .rewind-tool {
     display: inline-flex;
     opacity: 1;
     background: var(--surface-raised);
+  }
+
+  .rewind-tool span {
+    display: none;
   }
 }
 

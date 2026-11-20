@@ -786,6 +786,23 @@
   .chat-main.is-workbench .breadcrumb {
     display: block;
     flex: 1 1 auto;
+    min-width: 6ch;
+  }
+
+  /* The phone row is navigation, identity, views and one overflow button.
+   * `!important` is load-bearing: the primitives carry Tailwind `inline-flex`/
+   * `inline-grid` (utilities layer), which beats any `display` in this sheet. */
+  .chat-main.is-workbench .main-head .head-btn.branch-chip,
+  .chat-main.is-workbench .main-head .head-btn.notifications-head,
+  .chat-main.is-workbench .main-head .head-btn.context-header-btn,
+  .chat-main.is-workbench .main-head .head-btn.files-head-btn,
+  .chat-main.is-workbench .main-head .head-btn.command-head-btn {
+    display: none !important;
+  }
+
+  .chat-main.is-workbench .main-head > .workspace-tabs {
+    flex: 0 1 auto;
+    min-width: 0;
   }
 
   .chat-main.is-workbench .main-title {
@@ -843,11 +860,12 @@
    *    actually applied.
    */
   .chat-main.is-workbench .main-head > .breadcrumb {
-    flex: 1 1 0;
+    flex: 1 1 auto;
+    min-width: 6ch;
   }
 
   .chat-main.is-workbench .main-head > .workspace-tabs {
-    flex: 1 1 auto;
+    flex: 0 1 auto;
     min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;

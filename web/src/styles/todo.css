@@ -339,3 +339,14 @@
   font-size: var(--fs-tiny);
   line-height: 1.6;
 }
+
+@media (max-width: 460px) {
+  .todo-item-head {
+    flex-wrap: wrap;
+    align-items: center;
+    row-gap: var(--space-1);
+  }
+  .todo-title {
+    flex: 1 1 100%;
+  }
+}

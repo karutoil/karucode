@@ -7,7 +7,9 @@ import * as workbench from '../state/workbench';
 import { controlPlaneOpen } from '../state/controlPlane';
 import { modKey } from '../lib/platform';
 import {
+  BellIcon,
   CopyIcon,
+  FolderIcon,
   KebabIcon,
   SearchIcon,
   SettingsIcon,
@@ -36,6 +38,8 @@ export function WorkbenchTaskMenu({
 }: WorkbenchTaskMenuProps): JSX.Element {
   const menu = useMenu();
   const session = store.currentSessionId.value;
+  const narrow = store.narrowViewport.value;
+  const unread = store.unreadTotal.value;
 
   // A new conversation invalidates whatever the menu was about.
   useEffect(() => menu.close(), [session]);
@@ -50,11 +54,40 @@ export function WorkbenchTaskMenu({
         buttonRef={menu.triggerProps.ref}
         aria-haspopup="menu"
         expanded={menu.triggerProps['aria-expanded']}
-        icon={<KebabIcon size={15} />}
+        icon={
+          <>
+            <KebabIcon size={15} />
+            {narrow && unread > 0 ? (
+              <span class="head-badge" aria-hidden="true">
+                {unread > 99 ? '99+' : unread}
+              </span>
+            ) : null}
+          </>
+        }
         testId="workbench-task-menu"
         onClick={menu.triggerProps.onClick}
       />
       <Menu menu={menu} label="Task and workspace actions" class="workbench-task-menu-popover">
+        {narrow ? (
+          <MenuItem
+            menu={menu}
+            action={{
+              label: unread > 0 ? `Notifications (${unread})` : 'Notifications',
+              icon: <BellIcon size={13} />,
+              onSelect: actions.toggleNotificationCenter,
+            }}
+          />
+        ) : null}
+        {narrow && !controlPlane ? (
+          <MenuItem
+            menu={menu}
+            action={{
+              label: 'Files',
+              icon: <FolderIcon size={13} />,
+              onSelect: actions.toggleInspector,
+            }}
+          />
+        ) : null}
         <MenuItem
           menu={menu}
           action={{ label: 'Copy conversation', icon: <CopyIcon size={13} />, disabled: !canCopy, onSelect: onCopy }}

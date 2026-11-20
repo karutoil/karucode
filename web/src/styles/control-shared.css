@@ -147,21 +147,66 @@
  * plane is full-window while still rendering two columns next to a rail that is
  * not there (SH-01). One tier, one answer. */
 @media (max-width: 1023px) {
-  /* Overview: a dashboard, so the page itself may scroll. The rail keeps a
-     bounded height, or the dashboard the reader came for starts after the whole
-     session list. `.session-nav` scrolls inside it (`layout.css`). */
-  .control-plane.cp:not(.detail-open) { display: block; overflow: auto; }
-  .control-plane.cp:not(.detail-open) .cp-browser { max-height: 45dvh; }
+  .control-plane.cp {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .cp-mobile-tabs {
+    display: flex;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-6);
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    flex: 0 0 auto;
+  }
+
+  .cp-mobile-tab {
+    flex: 1 1 0;
+    min-height: 38px;
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted);
+    font-size: var(--fs-small);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 150ms ease;
+  }
+
+  .cp-mobile-tab.is-active {
+    background: var(--surface-raised);
+    color: var(--text);
+    border-color: var(--line-strong);
+    font-weight: 600;
+  }
+
+  /* When on mobile without session selected, toggle between overview and sessions */
+  .control-plane.cp:not(.detail-open)[data-mobile-tab='overview'] .cp-browser {
+    display: none;
+  }
+  .control-plane.cp:not(.detail-open)[data-mobile-tab='sessions'] .cp-pane {
+    display: none;
+  }
+  .control-plane.cp:not(.detail-open) .cp-browser {
+    flex: 1 1 auto;
+    width: 100%;
+    max-height: none;
+    border-right: 0;
+  }
+  .control-plane.cp:not(.detail-open) .cp-pane {
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 0;
+    overflow-y: auto;
+  }
 
   /* An open chat: the transcript owns the scroll, and there is exactly one
-   * scroller.
-   *
-   * `display: block` here used to take `.cp-pane`, `.cp-session`,
-   * `.cp-session-body` and `.cp-chat` out of flex flow, so all of them became
-   * content-height and `.cp-chat .chat-main { height: 100% }` (control-session)
-   * resolved against an auto height - the percentage computes to `auto`, so
-   * `.chat-scroll` stopped being a scroller and the plane's own page scroll
-   * landed on the oldest message. */
+   * scroller. */
   .control-plane.cp.detail-open {
     display: flex;
     flex-direction: column;

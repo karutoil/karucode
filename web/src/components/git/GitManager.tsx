@@ -103,11 +103,19 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
   // A manager that was hidden while the agent worked re-reads the tree when it
   // comes back, instead of showing what it last saw.
   const wasActive = useRef(active);
+  const mainRef = useRef<HTMLElement>(null);
   useEffect(() => {
     if (wasActive.current === active) return;
     wasActive.current = active;
     if (active) repo.refresh();
   }, [active, repo.refresh]);
+
+  useEffect(() => {
+    if (!selection || typeof window === 'undefined') return;
+    if (window.matchMedia('(max-width: 900px)').matches) {
+      mainRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    }
+  }, [selection]);
 
   const status = repo.status;
   const files = status?.files ?? [];
@@ -777,7 +785,7 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
                   {historyBlock}
                 </div>
               </aside>
-              <section class="gitm-main" aria-label="Diff">
+              <section class="gitm-main" ref={mainRef} aria-label="Diff">
                 <GitDiffPane
                   key="diff-pane"
                   variant="page"

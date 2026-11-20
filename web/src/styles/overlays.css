@@ -1453,6 +1453,23 @@ body
     padding: var(--space-2) var(--space-5);
   }
 
+  .palette-mobile-cancel {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 var(--space-3);
+    min-height: 44px;
+    color: var(--muted);
+    font-size: var(--fs-small);
+    background: none;
+    border: 0;
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+  .palette-mobile-cancel:hover {
+    color: var(--text);
+  }
+
   .palette-item {
     min-height: 44px;
   }
@@ -1551,6 +1568,7 @@ body
   display: flex;
   flex-direction: column;
   gap: var(--space-7);
+  padding: 0 var(--space-7) var(--space-4);
   /* `.dialog` is `max-height: calc(100dvh - 48px)` with `overflow: hidden`, and
    * on a phone it is the whole `100dvh`. This body is the tallest thing in the
    * app's dialogs: a quote, the count, three mode cards, a note field and a file
@@ -1567,6 +1585,8 @@ body
  * the content (mirrors `.dialog-model-edit > .dialog-actions`). */
 .dialog-rewind > .dialog-actions {
   flex: 0 0 auto;
+  padding: var(--space-4) var(--space-7) calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--line);
 }
 
 /* The message being recalled to, quoted so there is no doubt which turn it is. */

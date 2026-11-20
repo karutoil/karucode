@@ -51,6 +51,13 @@
   gap: var(--space-4);
 }
 
+@media (max-width: 1023px) {
+  .side-head.cp-head {
+    min-height: calc(var(--header-h) + env(safe-area-inset-top, 0px));
+    padding-top: calc(env(safe-area-inset-top, 0px) + var(--space-4));
+  }
+}
+
 
 
 /* -------------------------------------------------------------- filter chips */

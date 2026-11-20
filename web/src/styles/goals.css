@@ -501,8 +501,9 @@
   font-size: var(--fs-tiny);
 }
 
-/* Goal pills carry the goal's state and are the panel's navigation; an 18px
- * pill is not a thumb target (A11Y-02/LS-12). */
 @media (pointer: coarse) {
-  .goals-pill { min-height: 44px; }
+  .goals-details summary {
+    min-height: 44px;
+    padding: var(--space-3) 0;
+  }
 }

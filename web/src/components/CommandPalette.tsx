@@ -270,6 +270,16 @@ export function CommandPalette(): JSX.Element | null {
             }
           }}
         />
+        {store.narrowViewport.value ? (
+          <button
+            type="button"
+            class="palette-mobile-cancel"
+            onClick={actions.closePalette}
+            aria-label="Cancel"
+          >
+            Cancel
+          </button>
+        ) : null}
       </div>
 
       <p class="sr-only" aria-live="polite">

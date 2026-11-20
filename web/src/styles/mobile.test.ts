@@ -575,7 +575,7 @@ describe('phone control plane: the transcript keeps its own scroller', () => {
 
   it('does not turn the plane into the page scroller while a chat is open', () => {
     expect(controlSharedCss).not.toMatch(/\.control-plane\.cp \{ display: block/);
-    expect(sharedPhone).toMatch(/\.control-plane\.cp:not\(\.detail-open\) \{ display: block; overflow: auto; \}/);
+    expect(sharedPhone).toMatch(/\.control-plane\.cp:not\(\.detail-open\)\[data-mobile-tab='overview'\] \.cp-browser \{\s*\n\s*display: none;/);
     expect(sharedPhone).toMatch(/\.control-plane\.cp\.detail-open \{\s*\n\s*display: flex;\s*\n\s*flex-direction: column;\s*\n\s*overflow: hidden;/);
   });
 
@@ -588,7 +588,7 @@ describe('phone control plane: the transcript keeps its own scroller', () => {
   });
 
   it('bounds the overview rail so the dashboard is not a screenful of sessions away', () => {
-    expect(sharedPhone).toMatch(/\.control-plane\.cp:not\(\.detail-open\) \.cp-browser \{ max-height: 45dvh; \}/);
+    expect(sharedPhone).toMatch(/\.cp-mobile-tabs/);
   });
 
   it('keeps the status-bar inset in the session header', () => {

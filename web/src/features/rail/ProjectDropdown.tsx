@@ -273,14 +273,13 @@ export function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.
             onRename={() => setDialog('rename')}
             onDelete={() => setDialog('delete')}
           />
-          {!desktop || projectsOpen ? (
+          {desktop && projectsOpen ? (
             <IconButton
               size="sm"
               class="side-mini-btn"
-              label={desktop ? 'Close project switcher' : 'Close sessions panel'}
-              data-autofocus={desktop ? undefined : true}
+              label="Close project switcher"
               icon={<CloseIcon size={15} />}
-              onClick={desktop ? () => closeProjects() : actions.closeSheets}
+              onClick={() => closeProjects()}
             />
           ) : null}
         </div>

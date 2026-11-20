@@ -1802,6 +1802,10 @@
     min-height: 44px;
   }
 
+  .overlay-tall .overlay-footer-actions .ui-button {
+    min-height: 44px;
+  }
+
   .provider-actions .button {
     flex: 1 1 auto;
   }

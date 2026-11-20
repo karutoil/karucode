@@ -284,7 +284,7 @@ export function SessionsRail(): JSX.Element {
               }
             }}
           />
-          <Keycap class="keycap">/</Keycap>
+          {store.narrowViewport.value ? null : <Keycap class="keycap">/</Keycap>}
         </label>
 
         {/* The mock's `.chips`: one-tap filters over the list, each with its own
