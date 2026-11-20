@@ -123,6 +123,11 @@
  * over the open dropdown when both are up (the keyboard can open both). */
 .rail .project-switcher-desktop .project-switcher-menu {
   z-index: 30;
+  width: max-content;
+  min-width: 180px;
+  max-width: 190px;
+  right: 0;
+  left: auto;
 }
 
 .rail .workbench-projects-disclosure .project-switcher-list {

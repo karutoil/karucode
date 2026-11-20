@@ -242,12 +242,14 @@
   z-index: 3;
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 24px !important;
+  height: 24px !important;
+  min-width: 24px !important;
+  min-height: 24px !important;
   padding: 0;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line-strong) !important;
   border-radius: var(--radius-sm);
-  background: var(--surface-raised);
+  background: var(--surface-raised) !important;
   box-shadow: 0 0 0 2px var(--rail);
   color: var(--muted);
   opacity: 0;
@@ -260,9 +262,9 @@
 
 .project-rail-kebab:hover,
 .project-rail-kebab:active {
-  border-color: color-mix(in srgb, var(--line-strong) 70%, var(--accent));
+  border-color: color-mix(in srgb, var(--line-strong) 70%, var(--accent)) !important;
   /* `--surface` is a rung *below* this button's `--surface-raised` rest fill. */
-  background: var(--surface-hover);
+  background: var(--surface-hover) !important;
   color: var(--text);
 }
 
