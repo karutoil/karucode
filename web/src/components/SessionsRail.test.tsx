@@ -196,6 +196,35 @@ describe('SessionList', () => {
     expect(props.onDelete).toHaveBeenCalledWith('s_ab12');
   });
 
+  it('opens the row menu outside the list on a finger', () => {
+    // LS-04: a trigger-anchored menu renders inside the scrolling list, so a row
+    // near the bottom opened a menu the scrollport clipped. On a coarse pointer
+    // it is anchored at the kebab and portalled out instead - clamped, never
+    // clipped, and never inside `.session-nav`.
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('pointer: coarse'),
+      media: query,
+      onchange: null,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      dispatchEvent: () => false,
+    }));
+    try {
+      const { container } = renderList();
+      fireEvent.click(screen.getByRole('button', { name: 'Actions for Fix login bug' }));
+
+      const layer = document.body.querySelector('.menu-layer');
+      expect(layer).not.toBeNull();
+      expect(layer?.querySelector('[role="menu"]')).not.toBeNull();
+      // Nothing inline: the list holds no menu box of its own.
+      expect(container.querySelector('.session-menu')).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('restores the session menu trigger when the delete child is cancelled', async () => {
     renderList();
     const trigger = screen.getByRole('button', { name: 'Actions for Fix login bug' });
@@ -1310,5 +1339,153 @@ describe('the collapsed rail’s fly-out (RailPeek)', () => {
     const { container } = render(<SessionsRail />);
     expect(container.querySelector('.rail-peek')).toBeNull();
     expect(screen.getByLabelText('Find a session')).not.toBeNull();
+  });
+});
+
+describe('SessionsRail sheet: the landing contract and its exits', () => {
+  function seedSheet(): void {
+    store.sessions.value = [summaryFixture, secondSummaryFixture];
+    store.sessionsLoading.value = false;
+    store.currentSessionId.value = secondSummaryFixture.id;
+    store.currentProjectId.value = 'p_karucode';
+    store.projects.value = [
+      {
+        id: 'p_karucode',
+        name: 'KaruCode',
+        path: '/home/me/karucode',
+        created_at: NOW,
+        updated_at: NOW,
+        session_count: 2,
+      },
+      {
+        id: 'p_docs',
+        name: 'Docs Site',
+        path: '/home/me/docs',
+        created_at: NOW,
+        updated_at: NOW,
+        session_count: 3,
+      },
+    ];
+    store.clock.value = NOW;
+    store.narrowViewport.value = true;
+    store.mobileSheet.value = 'sessions';
+  }
+
+  beforeEach(seedSheet);
+
+  /** A `scrollIntoView` that records what it was asked to reveal. */
+  function spyScroll(): { calls: ScrollIntoViewOptions[]; restore: () => void } {
+    const original = Element.prototype.scrollIntoView;
+    const calls: ScrollIntoViewOptions[] = [];
+    Element.prototype.scrollIntoView = function (this: Element, options?: boolean | ScrollIntoViewOptions) {
+      calls.push((options ?? {}) as ScrollIntoViewOptions);
+    };
+    return { calls, restore: () => { Element.prototype.scrollIntoView = original; } };
+  }
+
+  it('lands on the open session and the active project pill, not at the top', () => {
+    // §5.6 / LS-01: the list is newest-first and the open session can be far
+    // down it. One reveal, centred, on the row that is current.
+    const scroll = spyScroll();
+    try {
+      render(<SessionsRail />);
+      const row = document.querySelector('.session-row.is-active');
+      expect(row).not.toBeNull();
+      expect(row?.getAttribute('data-session-id')).toBe(secondSummaryFixture.id);
+      const centred = scroll.calls.filter((options) => options.block === 'center');
+      expect(centred).toHaveLength(1);
+      // LS-05: the phone project strip is horizontal and ordered oldest-first.
+      const pill = scroll.calls.filter((options) => options.inline === 'center');
+      expect(pill).toHaveLength(1);
+      expect(pill[0]?.block).toBe('nearest');
+    } finally {
+      scroll.restore();
+    }
+  });
+
+  it('reveals the row again when the open session changes while the sheet is open', () => {
+    const scroll = spyScroll();
+    try {
+      render(<SessionsRail />);
+      const before = scroll.calls.length;
+      store.currentSessionId.value = summaryFixture.id;
+      // The signal re-renders the rail; the reveal follows the change.
+      return vi.waitFor(() => {
+        expect(scroll.calls.length).toBeGreaterThan(before);
+        expect(document.querySelector('.session-row.is-active')?.getAttribute('data-session-id')).toBe(
+          summaryFixture.id,
+        );
+      }).finally(() => scroll.restore());
+    } catch (error) {
+      scroll.restore();
+      throw error;
+    }
+  });
+
+  it('does not yank a reader who has scrolled the list themselves', async () => {
+    // A list that pulls itself back to the "right" row is worse than one that
+    // starts in the wrong place: after a scroll of the reader's own, the sheet
+    // stops steering.
+    const scroll = spyScroll();
+    try {
+      render(<SessionsRail />);
+      const nav = document.querySelector('.session-nav');
+      if (!nav) throw new Error('no session list');
+      // Let the sheet's own reveal fall outside its 250ms grace window, then
+      // treat the next scroll as the reader's.
+      await vi.waitFor(() => expect(document.querySelector('.session-row.is-active')).not.toBeNull());
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      fireEvent.scroll(nav);
+      const before = scroll.calls.length;
+      store.currentSessionId.value = summaryFixture.id;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(scroll.calls.length).toBe(before);
+    } finally {
+      scroll.restore();
+    }
+  });
+
+  it('gives the sheet a head with a 44px close control that closes it', () => {
+    const closeSheets = vi.spyOn(actions, 'closeSheets').mockImplementation(() => {
+      store.mobileSheet.value = null;
+    });
+    render(<SessionsRail />);
+    const head = document.querySelector('.rail-sheet-head');
+    expect(head?.textContent).toContain('Sessions');
+    const close = screen.getByRole('button', { name: 'Close sessions' });
+    expect(close.className).toContain('rail-sheet-close');
+    expect(close.getAttribute('data-testid')).toBe('rail-sheet-close');
+    // It must not steal the entry focus: the search field is the point of the
+    // sheet (see the note on `ProjectDropdown`'s close button).
+    expect(close.hasAttribute('data-autofocus')).toBe(false);
+    fireEvent.click(close);
+    expect(closeSheets).toHaveBeenCalledTimes(1);
+    closeSheets.mockRestore();
+  });
+
+  it('does not draw the sheet head on the wide rail', () => {
+    store.narrowViewport.value = false;
+    store.mobileSheet.value = null;
+    const { container } = render(<SessionsRail />);
+    expect(container.querySelector('.rail-sheet-head')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Close sessions' })).toBeNull();
+  });
+
+  it('marks the covered conversation inert while the sheet is open', () => {
+    // A11Y-05: the sheet is a sibling of the chat, so `aria-modal` alone left the
+    // conversation in the Tab order and in the accessibility tree.
+    const { container } = render(
+      <div class="app">
+        <main data-testid="chat" />
+        <SessionsRail />
+      </div>,
+    );
+    const chat = container.querySelector('[data-testid="chat"]');
+    expect(chat?.hasAttribute('inert')).toBe(true);
+
+    store.mobileSheet.value = null;
+    store.narrowViewport.value = false;
+    // Closing the sheet gives the conversation back.
+    return vi.waitFor(() => expect(chat?.hasAttribute('inert')).toBe(false));
   });
 });

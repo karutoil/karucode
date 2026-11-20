@@ -216,8 +216,13 @@
     flex-wrap: wrap;
     row-gap: var(--space-3);
     height: auto;
-    min-height: var(--header-h);
-    padding-block: var(--space-4);
+    /* The status bar is not part of the viewport when the app is installed
+       (`viewport-fit=cover`), so the header insets itself. The shell's own
+       `layout.css` rule does this too, but this container tier out-ranks it
+       (0,3,0 vs 0,1,0) - dropping the inset here put "Back to overview" under
+       the clock on every phone. See CP-06. */
+    min-height: calc(var(--header-h) + env(safe-area-inset-top, 0px));
+    padding-block: calc(env(safe-area-inset-top, 0px) + var(--space-4)) var(--space-4);
   }
   .cp-session-actions { flex: 1 0 100%; }
 }
@@ -234,8 +239,21 @@
  * window (the shell stacks at 900px, `control-shared.css`), so the pane must fill
  * it - and this is the one tier the stylesheet contract pins, because the plane
  * once hid a session's state behind a colour-only 6px dot here. */
-@media (max-width: 900px) {
-  .control-plane.cp.detail-open .cp-pane { min-height: calc(100dvh - var(--header-h)); }
+@media (max-width: 1023px) {
+  /* The pane fills whatever the shell leaves - flex, not a `100dvh` calc. The
+     header also carries the status-bar inset, and a calc that forgets it
+     overflows the shell by exactly that inset. */
+  .control-plane.cp.detail-open .cp-pane { flex: 1 1 auto; min-height: 0; }
+
+  /* The embedded chat column needs a *definite* height inside the phone stack,
+     or `.chat-scroll`'s `overflow-y` has nothing to scroll: `height: 100%`
+     against a content-height parent computes to `auto`, and the whole transcript
+     stops scrolling. This rule is what keeps it a scroller. */
+  .control-plane.cp.detail-open .cp-chat .chat-main {
+    height: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
 }
 
 /* The loading row and its spinner: this region's own, moved here from

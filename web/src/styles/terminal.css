@@ -5,6 +5,26 @@
  * of the centre pane).
  */
 
+/* The cell size the emulator is built with (WB-08).
+ *
+ * `TerminalSurface` reads this property first and falls back to `--fs-body`, so
+ * the terminal itself owns its size instead of borrowing the prose scale. The
+ * desktop default is that same body size - nothing changes - and the phone tier
+ * below raises it: measured at 390px with a 13px cell the grid was ~45 columns,
+ * which is a wrapping log rather than a shell. One step up (`--fs-lead`, 14px)
+ * costs ~4 columns and is the largest raise the 390px frame can pay for.
+ * A per-tab font control would be the fuller answer; this is the default it
+ * would start from, and the property is what such a control would write. */
+:root {
+  --terminal-font-size: var(--fs-body);
+}
+
+@media (max-width: 640px) {
+  :root {
+    --terminal-font-size: var(--fs-lead);
+  }
+}
+
 .terminal-view {
   display: flex;
   flex: 1 1 auto;
@@ -424,5 +444,14 @@
 
   .terminal-count {
     display: none;
+  }
+}
+/* WB-08: the chip's Rename and Close actions are 20px squares - a third of a
+ * thumb. The glyph stays 20 and only the box grows, so the strip's rhythm is
+ * unchanged while the target becomes reachable. */
+@media (pointer: coarse) {
+  .terminal-chip-action {
+    width: 44px;
+    height: 44px;
   }
 }

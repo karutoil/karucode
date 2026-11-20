@@ -341,6 +341,12 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  /* The band the pane header occupies is `position: static` (it must not scroll),
+   * so a section scrolled to `block: 'start'` by the search lands flush under it
+   * with nothing between the two (OV-09). Padding on the scrollport is what
+   * `scrollIntoView` respects; `scroll-margin-top` on the section is the belt to
+   * that brace, for the browsers that resolve the margin first. */
+  scroll-padding-top: var(--space-7);
 }
 
 /* Panels keep their contents mounted (form state would otherwise be lost), so a
@@ -395,6 +401,10 @@
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
+  /* A search jump lands this card at the top of the panel's scrollport; the
+   * margin is the air above it, so the card's own border is not glued to the
+   * hairline under the pane header (OV-09). */
+  scroll-margin-top: var(--space-7);
 }
 
 /* The head is the card's title bar: a rule under it separates "what this group
@@ -1754,7 +1764,23 @@
   }
 }
 
-@media (max-width: 600px) {
+/* The phone's own chrome (OV-08/OV-09). Width and height are both "phone" here
+ * for the same reason as the overlay tier: a 740x360 landscape screen is wider
+ * than 640 and has less room than any of it.
+ *
+ * The sheet spent ~280 of a 667px screen before the reader reached a control —
+ * the rail's head, the chip strip, the pane head and a footer that took two rows.
+ * The caption is the line that goes (the heading above it already names the
+ * section), and the footer keeps one row of thumb-sized buttons, which gives the
+ * panel back the height the working field needs. */
+@media (max-width: 640px), (max-height: 500px) {
+  /* The pane header's sentence. It is the second thing the reader is told about a
+   * section they have already chosen, and on a phone it is a line of the panel's
+   * scroller spent on prose. */
+  .settings-pane-caption {
+    display: none;
+  }
+
   .field-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1763,20 +1789,17 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  /* The footer band is the shell's, so the phone rule targets its note and
-   * actions slots rather than a `.settings-footer` that no longer draws a box. */
-  .overlay-tall .overlay-footer-note,
-  .overlay-tall .overlay-footer-actions {
-    flex-basis: 100%;
-  }
-
-  .overlay-tall .overlay-footer-actions {
-    flex: 1 1 auto;
-    margin-left: 0;
+  /* One row of thumb-sized buttons, and the note is what gives way. Two 96px
+   * buttons and a sentence in a 339px row is a footer three or four lines tall —
+   * that *is* the "two-row footer" the audit measured. The pane header's scope
+   * badge still says who commits the section; the button stays where the thumb
+   * expects it, and each one is at the coarse floor. */
+  .overlay-tall .settings-footer-note {
+    display: none;
   }
 
   .overlay-tall .overlay-footer-actions .button {
-    flex: 1 1 auto;
+    min-height: 44px;
   }
 
   .provider-actions .button {
@@ -2072,3 +2095,33 @@
   font-size: var(--fs-tiny);
 }
 
+/* ---------- the thumb floor (OV-05) ------------------------------------ */
+/* The sheet's two controls that a thumb hits first: the close button (31px) and a
+ * rail chip (32px on the phone strip). 44px is the floor the platform vendors and
+ * WCAG 2.5.5 both name, and it is `min-*` so the chip's glyph and its label stay
+ * on the size the rail was designed at. Declared last in the sheet on purpose:
+ * the phone tier above sets the chip to 32px at equal specificity, so the
+ * pointer tier has to come after it. */
+@media (pointer: coarse) {
+  .settings-close,
+  .settings-nav-item {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* The model-gallery chip's remove ✕ is the only way to un-attach an entry and
+ * was a 16px glyph with a 12px ring around it (A11Y-02). Grow the hit box, not
+ * the mark. */
+@media (pointer: coarse) {
+  .chip-remove { min-width: 44px; min-height: 44px; }
+
+  /* The field *is* the wrapper (`.side-search` is the bordered box; the input
+   * inside is frameless), so the floor belongs here: it measured 30px tall and
+   * was the one overlay control under 44 (OV-05). */
+  .settings-search,
+  .side-search {
+    min-height: 44px;
+    height: 44px;
+  }
+}

@@ -119,9 +119,29 @@
 /* A touch screen has no hover and a 24px arrow is a miss waiting to happen. */
 @media (pointer: coarse) {
   .todo-item-toggle {
-    width: 32px;
-    height: 32px;
+    width: 44px;
+    height: 44px;
   }
+}
+
+/* A task the agent added since this list was last read. The panel scrolls to it
+ * once (see `TodoPanel`), so the marker's job is to say *why* the reader's eye
+ * landed there rather than on the row they left. */
+.todo-item.is-new {
+  background: var(--accent-surface);
+}
+
+.todo-new-flag {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
+  background: var(--accent-surface);
+  color: var(--accent-on-tint);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
 }
 
 /* The leaf marker: reserves the chevron's width so titles line up either way. */

@@ -20,20 +20,76 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const css = readFileSync(new URL('./overlays.css', import.meta.url), 'utf8');
+const tokensCss = readFileSync(new URL('./tokens.css', import.meta.url), 'utf8');
 const previewSource = readFileSync(new URL('../components/FilePreview.tsx', import.meta.url), 'utf8');
 
 /** Declarations of one rule, matched by its full selector text. */
 function declarations(selector: string): Record<string, string> {
-  const start = css.indexOf(`\n${selector} {`);
-  expect(start, `${selector} is defined in overlays.css`).toBeGreaterThan(-1);
-  const end = css.indexOf('\n}', start);
+  return rule(css, selector);
+}
+
+/** A rule's declarations as a map, from a rule body with its comments removed. */
+function readDeclarations(body: string): Record<string, string> {
   const found: Record<string, string> = {};
-  for (const line of css.slice(start, end).split('\n')) {
-    const match = /^\s*([a-z-]+):\s*(.+);\s*$/.exec(line);
-    if (match?.[1] !== undefined && match[2] !== undefined) found[match[1]] = match[2];
+  let last: string | null = null;
+  for (const raw of body.split('\n')) {
+    const line = raw.trim();
+    if (line === '') continue;
+    const opening = /^([a-z-]+):\s*(.+)$/.exec(line);
+    if (opening?.[1] !== undefined && opening[2] !== undefined) {
+      last = opening[1];
+      found[last] = opening[2].replace(/;$/, '').trim();
+    } else if (last !== null) {
+      // A value that wrapped (`padding:` and its `calc()` on the next line).
+      found[last] = `${found[last] ?? ''} ${line.replace(/;$/, '').trim()}`.trim();
+    }
   }
   return found;
 }
+
+/**
+ * Declarations of one rule inside a sheet or inside a block of one.
+ *
+ * The selector is written the way a person reads it — `.a, .b` — and the match
+ * tolerates the indentation and the newlines a media block adds.
+ */
+function rule(source: string, selector: string): Record<string, string> {
+  const parts = selector
+    .split(',')
+    .map((part) => part.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = new RegExp(
+    `(?:^|\\n)[ \\t]*${parts.join(',\\s*')}[ \\t]*\\{([\\s\\S]*?)\\n[ \\t]*\\}`,
+  );
+  const match = pattern.exec(source);
+  expect(match, `${selector} is defined`).toBeTruthy();
+  return readDeclarations((match?.[1] ?? '').replace(/\/\*[\s\S]*?\*\//g, ''));
+}
+
+/** The body of a media block, by its exact header, braces matched. */
+function media(header: string, source = css): string {
+  const start = source.indexOf(`@media ${header}`);
+  expect(start, `@media ${header} is defined`).toBeGreaterThan(-1);
+  const open = source.indexOf('{', start);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    else if (source[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, index);
+    }
+  }
+  throw new Error(`@media ${header} is unterminated`);
+}
+
+/** One `--token: Npx;` from the token layer, so geometry can be computed. */
+function token(name: string): number {
+  const match = new RegExp(`--${name}: (\\d+)px;`).exec(tokensCss);
+  expect(match?.[1], `--${name} is a px token`).toBeDefined();
+  return Number(match?.[1]);
+}
+
+/** The phone tier: narrow OR short, which is what a landscape phone is. */
+const PHONE = '(max-width: 640px), (max-height: 500px)';
 
 describe('file viewer preview surface', () => {
   it('keeps the markdown preview at the full pane width', () => {
@@ -74,13 +130,16 @@ describe('file viewer preview surface', () => {
   it('keeps palette overlays compact on narrow viewports', () => {
     // Two facts: the desktop palette takes the role's measure (not a literal),
     // and the phone tier keeps it a compact floating box rather than promoting
-    // it to a full-height sheet the way every other role goes.
+    // it to a full-height sheet the way every other role goes. Its width is the
+    // role's measure *capped* by the window, so a 740px-wide landscape phone gets
+    // the 560px palette on the phone treatment rather than a 712px band.
     expect(css).toMatch(/\.overlay-palette \{[\s\S]*?width:\s*min\(var\(--overlay-w-palette\)/);
-    const phone = css.slice(css.indexOf('@media (max-width: 640px)'));
-    expect(phone).toMatch(
-      /\.overlay-palette \{\n {4}align-self: center;\n {4}width: calc\(100vw - 28px\);/,
+    const phone = media(PHONE);
+    expect(rule(phone, '.overlay-palette')['align-self']).toBe('center');
+    expect(rule(phone, '.overlay-palette')['width']).toBe(
+      'min(var(--overlay-w-palette), calc(100vw - 28px))',
     );
-    expect(phone).toMatch(/\.overlay-palette \{[\s\S]*?border-radius: var\(--radius\)/);
+    expect(rule(phone, '.overlay-palette')['border-radius']).toBe('var(--radius)');
   });
 
   it('insets the phone palette on the field, not on every header row', () => {
@@ -89,9 +148,9 @@ describe('file viewer preview surface', () => {
     // `.overlay-header` — the row every other role puts its close button in. The
     // palette renders no header (the field *is* the band), so the rule belongs to
     // `.palette-search` alone and no `.overlay-header` may be re-padded there.
-    const phone = css.slice(css.indexOf('@media (max-width: 640px)'));
-    expect(phone).toMatch(
-      /\.overlay-palette \.palette-search \{\n {4}padding: var\(--space-2\) var\(--space-5\);/,
+    const phone = media(PHONE);
+    expect(rule(phone, '.overlay-palette .palette-search')['padding']).toBe(
+      'var(--space-2) var(--space-5)',
     );
     expect(phone).not.toMatch(/\.overlay-palette \.overlay-header/);
     expect(phone).not.toMatch(/\.overlay-palette \.dialog-header/);
@@ -199,6 +258,18 @@ describe('layer ladder', () => {
     // `base.css` owns the skip link, and it is the top of the ladder in both files.
     expect(baseCss).toMatch(/\.skip-link \{[^}]*z-index: 200;/);
     expect(rung('z-skip-link')).toBe(200);
+  });
+
+  it('puts a menu above the dialog it was opened from, and under a toast (OV-04)', () => {
+    // A long-press or right-click menu is portalled into `<body>`, and it can be
+    // opened *inside* a dialog (a session row in the Context drawer). At the sheet
+    // rung it painted behind the dialog, so the next tap landed on the backdrop
+    // and closed the dialog the menu belonged to.
+    expect(rung('z-menu')).toBeGreaterThan(rung('z-modal'));
+    expect(rung('z-menu')).toBeLessThan(rung('z-toast'));
+    // `layout.css` still carries the old number on `.menu-layer`; the rung is
+    // applied where the ladder is published, with the specificity to win.
+    expect(rule(css, 'body > .menu-layer')['z-index']).toBe('var(--z-menu)');
   });
 });
 
@@ -345,5 +416,210 @@ describe('rewind dialog scroll bounds', () => {
     // tall screen (the outer scroller only matters on short ones).
     expect(declarations('.rewind-files')['max-height']).toBe('220px');
     expect(declarations('.rewind-files')['overflow-y']).toBe('auto');
+  });
+
+  it('declares its measure where the phone tier can override it (OV-09)', () => {
+    // The measure used to be written *after* the responsive block, so its 620px
+    // came back on top of the tier's `width: 100%` and the rewind was the one
+    // dialog the phone rules could not resize.
+    expect(declarations('.dialog-rewind')['width']).toBe(
+      'min(var(--overlay-w-standard), 100%)',
+    );
+    expect(css.indexOf('\n.dialog-rewind {')).toBeLessThan(
+      css.indexOf(`@media ${PHONE}`),
+    );
+    // …and the phone tier takes it to the full width like every other role.
+    expect(rule(media(PHONE), '.dialog')['width']).toBe('100%');
+  });
+});
+
+describe('the phone shell knows about the keyboard (OV-02, SH-03)', () => {
+  /* `--kb-inset` is the strip of viewport the on-screen keyboard covers, published
+   * by `lib/viewportInset.ts`. No overlay surface read it: every full-screen
+   * dialog was a bare `100dvh`, which on iOS is the *un*shortened screen, so Save
+   * and Continue sat under the keys with nothing able to scroll them out. */
+
+  it('sizes every full-screen surface to the viewport minus the keyboard', () => {
+    const phone = media(PHONE);
+    const shell = 'calc(100dvh - var(--kb-inset, 0px))';
+    for (const selector of [
+      '.overlay:not(.overlay-compact):not(.overlay-palette)',
+      '.dialog',
+      '.dialog-file, .overlay-full',
+    ]) {
+      const found = rule(phone, selector);
+      expect(found['height'], selector).toBe(shell);
+      expect(found['max-height'], selector).toBe(shell);
+    }
+    // The drawer is absolutely positioned inside the layer rather than sized.
+    expect(rule(phone, '.overlay-drawer')['bottom']).toBe('var(--kb-inset, 0px)');
+    // The palette is the one floating role, and its cap loses the same strip.
+    expect(rule(phone, '.overlay-palette')['max-height']).toBe(
+      'calc(82dvh - var(--kb-inset, 0px))',
+    );
+    // No dialogs left on the old arithmetic.
+    expect(phone).not.toMatch(/(?:max-)?height: 100dvh;/);
+  });
+
+  it('keeps the footer clear of the home indicator', () => {
+    // `env()` is 0 wherever there is no safe area, so this is the same padding on
+    // a desktop and 34px more on an iPhone's bottom band.
+    expect(declarations('.overlay-footer')['padding']).toContain(
+      'env(safe-area-inset-bottom, 0px)',
+    );
+    expect(declarations('.overlay-footer')['padding']).toContain('var(--space-8)');
+  });
+});
+
+describe('a tall compact dialog on a 375x667 phone (OV-01)', () => {
+  /* The defect: `.overlay-compact`/`.dialog-confirm` kept `margin-top:
+   * min(17vh, 150px)` (113px at 667) *and* a cap of `100dvh - 48px` (619px) inside
+   * a fixed layer that could not scroll, with the body's scroll locked. 113 + 619
+   * = 732 in a 667px window, and the confirm row was the part that hung below it. */
+
+  it('centres the dialog instead of anchoring it below the fold', () => {
+    const phone = media(PHONE);
+    const compact = rule(phone, '.dialog-confirm, .overlay-compact');
+    expect(compact['margin-top']).toBe('0');
+    expect(compact['align-self']).toBe('center');
+    expect(compact['height']).toBe('auto');
+  });
+
+  it('leaves its cap inside the 667px band, with the layer able to scroll', () => {
+    const height = 667;
+    const cap = height - token('space-10') - token('space-7'); // 667 - 32 - 16
+    expect(cap).toBe(619);
+    // No anchor is added above it on a phone, so the box fits the window …
+    expect(cap).toBeLessThan(height);
+    // … and if a role ever exceeds it, the layer is the scroller rather than a
+    // fixed panel with a row nobody can reach.
+    const layer = rule(media(PHONE), '.dialog-layer');
+    expect(layer['overflow-y']).toBe('auto');
+    expect(layer['overscroll-behavior']).toBe('contain');
+    expect(rule(media(PHONE), '.dialog-confirm, .overlay-compact')['max-height']).toBe(
+      'calc(100dvh - var(--kb-inset, 0px) - var(--space-10) - var(--space-7))',
+    );
+  });
+});
+
+describe('toasts over an open dialog (OV-06)', () => {
+  /* On a phone the toast region moves to the top of the screen — where a dialog
+   * draws its header and its close button — and it could cover 46vh of it. */
+
+  it('caps the region to two toasts and a quarter of the screen', () => {
+    const phone = media(PHONE);
+    expect(phone).toMatch(
+      /body:has\(> \.dialog-layer\) \.toast-region \{\n {4}max-height: 25vh;/,
+    );
+    // `nth-child(n + 3)` drops the oldest: the list renders in arrival order.
+    expect(phone).toMatch(
+      /body:has\(> \.dialog-layer\) \.toast-region \.toast:nth-child\(n \+ 3\) \{\n {4}display: none;/,
+    );
+    // The offset clears the header's 16px inset plus its 32px close button.
+    expect(rule(phone, '.toast-region')['top']).toBe(
+      'calc(var(--space-10) * 2 + env(safe-area-inset-top, 0px))',
+    );
+    expect(token('space-10') * 2).toBeGreaterThan(token('space-7') + 44);
+  });
+});
+
+describe('the thumb floor (OV-05)', () => {
+  /* No overlay sheet had a coarse-pointer tier: the dialog close button measured
+   * 32px, the sheet's close 31px, a rail chip 32px, the toast's dismiss 24px and
+   * the sign-in field 38px. 44px is the floor both platform vendors and WCAG
+   * 2.5.5 name, and each sheet raises its own controls where its later rules
+   * live. */
+  const settingsCss = readFileSync(new URL('./settings.css', import.meta.url), 'utf8');
+  const authCss = readFileSync(new URL('./auth.css', import.meta.url), 'utf8');
+
+  it('raises every overlay control a thumb hits to 44px', () => {
+    const coarse = media('(pointer: coarse)', css);
+    const overlayControls = rule(coarse, '.overlay-close, .toast-close, .overlay-footer .button');
+    expect(overlayControls['min-height']).toBe('44px');
+    expect(overlayControls['min-width']).toBe('44px');
+
+    const settings = media('(pointer: coarse)', settingsCss);
+    const sheetControls = rule(settings, '.settings-close, .settings-nav-item');
+    expect(sheetControls['min-height']).toBe('44px');
+    expect(sheetControls['min-width']).toBe('44px');
+    // The rail chip sets 32px in the phone tier at the same specificity, so the
+    // pointer tier has to be the later one.
+    expect(settingsCss.indexOf('@media (pointer: coarse)')).toBeGreaterThan(
+      settingsCss.indexOf('@media (max-width: 780px)'),
+    );
+
+    const auth = media('(pointer: coarse)', authCss);
+    // The field keeps the 38px it is drawn at on a mouse; the floor is the
+    // computed box, which is the larger of the two.
+    expect(rule(auth, '.auth-input')['min-height']).toBe('44px');
+    expect(rule(auth, '.auth-reveal')['width']).toBe('44px');
+    expect(rule(auth, '.auth-reveal')['height']).toBe('44px');
+  });
+});
+
+describe('the palette on a short viewport (SH-10, OV-11)', () => {
+  /* The palette was sized against `vh` with a `12vh` top anchor. On a 740x360
+   * landscape phone that is `min(12vh, 110px)` + `min(90vh, 475px)` = 43 + 324 =
+   * 367 in a 360px window: seven pixels of the last row, and the footer's key
+   * hints, off the screen. `vh` is the *largest* viewport on mobile Safari, so the
+   * real gap with the toolbar showing was worse than the arithmetic. */
+
+  it('caps and anchors in `dvh`, not `vh`', () => {
+    const palette = declarations('.dialog-palette');
+    expect(palette['margin-top']).toBe('min(12dvh, 110px)');
+    expect(palette['max-height']).toBe('min(90dvh, 475px)');
+    expect(palette['margin-top']).not.toMatch(/(?:^|[^d])vh/);
+    expect(palette['max-height']).not.toMatch(/(?:^|[^d])vh/);
+  });
+
+  it('fits 740x360, where the anchored box was 7px taller than the window', () => {
+    const height = 360;
+    const anchored = Math.min(0.12 * height, 110) + Math.min(0.9 * height, 475);
+    expect(anchored).toBeGreaterThan(height); // 367 > 360: the defect, in arithmetic
+    // The fix: no anchor on a phone, and a cap inside the window minus the keyboard.
+    const phone = media(PHONE);
+    expect(rule(phone, '.overlay-palette')['margin-top']).toBe('0');
+    expect(0.82 * height).toBeLessThanOrEqual(height);
+  });
+
+  it('drops the keyboard hints and the band they drew on a phone', () => {
+    // "↑ ↓ Enter Esc" teaches a device with no hardware keys, and costs a whole
+    // band at the bottom of a 360px screen.
+    const phone = media(PHONE);
+    expect(rule(phone, '.palette-keys, .overlay-palette .overlay-footer')['display']).toBe(
+      'none',
+    );
+    // The old ≤374px rule hid one group at a time; the whole row is gone now.
+    expect(phone).not.toMatch(/palette-keys > span/);
+  });
+});
+
+describe('the phone band is height-driven too (OV-03, OV-10)', () => {
+  /* A 740x360 landscape phone is 740px wide: wider than the 640 tier, so it got
+   * the desktop two-pane settings sheet in a 312px box and the onboarding card
+   * with its step rail wrapping over the fields. Height is the constraint there,
+   * and no height-driven tier existed. */
+
+  const onboardingCss = readFileSync(new URL('./onboarding.css', import.meta.url), 'utf8');
+  const settingsCss = readFileSync(new URL('./settings.css', import.meta.url), 'utf8');
+
+  it('gives the short viewport the phone treatment, not the desktop one', () => {
+    // Every sheet that had a phone tier now says "narrow OR short" in the same
+    // words, so one media query answers "is this a phone" for all of them.
+    for (const source of [css, onboardingCss, settingsCss]) {
+      expect(source).toContain(`@media ${PHONE} {`);
+    }
+    expect(rule(media(PHONE), '.dialog')['height']).toBe(
+      'calc(100dvh - var(--kb-inset, 0px))',
+    );
+  });
+
+  it('hides the onboarding step rail and keeps the primary action first', () => {
+    const band = media(PHONE, onboardingCss);
+    expect(rule(band, '.onboarding-rail')['display']).toBe('none');
+    // `column-reverse`: the primary action is the last child and the thumb comes
+    // from the bottom of the screen.
+    expect(rule(band, '.onboarding-footer')['flex-direction']).toBe('column-reverse');
+    expect(onboardingCss).not.toMatch(/@media \(max-width: 640px\) \{/);
   });
 });

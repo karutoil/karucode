@@ -330,6 +330,7 @@ export function ControlSession({
     <header class="main-head cp-session-head">
       <IconButton
         class="icon-button"
+        testId="cp-session-back"
         onClick={onBack}
         label="Back to overview"
         title="Back to overview"
@@ -357,6 +358,7 @@ export function ControlSession({
           : <Button
               variant="secondary"
               size="sm"
+              testId="cp-open-in-project"
               icon={<ExternalIcon size={12} />}
               class="button button-small"
               title="Open this session in its project’s workspace"

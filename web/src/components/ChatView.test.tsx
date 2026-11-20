@@ -877,6 +877,54 @@ describe('ChatView workspace tabs', () => {
   });
 });
 
+describe('ChatView phone header', () => {
+  beforeEach(() => {
+    resetAppState();
+    ResizeObserverStub.reset();
+    vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  });
+
+  afterEach(() => {
+    resetAppState();
+    ResizeObserverStub.reset();
+    vi.unstubAllGlobals();
+  });
+
+  it('offers a Files entry point on a narrow viewport, and only there (WB-02)', () => {
+    // A phone had no visible way into the explorer: `toggleInspector` was bound to
+    // a chord and the command palette, so the workspace tree was unreachable
+    // without a keyboard.
+    const wide = renderChat();
+    expect(screen.queryByTestId('files-head')).toBeNull();
+    wide.unmount();
+
+    store.narrowViewport.value = true;
+    // `toggleInspector` asks `lib/dom` (a live `matchMedia`), not the signal, so a
+    // narrow viewport has to be true in both places.
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('max-width: 1023px') || query.includes('max-width: 640px'),
+      media: query,
+      onchange: null,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      dispatchEvent: () => false,
+    }));
+    const { container } = render(<ChatView />);
+    const files = screen.getByTestId('files-head');
+    expect(files.getAttribute('aria-label')).toBe('Files');
+    expect(container.querySelector('header.main-head .header-buttons')?.contains(files)).toBe(true);
+    expect(store.mobileSheet.value).toBeNull();
+    expect(files.getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(files);
+    // The same sheet the chord opens, and the button says it is now open.
+    expect(store.mobileSheet.value).toBe('inspector');
+    expect(screen.getByTestId('files-head').getAttribute('aria-expanded')).toBe('true');
+  });
+});
+
 describe('ChatView composer dock', () => {
   beforeEach(() => {
     resetAppState();

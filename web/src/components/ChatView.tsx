@@ -38,6 +38,7 @@ import {
   ChatIcon,
   ChevronDownIcon,
   FileCodeIcon,
+  FolderIcon,
   GitIcon,
   MenuIcon,
   PanelIcon,
@@ -462,6 +463,26 @@ function SessionHeader({
             onClick={() => workbench.openContext('now')}
           />
         ) : null}
+        {/* WB-02: on a phone the Files explorer had no visible way in at all -
+         * `toggleInspector` was bound to a chord and the command palette, neither
+         * of which a thumb can reach - so the workspace tree was unreachable
+         * without a keyboard. This is the same sheet, opened from the one row a
+         * phone always shows; it exists only where the inspector *is* a sheet, so
+         * a desktop keeps its docked panel and its own controls. */}
+        {narrow && !controlPlane ? (
+          <IconButton
+            size="md"
+            class="head-btn head-icon files-head-btn"
+            label="Files"
+            aria-haspopup="dialog"
+            aria-controls="workbench-results"
+            expanded={store.mobileSheet.value === 'inspector'}
+            title="Files — open the workspace explorer"
+            icon={<FolderIcon size={15} />}
+            testId="files-head"
+            onClick={actions.toggleInspector}
+          />
+        ) : null}
         {resultsPopout ? (
           <IconButton
             size="md"
@@ -788,7 +809,7 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
           <div class="chat-body">
             {scroller.showJump ? (
               <Button
-                size="sm"
+                size="md"
                 class="jump-latest"
                 icon={<ChevronDownIcon size={14} />}
                 testId="jump-to-latest"

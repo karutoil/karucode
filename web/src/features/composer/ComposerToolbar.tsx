@@ -59,7 +59,9 @@ export function ComposerToolbar({
             <IconButton
               size="sm"
               class="compose-plus w-[24px] h-[24px] pointer-coarse:w-[40px] pointer-coarse:h-[40px]"
-              label="Attach files"
+              // CO-11: the meaning of an icon-only control has to survive its
+              // `title`, which no phone shows.
+              label="Attach files to this message"
               title={attachTitle}
               disabled={!canType}
               icon={<PaperclipIcon size={15} />}

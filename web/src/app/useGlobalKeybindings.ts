@@ -1,5 +1,6 @@
 import { useEffect } from 'preact/hooks';
 import { matchUiKeybinding } from '../components/uiContributions';
+import { isImeComposing } from '../lib/keyboard';
 import { isApplePlatform } from '../lib/platform';
 import * as actions from '../state/actions';
 import { controlPlaneOpen } from '../state/controlPlane';
@@ -52,9 +53,41 @@ export function useGlobalKeybindings(): void {
         actions.closeThemeStudio();
         return;
       }
-      if (event.key === 'Escape' && workbench.contextOpen.value && !event.defaultPrevented) {
+      // Escape belongs to whatever owns the caret first. The Context drawer is a
+      // dialog on a phone with a focus trap of its own, and that trap closes it;
+      // this branch is the key that still reaches the window - one a field inside
+      // the drawer handled itself (a rename, a filter) or one that cancels an IME
+      // candidate list. Neither may take the drawer away mid-word.
+      if (
+        event.key === 'Escape' &&
+        workbench.contextOpen.value &&
+        !event.defaultPrevented &&
+        !caretInEditable(event) &&
+        !isImeComposing(event)
+      ) {
         event.preventDefault();
         workbench.closeContext();
+        return;
+      }
+      // The phone's sheets are dialogs too (they are in `isDialogOpen()`), and their
+      // focus trap closes them from the capture phase. This covers the press that
+      // reaches the window instead - no trap in the path - and, like the trap,
+      // leaves Escape to a field, to a control marked `data-escape-local`, and to an
+      // IME that is using it to cancel a candidate.
+      if (
+        event.key === 'Escape' &&
+        store.mobileSheet.value !== null &&
+        !event.defaultPrevented &&
+        !isImeComposing(event)
+      ) {
+        const target = event.target;
+        if (
+          caretInEditable(event) ||
+          (target instanceof Element && target.closest('[data-escape-local]') !== null)
+        ) {
+          return;
+        }
+        actions.closeSheets();
         return;
       }
       if (isDialogOpen()) return;
@@ -98,10 +131,6 @@ export function useGlobalKeybindings(): void {
           target instanceof HTMLElement &&
           target.closest('input, textarea, select, [contenteditable="true"], [role="menu"]')
         ) {
-          return;
-        }
-        if (store.mobileSheet.value !== null) {
-          actions.closeSheets();
           return;
         }
         // A popped-out Results panel is an overlay, not a layout column: Escape

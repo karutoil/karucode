@@ -204,6 +204,44 @@ export function isShrinkAfterFollow(
 }
 
 /**
+ * True when a *change in the scroller's own height* is a follow event.
+ *
+ * Neither rule above can answer this, and both refuse the anchor outright when
+ * the two heights differ - correctly, because their arithmetic assumes one
+ * geometry. But the height changing is not the reader leaving: it is the
+ * on-screen keyboard opening (300px of transcript covered, the newest row
+ * behind it), the URL bar collapsing, a phone rotating, a panel that was
+ * `display: none` coming back. The reader was following before that happened and
+ * is following after it; nothing has moved the view but the browser.
+ *
+ * The anchor says whether the view was at the bottom when it was taken, and its
+ * `scrollTop` says whether anything has moved it since: nothing scrolls a
+ * scroller *down* except the app (which records its own follow) or the reader.
+ * So the gap that is left is the height change plus content that arrived after
+ * the follow, and closing it is not fighting anybody.
+ */
+export function isResizeAfterFollow(
+  metrics: ScrollMetrics,
+  anchor: FollowAnchor | null,
+  threshold: number = PIN_THRESHOLD_PX,
+): boolean {
+  if (!anchor) return false;
+  // A zero height is the absence of a viewport, not a shorter one.
+  if (anchor.clientHeight <= 0 || metrics.clientHeight <= 0) return false;
+  if (metrics.clientHeight === anchor.clientHeight) return false;
+  // The view the anchor describes was showing the newest content ...
+  if (!isPinnedToBottom(anchor, threshold)) return false;
+  // ... and only the app has moved it since. A downward movement is a reader.
+  const moved = metrics.scrollTop - anchor.scrollTop;
+  if (moved > 1) return false;
+  // The remaining gap is what the height change took away, plus whatever landed
+  // below the viewport after the follow (a stream that arrives while the
+  // keyboard animates open is one gesture to the reader, two events here).
+  const growth = Math.max(0, metrics.scrollHeight - anchor.scrollHeight);
+  return distanceFromBottom(metrics) <= Math.abs(metrics.clientHeight - anchor.clientHeight) + growth + threshold;
+}
+
+/**
  * The decision every follow path shares: keep up with the newest content while
  * the view is at the bottom, while the only reason it is not is content that
  * landed after the last follow, or while a smooth scroll we started is still
@@ -393,6 +431,40 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
    * mistaken for the reader scrolling away (see `syncPinnedState`).
    */
   const anchorRef = useRef<FollowAnchor | null>(null);
+  /**
+   * True while the follow is still the app's: the view was pinned at the last
+   * look and nothing has taken it since.
+   *
+   * `anchorRef` answers nearly the same question, and would answer it exactly if
+   * the scroller were never hidden. It is not: a hidden panel measures
+   * `{0,0,0}`, so the anchor a hidden frame would leave behind is garbage (and
+   * is no longer recorded at all), while the height it comes back at can be the
+   * one it left by - which the anchor-based rules read as "not a resize" and
+   * never re-pin. This flag is the piece of state that survives the hidden
+   * frame, and it is what re-pins on the way back (TR-02, TR-04).
+   */
+  const pinnedRef = useRef(false);
+  /**
+   * The scroller's height at the last look, `0` included.
+   *
+   * A height change is an event the follow rules do not model: `isGrowthAfterFollow`
+   * and `isShrinkAfterFollow` both refuse an anchor from a different viewport
+   * height, correctly, because their arithmetic assumes a single geometry. So the
+   * height itself has to be watched - otherwise the keyboard opening leaves the
+   * newest row 300px behind it and no rule is willing to close the gap (TR-01).
+   */
+  const heightRef = useRef(0);
+  /**
+   * The `scrollTop` of the last look that had a real viewport.
+   *
+   * A hidden scroller reports `0` (CSSOM: no layout box, no scroll offset), so the
+   * hidden frame may not overwrite this: the value here is the position the panel
+   * went away at, which is what makes the transition back judgeable. A height
+   * change accompanied by a *downward* movement of this number is not a resize -
+   * nothing but the app or the reader scrolls a scroller down - and a resize may
+   * not take the reader's view back.
+   */
+  const lastScrollRef = useRef(0);
   /** The element a smooth scroll is running on, so its settle flag can be cleared. */
   const settleElRef = useRef<HTMLElement | null>(null);
   /** The follow, for the settle timer that runs after it is defined. */
@@ -415,12 +487,45 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
    */
   const markFollow = useCallback((element: HTMLElement) => {
     anchorRef.current = noteFollow(element);
+    // The follow is the app's until a gesture takes it: that is what lets a
+    // later height change re-pin instead of being read as a reader who left.
+    pinnedRef.current = true;
   }, []);
 
   /** The reader has left: forget the follow, inside the hook and outside it. */
   const dropFollow = useCallback((element: HTMLElement | null) => {
     anchorRef.current = null;
+    pinnedRef.current = false;
     forgetFollow(element);
+  }, []);
+
+  /**
+   * True when this look is the first after the scroller's height changed, and
+   * the follow is still the app's to re-pin.
+   *
+   * Records the height either way: this is the only place the height is watched,
+   * and the answer depends on the one before it.
+   */
+  const resizedWhileFollowing = useCallback((metrics: ScrollMetrics): boolean => {
+    const previous = heightRef.current;
+    const previousTop = lastScrollRef.current;
+    heightRef.current = metrics.clientHeight;
+    if (metrics.clientHeight <= 0) return false;
+    lastScrollRef.current = metrics.scrollTop;
+    if (previous === metrics.clientHeight) return false;
+    // A gesture dropped the follow; a resize may not take it back.
+    if (!pinnedRef.current) return false;
+    // A view that moved *down* while we were not looking is not a resize: it is
+    // the reader, a restored position, or another writer, and none of them asked
+    // to be pulled to the tail. (A browser clamping the scroll up as the viewport
+    // grows is the one movement this rule owns, and it never moves it down.)
+    if (metrics.scrollTop - previousTop > 1) return false;
+    // With an anchor in hand it has to describe a view that was at the bottom,
+    // and a gap no wider than the height change (plus late content) left behind.
+    // A follow recorded fifty rows up the history is not a resize event.
+    const anchor = anchorRef.current;
+    if (anchor && !isResizeAfterFollow(metrics, anchor)) return false;
+    return true;
   }, []);
 
   const pinToBottom = useCallback(
@@ -465,6 +570,12 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
       // means "nothing to compare against", which is the truth.
       if (!settlingRef.current && element.clientHeight > 0) {
         markFollow(element);
+      } else {
+        // No anchor, but the follow is still the app's intent: a session that
+        // opens while its panel is hidden (`display: none` measures zero) must
+        // land at the newest row the moment it is shown, and `pinnedRef` is the
+        // only state that survives that frame.
+        pinnedRef.current = true;
       }
     },
     [endSettle, markFollow],
@@ -539,7 +650,26 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
     // gap it opened and treating it as a reader who scrolled away.
     if (handleOwnScroll(element)) return;
     const metrics = readMetrics(element);
+    // A hidden panel (the Terminal tab is open) measures `{0,0,0}`. That is not a
+    // viewport, it is the absence of one: recording a follow from it put an anchor
+    // of three zeroes in hand, every later rule refused that anchor for having
+    // changed height, and the transcript came back from a tab switch showing
+    // "Jump to latest" over a view that was at the newest row (TR-04).
+    if (metrics.clientHeight <= 0) {
+      heightRef.current = 0;
+      return;
+    }
+    if (resizedWhileFollowing(metrics)) {
+      // The scroller's own height changed under a view that was following: the
+      // keyboard opened, the URL bar collapsed, the panel was shown. Pin to the
+      // new bottom, which is what "following" means on the far side of a resize.
+      pinToBottom('auto');
+      return;
+    }
     if (!shouldFollow(metrics, anchorRef.current, settlingRef.current)) {
+      // Not pinned and no rule of ours explains the gap: the follow is no longer
+      // the app's, so a later resize may not take the view back.
+      pinnedRef.current = false;
       if (!settlingRef.current && !isPinnedToBottom(metrics)) setShowJump(true);
       return;
     }
@@ -549,7 +679,7 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
     }
     scrollToBottom(element, 'auto');
     markFollow(element);
-  }, [handleOwnScroll, markFollow]);
+  }, [handleOwnScroll, markFollow, pinToBottom, resizedWhileFollowing]);
   reconcileRef.current = reconcile;
 
   /**
@@ -575,6 +705,19 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
     const syncPinnedState = () => {
       frameRef.current = 0;
       const metrics = readMetrics(element);
+      // A hidden scroller's numbers are placeholders, not geometry: neither the
+      // pill nor a follow anchor may be published from them (TR-04).
+      if (metrics.clientHeight <= 0) {
+        heightRef.current = 0;
+        return;
+      }
+      if (resizedWhileFollowing(metrics)) {
+        // A resize that moved the view is still the app's follow: the scroll
+        // event it produced must not be read as a gesture (TR-01). The observer
+        // path takes the same decision; whichever runs first wins.
+        pinToBottom('auto');
+        return;
+      }
       if (isPinnedToBottom(metrics)) {
         markFollow(element);
         endSettle();
@@ -598,6 +741,7 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
         setShowJump(false);
         return;
       }
+      pinnedRef.current = false;
       setShowJump(!settlingRef.current);
     };
 
@@ -672,7 +816,7 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
       frameRef.current = 0;
       endSettle();
     };
-  }, [endSettle, reconcile, dropFollow]);
+  }, [endSettle, reconcile, dropFollow, pinToBottom, resizedWhileFollowing, markFollow]);
 
   // A different conversation always starts at the newest message, instantly.
   //

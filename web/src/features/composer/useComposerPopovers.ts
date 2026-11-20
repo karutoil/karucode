@@ -22,8 +22,31 @@ import {
   slashQuery,
 } from '../../lib/slash';
 import * as store from '../../state/store';
-import { defaultLoadTree, INDEX_TTL_MS } from './helpers';
+import { defaultLoadTree, INDEX_TTL_MS, MENTION_MENU_ID, SLASH_MENU_ID } from './helpers';
 import type { FieldUpdate } from './types';
+
+/**
+ * The DOM id of one popover row, matching `mentionOptionId`/`slashOptionId` in
+ * the two menu components (`${menuId}-option-${index}`). Kept here so the reveal
+ * effect below does not have to import a component to recompute it.
+ */
+function optionId(menuId: string, index: number): string {
+  return `${menuId}-option-${index}`;
+}
+
+/**
+ * Scroll the armed row into view with the smallest possible movement.
+ *
+ * `block: 'nearest'` is the whole point: `scrollIntoView()` with no options
+ * centres the row, which yanks the list (and on a phone, the page) around on
+ * every arrow press. A row that is already visible is not moved at all.
+ */
+function revealActiveRow(menuId: string, index: number): void {
+  const row = document.getElementById(optionId(menuId, index));
+  if (row && typeof row.scrollIntoView === 'function') {
+    row.scrollIntoView({ block: 'nearest' });
+  }
+}
 
 export interface ComposerPopoversHandle {
   // Mentions
@@ -136,6 +159,22 @@ export function useComposerPopovers(options: {
     setActiveOption(0);
   }, [mention?.query, mentionOpen]);
 
+  /**
+   * CO-04: keep the armed row inside the scrollable list when the keyboard
+   * steals half the sheet.
+   *
+   * The popover is a `position: absolute` child of the dock, and the arrows move
+   * a highlight that lives in `.mention-list`. Before this the highlight could
+   * move to a row that was outside the (now much shorter) viewport band, with
+   * nothing scrolling it back: `block: 'nearest'` moves the popover's own list
+   * by the smallest amount that reveals the row and leaves the rest of the page
+   * alone.
+   */
+  useEffect(() => {
+    if (!menuOpen) return;
+    revealActiveRow(MENTION_MENU_ID, activeIndex);
+  }, [menuOpen, activeIndex]);
+
   const chooseMention = (candidate: MentionCandidate): void => {
     if (!mention) return;
     const next = insertMention(draft, mention, candidate.path);
@@ -215,6 +254,35 @@ export function useComposerPopovers(options: {
   useEffect(() => {
     setSlashIndex(0);
   }, [slashQueryText]);
+
+  // CO-04, same contract for the `/` list.
+  useEffect(() => {
+    if (!slashOpen) return;
+    revealActiveRow(SLASH_MENU_ID, slashActiveIndex);
+  }, [slashOpen, slashActiveIndex]);
+
+  // CO-05: a phone has no Escape, so the two menus used to close only when the
+  // trigger character was deleted. Dismiss on a pointer that lands anywhere but
+  // the field or the popover itself - the tap that means "never mind" - while
+  // one is open.
+  useEffect(() => {
+    if (!menuOpen && !slashOpen) return;
+    const onPointerDown = (event: Event): void => {
+      const target = event.target as Element | null;
+      if (!target || typeof target.closest !== 'function') return;
+      if (target === textarea.current) return;
+      // A row keeps the menu alive for the `click` that picks it (both menus
+      // `preventDefault` the mousedown that would blur the field).
+      if (target.closest('.mention-popover') !== null) return;
+      if (target.closest('.composer-input') !== null) return;
+      setDismissed(true);
+      setSlashDismissed(true);
+    };
+    // Capture: a control that handles its own pointerdown and stops propagation
+    // would otherwise leave a menu open behind the surface it just revealed.
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [menuOpen, slashOpen, textarea]);
 
   const chooseCommand = (command: CommandSpec): void => {
     const text = insertCommand(command);

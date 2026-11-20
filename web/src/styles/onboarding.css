@@ -212,11 +212,18 @@
   gap: var(--space-3);
 }
 
-@media (max-width: 640px) {
+/* Narrow *or* short: a 740x360 landscape phone is wider than 640 and shorter than
+ * any desktop, and it used to get the desktop layout — a 760px card with the step
+ * rail wrapping to two rows over the fields, and a footer that put the primary
+ * action on the right, away from the thumb that has to reach it (OV-10). */
+@media (max-width: 640px), (max-height: 500px) {
   .onboarding-card {
     padding: var(--space-7) var(--space-6);
   }
 
+  /* The rail is orientation, and on a phone the "Step 2 of 5" line above it
+   * already says where the reader is. On a landscape screen it costs two wrapped
+   * rows of a card with no slack. */
   .onboarding-rail {
     display: none;
   }
@@ -226,6 +233,9 @@
     gap: var(--space-2);
   }
 
+  /* `column-reverse`: the primary action ("Continue") is the last child, and the
+   * thumb comes from the bottom of the screen. Back/Next stay under it in one row
+   * of their own. */
   .onboarding-footer {
     flex-direction: column-reverse;
     align-items: stretch;

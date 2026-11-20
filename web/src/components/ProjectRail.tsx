@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX, TargetedSubmitEvent } from 'preact';
 import type { Project } from '../api/types';
 import { modKey } from '../lib/platform';
-import { Menu, MenuItem, useMenu } from '../lib/menu';
+import { Menu, MenuItem, contextMenuProps, useMenu } from '../lib/menu';
 import * as actions from '../state/actions';
 import * as railPeek from '../state/railPeek';
 import * as store from '../state/store';
@@ -507,6 +507,7 @@ export function ProjectRail(): JSX.Element {
                 (project.session_count > 0
                   ? `${project.name}\n${project.path}\n${sessions}`
                   : `${project.name}\n${project.path}`) + (unread > 0 ? `\n${unreadLabel(unread)}` : '');
+              const gestures = contextMenuProps(menu, () => true, () => null);
               return (
                 <li
                   class={`project-rail-item-wrap${active ? ' is-active' : ''}`}
@@ -544,7 +545,19 @@ export function ProjectRail(): JSX.Element {
                       railPeek.openPeek(project.id);
                     }}
                     // Every tile answers a right-click, not just the active one:
-                    // the menu's actions name the tile they opened from.
+                    // the menu's actions name the tile they opened from. A touch
+                    // screen has no right-click, so `contextMenuProps` adds the
+                    // gesture that exists there — a finger resting on the tile
+                    // (LS-06). It opens the menu itself, anchored at the pressed
+                    // element; the subject is the one thing it cannot know, so
+                    // the tile is named on pointerdown, before the press can
+                    // ripen. `onContextMenu` stays here: the desktop path is
+                    // unchanged, including the pointer coordinates it opens at.
+                    {...gestures}
+                    onPointerDown={(event) => {
+                      setMenuFor(project.id);
+                      gestures.onPointerDown(event);
+                    }}
                     onContextMenu={(event) => openTileMenuAtPointer(project, event)}
                   >
                     <ProjectGlyph project={project} />
@@ -565,7 +578,9 @@ export function ProjectRail(): JSX.Element {
                   {active ? (
                     <IconButton
                       size="sm"
-                      class="project-rail-kebab w-[24px] h-[24px]"
+                      // The box is `rail.css`'s: a Tailwind `w-[24px]` would
+                      // outrank the coarse-pointer tier that has to grow it.
+                      class="project-rail-kebab"
                       label={`Project actions for ${project.name}`}
                       title={`Project actions for ${project.name}`}
                       aria-haspopup="menu"

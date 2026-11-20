@@ -1,6 +1,7 @@
 import type { JSX } from 'preact';
 import { useId } from 'preact/hooks';
 import { Text } from '../ui/Layout';
+import { cn } from '../ui/variants';
 
 export interface ToggleProps {
   checked: boolean;
@@ -26,15 +27,27 @@ export function Toggle({
   testId,
 }: ToggleProps): JSX.Element {
   const generated = useId();
+  /* The row used to be a `<div>` beside a
+   * `<span class="toggle-label">`, so only the 36×21 track toggled and tapping
+   * the words did nothing — most of the row's area on a phone. The row is now a
+   * `<label for>` pointing at the switch, which is the one control the whole
+   * row names; `for` (rather than relying on the implicit association) keeps
+   * working if the copy is ever moved outside the label. A `<label>` may label a
+   * `<button>`, and both browsers and jsdom skip re-activation when the click
+   * already landed inside the control, so the switch still flips exactly once. */
+  const switchId = id ?? `toggle-${generated}`;
   const descriptionId = description ? `toggle-description-${id ?? generated}` : undefined;
   return (
-    <div class="toggle-field">
+    <label
+      class={cn('toggle-field', disabled ? 'cursor-not-allowed' : 'cursor-pointer')}
+      for={switchId}
+    >
       {/* The switch stays a plain `<button>`. It is a `switch`, not a pressable
           control: `role="switch"`, `aria-checked` and the `.toggle`/`.toggle-knob`
           track are the contract (`Toggle.test.tsx`, the settings browser
           verifier), and `IconButton` fixes its own role and `aria-pressed`. */}
       <button
-        id={id}
+        id={switchId}
         type="button"
         role="switch"
         data-testid={testId}
@@ -59,6 +72,6 @@ export function Toggle({
           </Text>
         ) : null}
       </Text>
-    </div>
+    </label>
   );
 }

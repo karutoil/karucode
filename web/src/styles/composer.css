@@ -111,6 +111,12 @@
   gap: var(--space-3);
   margin: 0;
   padding: var(--space-3) var(--space-6) var(--space-1) var(--space-6);
+  /* CO-06: the chip row is a list, not a wall. Ten attachments used to grow the
+   * dock without a bound - and the dock is measured, so every chip came out of
+   * the transcript. The strip now scrolls inside its own band instead. */
+  max-height: min(20dvh, 96px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   list-style: none;
 }
 
@@ -176,7 +182,12 @@
   color: var(--danger);
 }
 
-.attachment-chip-remove {
+/* CO-08: the size lives here, never in a `w-[24px] h-[24px]` utility on the
+ * button. Utilities are unlayered, so they beat every `layer(components)` rule -
+ * including the 32px coarse floor below - and the Remove target stayed 24x24 on a
+ * phone. `.attachment-chip` in front is what outranks the geometry utility an
+ * `IconButton` always emits (24 base / 32 coarse / 40 on the phone tier). */
+.attachment-chip .attachment-chip-remove {
   display: grid;
   flex: 0 0 auto;
   place-items: center;
@@ -239,6 +250,13 @@
   gap: var(--space-2);
   margin: 0;
   padding: 0;
+  /* CO-06: the tray is above the box, so its height is dock height. Eight
+   * waiting messages pushed `.composer-wrap` to y=-46 (the first Recall
+   * unreachable, the transcript 0px tall); the list scrolls instead of the dock
+   * growing, so the dock stays inside the pane whatever is waiting. */
+  max-height: min(30dvh, 160px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   list-style: none;
 }
 
@@ -1094,6 +1112,46 @@
   outline-offset: 0;
 }
 
+/* CO-09: the visible line break for a device that has no Shift+Enter.
+ *
+ * Only rendered while `Enter` is the send key (in the default Ctrl/Cmd+Enter
+ * mode the keyboard already breaks the line), and only *shown* where the reveal
+ * contract says so: a phone or a tablet, never a desktop that has the chords.
+ * `.compose-foot` in front is what beats the geometry utilities `Button` always
+ * emits - a single class cannot. */
+.compose-foot .compose-newline {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 24px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.compose-foot .compose-newline:hover {
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+}
+
+.compose-foot .compose-newline:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: 0;
+}
+
+/* §5.3, reveal inverted: hidden exactly where the keyboard chords exist. */
+@media (hover: hover) and (pointer: fine) {
+  .compose-foot .compose-newline {
+    display: none;
+  }
+}
+
 /* ---------- drop target ---------- */
 
 .composer-drop {
@@ -1137,7 +1195,18 @@
   z-index: 70;
   display: flex;
   flex-direction: column;
-  max-height: min(340px, 48dvh);
+  /* CO-04: sized for the *visible* window, not the layout viewport. iOS does not
+   * shrink the layout viewport for the keyboard, so `48dvh` alone let the
+   * popover's head - and the row the arrows were on - sit above the top of the
+   * screen (measured: 96px above at 375x667 with the keyboard up). The shell is
+   * already `100dvh - var(--kb-inset)` tall (`layout.css`), so the room above the
+   * dock is that height, minus the dock, minus the 8px gap it is anchored by.
+   * `48dvh` stays as the short-landscape cap. The floor is 64px, not 88: at
+   * 320x568 with a 320px keyboard there are only ~85px between the top of the
+   * screen and the field, and an 88px floor put the popover's head 11px above the
+   * window (measured). 64 keeps a header and one scrolling row on screen, which
+   * is the least that is still usable; anything larger scrolls inside the cap. */
+  max-height: max(64px, min(340px, 48dvh, calc(100dvh - var(--kb-inset, 0px) - var(--composer-h, 96px) - var(--space-4))));
   overflow: hidden;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
@@ -1371,16 +1440,23 @@
    * The `min()`/`42dvh` pair is the guard for a dock that fills the screen (a
    * landscape phone with a long draft and a queued panel): the menu stops 56dvh
    * up and is at most 42dvh tall, so it is never parked off the top edge the way
-   * a raw `--composer-h` anchor could be. */
+   * a raw `--composer-h` anchor could be.
+   *
+   * CO-01: this element is `position: fixed`, so its anchor resolves against the
+   * layout viewport - which iOS never shrinks for the keyboard. The dock sits at
+   * the bottom of a shell that *is* the shrunken one (`layout.css`), so the
+   * anchor has to add `--kb-inset` back or ~110px of the sheet opens underneath
+   * the keyboard. Its height is then what is left of that shell above the anchor:
+   * `100dvh - inset - dock - 12px`. */
   .compose-bottom .model-switcher-menu.dropup,
   .compose-bottom .reasoning-selector .model-switcher-menu.dropup {
     position: fixed;
     top: auto;
     right: auto;
-    bottom: min(calc(var(--composer-h, 96px) + var(--space-3)), 56dvh);
+    bottom: calc(min(calc(var(--composer-h, 96px) + var(--space-3)), 56dvh) + var(--kb-inset, 0px));
     left: var(--space-6);
     width: min(300px, calc(100vw - var(--space-9)));
-    max-height: 42dvh;
+    max-height: min(42dvh, calc(100dvh - var(--kb-inset, 0px) - var(--composer-h, 96px) - var(--space-6)));
     overflow-y: auto;
     overscroll-behavior: contain;
   }
@@ -1394,10 +1470,11 @@
   /* The searchable list needs the room the short menu did not: a filter band and
    * a footer inside a 42dvh card would leave two rows of models under them. The
    * second term is the real ceiling — the sheet is anchored above the dock, so
-   * what is left of the viewport above that anchor is all it may take. */
+   * what is left of the shrunken shell above that anchor is all it may take
+   * (CO-01: the inset is part of that subtraction). */
   .compose-bottom .model-switcher-menu-models.dropup {
     width: min(340px, calc(100vw - var(--space-9)));
-    max-height: min(52dvh, calc(100dvh - var(--composer-h, 96px) - var(--space-6)));
+    max-height: min(52dvh, calc(100dvh - var(--kb-inset, 0px) - var(--composer-h, 96px) - var(--space-6)));
     overflow: hidden;
   }
 
@@ -1442,9 +1519,17 @@
    * the base rule instead: shrinking prose below the floor is the bug. */
 }
 
-/* Phones: below 16px iOS zooms the whole page on focus, so the mock's 12px is
- * desktop-only. This lives here because composer.css loads after layout.css and
- * wins over the shared `.composer-input` guard there. */
+/* Phones: below 16px iOS zooms the whole page when a field is focused, so the
+ * mock's 12px input is desktop-only.
+ *
+ * CO-02/CO-03: this tier is a *portrait* phone. A landscape phone (852x393) and
+ * an iPad are wider than 640px, so they kept the 13px textarea and the 11px
+ * model filter and iOS zoomed the page on every focus. The same two rules are
+ * therefore repeated in the `(pointer: coarse)` block at the end of this sheet -
+ * a coarse pointer is the device that has an on-screen keyboard, whatever its
+ * width - and `composer.css`'s own suite fails if the pair drifts apart. The
+ * guard lives here because this sheet loads after layout.css and wins over the
+ * shared `.composer-input` rule there. */
 @media (max-width: 640px) {
   /* A running phone dock has two deliberate rows: model/session configuration
    * and always-available Stop above, then Usage plus the explicit send mode and
@@ -1518,6 +1603,13 @@
      * `height` Composer.tsx sets, so lowering the cap here is enough — no
      * re-measure needed when the keyboard opens or the phone rotates. */
     --compose-input-max: min(112px, 22vh);
+  }
+
+  .compose-bottom .model-switcher-filter {
+    /* A real text field inside a `position: fixed` sheet: the same 16px floor,
+     * in a 32px box rather than the 20px the desktop density gave it (CO-03). */
+    height: 32px;
+    font-size: var(--fs-title);
   }
 
   /* Shortcut prose yields on a phone. Live status and the read-only Approvals
@@ -1677,21 +1769,36 @@
  * transcript automatically rather than overlapping the last message.
  */
 @media (pointer: coarse) {
+  /* CO-02/CO-03: the iOS no-zoom floor belongs to the pointer, not to a width.
+   * A landscape phone and an iPad are wider than the 640px tier above, so both
+   * kept a 13px textarea and an 11px model filter and iOS zoomed the page on
+   * focus. Identical to the phone tier's pair on purpose - `composer.test.ts`
+   * fails if the two copies drift apart. */
+  .composer-input {
+    font-size: var(--fs-title);
+    --compose-input-max: min(112px, 22vh);
+  }
+
+  .compose-bottom .model-switcher-filter {
+    height: 32px;
+    font-size: var(--fs-title);
+  }
+
   .compose-plus {
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
   }
 
   .compose-bottom .button-stop,
   .button-send {
-    width: 40px;
-    min-width: 40px;
-    height: 40px;
-    min-height: 40px;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
   }
 
   .compose-bottom .button-queue {
-    min-height: 40px;
+    min-height: 44px;
   }
 
   /* The queue-mode options take the 32px thumb floor above, so the capsule
@@ -1704,24 +1811,66 @@
   }
 
   /* Labelled pills are already 66-107px wide, so height alone was the miss. 32 is
-   * enough to land a thumb on without turning the dock into a toolbar. */
+   * enough to land a thumb on without turning the dock into a toolbar - the
+   * two most-tapped lists of the dock and the two controls that only say what
+   * they are in a `title` (CO-11) take the full 40px floor instead. */
   .context-pill,
-  .compose-approvals,
   .compose-bottom .model-switcher-button,
-  .queued-recall,
   .queue-mode-option {
     min-height: 32px;
+  }
+
+  .queued-recall,
+  .compose-approvals {
+    min-height: 44px;
+  }
+
+  /* CO-10: the @/slash rows and the model sheet's filter are the two lists a
+   * thumb scrolls and taps most, and both were below every platform floor
+   * (33px and 20px). 44 is the §5.3 floor; the filter is a field, so it takes the
+   * 32px box its 16px text needs (CO-03's tier) rather than the row floor. */
+  .mention-item {
+    min-height: 44px;
+  }
+
+  .compose-bottom .model-switcher-filter {
+    min-height: 32px;
+  }
+
+  /* CO-05: the footer is keyboard prose - `↑↓ to move`, `Esc to dismiss` - and a
+   * phone has no Escape and no arrows. It was also 10px of a sheet that is
+   * already short. The rows themselves stay. */
+  .mention-foot {
+    display: none;
   }
 
   /* The model pill carries two lines on a phone (model, then effort) and it is
    * the one control that changes what answers you, so it takes the full target. */
   .compose-bottom .model-switcher-button {
-    min-height: 40px;
+    min-height: 44px;
   }
 
-  .attachment-chip-remove {
+  /* CO-09: in Enter-sends mode the Return key sends, so a coarse pointer needs a
+   * visible way to break a line - a phone keyboard has no Shift+Enter. */
+  .compose-foot .compose-newline {
+    min-height: 44px;
+  }
+
+  .attachment-chip .attachment-chip-remove {
     width: 32px;
     min-width: 32px;
     height: 32px;
+    min-height: 32px;
+  }
+}
+
+/* The phone tier of the same floor: a full-bleed chip row is where Remove is
+ * aimed with a thumb and no pointer, so it takes the last step up (CO-08). */
+@media (pointer: coarse) and (max-width: 640px) {
+  .attachment-chip .attachment-chip-remove {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
   }
 }

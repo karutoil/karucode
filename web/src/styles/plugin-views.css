@@ -280,3 +280,28 @@
     opacity: 1;
   }
 }
+
+/* ---------- the panel's own chrome ------------------------------------- */
+
+/* The kicker row carries the panel's name and its Refresh control, and it used
+ * to scroll away with the payload: on a long panel the only way to re-read the
+ * data was to scroll back to the top (LS-17). It is sticky inside the panel's
+ * scroll container instead, with an opaque fill so rows pass under it.
+ *
+ * `.plugin-panel` is the wrapper `PluginPanelView` draws; the rule is scoped to
+ * it so the inspector's other kicker rows keep their static behaviour. */
+.plugin-panel > .inspector-kicker-row {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-bottom: var(--space-3);
+  background: var(--surface);
+}
+
+/* A finger gets a taller target on the same control. */
+@media (pointer: coarse) {
+  .plugin-panel .plugin-panel-refresh {
+    width: 44px;
+    height: 44px;
+  }
+}

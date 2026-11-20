@@ -167,8 +167,10 @@ describe('todo panel: ids, accent ink and disclosure targets', () => {
   });
 
   it('grows the disclosure for a coarse pointer', () => {
+    // 32px was under the repository's own 40px floor (LS-14): a chevron a thumb
+    // has to aim at between two lines of text.
     expect(todo).toMatch(
-      /@media \(pointer: coarse\) \{\s*\n\s*\.todo-item-toggle \{\s*\n\s*width: 32px;\s*\n\s*height: 32px;/,
+      /@media \(pointer: coarse\) \{\s*\n\s*\.todo-item-toggle \{\s*\n\s*width: 44px;\s*\n\s*height: 44px;/,
     );
   });
 

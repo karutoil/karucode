@@ -373,6 +373,7 @@ export function ControlRail({
       <button
         type="button"
         class="icon-button"
+        data-testid="cp-rail-leave"
         aria-label="Back to sessions"
         title="Back to sessions"
         onClick={onLeave}
@@ -388,6 +389,7 @@ export function ControlRail({
       </div>
       <IconButton
         class="icon-button"
+        testId="cp-rail-refresh"
         title="Refresh sessions"
         label="Refresh sessions"
         icon={<RefreshIcon size={15} />}
@@ -397,6 +399,7 @@ export function ControlRail({
     <label class="side-search">
       <SearchIcon size={15} />
       <input
+        data-testid="cp-rail-search"
         type="search"
         value={query}
         placeholder="Search sessions or projects…"

@@ -87,10 +87,18 @@ function getInstance(id: string): {
   return instance;
 }
 
-/** The cell size, from the type scale rather than a magic number. */
+/** The cell size, from the stylesheet rather than a magic number. */
 function terminalFontSize(): number {
   if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return 13;
-  const value = window.getComputedStyle(document.documentElement).getPropertyValue('--fs-body').trim();
+  const styles = window.getComputedStyle(document.documentElement);
+  // The terminal's own size, when the stylesheet publishes one (`terminal.css`):
+  // it defaults to `--fs-body` and the phone tier raises it, because a 13px cell
+  // at 390px is a ~45-column grid (WB-08). `--fs-body` stays the fallback so a
+  // theme that predates the property - or a test with no stylesheet loaded -
+  // still measures what it did.
+  const own = Number.parseFloat(styles.getPropertyValue('--terminal-font-size').trim());
+  if (Number.isFinite(own) && own > 0) return own;
+  const value = styles.getPropertyValue('--fs-body').trim();
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 13;
 }

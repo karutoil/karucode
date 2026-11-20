@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { getGitStatus } from '../api/endpoints';
 import type { GitStatus } from '../api/types';
 import { useFocusTrap } from '../lib/dom';
+import { useCoveredInert } from '../features/rail/coveredInert';
 import { pluralise } from '../lib/format';
 import { lazyNamed } from '../lib/lazyView';
 import * as actions from '../state/actions';
@@ -160,6 +161,10 @@ export function Inspector(): JSX.Element {
   // Context is the top phone surface. The result sheet remains mounted, but must
   // not run a second focus trap or expose its controls behind the drawer.
   useFocusTrap(inspectorRef, isNarrow && isSheetOpen && !contextOpen, actions.closeSheets);
+  // The sheet covers the conversation; a screen reader and the Tab order must
+  // agree with the pixels (A11Y-05). `inert` on the covered siblings does that
+  // without teaching `isDialogOpen()` about a second kind of dialog.
+  useCoveredInert(inspectorRef, isNarrow && isSheetOpen);
   const hostedPanels = uniqueHostedPanels(store.pluginPanelTabs.value);
   const pluginTabs = hostedPanels.panels;
   const ui = store.pluginUi.value;

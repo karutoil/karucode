@@ -19,6 +19,17 @@ export function caretInEditable(event: Event): boolean {
   );
 }
 
+/**
+ * Is a modal surface in front of the workbench?
+ *
+ * Every signal here renders a `role="dialog"` (or a `Dialog`/`Overlay` shell)
+ * that traps focus, so a shortcut or a plugin chord that fired behind one would
+ * act on a surface the reader cannot reach. The phone's sessions and Results
+ * sheets count: they are `aria-modal="true"` at 92vw, and the chat under them is
+ * as unreachable as the chat behind Settings. The Context drawer is a dialog too,
+ * but only below the breakpoint — docked, it is a column and the workspace keeps
+ * its shortcuts.
+ */
 export function isDialogOpen(): boolean {
   return (
     store.settingsOpen.value ||
@@ -27,6 +38,7 @@ export function isDialogOpen(): boolean {
     store.notificationCenterOpen.value ||
     store.rewindTarget.value !== null ||
     store.fileViewerPath.value !== null ||
+    store.mobileSheet.value !== null ||
     (store.narrowViewport.value && workbench.contextOpen.value)
   );
 }

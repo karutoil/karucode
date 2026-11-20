@@ -1931,3 +1931,41 @@
     padding: var(--space-5);
   }
 }
+
+/* WB-04 / WB-09: the source-control strip and the per-row actions at thumb size.
+ *
+ * `.gitm-act` is 24px (stage, discard, unstage) and `.gitm-nav-tab` 36px - the
+ * two controls a phone user touches most in this pane, sitting at mouse sizes.
+ * `pointer: coarse` rather than a width tier, because a touch laptop has the same
+ * problem and a narrow mouse window does not. The nav strip also gets the same
+ * edge fade the workspace strip has (`git.css` owns `.gitm-nav`, so the mask lives
+ * here): it scrolls through Sections/Branches/History/PRs with its scrollbar
+ * hidden, and nothing said there was more to the right. The fade is 8px inside the
+ * strip's own 16px inline padding, so a strip that fits loses only padding. */
+.gitm-nav {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    currentColor var(--space-4),
+    currentColor calc(100% - var(--space-4)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    currentColor var(--space-4),
+    currentColor calc(100% - var(--space-4)),
+    transparent 100%
+  );
+}
+
+@media (pointer: coarse) {
+  .gitm-act {
+    width: 44px;
+    height: 44px;
+  }
+
+  .gitm-nav-tab {
+    min-height: 44px;
+  }
+}

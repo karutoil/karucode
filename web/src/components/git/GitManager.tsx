@@ -548,6 +548,22 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
     </div>
   ) : null;
 
+  // WB-09: the section strip is a horizontal scrollport with its scrollbar hidden,
+  // and a full-width phone shows Changes/Branches/History/PRs/Issues/Remotes with
+  // the last two off-screen. Nothing scrolled them into view, so a section could be
+  // selected and unreachable - by a click that worked from a half-clipped tab, or
+  // by a branch link that knows where it wants to go. `scrollIntoView` with
+  // `inline: 'nearest'` scrolls the strip and *only* the strip: `block: 'nearest'`
+  // keeps it from also scrolling the pane it sits in. jsdom has no implementation,
+  // which is why it is called through the optional property.
+  const navRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const nav = navRef.current;
+    if (!nav) return;
+    const activeTab = nav.querySelector<HTMLElement>('.gitm-nav-tab.is-active');
+    activeTab?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
+  }, [section]);
+
   const pageSections: Array<{
     id: GitSection;
     label: string;
@@ -720,7 +736,7 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
         </header>
 
         {status?.is_repo ? (
-          <nav class="gitm-nav" role="tablist" aria-label="Source control sections">
+          <nav ref={navRef} class="gitm-nav" role="tablist" aria-label="Source control sections">
             {pageSections.map((item) => {
               const selected = section === item.id;
               return (

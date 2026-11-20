@@ -17,6 +17,9 @@ describe('Button', () => {
     expect(btn.getAttribute('data-variant')).toBe('secondary');
     expect(btn.getAttribute('data-size')).toBe('md');
     expect(btn.classList.contains('button')).toBe(false);
+    // A11Y-01: the stable hook `base.css` raises to the 44×44 coarse-pointer
+    // floor. It is *not* the legacy `.button` class that the sheet also serves.
+    expect(btn.classList.contains('ui-button')).toBe(true);
     expect(btn.hasAttribute('aria-busy')).toBe(false);
     expect(btn.disabled).toBe(false);
 
@@ -130,6 +133,7 @@ describe('IconButton', () => {
     expect(btn.getAttribute('data-testid')).toBe('sidebar-toggle');
     expect(btn.getAttribute('data-size')).toBe('md');
     expect(btn.classList.contains('icon-button')).toBe(false);
+    expect(btn.classList.contains('ui-icon-button')).toBe(true);
     expect(btn.className).toContain('w-[30px]');
     expect(btn.hasAttribute('aria-pressed')).toBe(false);
     expect(btn.hasAttribute('aria-expanded')).toBe(false);

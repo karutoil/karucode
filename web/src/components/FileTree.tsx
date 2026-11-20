@@ -30,14 +30,29 @@ type FileKind = 'folder' | 'rust' | 'ts' | 'md' | 'file';
 const MAX_TREE_DEPTH = 32;
 
 /**
- * One row's outer height, in CSS pixels.
+ * One row's outer height, in CSS pixels, when the stylesheet cannot be read.
  *
- * Windowed rendering turns a row index into a scroll offset, so this has to agree
- * with `.tree-row { height: 29px }` in `styles/inspector.css`. Change both
- * together: a drift of a pixel or two is invisible until the spacers have
- * accumulated it, and then the scrollbar jumps as rows mount and unmount.
+ * Windowed rendering turns a row index into a scroll offset, so the number has to
+ * agree with `.tree-row` in `styles/inspector.css`. It is *published* there as
+ * `--tree-row-h` on `.tree` (`29px`, `44px` under `pointer: coarse`), and
+ * `rowHeight()` reads it: a constant here would be a second copy that drifts the
+ * moment the coarse tier moves the rows (WB-04), and every scroll step would
+ * mount the wrong slice.
+ *
+ * The fallback is the pointer-fine number because the suite runs with CSS
+ * disabled (`css: false`) and jsdom computes no custom property.
  */
-const ROW_HEIGHT = 29;
+const ROW_HEIGHT_FALLBACK = 29;
+
+/** The row height the tree is actually laid out with, read from the stylesheet. */
+function rowHeight(list: HTMLElement | null): number {
+  if (list === null || typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') {
+    return ROW_HEIGHT_FALLBACK;
+  }
+  const raw = window.getComputedStyle(list).getPropertyValue('--tree-row-h').trim();
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : ROW_HEIGHT_FALLBACK;
+}
 
 /**
  * Above this many visible rows the tree mounts a window instead of everything.
@@ -281,6 +296,9 @@ export function FileTree({
 
   /** The window, or `null` while the list is not windowed. */
   const [rowWindow, setRowWindow] = useState<RowWindow | null>(null);
+  /** The laid-out row height, re-read on every measure so a pointer change (or a
+   *  density change) moves the spacers with the rows. */
+  const [rowPx, setRowPx] = useState(ROW_HEIGHT_FALLBACK);
   const scroller = useRef<HTMLElement | null>(null);
   /** Read by `measure`, which must not be re-created when the list grows. */
   const totalRef = useRef(visible.length);
@@ -309,10 +327,15 @@ export function FileTree({
       setRowWindow((current) => (current === null ? current : null));
       return;
     }
+    // Read the row height from the stylesheet on every measure: `pointer: coarse`
+    // changes it under a mounted tree, and the arithmetic below has to use the
+    // rows the browser actually laid out (WB-04).
+    const px = rowHeight(list);
+    setRowPx(px);
     const listTop = list.getBoundingClientRect().top - parent.getBoundingClientRect().top
       + parent.scrollTop;
-    const first = Math.max(0, Math.floor((parent.scrollTop - listTop) / ROW_HEIGHT));
-    const rowsOnScreen = Math.ceil(height / ROW_HEIGHT) + 1;
+    const first = Math.max(0, Math.floor((parent.scrollTop - listTop) / px));
+    const rowsOnScreen = Math.ceil(height / px) + 1;
     const start = Math.max(0, first - OVERSCAN);
     const end = Math.min(totalRef.current, first + rowsOnScreen + OVERSCAN);
     setRowWindow((current) =>
@@ -351,14 +374,15 @@ export function FileTree({
     const list = container.current;
     const parent = scroller.current;
     if (!list || !parent) return;
+    const px = rowHeight(list);
     const listTop = list.getBoundingClientRect().top - parent.getBoundingClientRect().top
       + parent.scrollTop;
-    const top = listTop + index * ROW_HEIGHT;
-    const bottom = top + ROW_HEIGHT;
+    const top = listTop + index * px;
+    const bottom = top + px;
     const viewTop = parent.scrollTop;
     const viewBottom = viewTop + parent.clientHeight;
-    if (top < viewTop) parent.scrollTop = Math.max(0, top - ROW_HEIGHT);
-    else if (bottom > viewBottom) parent.scrollTop = bottom - parent.clientHeight + ROW_HEIGHT;
+    if (top < viewTop) parent.scrollTop = Math.max(0, top - px);
+    else if (bottom > viewBottom) parent.scrollTop = bottom - parent.clientHeight + px;
     else return;
     // The browser also fires `scroll` here, but not synchronously and not in a
     // layout-less test: measuring now is what makes the row exist by the time
@@ -532,7 +556,7 @@ export function FileTree({
             role="presentation"
             aria-hidden="true"
             class="tree-spacer"
-            style={{ height: `${start * ROW_HEIGHT}px` }}
+            style={{ height: `${start * rowPx}px` }}
           />
         ) : null}
         {shown.map((node, offset) => {
@@ -562,7 +586,7 @@ export function FileTree({
             role="presentation"
             aria-hidden="true"
             class="tree-spacer"
-            style={{ height: `${(visible.length - end) * ROW_HEIGHT}px` }}
+            style={{ height: `${(visible.length - end) * rowPx}px` }}
           />
         ) : null}
       </ul>

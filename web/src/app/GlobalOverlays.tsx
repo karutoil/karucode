@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
 import { Suspense } from 'preact/compat';
+import { useEffect, useRef } from 'preact/hooks';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { ToastRegion } from '../components/ToastRegion';
 import { lazyNamed } from '../lib/lazyView';
@@ -42,6 +43,44 @@ const RewindDialogLazy = lazyNamed(() => import('../components/RewindDialog'), '
 const FileViewerLazy = lazyNamed(() => import('../components/FileViewer'), 'FileViewer');
 
 export function GlobalOverlays(): JSX.Element {
+  // Android's Back button leaves the whole app: nothing in the workspace has ever
+  // pushed a history entry, so the gesture that means "close this" is the one
+  // gesture that throws the sheet away *and* the conversation with it (SH-07).
+  // One entry per open sheet, popped by `closeSheets` however the sheet closes,
+  // and the hardware Back is mapped to the same action the backdrop runs.
+  const sheet = store.mobileSheet.value;
+  /** True while the history entry this component pushed is the current one. */
+  const ownsHistory = useRef(false);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (sheet !== null) {
+      const entry = { karucodeSheet: sheet };
+      // One entry per open sheet. A switch straight from one sheet to another
+      // replaces it rather than stacking a second "close" step for a gesture the
+      // reader made once.
+      if (ownsHistory.current) window.history.replaceState(entry, '');
+      else {
+        window.history.pushState(entry, '');
+        ownsHistory.current = true;
+      }
+      const onPopState = (): void => {
+        ownsHistory.current = false;
+        actions.closeSheets();
+      };
+      window.addEventListener('popstate', onPopState);
+      return () => window.removeEventListener('popstate', onPopState);
+    }
+    // A sheet closed by its own ✕, by Escape or by the backdrop must not leave
+    // our entry behind: the next Back press would be spent dismissing a surface
+    // that is already gone. Only the entry this effect pushed is unwound, and the
+    // listener is already detached, so the pop this causes closes nothing.
+    const state = window.history.state as { karucodeSheet?: unknown } | null;
+    if (ownsHistory.current && state !== null && 'karucodeSheet' in state) {
+      ownsHistory.current = false;
+      window.history.back();
+    }
+  }, [sheet]);
+
   return (
     <>
       {store.mobileSheet.value !== null ? (

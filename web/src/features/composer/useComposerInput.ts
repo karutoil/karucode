@@ -19,6 +19,11 @@ export interface ComposerInputHandle {
   submit: () => Promise<void>;
   syncCaret: (element: HTMLTextAreaElement) => void;
   handleKeyDown: (event: TargetedKeyboardEvent<HTMLTextAreaElement>) => void;
+  /**
+   * Start a new line at the caret and keep the box focused - the visible
+   * counterpart of Shift+Enter for a device that has no Shift key (CO-09).
+   */
+  insertLineBreak: () => void;
 }
 
 export function useComposerInput(options: {
@@ -212,6 +217,18 @@ export function useComposerInput(options: {
     });
   };
 
+  /**
+   * The button's version of the same thing: it takes the caret from the live
+   * field and hands focus back, because the tap moved focus to the button and a
+   * phone would otherwise close the keyboard the writer is still using.
+   */
+  const insertLineBreakAtCaret = (): void => {
+    const element = textarea.current;
+    if (!element) return;
+    element.focus();
+    insertLineBreak(element);
+  };
+
   const handleKeyDown = (event: TargetedKeyboardEvent<HTMLTextAreaElement>): void => {
     // An IME owns these keys while it is composing: Enter commits a
     // candidate, the arrows walk the candidate list and Escape cancels
@@ -332,5 +349,6 @@ export function useComposerInput(options: {
     submit,
     syncCaret,
     handleKeyDown,
+    insertLineBreak: insertLineBreakAtCaret,
   };
 }

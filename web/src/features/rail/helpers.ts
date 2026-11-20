@@ -4,7 +4,7 @@ import * as store from '../../state/store';
 const DAY = 86_400_000;
 
 /** The rail's one-tap filters, in the mock's order. */
-export type SessionFilter = 'all' | 'needs' | 'running' | 'changes';
+export type SessionFilter = 'all' | 'needs' | 'running';
 
 export const SESSION_FILTERS: ReadonlyArray<{
   id: SessionFilter;
@@ -14,7 +14,6 @@ export const SESSION_FILTERS: ReadonlyArray<{
   { id: 'all', label: 'All', title: 'Every session in this project' },
   { id: 'needs', label: 'Needs you', title: 'Sessions with unread news or a failed run' },
   { id: 'running', label: 'Running', title: 'Sessions with a run in flight' },
-  { id: 'changes', label: 'Changes', title: 'Sessions that touched files' },
 ];
 
 /** Hover intent for the desktop project dropdown: crossing the trigger on the way
@@ -35,10 +34,11 @@ export function passesFilter(
   if (filter === 'needs') {
     return unread > 0 || session.last_run_status === 'failed' || session.last_run_status === 'interrupted';
   }
-  if (filter === 'running') return session.running;
-  // "Changes" is about what the session *did*, and only a session the server has
-  // described can answer it. Unknown is not "no": it stays visible under All.
-  return false;
+  // `running` is the last filter: a fourth one ("Changes") used to live here and
+  // could only ever answer `false` - the session summary carries no "touched
+  // files" fact, so its chip counted zero and never rendered. Dead code that
+  // advertises a filter is worse than no filter (LS-16).
+  return session.running;
 }
 
 /** Bucket a session's last activity into the rail's date groups. */

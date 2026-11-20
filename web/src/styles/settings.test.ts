@@ -216,6 +216,48 @@ describe('settings sheet: the phone layout', () => {
   });
 });
 
+describe('settings sheet: the phone chrome (OV-08, OV-09)', () => {
+  /* A 375x667 screen spent ~280px of chrome before the first control: the rail's
+   * head, the chip strip, the pane head, and a footer the note pushed to three
+   * lines. The band is narrow OR short, because a 740x360 landscape phone is wider
+   * than 640 and has less vertical room than any of it. */
+  const phone = media('(max-width: 640px), (max-height: 500px)');
+
+  it('drops the pane caption, the second sentence about a chosen section', () => {
+    expect(phone).toMatch(/\.settings-pane-caption \{\n {4}display: none;/);
+  });
+
+  it('keeps the footer one row of thumb-sized buttons', () => {
+    // The note was what wrapped: two 96px buttons and a sentence in a 339px row
+    // is a footer three or four lines tall. `flex-basis: 100%` on both slots was
+    // the old two-row recipe and it is gone.
+    expect(phone).not.toMatch(/flex-basis: 100%/);
+    expect(phone).toMatch(
+      /\.overlay-tall \.settings-footer-note \{\n {4}display: none;/,
+    );
+    expect(phone).toMatch(
+      /\.overlay-tall \.overlay-footer-actions \.button \{\n {4}min-height: 44px;/,
+    );
+  });
+
+  it('lands a search jump below the pane header instead of flush against it', () => {
+    // `useSettingsSheet` scrolls the matched section to `block: 'start'` inside
+    // the panel; with no scroll padding the card's own border arrived glued to the
+    // hairline under the pane header.
+    expect(declarations('.settings-panels > .tab-panel')['scroll-padding-top']).toBe(
+      'var(--space-7)',
+    );
+    expect(declarations('.settings-section')['scroll-margin-top']).toBe('var(--space-7)');
+  });
+
+  it('leaves the desktop sheet on the wider tiers it already had', () => {
+    // The height half must not swallow the layout at desk widths: the two-pane
+    // strip switch stays a width query.
+    expect(css).toContain('@media (max-width: 780px) {');
+    expect(phone).not.toMatch(/\.settings-shell \{\n {4}flex-direction: column/);
+  });
+});
+
 describe('settings sheet: the Advanced disclosure', () => {
   it('is a bordered block whose summary hides the native marker', () => {
     const block = declarations('.settings-advanced');

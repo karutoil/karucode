@@ -1866,6 +1866,86 @@ describe('SettingsSheet tabs', () => {
 });
 
 /* ------------------------------------------------------------------ *
+ * The rail strip reveals the section it switched to (LS-09).
+ * ------------------------------------------------------------------ */
+
+describe('SettingsSheet rail reveal', () => {
+  /* Below 780px the rail is a horizontal strip. Switching sections from the
+   * search, from an arrow key or from a rejected field's jump changed the panel
+   * and left the chip that names it off the right-hand edge, so nothing on screen
+   * said where the reader now was. The reveal is guarded: a chip already inside
+   * the strip is left where the reader put it. */
+
+  beforeEach(() => {
+    resetAppState();
+  });
+
+  afterEach(() => {
+    resetAppState();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /** A rect with only the horizontal edges set: the strip is a row. */
+  function row(left: number, right: number): DOMRect {
+    return {
+      left,
+      right,
+      top: 0,
+      bottom: 44,
+      width: right - left,
+      height: 44,
+      x: left,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect;
+  }
+
+  /** Lay out the strip and one chip horizontally; jsdom has no layout of its own. */
+  function layOutStrip(offScreenChip: string | null): void {
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: Element,
+    ) {
+      if (this.id === offScreenChip) return row(402, 470);
+      return row(0, 390);
+    });
+  }
+
+  it('scrolls the off-screen chip of the new section into the strip', async () => {
+    installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const updates = await screen.findByRole('tab', { name: /^Updates/i });
+    // A 390px strip with the eighth chip scrolled past its right edge.
+    layOutStrip('settings-nav-tab-updates');
+    const reveal = vi.spyOn(Element.prototype, 'scrollIntoView');
+
+    fireEvent.click(updates);
+
+    expect(reveal).toHaveBeenCalledWith({ inline: 'nearest', block: 'nearest' });
+    // "Nearest" and not "center": the strip moves by the overlap, so a chip the
+    // reader had half in view does not jump across the strip.
+    expect(reveal.mock.calls.every(([options]) => (options as ScrollIntoViewOptions).block === 'nearest')).toBe(
+      true,
+    );
+  });
+
+  it('leaves a strip the reader can already see where they put it', async () => {
+    installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const agent = await screen.findByRole('tab', { name: /^Agent/i });
+    // Every chip inside the strip: nothing is clipped, so nothing may move.
+    layOutStrip(null);
+    const reveal = vi.spyOn(Element.prototype, 'scrollIntoView');
+
+    fireEvent.click(agent);
+
+    expect(reveal).not.toHaveBeenCalled();
+  });
+});
+
+/* ------------------------------------------------------------------ *
  * Search: the rail's answer to "where is that setting".
  * ------------------------------------------------------------------ */
 

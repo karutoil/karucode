@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiError } from '../api/client';
 import { sendMessage, sendQueuedMessage } from '../api/endpoints';
 import { Badge, Button, Callout, Card, Chip, Inline, Stack, Text } from '../ui';
@@ -448,12 +448,30 @@ function OptionGrid({ options }: { options: PanelOption[] }): JSX.Element | null
 function GoalCard({
   goal,
   refresh,
+  isOpen,
 }: {
   goal: PanelGoal;
   refresh: () => void;
+  /** The goal this session is working on, marked and revealed once (LS-11). */
+  isOpen: boolean;
 }): JSX.Element {
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<{ id: string; text: string; bad: boolean } | null>(null);
+  // The card's own header, not the card: `Card` is a primitive that forwards no
+  // ref and spreads no attributes, and the header is the top of the block anyway.
+  const headRef = useRef<HTMLElement>(null);
+  /** The landing happens once per mount: the panel must never fight the reader's
+   *  own scroll after that. */
+  const landed = useRef(false);
+
+  useEffect(() => {
+    if (!isOpen || landed.current) return;
+    landed.current = true;
+    const head = headRef.current;
+    if (head && typeof head.scrollIntoView === 'function') {
+      head.scrollIntoView({ block: 'center', inline: 'nearest' });
+    }
+  }, [isOpen]);
 
   async function run(action: PanelAction): Promise<void> {
     if (!action.enabled || busy) return;
@@ -476,14 +494,15 @@ function GoalCard({
       as="section"
       surface="raised"
       padding="5"
-      class={`goals-goal goals-goal-${toneFor(goal.status)}`}
+      class={`goals-goal goals-goal-${toneFor(goal.status)}${isOpen ? ' is-open' : ''}`}
     >
-      <header class="goals-goal-head">
+      <header class="goals-goal-head" ref={headRef}>
         <div class="goals-goal-titles">
           <Text as="h3" size="body" weight="semibold" class="goals-title">
             {goal.title}
           </Text>
           <Inline gap="3" wrap class="goals-sub">
+            {isOpen ? <span class="goals-open-flag">Open</span> : null}
             <StatusPill status={goal.status} />
             <Text as="span" size="tiny" tone="muted" class="goals-score">
               {goal.score} criteria
@@ -636,6 +655,16 @@ export function GoalsPanel({ data, refresh }: PluginPanelRenderProps): JSX.Eleme
       : 'engine idle (auto-continue off)'
     : 'engine off';
 
+  // §5.6's landing contract: the goal this session is working on is the one the
+  // reader came for, and the list is not sorted to put it first — so it is
+  // marked and scrolled to once (LS-11). A closed goal is not "the open goal":
+  // the engine is not going to move it, and marking it would point the reader at
+  // history.
+  const openGoal = parsed.goals.find(
+    (goal) => goal.is_current_session && goal.status !== 'done' && goal.status !== 'abandoned',
+  );
+  const openKey = openGoal ? `${openGoal.session_id}:${openGoal.goal}` : null;
+
   return (
     <Stack gap="5" class="goals-tab">
       {/* No refresh button here: `PluginPanelView` already draws one in the
@@ -683,13 +712,20 @@ export function GoalsPanel({ data, refresh }: PluginPanelRenderProps): JSX.Eleme
           finished and it will record it.
         </Callout>
       ) : (
-        parsed.goals.map((goal) => (
-          <GoalCard
-            goal={goal}
-            refresh={refresh}
-            key={`${goal.session_id}:${goal.goal}`}
-          />
-        ))
+        parsed.goals.map((goal) => {
+          const key = `${goal.session_id}:${goal.goal}`;
+          return (
+            <GoalCard
+              goal={goal}
+              refresh={refresh}
+              // The goal the reader is actually working on: this session's, and
+              // still open. Marked so the panel's landing position makes sense,
+              // and scrolled to once on mount (LS-11).
+              isOpen={key === openKey}
+              key={key}
+            />
+          );
+        })
       )}
 
       <details class="goals-details">

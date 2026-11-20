@@ -642,6 +642,75 @@
   }
 }
 
+/* ---------- the sessions sheet: its head, its footer, its targets ------ */
+
+/* A sheet needs one thing the wide column does not: a named header with a
+ * visible way out (C10). The wide rail puts the project disclosure in that slot
+ * and has nothing to exit, so this row only renders inside the sheet. 44px is
+ * the tap floor (C3) and the control a thumb reaches for by reflex. */
+.rail-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: 44px;
+}
+
+.rail-sheet-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-kicker);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.9px;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.rail-sheet-close {
+  /* `min-*`, not `width`/`height`: the primitive sets those with Tailwind
+   * utilities, which sit in a layer above this sheet. */
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* SH-08: the footer touches the bottom edge whenever the rail is a column (a
+ * short or landscape window) and clears the home indicator there. It is
+ * deliberately *not* added for the phone sheet: `layout.css` already insets
+ * `.rail` on all four sides at that tier, and a second inset would be 34px of
+ * dead space between Settings and the edge. */
+.app:not(.is-narrow) .side-footer {
+  padding-bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+}
+
+/* The row kebab. The box lives here, not in Tailwind geometry on the element:
+ * a utility sits outside every layer and would outrank the media query below,
+ * which is how a 24px hover-only control survived on a touch screen (LS-02). */
+.session-menu-trigger {
+  width: 24px;
+  height: 24px;
+}
+
+/* A finger has no hover: both row kebabs are revealed, and `base.css` already
+ * raises every `.icon-button` to its 44px coarse floor once the element stops
+ * overriding the width in utilities. */
+@media (pointer: coarse) {
+  .session-menu-trigger,
+  .project-rail-kebab {
+    width: 44px;
+    height: 44px;
+    opacity: 1;
+  }
+
+  /* The tile's kebab keeps its corner but has to hang further out of a 42px
+   * tile, which is what the negative offset is for. */
+  .project-rail-kebab {
+    top: calc(-1 * var(--space-4));
+    right: calc(-1 * var(--space-2));
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .project-rail-item,
   .project-rail-item-wrap::before,

@@ -227,6 +227,60 @@ describe('TodoPanel', () => {
     expect(document.querySelectorAll('.todo-item.is-subtask')).toHaveLength(1);
   });
 
+  it('marks a task the agent just added and reveals it once', () => {
+    // LS-13 / §5.6: the list is in plan order, so a task the agent adds can land
+    // below the fold of a panel the reader is already looking at.
+    const scroll = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scroll;
+    try {
+      const first = payload({ items: [item({ id: 't1', title: 'The old one' })] });
+      const { rerender } = render(
+        <TodoPanel {...{ panel: panel(), plugin: 'kc-todo', version: '0.1.0', data: first, refresh: () => {} }} />,
+      );
+      // Opening the panel is not news: nothing is marked before the list moves.
+      expect(document.querySelectorAll('.todo-item.is-new')).toHaveLength(0);
+      expect(scroll).not.toHaveBeenCalled();
+
+      const second = payload({
+        items: [item({ id: 't1', title: 'The old one' }), item({ id: 't2', title: 'Just added' })],
+      });
+      rerender(
+        <TodoPanel {...{ panel: panel(), plugin: 'kc-todo', version: '0.1.0', data: second, refresh: () => {} }} />,
+      );
+
+      const marked = document.querySelectorAll('.todo-item.is-new');
+      expect(marked).toHaveLength(1);
+      expect(marked[0]?.textContent).toContain('Just added');
+      // The marker is a word, and the reveal is anchored on that same row.
+      expect(marked[0]?.querySelector('.todo-new-flag')?.textContent).toContain('New');
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(scroll.mock.calls[0]?.[0]).toMatchObject({ block: 'nearest' });
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it('does not mark a task that was already there', () => {
+    const data = payload({ items: [item({ id: 't1' }), item({ id: 't2' })] });
+    const { rerender } = render(
+      <TodoPanel {...{ panel: panel(), plugin: 'kc-todo', version: '0.1.0', data, refresh: () => {} }} />,
+    );
+    // A status change is not an addition: the same two ids, one of them re-worded.
+    rerender(
+      <TodoPanel
+        {...{
+          panel: panel(),
+          plugin: 'kc-todo',
+          version: '0.1.0',
+          data: payload({ items: [item({ id: 't1' }), item({ id: 't2', title: 'Renamed', status: 'done' })] }),
+          refresh: () => {},
+        }}
+      />,
+    );
+    expect(document.querySelectorAll('.todo-item.is-new')).toHaveLength(0);
+  });
+
   it('flags an unverified completion', () => {
     const data = payload({
       items: [item({ status: 'done', label: 'Implemented', evidence: 'trust me', started: false })],

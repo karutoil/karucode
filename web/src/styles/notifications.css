@@ -69,6 +69,10 @@
   min-height: 0;
   margin: 0;
   padding: var(--space-4);
+  /* The list is the surface that reaches the bottom edge on a phone (the dialog
+   * is full-bleed there), so it carries the home-indicator inset itself (OV-07).
+   * `env()` is 0 everywhere else, hence no width check. */
+  padding-bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
   overflow-y: auto;
   overscroll-behavior: contain;
   list-style: none;
@@ -272,11 +276,25 @@
   padding: var(--space-9) var(--space-9) var(--space-10);
 }
 
-@media (max-width: 640px) {
-  .notification-center {
-    width: calc(100vw - 28px);
-    max-height: calc(100dvh - 24px);
+/* The mark-as-read control is hover-revealed above, which is a mouse-only
+ * affordance: with no hover and no `:focus-within` on a finger it stayed
+ * invisible AND untappable (`pointer-events: none`), so the row's own open
+ * button swallowed the tap and took the reader to another project (LS-03). */
+@media (hover: none) {
+  .notification-mark {
+    opacity: 1;
+    pointer-events: auto;
+    min-width: 44px;
+    min-height: 44px;
   }
+}
+
+@media (max-width: 640px) {
+  /* The width/max-height pair that used to sit here was dead CSS: the dialog's
+   * own phone rule (`.overlay:not(.overlay-compact):not(.overlay-palette)`, three
+   * classes to this one) already makes every full-size overlay the screen. It
+   * stays in `overlays.css` so the eight other phone dialogs keep it, and it is
+   * deliberately not restated here (OV-07). */
 
   /* The toolbar buttons keep their labels but lose the icon gutter: on a phone
      every pixel of the row is a character of the count. */

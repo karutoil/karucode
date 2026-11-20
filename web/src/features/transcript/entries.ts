@@ -124,20 +124,67 @@ export function buildEntries(items: readonly ChatItem[], previous: readonly Entr
 }
 
 /**
+ * Characters per line the estimate assumes when nothing has been measured.
+ *
+ * The number the estimate has always used, and it is a desktop number: it
+ * describes a transcript roughly 620px wide, which is the shell's chat column at
+ * its largest tier. On a phone the column is a third of that, so every row is
+ * two to three times taller than this assumes and the first window's document is
+ * short by the same factor - which the reader sees as the transcript moving
+ * under their thumb the moment the rows are measured (TR-07).
+ */
+export const DEFAULT_CHARS_PER_LINE = 96;
+
+/**
+ * Average advance of one character of transcript prose, in px.
+ *
+ * `--fs-body` is 13px and the transcript sets its answers in it; a mixed
+ * Latin/sans line averages a little under half an em. The estimate is a guess by
+ * definition - it is only ever used until the browser measures the row - so a
+ * single honest constant beats an unmeasurable one.
+ */
+const AVG_CHAR_PX = 6.4;
+
+/** Below this a "line" is not a line: capped so a zero-width measurement cannot fake a mile of text. */
+const MIN_CHARS_PER_LINE = 24;
+
+/**
+ * How many characters fit on one line of a transcript column `widthPx` wide.
+ *
+ * The fallback (no width, or a width nothing has laid out yet) keeps the historic
+ * 96, so a renderer that cannot measure - jsdom, an embedded view - estimates
+ * exactly what it always did.
+ */
+export function estimateCharsPerLine(widthPx: number): number {
+  if (!Number.isFinite(widthPx) || widthPx <= 0) return DEFAULT_CHARS_PER_LINE;
+  return Math.max(MIN_CHARS_PER_LINE, Math.round(widthPx / AVG_CHAR_PX));
+}
+
+/**
  * A height guess for one entry, used only until the browser measures the row.
  *
  * It is deliberately generous: an overestimate leaves a little padding above
  * the window that collapses on the first measurement, while an underestimate
  * makes the scrollbar jump as rows are discovered. The estimate never wins over
  * a measured height.
+ *
+ * `charsPerLine` is the width the row is rendered in, expressed the only way the
+ * estimate can use it: a phone column of ~50 characters per line needs twice the
+ * lines of the desktop 96 the default assumes. Callers with a measured scroller
+ * pass `estimateCharsPerLine(element.clientWidth)`; leaving it out keeps the
+ * desktop estimate exactly as it was.
  */
-export function estimateEntryHeight(entry: Entry): number {
+export function estimateEntryHeight(
+  entry: Entry,
+  charsPerLine: number = DEFAULT_CHARS_PER_LINE,
+): number {
+  const perLine = Number.isFinite(charsPerLine) && charsPerLine > 0 ? charsPerLine : DEFAULT_CHARS_PER_LINE;
   if (entry.kind === 'day') return 48;
-  if (entry.kind === 'user') return 96 + Math.ceil(entry.item.content.length / 96) * 18;
+  if (entry.kind === 'user') return 96 + Math.ceil(entry.item.content.length / perLine) * 18;
   let height = 104;
   for (const part of entry.parts) {
     if (part.kind === 'message') {
-      height += 32 + Math.ceil((part.content.length + part.reasoning.length) / 96) * 18;
+      height += 32 + Math.ceil((part.content.length + part.reasoning.length) / perLine) * 18;
     } else if (part.kind === 'tool' || part.kind === 'command') {
       height += 46;
     } else if (part.kind === 'approval') {

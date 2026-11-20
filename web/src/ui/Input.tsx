@@ -3,8 +3,14 @@ import { useId } from 'preact/hooks';
 import type { BaseUiProps } from './types';
 import { cn, variants, type VariantProps } from './variants';
 
+/* `ui-field` is a stable hook, not a style: `base.css` gives it the 16px iOS
+ * zoom floor under `(max-width: 640px), (pointer: coarse)`. The old guard
+ * targeted a legacy `.input` class these primitives never emit, so 54
+ * `<Textarea>`/`<Select>` call
+ * sites stayed at 11–12.5px and iOS zoomed the page on focus. The utilities here
+ * are unchanged, so a desktop pointer keeps its visual size. */
 export const inputVariants = variants({
-  base: 'w-full rounded-sm border border-line bg-rail text-text placeholder:text-muted transition-colors duration-150 enabled:hover:border-line-strong focus-visible:border-accent-line disabled:cursor-not-allowed disabled:opacity-50 read-only:bg-surface',
+  base: 'ui-field w-full rounded-sm border border-line bg-rail text-text placeholder:text-muted transition-colors duration-150 enabled:hover:border-line-strong focus-visible:border-accent-line disabled:cursor-not-allowed disabled:opacity-50 read-only:bg-surface',
   variants: {
     size: {
       sm: 'h-[28px] px-3 text-tiny',
@@ -162,7 +168,7 @@ export function Input({
 }
 
 export const textareaVariants = variants({
-  base: 'w-full min-h-[72px] rounded-sm border border-line bg-rail px-4 py-2 text-text placeholder:text-muted resize-y transition-colors duration-150 enabled:hover:border-line-strong focus-visible:border-accent-line disabled:cursor-not-allowed disabled:opacity-50 read-only:bg-surface',
+  base: 'ui-field w-full min-h-[72px] rounded-sm border border-line bg-rail px-4 py-2 text-text placeholder:text-muted resize-y transition-colors duration-150 enabled:hover:border-line-strong focus-visible:border-accent-line disabled:cursor-not-allowed disabled:opacity-50 read-only:bg-surface',
   variants: {
     mono: {
       true: 'font-mono text-message',
@@ -268,7 +274,7 @@ export function Textarea({
 }
 
 export const selectVariants = variants({
-  base: 'w-full h-[32px] rounded-sm border border-line bg-rail px-4 text-small text-text transition-colors duration-150 enabled:hover:border-line-strong focus-visible:border-accent-line disabled:cursor-not-allowed disabled:opacity-50',
+  base: 'ui-field w-full h-[32px] rounded-sm border border-line bg-rail px-4 text-small text-text transition-colors duration-150 enabled:hover:border-line-strong focus-visible:border-accent-line disabled:cursor-not-allowed disabled:opacity-50',
   variants: {
     invalid: {
       true: 'border-danger focus-visible:border-danger enabled:hover:border-danger',

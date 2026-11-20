@@ -27,6 +27,9 @@ const chatCss = readFileSync(new URL('./chat.css', import.meta.url), 'utf8');
 const composerCss = readFileSync(new URL('./composer.css', import.meta.url), 'utf8');
 const workbenchCss = readFileSync(new URL('./workbench.css', import.meta.url), 'utf8');
 const notificationsCss = readFileSync(new URL('./notifications.css', import.meta.url), 'utf8');
+const controlSharedCss = readFileSync(new URL('./control-shared.css', import.meta.url), 'utf8');
+const controlSessionCss = readFileSync(new URL('./control-session.css', import.meta.url), 'utf8');
+const overlaysCss = readFileSync(new URL('./overlays.css', import.meta.url), 'utf8');
 
 /** Declarations of one rule, matched by its full selector text. */
 function declarations(css: string, selector: string): Record<string, string> {
@@ -99,10 +102,13 @@ describe('phone shell: the frame leaves the conversation alone', () => {
   });
 
   it('compacts the header on a phone', () => {
-    const body = tier(layoutCss, 640);
     // 66px is the desktop header; on a 956px screen it was spent on chrome before
-    // the first message.
-    expect(body).toMatch(/--header-h: 52px/);
+    // the first message. The declaration lives in `tokens.css` because that sheet
+    // is imported unlayered - the same rule in `layout.css` (inside
+    // `layer(components)`) never applied, so the browser kept 66px while this
+    // suite asserted 52 (SH-06).
+    expect(tokensCss).toMatch(/@media \(max-width: 640px\) \{[\s\S]*?--header-h: 52px/);
+    expect(layoutCss).not.toMatch(/--header-h: 52px/);
   });
 
   it('keeps the session title while dropping secondary breadcrumb chrome', () => {
@@ -133,28 +139,30 @@ describe('phone chrome: every control is a thumb-sized target', () => {
     // workbench.css because that file owns the 30px floor AND loads last: the
     // same declaration in layout.css is silently outranked.
     expect(coarse(workbenchCss)).toMatch(
-      /\.chat-main\.is-workbench \.header-buttons > \.head-btn \{[^}]*min-width: 40px;[^}]*min-height: 40px;/,
+      /\.chat-main\.is-workbench \.header-buttons > \.head-btn \{[^}]*min-width: 44px;[^}]*min-height: 44px;/,
     );
     // ...and the floor it has to override is still there for pointer-fine.
     expect(workbenchCss).toMatch(/\.header-buttons > \.head-btn \{\s*\n\s*min-height: 30px/);
   });
 
   it('covers the control-plane header too, which is not `.is-workbench`', () => {
-    expect(coarse(layoutCss)).toMatch(/\.main-head \.head-btn \{[^}]*min-height: 40px/);
+    expect(coarse(layoutCss)).toMatch(/\.main-head \.head-btn \{[^}]*min-height: 44px/);
   });
 
   it('sizes the dock controls for a finger, Stop included', () => {
     // Stop sat at 28x28 directly beside Queue: the two most consequential
     // neighbours in the product, 4px apart.
     const body = coarse(composerCss);
-    expect(body).toMatch(/\.compose-bottom \.button-stop,[\s\S]*?min-height: 40px/);
-    expect(body).toMatch(/\.compose-plus \{[^}]*width: 40px;[^}]*height: 40px;/);
+    expect(body).toMatch(/\.compose-bottom \.button-stop,[\s\S]*?min-height: 44px/);
+    expect(body).toMatch(/\.compose-plus \{[^}]*width: 44px;[^}]*height: 44px;/);
     // The capsule around the queue options has to be tall enough to hold them:
     // 32px options in a 30px capsule painted the active one outside its border
     // (measured at 440x956 with touch emulation).
     expect(body).toMatch(/\.queue-mode \{\s*\n\s*height: auto;[\s\S]*?min-height: 34px/);
     // The labelled pills only needed height: they are already 66-107px wide.
-    expect(body).toMatch(/\.compose-approvals,[\s\S]*?min-height: 32px/);
+    // The two controls that say what they are only in a `title` take the full
+    // thumb floor (CO-11), like every other dock control.
+    expect(body).toMatch(/\.queued-recall,\s*\n\s*\.compose-approvals \{\s*\n\s*min-height: 44px/);
   });
 
   it('keeps the pointer-fine sizes the style contract pins', () => {
@@ -542,7 +550,7 @@ describe('phone results sheet: above the veil, not behind it', () => {
 });
 
 describe('the phone model sheet is a thumb surface', () => {
-  it('gives the reasoning choices the same 40px floor as the rest of the dock', () => {
+  it('gives the reasoning choices the same 44px floor as the rest of the dock', () => {
     // Checked at the iPhone 16 Pro Max viewport (440x956): the effort toggles
     // measured 36px, four of them side by side, between "Low" and "Max" - two
     // neighbours a thumb picks between. The dock's other controls already take
@@ -550,8 +558,77 @@ describe('the phone model sheet is a thumb surface', () => {
     const coarseStart = layoutCss.lastIndexOf('@media (pointer: coarse) {');
     expect(coarseStart).toBeGreaterThan(-1);
     const body = layoutCss.slice(coarseStart);
-    expect(body).toMatch(/\.reasoning-choice \{\s*\n\s*min-height: 40px/);
+    expect(body).toMatch(/\.reasoning-choice \{\s*\n\s*min-height: 44px/);
     // ...without moving the pointer-fine row, which stays a compact popover.
     expect(declarations(layoutCss, '.reasoning-choice')['min-height']).toBe('36px');
+  });
+});
+
+describe('phone control plane: the transcript keeps its own scroller', () => {
+  // The reported bug: on a phone the plane opened on the oldest message, never
+  // followed new output and never showed "Jump to latest". All three were one
+  // defect - `display: block` at the phone tier removed every ancestor from flex
+  // flow, so `.chat-scroll` was content-sized and the plane's own page scroll was
+  // the only thing that moved.
+  const sharedPhone = controlSharedCss.slice(controlSharedCss.indexOf('@media (max-width: 1023px)'));
+  const sessionPhone = controlSessionCss.slice(controlSessionCss.indexOf('@media (max-width: 1023px)'));
+
+  it('does not turn the plane into the page scroller while a chat is open', () => {
+    expect(controlSharedCss).not.toMatch(/\.control-plane\.cp \{ display: block/);
+    expect(sharedPhone).toMatch(/\.control-plane\.cp:not\(\.detail-open\) \{ display: block; overflow: auto; \}/);
+    expect(sharedPhone).toMatch(/\.control-plane\.cp\.detail-open \{\s*\n\s*display: flex;\s*\n\s*flex-direction: column;\s*\n\s*overflow: hidden;/);
+  });
+
+  it('gives the embedded chat column a definite height on a phone', () => {
+    // `height: 100%` against a content-height parent computes to `auto`, which is
+    // exactly how `.chat-scroll` stopped being a scroller.
+    expect(sessionPhone).toMatch(
+      /\.control-plane\.cp\.detail-open \.cp-chat \.chat-main \{\s*\n\s*height: auto;\s*\n\s*flex: 1 1 auto;\s*\n\s*min-height: 0;/,
+    );
+  });
+
+  it('bounds the overview rail so the dashboard is not a screenful of sessions away', () => {
+    expect(sharedPhone).toMatch(/\.control-plane\.cp:not\(\.detail-open\) \.cp-browser \{ max-height: 45dvh; \}/);
+  });
+
+  it('keeps the status-bar inset in the session header', () => {
+    // The container tier out-ranks the shell's own `env()` padding (0,3,0 vs
+    // 0,1,0), so the inset has to be restated here or "Back to overview" sits
+    // under the clock on every installed phone.
+    expect(controlSessionCss).toMatch(
+      /@container control-plane \(max-width: 1000px\)[\s\S]*?min-height: calc\(var\(--header-h\) \+ env\(safe-area-inset-top, 0px\)\);[\s\S]*?padding-block: calc\(env\(safe-area-inset-top, 0px\) \+ var\(--space-4\)\)/,
+    );
+  });
+
+  it('gives the plane a coarse-pointer floor', () => {
+    expect(controlSharedCss).toMatch(
+      /@media \(pointer: coarse\) \{[\s\S]*?\.control-plane \.session-menu-trigger \{\s*\n\s*width: 44px;\s*\n\s*height: 44px;\s*\n\s*opacity: 1;/,
+    );
+  });
+});
+
+describe('phone overlays: the keyboard and the notch own the frame', () => {
+  it('ends the dialog layer where the keyboard starts', () => {
+    // The dialog sized itself to the visible band but stayed centred in an
+    // 844px-tall layer, so its footer sat 160px under a 320px keyboard (OV-02,
+    // SH-03). Measured at 390x844 with --kb-inset: every control of the settings
+    // dialog is now above the band.
+    expect(overlaysCss).toMatch(
+      /@media \(max-width: 640px\), \(max-height: 500px\)[\s\S]*?\.dialog-layer \{[\s\S]*?height: calc\(100dvh - var\(--kb-inset, 0px\)\)/,
+    );
+  });
+
+  it('gives every overlay control a coarse-pointer floor', () => {
+    // The close control is the corner a thumb reaches first and was the smallest
+    // thing on the surface (31-32px).
+    expect(overlaysCss).toMatch(/@media \(pointer: coarse\)[\s\S]*?\.overlay-close/);
+  });
+
+  it('scrolls a confirmation instead of hanging its footer below the fold', () => {
+    // A tall `compact` dialog (Rewind) kept a 17vh top anchor while capped at
+    // 100dvh - 48px, on a non-scrolling layer with body scroll locked.
+    expect(overlaysCss).toMatch(
+      /@media \(max-width: 640px\), \(max-height: 500px\)[\s\S]*?\.dialog-layer \{[\s\S]*?overflow-y: auto/,
+    );
   });
 });

@@ -19,10 +19,18 @@
  * Back and the session actions. */
 .chat-main.is-workbench .main-head,
 .main-head.cp-session-head {
-  height: var(--workbench-header-h);
-  min-height: var(--workbench-header-h);
+  height: calc(var(--workbench-header-h) + env(safe-area-inset-top, 0px));
+  min-height: calc(var(--workbench-header-h) + env(safe-area-inset-top, 0px));
   gap: var(--space-5);
-  padding: 0 var(--space-8);
+  /* Longhands, not the `0 …` shorthand: `layout.css`'s <=1023 tier pads the top
+   * of the header by `env(safe-area-inset-top)` so an installed phone app's
+   * buttons do not sit under the clock, and this sheet loads last. A shorthand
+   * here re-zeroed that inset at every width (SH-05). `env()` is 0 on a desktop,
+   * so the only thing this changes is the case it exists for. */
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: var(--space-8);
+  padding-bottom: 0;
+  padding-left: var(--space-8);
   background: var(--bg);
 }
 
@@ -76,6 +84,12 @@
 
 .chat-main.is-workbench .header-buttons {
   gap: var(--space-3);
+  /* `layout.css` pins the cluster at `flex: 0 0 auto`, which means the row can
+   * never take space back from it: a plugin chip in the header slot added its
+   * width to the cluster's and pushed the bell, Context and the kebab past the
+   * right edge (SH-09). Zero floor here, and the slot (which has no width of its
+   * own) is clipped at the phone tier so the *chip* gives way, never a built-in. */
+  min-width: 0;
 }
 
 .chat-main.is-workbench .header-buttons > .head-btn {
@@ -90,14 +104,49 @@
  * control-plane header, which is not `.is-workbench`. */
 @media (pointer: coarse) {
   .chat-main.is-workbench .header-buttons > .head-btn {
-    min-width: 40px;
-    min-height: 40px;
+    min-width: 44px;
+    min-height: 44px;
   }
 
-  /* The context button is already wide; it only needed height. */
+  /* The context button carries the usage ring and a percentage, so it is already
+   * wide at rest - but "wide" is not "44 square", and at a phone width its
+   * natural box is the 30px icon utility. It takes the floor like its neighbours. */
   .chat-main.is-workbench .header-buttons > .head-btn.context-header-btn {
-    min-width: 0;
+    min-width: 44px;
     padding: 0 var(--space-4);
+  }
+
+  /* Two of the row's controls are *not* direct children of the cluster: the
+   * sessions toggle sits beside the breadcrumb, and the task-menu button lives
+   * inside its own wrapper. The rule above therefore never reached them, and both
+   * measured 15x30 / 30x30 in the corner a thumb reaches first. */
+  .chat-main.is-workbench .main-head .head-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* A closable workspace tab's ✕ was an 18px square next to a 45px tab - the one
+   * target in the strip a thumb cannot hit (WB-05). The *hit box* grows to 40;
+   * the glyph stays 11px because it is the `IconButton`'s own svg, untouched. */
+  .chat-main.is-workbench .tab-close {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* The file viewer's toolbar actions are words, not buttons (`.file-action` in
+   * overlays.css is a padding-only inline-flex: ~25px tall), so they stayed under
+   * the thumb floor while every real button reached it (WB-10). The rule lives
+   * here rather than in overlays.css because that sheet loads before this one and
+   * a same-specificity `min-height` there would lose on source order. */
+  .file-action {
+    min-height: 44px;
+  }
+
+  /* The two workspace views (three with the terminal) are icons at phone width;
+   * a 15px glyph in a 31px box is still not a thumb target. */
+  .chat-main.is-workbench .workspace-tab {
+    min-width: 44px;
+    min-height: 44px;
   }
 }
 
@@ -235,6 +284,29 @@
   scroll-padding-inline: var(--space-2);
 }
 
+/* WB-05: the strip becomes a scrollport as soon as a plugin contributes a view
+ * or a phone shows three, and `layout.css` hides its scrollbar - so nothing said
+ * there was more to the right. The fade is 8px, *inside* the tab's own 10px
+ * inline padding (`--space-5`), so a strip that fits loses nothing but padding
+ * edge while an overflowing one shows its cut edge, in every browser (the
+ * alternative - a scroll-driven animation - is not supported everywhere yet). */
+.chat-main.is-workbench .main-head > .workspace-tabs {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    currentColor var(--space-4),
+    currentColor calc(100% - var(--space-4)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    currentColor var(--space-4),
+    currentColor calc(100% - var(--space-4)),
+    transparent 100%
+  );
+}
+
 .chat-main.is-workbench .workspace-tab {
   font-size: var(--fs-small);
 }
@@ -364,7 +436,7 @@
 
 /* Keep every action mounted when the header is constrained: only the workspace
  * tablist wraps, to a second row that still belongs to the same <header>. */
-@container workbench (max-width: 1000px) {
+@container workbench (min-width: 641px) and (max-width: 1000px) {
   /* The page header is one recipe with two mount points: the workbench's own
  * conversation header, and the control plane's, which is the same role (a page
  * head carrying a breadcrumb, a title and right-hand actions) on a screen that
@@ -379,7 +451,9 @@
     column-gap: var(--space-3);
     row-gap: 0;
     height: auto;
-    min-height: calc(var(--workbench-header-h) + var(--workbench-result-bar-h));
+    min-height: calc(
+      var(--workbench-header-h) + var(--workbench-result-bar-h) + env(safe-area-inset-top, 0px)
+    );
   }
 
   .chat-main.is-workbench .main-head > .breadcrumb {
@@ -397,6 +471,87 @@
     width: 100%;
     height: var(--workbench-result-bar-h);
     min-height: var(--workbench-result-bar-h);
+  }
+}
+
+/* The phone header is one row (SH-02).
+ *
+ * The two-row recipe above is the right answer for a 700-1000px container: a
+ * wrapped strip costs 45px and keeps every view. Applied on a phone it made the
+ * workbench header 104px - 58px of breadcrumb plus a 45px second row for the
+ * tabs, on a 956px screen, before a single message - while `--header-h` and
+ * `mobile.test.ts` both promise 52px. So the wrap is scoped to a container that
+ * is wide enough to afford it, and here the strip becomes a compact icon-only
+ * segmented control inside the one row. The label a hidden span carried is still
+ * the tab's accessible name (`Tabs` always sets `aria-label`) and its tooltip,
+ * and the height is `--header-h` plus the status-bar inset `layout.css` adds. */
+@container workbench (max-width: 640px) {
+  .chat-main.is-workbench .main-head {
+    flex-wrap: nowrap;
+    height: calc(var(--header-h) + env(safe-area-inset-top, 0px));
+    min-height: calc(var(--header-h) + env(safe-area-inset-top, 0px));
+    column-gap: var(--space-3);
+    row-gap: 0;
+    padding-right: var(--space-5);
+    padding-left: var(--space-5);
+  }
+
+  /* The title takes what is left and ellipsises: it may not push the controls,
+   * and no control may push it off the row. */
+  .chat-main.is-workbench .main-head > .breadcrumb {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .chat-main.is-workbench .main-head > .workspace-tabs {
+    order: initial;
+    flex: 0 1 auto;
+    align-self: center;
+    width: auto;
+    height: auto;
+    min-height: 0;
+    gap: var(--space-1);
+    margin-left: 0;
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+  }
+
+  .chat-main.is-workbench .workspace-tab {
+    padding: 0 var(--space-3);
+    border-radius: var(--radius-xs);
+  }
+
+  /* The icon is the control; the word moved into the accessible name and the
+   * tooltip. Nothing else in the row can afford 80px of label. */
+  .chat-main.is-workbench .workspace-tab > span:not(.tab-icon) {
+    display: none;
+  }
+
+  .chat-main.is-workbench .workspace-tab .tab-icon {
+    display: inline-grid;
+    place-items: center;
+  }
+
+  /* SH-09: a plugin chip must never buy width from the bell or Context. The two
+   * rules that achieve it, measured in Chromium at 390px: the cluster keeps its
+   * own built-ins (`flex: 0 0 auto`, so it can neither shrink under them and paint
+   * them past the edge - which is what `min-width: 0` alone did: the five controls
+   * spilled 16px past the screen - nor take width it does not have), and the slot
+   * contributes zero and clips, so the chip is the thing that gives way. */
+  .chat-main.is-workbench .header-buttons {
+    flex: 0 0 auto;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
+  .chat-main.is-workbench .header-buttons > .plugin-slot {
+    flex: 0 0 0;
+    flex-wrap: nowrap;
+    min-width: 0;
+    overflow: hidden;
   }
 }
 
@@ -609,7 +764,23 @@
 .chat-main.is-workbench .main-head {
     column-gap: var(--space-2);
     row-gap: 0;
-    padding: 0 var(--space-5);
+    /* Longhands, so the status-bar inset the 1023 tier and this sheet's base rule
+     * add survives the phone tier. The shorthand that used to sit here zeroed
+     * `env(safe-area-inset-top)` and put the header under the clock (SH-05). */
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-right: var(--space-5);
+    padding-left: var(--space-5);
+  }
+
+  /* WB-01: the Results dock was `min(380px, 92vw)` - 359px on a 390px screen,
+   * which left a 31px sliver of dimmed transcript down one edge and read as a
+   * misaligned panel rather than a full-screen one. Full bleed at the phone tier.
+   * `100%` of the sheet's containing block, not `100vw`: on iOS the layout
+   * viewport is wider than the visual one (the same reason SH-11 replaced
+   * Context's `100vw`). */
+  .chat-main.is-workbench .center-body.has-result > .inspector,
+  .chat-main.is-workbench .inspector-inner {
+    width: 100%;
   }
 
   .chat-main.is-workbench .breadcrumb {
@@ -639,5 +810,50 @@
   .workbench-task-menu-popover {
     right: 0;
     width: min(224px, calc(100vw - var(--space-10)));
+  }
+}
+
+/* The phone's workspace strip is an icon-only segmented control: each tab is a
+ * thumb target in its own right, so each one reaches the 44px floor even though
+ * the row it sits in is 52px tall. */
+@media (pointer: coarse) {
+  .chat-main.is-workbench .workspace-tab {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* 320px is the reflow floor (WCAG 1.4.10): six 44px controls plus three 44px view
+ * tabs do not fit in 300px of usable row. The tabs are the part that gives - they
+ * keep their 44px boxes and the strip scrolls sideways (the selected tab is
+ * already revealed by `Tabs`), so the action cluster stays on screen instead of
+ * 32px past the right edge. This lives here, not in `layout.css`, because the
+ * ≤640 container query above has already claimed `flex` and this file loads
+ * later. */
+@media (max-width: 374px) {
+  /* 320px is the reflow floor: six 44px controls plus the tabs do not fit in one
+   * row there. Two things give, and the header stays one row (SH-02):
+   *
+   * 1. the breadcrumb's flex *basis* drops to 0, so line breaking sees the title
+   *    as free width instead of its content width - without this the cluster
+   *    wrapped to a second row even when it would have fitted;
+   * 2. the palette button goes (task menu -> Commands, and Mod+K on a keyboard),
+   *    which is exactly the control the <=640 tier already means to hide - that
+   *    rule loses to the primitive's unlayered `inline-flex` utility, so it never
+   *    actually applied.
+   */
+  .chat-main.is-workbench .main-head > .breadcrumb {
+    flex: 1 1 0;
+  }
+
+  .chat-main.is-workbench .main-head > .workspace-tabs {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .chat-main.is-workbench .main-head > .workspace-tabs::-webkit-scrollbar {
+    display: none;
   }
 }

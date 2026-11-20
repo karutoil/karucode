@@ -168,29 +168,37 @@ export function Composer({
   const enterSends = store.sendKey.value === 'enter';
   const { sendChord, sendChordLong } = sendChordLabels(enterSends);
 
-  const { canSend, canQueue, canCommand, hasContent, submit, syncCaret, handleKeyDown } =
-    useComposerInput({
-      form,
-      draft,
-      attachments,
-      sending,
-      canType,
-      running,
-      stopping,
-      enterSends,
-      queueMode,
-      textarea,
-      popovers,
-      onSend,
-      onCommand,
-      onQueue,
-      onStop,
-      setDraft,
-      setCaret,
-      setAttachments,
-      setAnnouncement,
-      setSending,
-    });
+  const {
+    canSend,
+    canQueue,
+    canCommand,
+    hasContent,
+    submit,
+    syncCaret,
+    handleKeyDown,
+    insertLineBreak,
+  } = useComposerInput({
+    form,
+    draft,
+    attachments,
+    sending,
+    canType,
+    running,
+    stopping,
+    enterSends,
+    queueMode,
+    textarea,
+    popovers,
+    onSend,
+    onCommand,
+    onQueue,
+    onStop,
+    setDraft,
+    setCaret,
+    setAttachments,
+    setAnnouncement,
+    setSending,
+  });
 
   // Phones get a short placeholder: at 16px (the iOS no-zoom size) the desktop
   // sentence wraps to two lines in a 390px column, and an empty dock would then
@@ -312,6 +320,18 @@ export function Composer({
                   : undefined
             }
             aria-describedby="composer-status"
+            // CO-09: the phone keyboard's Return key should name what it does.
+            // With `Enter` sending it says "send"; in the default
+            // Ctrl/Cmd+Enter mode it stays a plain line break, and the footer
+            // offers the visible "New line" control a soft keyboard needs.
+            enterkeyhint={enterSends ? 'send' : 'enter'}
+            // An identifier is not prose: autocorrect rewrites `karucode`,
+            // `cfg` and every path a reader types, and the red spell squiggles
+            // are noise inside a message that is about to be sent as code-ish
+            // text. Sentences are still capitalised.
+            autoCorrect="off"
+            autoCapitalize="sentences"
+            spellcheck={false}
             onInput={(event) => {
               const element = event.currentTarget;
               setDraft(element.value);
@@ -320,6 +340,12 @@ export function Composer({
               popovers.setSlashDismissed(false);
             }}
             onClick={(event) => syncCaret(event.currentTarget)}
+            // CO-05: a tap on anything else blurs the field, and a phone has no
+            // Escape. Closing here is what makes "tap away" dismiss the menu.
+            onBlur={() => {
+              popovers.setDismissed(true);
+              popovers.setSlashDismissed(true);
+            }}
             onKeyUp={(event) => {
               if (event.key.startsWith('Arrow') || event.key === 'Home' || event.key === 'End') {
                 syncCaret(event.currentTarget);
@@ -388,6 +414,8 @@ export function Composer({
         sendChord={sendChord}
         mentionLabel={mentionLabel}
         usageLabel={usageLabel}
+        enterSends={enterSends}
+        onLineBreak={insertLineBreak}
         onOpenSettings={onOpenSettings}
       />
     </>

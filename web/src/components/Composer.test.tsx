@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { Composer, FORM_SCOPE_LIMIT, trimFormScopes, type ComposerProps } from './Composer';
 import type { Activity } from '../state/selectors';
@@ -330,7 +331,7 @@ describe('Composer', () => {
     expect(textarea.disabled).toBe(true);
     const send = screen.getByRole('button', { name: /Send message/ }) as HTMLButtonElement;
     expect(send.disabled).toBe(true);
-    expect((screen.getByRole('button', { name: 'Attach files' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: /^Attach files/ }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/No model provider configured/)).not.toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
@@ -388,7 +389,7 @@ describe('Composer', () => {
     it('keeps the attach control in the bottom bar, like the mock', () => {
       const { container } = renderComposer();
       const bar = container.querySelector('.compose-bottom') as HTMLElement;
-      const attach = screen.getByRole('button', { name: 'Attach files' });
+      const attach = screen.getByRole('button', { name: /^Attach files/ });
       expect(bar.contains(attach)).toBe(true);
       // The mock's textarea is the first thing in the box; there is no header row.
       expect(container.querySelector('.compose-top')).toBeNull();
@@ -1371,7 +1372,7 @@ describe('Composer', () => {
       expect(bar).not.toBeNull();
       expect(configuration).not.toBeNull();
       expect(actions).not.toBeNull();
-      expect(configuration.contains(screen.getByRole('button', { name: 'Attach files' }))).toBe(true);
+      expect(configuration.contains(screen.getByRole('button', { name: /^Attach files/ }))).toBe(true);
       expect(
         within(configuration).getByRole('group', {
           name: 'Model and reasoning pins for subsequent runs in this session',
@@ -1740,4 +1741,158 @@ describe('Composer', () => {
       expect(container.querySelector('.compose-plus')).not.toBeNull();
     });
   });
-});
+  describe('the phone keyboard (CO-04, CO-05, CO-06, CO-09, CO-11, CO-12)', () => {
+    beforeEach(() => {
+      store.sendKey.value = 'modifier-enter';
+      resetAppState();
+    });
+    afterEach(() => {
+      store.sendKey.value = 'modifier-enter';
+      store.config.value = null;
+      document.documentElement.style.removeProperty('--kb-inset');
+      resetAppState();
+    });
+
+    it('names the Return key and turns off the corrections that rewrite identifiers', () => {
+      const { textarea } = renderComposer();
+      // In the default Ctrl/Cmd+Enter mode Return is a line break, so the key
+      // says so; autocorrect and spellcheck are off because a message is
+      // half code, half prose, and autocorrect rewrites `karucode` and `cfg`.
+      expect(textarea.getAttribute('enterkeyhint')).toBe('enter');
+      expect(textarea.getAttribute('autocorrect')).toBe('off');
+      // `spellcheck` is a boolean IDL property and jsdom implements neither the
+      // property nor a reflected write, so the flag is pinned where it is
+      // declared. In a browser `spellcheck={false}` writes the attribute.
+      const source = readFileSync('src/components/Composer.tsx', 'utf8');
+      expect(source).toContain('spellcheck={false}');
+      expect(textarea.getAttribute('autocapitalize')).toBe('sentences');
+
+      act(() => {
+        store.sendKey.value = 'enter';
+      });
+      expect(screen.getByLabelText('Message karucode').getAttribute('enterkeyhint')).toBe('send');
+    });
+
+    it('gives a soft keyboard a visible line break while Enter sends', async () => {
+      act(() => {
+        store.sendKey.value = 'enter';
+      });
+      const { textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'first line' } });
+
+      const newline = screen.getByRole('button', { name: 'Start a new line instead of sending' });
+      fireEvent.click(newline);
+
+      await waitFor(() => expect(textarea.value).toBe('first line\n'));
+      // The tap must leave the writer in the field: a phone closes the keyboard
+      // the moment focus lands on a button.
+      expect(document.activeElement).toBe(textarea);
+    });
+
+    it('leaves the line-break control out where the chords exist', () => {
+      renderComposer();
+      // `composer.css` hides it again under `(hover: hover) and (pointer: fine)`;
+      // in the default chord mode there is nothing for it to do anywhere.
+      expect(screen.queryByRole('button', { name: 'Start a new line instead of sending' })).toBeNull();
+    });
+
+    it('closes the @ menu on a tap outside it, because a phone has no Escape', async () => {
+      const { textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'look at @src' } });
+      await screen.findByRole('listbox');
+
+      fireEvent.pointerDown(document.body);
+      await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
+      // The draft is untouched: dismissing a menu is not deleting text.
+      expect(textarea.value).toBe('look at @src');
+    });
+
+    it('keeps the menu when the tap lands on one of its rows', async () => {
+      const { textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: '@src' } });
+      const listbox = await screen.findByRole('listbox');
+      const row = within(listbox).getAllByRole('option')[0] as HTMLElement;
+
+      fireEvent.pointerDown(row);
+      // The row prevents the mousedown that would blur the field, so its
+      // pointerdown is not the "tap away" this dismissal is about.
+      expect(screen.getByRole('listbox')).not.toBeNull();
+
+      fireEvent.click(row);
+      await waitFor(() => expect(textarea.value).toBe('@src/main.ts '));
+    });
+
+    it('closes the menu when focus leaves the field', async () => {
+      const { textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: '@src' } });
+      await screen.findByRole('listbox');
+
+      // A tap on anything else fires this on the way out (Preact's `onBlur` is
+      // the bubbling `focusout`), and a phone has no Escape to fall back on.
+      fireEvent.focusOut(textarea);
+      await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
+    });
+
+    it('scrolls the armed row into view under the keyboard inset (CO-04)', async () => {
+      // jsdom has no layout engine, so the shell cannot actually shrink; the
+      // inset is published the way `lib/viewportInset` publishes it, and the
+      // *reveal* - the half of CO-04 a DOM can hold - is what is asserted. The
+      // arithmetic that keeps the popover inside the shrunken shell is checked
+      // numerically in `styles/composer.test.ts`.
+      document.documentElement.style.setProperty('--kb-inset', '320px');
+      expect(document.documentElement.style.getPropertyValue('--kb-inset')).toBe('320px');
+
+      const scrollIntoView = vi.spyOn(Element.prototype, 'scrollIntoView');
+      const { textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: '@' } });
+      await screen.findByRole('listbox');
+      scrollIntoView.mockClear();
+
+      fireEvent.keyDown(textarea, { key: 'ArrowDown' });
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' }));
+      const revealed = scrollIntoView.mock.contexts.at(-1) as HTMLElement;
+      // The row the arrows moved to, scrolled by the smallest amount that shows
+      // it: `scrollIntoView()` with no options would centre the list on a phone.
+      expect(revealed.id).toBe('composer-mention-menu-option-1');
+      expect(revealed.getAttribute('aria-selected')).toBe('true');
+    });
+
+    it('bounds the tray rather than the pane when eight messages are waiting (CO-06)', () => {
+      document.documentElement.style.setProperty('--kb-inset', '320px');
+      const queued = Array.from({ length: 8 }, (_, index) => ({
+        id: `steer_${index}`,
+        kind: 'steer' as const,
+        content: `message ${index + 1}`,
+        draft: `message ${index + 1}`,
+        accepted_at: 1_710_000_000_000 + index,
+      }));
+      const { container } = renderComposer({
+        running: true,
+        status: { kind: 'streaming', label: 'Streaming' },
+        onQueue: vi.fn(async () => true),
+        onRecall: vi.fn(async () => true),
+        queued,
+      });
+
+      const rows = container.querySelectorAll('.queued-row');
+      expect(rows).toHaveLength(8);
+      // The list is the scroller (the stylesheet caps it at `min(30dvh, 160px)`
+      // and every row stays in the DOM), so the dock's height stops at the cap
+      // instead of at 8 rows: measured before the fix, the tray started at
+      // y=-46 and the transcript had 0px left.
+      const list = container.querySelector('.queued-list') as HTMLElement;
+      expect(list.classList.contains('queued-list')).toBe(true);
+      expect(list.parentElement?.classList.contains('queued-panel')).toBe(true);
+      expect(screen.getAllByRole('button', { name: /^Recall steer/ })).toHaveLength(8);
+    });
+
+    it('names every icon-only control so no meaning lives in a title (CO-11)', () => {
+      store.config.value = configFixture;
+      renderComposer({ running: true, status: { kind: 'streaming', label: 'Streaming' }, onQueue: vi.fn(async () => true) });
+      // `title` is a hover tooltip; a phone never shows one.
+      expect(screen.getByRole('button', { name: 'Attach files to this message' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^Approvals: .+\. Open Settings$/ })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^Queue this message and steer/ })).toBeTruthy();
+    });
+  });
+})

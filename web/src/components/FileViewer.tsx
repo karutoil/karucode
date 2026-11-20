@@ -383,8 +383,13 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
           : null;
   const lineWord = `${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`;
 
+  /* No `host`-specific class: `.file-viewer-tabbed` was emitted here and defined
+   * in no stylesheet, so it was a hook nobody could find and a reader could
+   * mistake for styling (WB-07). The tab host is already distinguishable from the
+   * dialog by `.tab-panel > .file-viewer` and by the absence of the dialog's
+   * chrome; nothing keys off a modifier class. */
   const body = (
-    <div class={`file-viewer${host === 'tab' ? ' file-viewer-tabbed' : ''}`} onKeyDown={onKeyDown}>
+    <div class="file-viewer" onKeyDown={onKeyDown}>
       <div class="file-toolbar">
         {tabs}
         {flags.length > 0 ? (

@@ -69,13 +69,78 @@ describe('Workbench result resizing', () => {
   it('keeps views in the header and wraps only that tablist when space is constrained', () => {
     expect(workbench).toContain('.chat-main.is-workbench .main-head > .workspace-tabs');
     expect(workbench).not.toContain('.chat-main.is-workbench > .workspace-tabbar');
-    const tier = workbench.indexOf('@container workbench (max-width: 1000px)');
+    // Two rows only where the container can afford them: the wrap is scoped to
+    // 641-1000px, so a phone (<=640) keeps one row (SH-02).
+    const tier = workbench.indexOf('@container workbench (min-width: 641px) and (max-width: 1000px)');
+    expect(tier).toBeGreaterThan(-1);
     const nextTier = workbench.indexOf('@container workbench (max-width: 1100px)', tier + 1);
     const compact = workbench.slice(tier, nextTier);
     expect(compact).toMatch(/\.main-head \{[^}]*flex-wrap:\s*wrap;[^}]*height:\s*auto;/s);
     expect(compact).toMatch(/\.workspace-tabs \{[^}]*order:\s*5;[^}]*flex:\s*1 0 100%;/s);
-    expect(compact).toMatch(/min-height:\s*calc\(var\(--workbench-header-h\) \+ var\(--workbench-result-bar-h\)\)/);
+    expect(compact).toMatch(
+      /min-height:[\s\S]*?var\(--workbench-header-h\) \+ var\(--workbench-result-bar-h\)/,
+    );
   });
+
+  it('gives the phone one 52px header row instead of a wrapped 104px one (SH-02)', () => {
+    // Measured before this rule: a 58px breadcrumb row plus a 45px tab row = 104px
+    // at 360/375/390, while `--header-h` and `mobile.test.ts` promise 52. The
+    // number chosen here is the token plus the status-bar inset, i.e. 52px on a
+    // plain browser and 52 + inset on an installed app - the same shape
+    // `layout.css` gives the non-workbench `.main-head`.
+    const start = workbench.indexOf('@container workbench (max-width: 640px) {');
+    expect(start).toBeGreaterThan(-1);
+    const phone = workbench.slice(start, workbench.indexOf('@container workbench (min-width: 1100.01px)', start));
+    expect(phone).toMatch(
+      /\.main-head \{[^}]*height:\s*calc\(var\(--header-h\) \+ env\(safe-area-inset-top, 0px\)\);/s,
+    );
+    expect(phone).toMatch(/\.main-head \{[^}]*flex-wrap:\s*nowrap;/s);
+    // The strip shares the row: no full-width second line, and the label gives way
+    // to the icon (the accessible name is unchanged).
+    expect(phone).not.toMatch(/\.workspace-tabs \{[^}]*flex:\s*1 0 100%;/s);
+    expect(phone).toMatch(/\.workspace-tab > span:not\(\.tab-icon\) \{\s*\n\s*display: none;/);
+    // ...and the two-row block is not reachable at phone widths.
+    const wrap = workbench.indexOf('@container workbench (min-width: 641px) and (max-width: 1000px)');
+    expect(wrap).toBeLessThan(start);
+  });
+
+  it('keeps the status-bar inset in every tier (SH-05)', () => {
+    // The base rule and the phone tier both used a `padding` shorthand, which
+    // re-zeroed the `env(safe-area-inset-top)` the <=1023 tier adds, and put the
+    // phone header under the clock.
+    expect(workbench).toMatch(
+      /\.chat-main\.is-workbench \.main-head,\s*\n\.main-head\.cp-session-head \{[\s\S]*?padding-top: env\(safe-area-inset-top, 0px\);/,
+    );
+    const start = workbench.indexOf('@media (max-width: 640px) {');
+    const phone = workbench.slice(start);
+    expect(phone).toMatch(/\.main-head \{[^}]*padding-top: env\(safe-area-inset-top, 0px\);/s);
+    expect(workbench).not.toMatch(/\.main-head \{[^}]*padding: 0 var\(--space-5\);/s);
+  });
+
+  it('bleeds the phone results sheet across the viewport (WB-01)', () => {
+    // `min(380px, 92vw)` is 359px on a 390px screen: a 31px sliver of dimmed
+    // transcript down one edge, which reads as a misaligned panel.
+    const start = workbench.indexOf('@media (max-width: 640px) {');
+    const phone = workbench.slice(start);
+    expect(phone).toMatch(/\.chat-main\.is-workbench \.center-body\.has-result > \.inspector,\s*\n\s*\.chat-main\.is-workbench \.inspector-inner \{\s*\n\s*width: 100%;/);
+  });
+
+  it('lets a plugin chip shrink instead of pushing the bell off the header (SH-09)', () => {
+    expect(workbench).toMatch(/\.header-buttons \{[^}]*min-width: 0;/s);
+    const start = workbench.indexOf('@container workbench (max-width: 640px) {');
+    const phone = workbench.slice(start);
+    expect(phone).toMatch(/> \.plugin-slot \{[^}]*overflow: hidden;/s);
+  });
+
+  it('gives the tab close and the file actions a thumb-sized box (WB-05, WB-10)', () => {
+    // The mask is what says the strip overflows: the fade is 8px, inside the tab's
+    // own 10px padding, so a strip that fits shows no dimmed label.
+    expect(workbench).toMatch(/\.main-head > \.workspace-tabs \{[\s\S]*?mask-image: linear-gradient\(/);
+    const coarse = workbench.slice(workbench.indexOf('@media (pointer: coarse) {'));
+    expect(coarse).toMatch(/\.chat-main\.is-workbench \.tab-close \{[^}]*min-width: 44px;[^}]*min-height: 44px;/);
+    expect(coarse).toMatch(/\.file-action \{\s*\n\s*min-height: 44px;/);
+  });
+
 
   it('gives a popped-out panel the same width variable and a card on the same geometry', () => {
     // The pop-out is the only place the dock's width variable is *required*: its

@@ -3,6 +3,7 @@ import { jsonResponse, resetAppState } from '../test/fixtures';
 import * as actions from './actions';
 import { emptyChatState } from './chat';
 import * as store from './store';
+import * as workbench from './workbench';
 
 const realFetch = globalThis.fetch;
 const firstTarget = { messageId: 1, preview: 'First prompt', isAssistant: false };
@@ -70,6 +71,41 @@ describe('single-overlay replacement', () => {
     if (_name === 'rewind') expect(store.rewindTarget.value).toEqual(firstTarget);
     else expect(store.rewindTarget.value).toBeNull();
     expect(store.mobileSheet.value).toBeNull();
+  });
+});
+
+describe('opening a file in a tab', () => {
+  it('closes the phone sheet that would otherwise cover the tab it opened', () => {
+    // The sheet is 92vw wide: on a phone it stayed on top of the tab the reader
+    // had just asked for (`replaceOverlay` is the only other place that clears it).
+    store.narrowViewport.value = true;
+    store.mobileSheet.value = 'sessions';
+    actions.openFileInTab('/src/main.rs');
+
+    expect(store.mobileSheet.value).toBeNull();
+    // It is a tab, not an overlay: the modal that offered it goes away with it.
+    expect(store.fileViewerPath.value).toBeNull();
+  });
+
+  it('closes a phone Context drawer rather than restoring the sheet behind it', () => {
+    store.narrowViewport.value = true;
+    store.mobileSheet.value = 'sessions';
+    workbench.openContext('now');
+    expect(store.mobileSheet.value).toBe('inspector');
+
+    actions.openFileInTab('/src/main.rs');
+
+    expect(workbench.contextOpen.value).toBe(false);
+    expect(store.mobileSheet.value).toBeNull();
+  });
+
+  it('leaves a docked Context column where the reader put it', () => {
+    workbench.openContext('now');
+    expect(store.mobileSheet.value).toBeNull();
+
+    actions.openFileInTab('/src/main.rs');
+
+    expect(workbench.contextOpen.value).toBe(true);
   });
 });
 

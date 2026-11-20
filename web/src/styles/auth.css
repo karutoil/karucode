@@ -483,3 +483,25 @@
     transition: none;
   }
 }
+
+/* ---------- the thumb floor (OV-05) ------------------------------------ */
+/* The sign-in screen is the first thing a phone shows, and it was the smallest
+ * field in the app: a 38px input with a 30px eye inside it. `min-height` on the
+ * field keeps the 38px it is drawn at on a mouse (the declaration above) and
+ * lifts it to the 44px floor for a finger — the computed box is the larger of the
+ * two, so nothing else has to change. The reveal button takes the same 44px and
+ * the field's text inset grows with it, so the button never sits on a token. */
+@media (pointer: coarse) {
+  .auth-input {
+    min-height: 44px;
+  }
+
+  .auth-reveal {
+    width: 44px;
+    height: 44px;
+  }
+
+  .auth-field-with-reveal .auth-input {
+    padding-right: calc(var(--space-10) + var(--space-5));
+  }
+}

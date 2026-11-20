@@ -24,7 +24,7 @@
  */
 
 import type { JSX } from 'preact';
-import { useRef } from 'preact/hooks';
+import { useEffect, useRef } from 'preact/hooks';
 import type { TargetedKeyboardEvent } from 'preact';
 import { LinkButton } from '../ui';
 import {
@@ -299,6 +299,29 @@ export function SettingsNav({
   // While a query is active the selected section can be filtered out of the rail
   // even though its panel is still the one on screen.
   const activeHidden = visible.every((section) => section.id !== active);
+
+  /**
+   * Reveal the section the rail just switched to (LS-09).
+   *
+   * Below 780px the rail is a horizontal strip (`settings.css`), so a section
+   * picked from the search, from an arrow key or from a rejected field's jump
+   * could stay off the right-hand edge: the panel changed and the chip that said
+   * which section it was did not appear. Two guards keep the reveal from fighting
+   * a reader who has scrolled the strip themselves — it only runs when the chip is
+   * actually clipped, and `inline: 'nearest'` moves it by the overlap rather than
+   * centring it. On a desktop the rail is a vertical column whose chips never
+   * leave the strip horizontally, so this is a no-op there.
+   */
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const chip = list.querySelector<HTMLElement>(`#settings-nav-tab-${active}`);
+    if (!chip) return;
+    const view = list.getBoundingClientRect();
+    const box = chip.getBoundingClientRect();
+    if (box.left >= view.left && box.right <= view.right) return;
+    chip.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  }, [active]);
 
   /**
    * Arrow keys move the selection, Home/End jump to the ends.

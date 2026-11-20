@@ -76,6 +76,27 @@
   border-left: 2px solid var(--muted);
 }
 
+/* The goal this session is working on: marked so the panel's landing position
+ * (see `GoalsPanel`, which scrolls to it once) reads as "here", not as "the page
+ * happened to open halfway down" (LS-11). */
+.goals-goal.is-open {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 1px var(--accent-faint);
+}
+
+.goals-open-flag {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
+  background: var(--accent-surface);
+  color: var(--accent-on-tint);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+
 .goals-goal-head {
   display: flex;
   align-items: flex-start;
@@ -346,6 +367,16 @@
   white-space: nowrap;
 }
 
+/* "Mark met", "Abandon" and "Resume" are the most consequential controls in the
+ * product and they were 24px rows a thumb could not reliably hit (LS-12). */
+@media (pointer: coarse) {
+  .goals-btn {
+    min-height: 44px;
+    height: auto;
+    padding: 0 var(--space-6);
+  }
+}
+
 .goals-btn:hover:not(:disabled) {
   border-color: var(--accent);
 }
@@ -468,4 +499,10 @@
   border-radius: var(--radius-pill);
   background: var(--surface-inset);
   font-size: var(--fs-tiny);
+}
+
+/* Goal pills carry the goal's state and are the panel's navigation; an 18px
+ * pill is not a thumb target (A11Y-02/LS-12). */
+@media (pointer: coarse) {
+  .goals-pill { min-height: 44px; }
 }

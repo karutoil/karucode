@@ -81,6 +81,14 @@
      * `--line-strong` is a *line* tone and read as a scratch on the edge. */
     scrollbar-color: var(--faint) transparent;
     scrollbar-width: thin;
+    /* Without this, iOS inflates every block of text in landscape and Android's font-boosting rewrites the
+     * widths the layout measured, so the phone layout is computed against type
+     * sizes it never chose. 100% says "the sizes below are the sizes", which is
+     * the honest declaration while the `--fs-*` ladder in `tokens.css` is px
+     * only — that ladder is the remaining half of A11Y-09 (rem would let
+     * dynamic type scale the UI) and it belongs to the token layer. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
 
   body {
@@ -604,6 +612,118 @@ input.mono {
 .input::placeholder {
   color: var(--muted);
   opacity: 1;
+}
+
+/* ---------- touch and pointer contract ----------
+ *
+ * The floor is 44×44 for any control a thumb can hit, 40×40 only where a
+ * surface's own density contract needs it and never for a destructive or primary
+ * action. Measured before it landed, *nothing* reached 44: the primitives were 26–30px, four feature sheets each
+ * lifted their own subset to 40, and a new control inherited none of it.
+ *
+ * So the floor lives here, once, keyed on `pointer: coarse` rather than a width
+ * tier: a touch laptop with a 1440px window has the same problem, and a narrow
+ * window driven by a mouse does not. `.ui-button`, `.ui-icon-button` and
+ * `.ui-field` are the stable hooks the primitives emit (`ui/Button.tsx`,
+ * `ui/Input.tsx`); `.button`, `.icon-button`, `.input`, `.select` are the class
+ * names the rest of the app still writes by hand. Both are served, so a control
+ * does not have to be migrated to inherit the floor.
+ *
+ * The primitives keep their 26/30/32px sizes for a fine pointer — only the
+ * coarse tier moves — and `min-*` is used rather than `height`/`width` on
+ * purpose: the primitives set those with Tailwind utilities, which live in a
+ * layer *above* this sheet, and `min-height` wins over `height` whatever the
+ * layer says. */
+
+/* A11Y-07: no 300ms wait and no blue flash. `touch-action: manipulation` keeps
+ * pan and pinch (it only removes double-tap zoom, which is how a second press of
+ * Send/Stop used to turn into a page zoom on iOS), and the tap highlight is a
+ * browser-painted rectangle on a themed surface. Roles are listed because a
+ * `div[role="switch"]`, an `li[role="option"]` and a `button` are the same
+ * promise to a thumb. */
+button,
+a,
+summary,
+[role='button'],
+[role='switch'],
+[role='tab'],
+[role='option'],
+[role='radio'],
+[role='checkbox'] {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+@media (pointer: coarse) {
+  .button,
+  .icon-button,
+  .ui-button,
+  .ui-icon-button,
+  .link-button,
+  .ui-link-button,
+  .input,
+  .select,
+  .ui-field {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* `sm` keeps the house floor of 40 only in the one place §5.3 names: a
+   * transcript row (`.button-small` is that surface's class). A `data-size='sm'`
+   * button elsewhere - header chips, tab close, git actions, agent rows - is a
+   * control a thumb aims at, so it takes the 44 floor like every other one. */
+  .button-small {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  /* §5.3's exception, enforced: a destructive or committing action never goes
+   * under 44 on touch, whatever size its surface asked for. Missing a Stop or a
+   * Delete by 4px is the failure with a cost. */
+  .button-small.button-primary,
+  .button-small.button-danger,
+  .button-small.button-stop,
+  .ui-button[data-size='sm'][data-variant='primary'],
+  .ui-button[data-size='sm'][data-variant='danger'],
+  .ui-button[data-size='sm'][data-variant='danger-ghost'],
+  .ui-button[data-size='sm'][data-variant='stop'] {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* The switch's 36×21 track is a deliberate shape (§8.8.1 measured it), so
+   * growing the box would turn the pill into a blob. The *hit* box grows
+   * instead: a transparent 44×44 square centred on the track. */
+  .toggle::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
+}
+
+/* A11Y-08: the iOS zoom guard, on the primitives (§5.3). iOS Safari zooms the
+ * whole page when a focused field's font-size is under 16px, and 54
+ * `<Textarea>`/`<Select>` call sites were 11–12.5px because the primitives emit
+ * Tailwind utilities instead of the legacy `.input` class the old guard targets.
+ * `.ui-field` is the stable hook they now emit, so a field written tomorrow
+ * inherits the floor without anyone remembering this rule; `.input` and
+ * `.palette-input` are kept because those two are real fields the app still
+ * paints by hand. Nothing changes on a desktop pointer: the visual size on a
+ * fine pointer stays 11.5–13px.
+ *
+ * `!important` is required, not lazy: this sheet lands in the `components`
+ * layer and `text-tiny`/`text-small` outrank it by *layer*, which no selector
+ * specificity here can beat. */
+@media (max-width: 640px), (pointer: coarse) {
+  .ui-field,
+  .input,
+  .palette-input {
+    font-size: var(--fs-title) !important;
+  }
 }
 
 /* ---------- status, badges, chips ---------- */

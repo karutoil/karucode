@@ -424,3 +424,28 @@
     --rail-w: 0px;
   }
 }
+
+/* The phone header is a space budget, not a density knob.
+ *
+ * This tier has to live here, in the *unlayered* sheet: `index.css` imports
+ * `tokens.css` unlayered and every component sheet inside `layer(components)`,
+ * and an unlayered rule beats any layer whatever the specificity. The same
+ * declarations in `layout.css` therefore never applied - 390px computed 66px,
+ * not the 52px they promised. Restating the
+ * tier per density keeps `compact` from being *taller* than comfortable (54 vs
+ * 52 under the old rules) and `spacious` at the phone value, which still gets
+ * its extra room from the spacing scale inside the conversation. */
+@media (max-width: 640px) {
+  :root,
+  :root[data-density='comfortable'] {
+    --header-h: 52px;
+  }
+
+  :root[data-density='compact'] {
+    --header-h: 50px;
+  }
+
+  :root[data-density='spacious'] {
+    --header-h: 52px;
+  }
+}

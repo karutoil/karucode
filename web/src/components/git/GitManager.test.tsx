@@ -258,6 +258,26 @@ describe('GitManager — full-width source control view', () => {
     expect(within(untracked).getByText('?')).not.toBeNull();
   });
 
+  it('reveals the selected section in the scrolling strip (WB-09)', async () => {
+    // The strip holds six sections and hides its scrollbar, so on a phone the last
+    // two are off-screen. Selecting one used to leave it there: the section was
+    // current and unreachable. `inline: 'nearest'` scrolls the strip (and only the
+    // strip) to the newly active tab.
+    installFetch();
+    render(<GitManager variant="page" />);
+    await screen.findByRole('tablist', { name: 'Source control sections' });
+    await screen.findByRole('tab', { name: /Pull requests/ });
+
+    const scrollIntoView = vi.spyOn(Element.prototype, 'scrollIntoView');
+    fireEvent.click(screen.getByRole('tab', { name: /Pull requests/ }));
+
+    await waitFor(() =>
+      expect(scrollIntoView).toHaveBeenCalledWith({ inline: 'nearest', block: 'nearest' }),
+    );
+    expect(document.querySelector('.gitm-nav-tab.is-active')?.textContent).toContain('Pull requests');
+    scrollIntoView.mockRestore();
+  });
+
   it('opens the patch in the main region and asks for that side of the diff', async () => {
     const calls = installFetch();
     render(<GitManager variant="page" />);

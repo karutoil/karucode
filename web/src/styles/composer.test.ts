@@ -23,8 +23,9 @@ import { describe, expect, it } from 'vitest';
 
 const composerCss = readFileSync(new URL('./composer.css', import.meta.url), 'utf8');
 const layoutCss = readFileSync(new URL('./layout.css', import.meta.url), 'utf8');
+const tokensCss = readFileSync(new URL('./tokens.css', import.meta.url), 'utf8');
 
-/** Declarations of one rule, matched by its full selector text. */
+/** Declarations of one top-level rule, matched by its full selector text. */
 function declarations(css: string, selector: string): Record<string, string> {
   const start = css.indexOf(`\n${selector} {`);
   expect(start, `${selector} is defined`).toBeGreaterThan(-1);
@@ -36,6 +37,102 @@ function declarations(css: string, selector: string): Record<string, string> {
   }
   return found;
 }
+
+/** Declarations of one rule inside a media block body (selector lists included). */
+function declarationsIn(body: string, selector: string): Record<string, string> {
+  const found: Record<string, string> = {};
+  for (const rule of body.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const selectors = (rule[1] ?? '')
+      // Strip the comments first: they carry commas (`16px, 22vh`) and would
+      // otherwise split a selector in half.
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split(',')
+      .map((part) => part.trim());
+    if (!selectors.includes(selector)) continue;
+    // Every matching rule, in source order: the same selector can be extended
+    // further down one block (the coarse tier adds a `min-height` to a rule that
+    // is already there), and the cascade takes the later declaration.
+    for (const line of (rule[2] ?? '').split('\n')) {
+      const match = /^\s*([a-z-]+):\s*(.+);\s*$/.exec(line);
+      if (match?.[1] !== undefined && match[2] !== undefined) found[match[1]] = match[2];
+    }
+  }
+  expect(Object.keys(found).length, `${selector} is defined in the block`).toBeGreaterThan(0);
+  return found;
+}
+
+/** The body of the first `@media <query> { … }` block, indentation-aware. */
+function mediaBlock(css: string, query: string): string {
+  const header = `@media ${query} {`;
+  const start = css.indexOf(header);
+  expect(start, `${query} block exists`).toBeGreaterThan(-1);
+  const end = css.indexOf('\n}', start);
+  // Start *inside* the block: the header's own `{` would otherwise pair with the
+  // first rule's `}` and shift every selector by one.
+  return css.slice(start + header.length, end);
+}
+
+/**
+ * Evaluate one length declaration to CSS pixels.
+ *
+ * jsdom has no layout engine, so none of this geometry can be measured by
+ * rendering: every dock assertion in the component suite would pass with the
+ * popover parked under the keyboard. The sheet ships the arithmetic, so the
+ * arithmetic is what gets computed - `var()` resolves against the numbers the
+ * audit measured (`--kb-inset: 320px` for an iOS keyboard, `--composer-h: 96px`
+ * for the dock), `dvh` against the device height, and `min()`/`max()`/`calc()`
+ * are evaluated with `Function`. A value that is not pure arithmetic throws,
+ * which is the guard against a selector silently losing its formula.
+ */
+function pixels(
+  value: string,
+  context: { height: number; vars?: Record<string, string> },
+): number {
+  let resolved = value;
+  for (let pass = 0; pass < 8; pass += 1) {
+    const next = resolved.replace(
+      /var\(\s*--([a-z0-9-]+)\s*(?:,\s*([^()]*?))?\s*\)/g,
+      (_whole, name: string, fallback: string | undefined) => {
+        const mapped = context.vars?.[name] ?? fallback;
+        if (mapped === undefined) throw new Error(`unresolved var(--${name}) in ${value}`);
+        return mapped;
+      },
+    );
+    if (next === resolved) break;
+    resolved = next;
+  }
+  const arithmetic = resolved
+    .replace(/\bcalc\(/g, '(')
+    .replace(/\bmin\(/g, 'Math.min(')
+    .replace(/\bmax\(/g, 'Math.max(')
+    .replace(/(\d+(?:\.\d+)?)dvh\b/g, (_all, n: string) =>
+      String((Number(n) / 100) * context.height),
+    )
+    .replace(/(\d+(?:\.\d+)?)vh\b/g, (_all, n: string) =>
+      String((Number(n) / 100) * context.height),
+    )
+    .replace(/(\d+(?:\.\d+)?)px\b/g, '$1');
+  expect(arithmetic.replace(/Math\.(?:min|max)/g, ''), `${value} is arithmetic`).toMatch(
+    /^[\d\s()+\-*/.,]+$/,
+  );
+  const result = Number(new Function(`"use strict"; return (${arithmetic});`)());
+  expect(Number.isFinite(result), `${value} resolves to a number`).toBe(true);
+  return result;
+}
+
+/** The measured numbers the audit's reference phone gives the dock. */
+const IOS_KEYBOARD = 320;
+const DOCK = 96;
+const dockVars = (inset: number, dock = DOCK): Record<string, string> => ({
+  'space-2': '4px',
+  'space-3': '6px',
+  'space-4': '8px',
+  'space-6': '12px',
+  'space-9': '24px',
+  'composer-h': `${dock}px`,
+  'kb-inset': `${inset}px`,
+});
+
 
 describe('composer dock: layout', () => {
   const wrap = declarations(layoutCss, '.composer-wrap');
@@ -70,9 +167,11 @@ describe('composer dock: layout', () => {
     expect(declarations(layoutCss, '.chat-scroll')['scroll-padding-bottom']).toBe(
       'var(--composer-h, 24px)',
     );
-    // The pill must clear the dock, not sit under it.
-    expect(declarations(layoutCss, '.jump-latest')['bottom']).toBe(
-      'calc(var(--composer-h, 0px) + 10px)',
+    // The pill must clear the dock, not sit under it. `layout.css` adds the
+    // home-indicator band the dock itself sits on (CO-07), so both terms are
+    // part of the clearance and the assertion allows either.
+    expect(declarations(layoutCss, '.jump-latest')['bottom']).toMatch(
+      /^calc\(var\(--composer-h, 0px\) \+ 10px(?: \+ env\(safe-area-inset-bottom, 0px\))?\)$/,
     );
   });
 
@@ -186,7 +285,7 @@ describe('composer dock: the box stays compact', () => {
       '.compose-plus',
       '.queue-mode-option',
       '.queued-recall',
-      '.attachment-chip-remove',
+      '.attachment-chip .attachment-chip-remove',
       '.context-pill',
       '.compose-approvals',
     ];
@@ -312,8 +411,6 @@ describe('composer pickers: the menu appears where the thumb is', () => {
     const narrow = /@media \(max-width: 800px\) \{([\s\S]*?)\n\}/.exec(composerCss);
     const body = narrow?.[1] ?? '';
     expect(body).toMatch(/\.compose-bottom \.model-switcher-menu\.dropup,[\s\S]*?position: fixed/);
-    expect(body).toContain('bottom: min(calc(var(--composer-h, 96px) + var(--space-3)), 56dvh)');
-    expect(body).toContain('max-height: 42dvh');
     expect(body).not.toContain('bottom: calc(100% + 6px)');
     // The reasoning menu is the right-hand control: it opens under it, and both
     // stay inside the screen width.
@@ -332,5 +429,196 @@ describe('composer pickers: the menu appears where the thumb is', () => {
     expect(layoutCss).toMatch(/\.model-switcher-menu \{[\s\S]*?max-height: min\(70dvh, 480px\)/);
     expect(layoutCss).toMatch(/\.model-switcher-menu \{[\s\S]*?overscroll-behavior: contain/);
     expect(layoutCss).not.toContain('left: calc(var(--rail-w) + 8px)');
+  });
+});
+describe('composer dock: keyboard-safe geometry (CO-01, CO-04, CO-06, CO-12)', () => {
+  // The numbers the audit measured: a 390x844 phone, an iOS keyboard covering
+  // 320px of it, and a dock standing 96px tall. Nothing here renders - it
+  // computes the shipped formulas, which is the only way CO-01..CO-08 can fail a
+  // test instead of merely looking wrong on a phone.
+  const PHONE = 844;
+  const SHORT = 667; // the 375x667 device CO-04 was measured on
+  const LANDSCAPE = 390; // an 844x390 phone, keyboard closed
+  const narrow = mediaBlock(composerCss, '(max-width: 800px)');
+  const anchorValue = (): string =>
+    declarationsIn(narrow, '.compose-bottom .model-switcher-menu.dropup')['bottom'] ?? '';
+
+  it('lifts the model sheet above the keyboard and keeps it under the shell top (CO-01)', () => {
+    const menu = declarationsIn(narrow, '.compose-bottom .model-switcher-menu.dropup');
+    expect(menu['position']).toBe('fixed');
+    const bottom = menu['bottom'] ?? '';
+    const height = menu['max-height'] ?? '';
+    // The inset has to be part of the anchor: this element is measured against
+    // the layout viewport, which iOS never shrinks for the keyboard.
+    expect(bottom).toContain('var(--kb-inset, 0px)');
+    expect(height).toContain('var(--kb-inset, 0px)');
+
+    for (const [inset, viewport] of [
+      [0, PHONE],
+      [IOS_KEYBOARD, PHONE],
+      [IOS_KEYBOARD, SHORT],
+      [0, LANDSCAPE],
+    ] as const) {
+      const vars = dockVars(inset);
+      const anchor = pixels(bottom, { height: viewport, vars });
+      const maxHeight = pixels(height, { height: viewport, vars });
+      // `layout.css`: the shell is `100dvh - inset` tall and the dock is its
+      // bottom `--composer-h`, so the sheet may not hang below that top edge.
+      const dockTop = viewport - inset - DOCK;
+      const sheetBottom = viewport - anchor;
+      expect(sheetBottom, `inset ${inset} at ${viewport}`).toBeLessThanOrEqual(dockTop + 0.01);
+      // ...and its top edge stays inside the visible band.
+      expect(sheetBottom - maxHeight, `inset ${inset} at ${viewport}`).toBeGreaterThanOrEqual(
+        -0.01,
+      );
+      // A sheet with no room left is a closed sheet: keep a few rows.
+      expect(maxHeight).toBeGreaterThan(80);
+    }
+  });
+
+  it('bounds the searchable model list by what is left above the dock (CO-01)', () => {
+    const menu = declarationsIn(narrow, '.compose-bottom .model-switcher-menu-models.dropup');
+    const vars = dockVars(IOS_KEYBOARD);
+    const maxHeight = pixels(menu['max-height'] ?? '', { height: SHORT, vars });
+    const anchor = pixels(anchorValue(), { height: SHORT, vars });
+    expect(SHORT - anchor - maxHeight).toBeGreaterThanOrEqual(-0.01);
+  });
+
+  it('fits the @ popover into the window the keyboard leaves (CO-04)', () => {
+    const maxHeight = declarations(composerCss, '.mention-popover')['max-height'] ?? '';
+    expect(maxHeight).toContain('var(--kb-inset, 0px)');
+    for (const [inset, viewport] of [
+      [0, PHONE],
+      [IOS_KEYBOARD, PHONE],
+      [IOS_KEYBOARD, SHORT],
+      [0, LANDSCAPE],
+    ] as const) {
+      const resolved = pixels(maxHeight, { height: viewport, vars: dockVars(inset) });
+      // The popover is anchored `calc(100% + 8px)` above the dock's own box, and
+      // the dock's box starts at the top of the measured region.
+      const top = viewport - inset - DOCK - 8 - resolved;
+      expect(top, `inset ${inset} at ${viewport}`).toBeGreaterThanOrEqual(-0.01);
+      // 88px is the floor: a couple of rows stay readable, and the armed row is
+      // scrolled into view (`useComposerPopovers`) rather than clipped.
+      expect(resolved).toBeGreaterThanOrEqual(88);
+    }
+  });
+
+  it('caps the waiting list and the chip strip so the dock cannot leave the pane (CO-06)', () => {
+    const list = declarations(composerCss, '.queued-list');
+    expect(list['overflow-y']).toBe('auto');
+    expect(list['overscroll-behavior']).toBe('contain');
+
+    const chips = declarations(composerCss, '.composer-attachments');
+    expect(chips['overflow-y']).toBe('auto');
+    expect(chips['overscroll-behavior']).toBe('contain');
+
+    // Eight waiting messages at the 40px coarse row floor are 320px of content
+    // that used to be 320px of dock (measured: the tray at y=-46, the transcript
+    // at 0px). The list scrolls instead.
+    const queueCap = pixels(list['max-height'] ?? '', { height: PHONE, vars: dockVars(0) });
+    expect(queueCap).toBe(160);
+    expect(8 * 40).toBeGreaterThan(queueCap);
+
+    // The three bands that grow with content are all bounded now, and their
+    // bounds still fit inside the shrunken shell with room for the transcript:
+    // the queue tray (list + panel padding + head), the chip strip and the draft.
+    const draftCap = pixels(
+      declarationsIn(mediaBlock(composerCss, '(pointer: coarse)'), '.composer-input')[
+        '--compose-input-max'
+      ] ?? '',
+      { height: PHONE },
+    );
+    const chipCap = pixels(chips['max-height'] ?? '', { height: PHONE, vars: dockVars(0) });
+    const queueTray = queueCap + 16 + 24;
+    const shell = PHONE - IOS_KEYBOARD;
+    expect(queueTray + chipCap + draftCap).toBeLessThanOrEqual(shell - DOCK);
+  });
+
+  it('takes the 16px iOS no-zoom guard onto every coarse pointer (CO-02, CO-03)', () => {
+    // `--fs-title` is 16px, and the scale is the only place that may say so.
+    expect(tokensCss).toMatch(/--fs-title: 16px/);
+
+    // The portrait phone tier keeps its copy (that is the width the audit
+    // measured); the coarse tier is what reaches a landscape phone and an iPad.
+    const phone = declarationsIn(mediaBlock(composerCss, '(max-width: 640px)'), '.composer-input');
+    const coarse = declarationsIn(mediaBlock(composerCss, '(pointer: coarse)'), '.composer-input');
+    for (const body of [phone, coarse]) {
+      expect(body['font-size']).toBe('var(--fs-title)');
+      expect(body['--compose-input-max']).toBe('min(112px, 22vh)');
+    }
+    expect(pixels('min(112px, 22vh)', { height: PHONE })).toBe(112);
+
+    // The model filter is a focusable field inside a fixed sheet: 16px in a 32px
+    // box, in both tiers, or iOS zooms the page inside the sheet.
+    for (const query of ['(max-width: 640px)', '(pointer: coarse)']) {
+      const filter = declarationsIn(
+        mediaBlock(composerCss, query),
+        '.compose-bottom .model-switcher-filter',
+      );
+      expect(filter['font-size']).toBe('var(--fs-title)');
+      expect(filter['height']).toBe('32px');
+    }
+  });
+
+  it('gives the coarse lists and the title-only controls the thumb floor (CO-10, CO-11)', () => {
+    const coarse = mediaBlock(composerCss, '(pointer: coarse)');
+    // §5.3: 44 for every control a thumb aims at (44 from this audit on - the
+    // 40px house floor it used to allow is now confined to transcript rows).
+    expect(declarationsIn(coarse, '.mention-item')['min-height']).toBe('44px');
+    expect(declarationsIn(coarse, '.compose-bottom .model-switcher-filter')['min-height']).toBe(
+      '32px',
+    );
+    expect(declarationsIn(coarse, '.queued-recall')['min-height']).toBe('44px');
+    expect(declarationsIn(coarse, '.compose-approvals')['min-height']).toBe('44px');
+    // A phone has no Escape and no arrows, so the keyboard footer is pure noise.
+    expect(declarationsIn(coarse, '.mention-foot')['display']).toBe('none');
+  });
+
+  it('owns the attachment Remove target in the sheet, not in a utility (CO-08)', () => {
+    // An unlayered `w-[24px] h-[24px]` outranks `layer(components)`, so the
+    // coarse rule never applied and a phone got a 24x24 Remove.
+    expect(declarations(composerCss, '.attachment-chip .attachment-chip-remove')).toMatchObject({
+      width: '24px',
+      height: '24px',
+    });
+    expect(
+      declarationsIn(
+        mediaBlock(composerCss, '(pointer: coarse)'),
+        '.attachment-chip .attachment-chip-remove',
+      )['width'],
+    ).toBe('32px');
+    expect(
+      declarationsIn(
+        mediaBlock(composerCss, '(pointer: coarse) and (max-width: 640px)'),
+        '.attachment-chip .attachment-chip-remove',
+      )['width'],
+    ).toBe('44px');
+
+    // The component no longer carries the size the sheet has to fight.
+    const strip = readFileSync(
+      new URL('../features/composer/AttachmentStrip.tsx', import.meta.url),
+      'utf8',
+    );
+    expect(strip).not.toMatch(/\bw-\[|\bh-\[/);
+  });
+
+  it('shows the visible line break only where a soft keyboard exists (CO-09)', () => {
+    expect(declarations(composerCss, '.compose-foot .compose-newline')['display']).toBe(
+      'inline-flex',
+    );
+    // Reveal inverted: a pointer with the real chords does not need the button.
+    expect(
+      declarationsIn(
+        mediaBlock(composerCss, '(hover: hover) and (pointer: fine)'),
+        '.compose-foot .compose-newline',
+      )['display'],
+    ).toBe('none');
+    expect(
+      declarationsIn(
+        mediaBlock(composerCss, '(pointer: coarse)'),
+        '.compose-foot .compose-newline',
+      )['min-height'],
+    ).toBe('44px');
   });
 });

@@ -324,4 +324,125 @@ describe('windowed transcript', () => {
       if (realScrollHeight) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', realScrollHeight);
     }
   });
+
+  it('corrects the scroll for a short transcript too, not just a windowed one', async () => {
+    // `overflow-anchor: none` is global, so the JS compensation *is* the scroll
+    // anchoring - and it used to run only above 150 entries. Most phone
+    // conversations are shorter than that, and an unwindowed transcript has no
+    // padding to absorb a row that changes height: a Markdown block finishing
+    // above the reader moved the whole document under their thumb (TR-03).
+    const layout = { shift: 0, heights: {} as Record<string, number> };
+    const realRect = HTMLElement.prototype.getBoundingClientRect;
+    const realClientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight');
+    const realScrollHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight');
+    HTMLElement.prototype.getBoundingClientRect = function getBoundingClientRect(this: HTMLElement) {
+      if (this.id === 'short-viewport' || this.classList.contains('transcript')) return box(0, 600);
+      const key = this.getAttribute('data-entry-key');
+      if (key) {
+        const height = layout.heights[key] ?? 100;
+        return box(layout.shift, layout.shift + height);
+      }
+      return realRect.call(this);
+    };
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.id === 'short-viewport' ? 600 : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.id === 'short-viewport' ? 100_000 : 0;
+      },
+    });
+
+    function ShortHarness({ items }: { items: ChatItem[] }): JSX.Element {
+      const viewport = useRef<HTMLDivElement>(null);
+      return (
+        <div id="short-viewport" ref={viewport}>
+          <ChatTranscript
+            items={items}
+            resolvingApprovals={{}}
+            onApprovalDecision={() => undefined}
+            viewportRef={viewport}
+          />
+        </div>
+      );
+    }
+
+    try {
+      // 40 turns is 81 entries: rendered whole, with no window and no padding.
+      const { container, rerender } = render(<ShortHarness items={conversation(40)} />);
+      await waitFor(() => expect(rows(container).length).toBeGreaterThan(0));
+      const transcript = container.querySelector('.transcript') as HTMLElement;
+      expect(transcript.classList.contains('is-windowed')).toBe(false);
+      expect(transcript.style.paddingTop || '').toBe('');
+
+      const viewport = container.querySelector('#short-viewport') as HTMLElement;
+      viewport.scrollTop = 4_000;
+      fireEvent.scroll(viewport);
+      await waitFor(() => expect(viewport.scrollTop).toBe(4_000));
+      const before = viewport.scrollTop;
+
+      // Older content above grew by 300px while nothing in view changed height.
+      layout.shift = 300;
+      rerender(<ShortHarness items={[...conversation(40), message({ id: 'tail', content: 'tail' })]} />);
+      await waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(before + 200));
+      expect(Math.abs(viewport.scrollTop - (before + 300))).toBeLessThanOrEqual(1);
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = realRect;
+      if (realClientHeight) Object.defineProperty(HTMLElement.prototype, 'clientHeight', realClientHeight);
+      if (realScrollHeight) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', realScrollHeight);
+    }
+  });
+
+  it('estimates the first window from the measured column width', async () => {
+    // The estimate assumed 96 characters per line whatever the width, so a phone
+    // column claimed rows two thirds of their real height and the document moved
+    // under the thumb as they were measured (TR-07). The transcript's top padding
+    // is the height the window claims for all the rows it is not mounting, so it
+    // is the estimate made visible: the same conversation must be claimed taller
+    // on a narrow column than on a wide one.
+    const long = 'lorem ipsum dolor sit amet, consectetur adipiscing elit. '.repeat(20);
+    const items: ChatItem[] = [];
+    for (let index = 0; index < 100; index += 1) {
+      items.push(
+        message({ id: `u${index}`, role: 'user', content: long, at: NOW + index * 2 }),
+        message({ id: `a${index}`, content: long, at: NOW + index * 2 + 1 }),
+      );
+    }
+
+    const layout = { width: 780 };
+    const realClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.id === 'probe-viewport' ? layout.width : 0;
+      },
+    });
+    const claimedHeight = async (): Promise<number> => {
+      const { container, unmount } = render(<Harness items={items} />);
+      await waitFor(() => expect(rows(container).length).toBeGreaterThan(0));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      const transcript = container.querySelector('.transcript') as HTMLElement;
+      const padding = Number.parseFloat(transcript.style.paddingTop || '0');
+      unmount();
+      return padding;
+    };
+    try {
+      const wide = await claimedHeight();
+      layout.width = 340;
+      const narrow = await claimedHeight();
+
+      // 780px is ~122 characters a line, a 340px phone column ~53: the same text
+      // needs more than twice the lines, and the first window must say so.
+      expect(wide).toBeGreaterThan(0);
+      expect(narrow).toBeGreaterThan(wide * 1.4);
+    } finally {
+      if (realClientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', realClientWidth);
+    }
+  });
 });

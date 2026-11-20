@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { fireEvent, render } from '@testing-library/preact';
+import { act, fireEvent, render } from '@testing-library/preact';
 import { createElement } from 'preact';
-import { useStickyBottom } from './stickyBottom';
+import { useStickyBottom, type StickyBottom } from './stickyBottom';
 import {
   distanceFromBottom,
   followingNewest,
   forgetFollow,
   isGrowthAfterFollow,
   isPinnedToBottom,
+  isResizeAfterFollow,
   jumpBehavior,
   noteFollow,
   noteSettling,
@@ -290,6 +291,250 @@ function armFollow(node: HTMLDivElement): void {
   setGeometry(node, { scrollHeight: 2100 });
   expect(followingNewest(node)).toBe(true);
 }
+
+/**
+ * The numbers a real scroller reports, as a mutable record: change
+ * `clientHeight` and the element is a resized one, exactly as the browser would
+ * report it (a shrink leaves `scrollTop` where it was, a grow clamps it).
+ */
+interface FakeBox {
+  scrollHeight: number;
+  clientHeight: number;
+  scrollTop: number;
+}
+
+function fakeScrollBox(element: HTMLElement, box: FakeBox): void {
+  Object.defineProperty(element, 'scrollHeight', {
+    configurable: true,
+    get: () => box.scrollHeight,
+  });
+  Object.defineProperty(element, 'clientHeight', {
+    configurable: true,
+    get: () => box.clientHeight,
+  });
+  Object.defineProperty(element, 'scrollTop', {
+    configurable: true,
+    get: () => box.scrollTop,
+    set: (value: number) => {
+      box.scrollTop = Math.max(0, Math.min(value, Math.max(0, box.scrollHeight - box.clientHeight)));
+    },
+  });
+}
+
+interface MountedBox {
+  box: FakeBox;
+  node: HTMLDivElement;
+  sticky: () => StickyBottom;
+  unmount: () => void;
+}
+
+/** A transcript the follow hook owns, laid out by `box`. */
+function mountScrollBox(box: FakeBox): MountedBox {
+  let element: HTMLDivElement | null = null;
+  let latest: StickyBottom | null = null;
+
+  function Transcript() {
+    const sticky = useStickyBottom({ sessionKey: 's_1', contentKey: 'rows:20', sentMessageTick: 0 });
+    latest = sticky;
+    return createElement(
+      'div',
+      {
+        ref: (node: HTMLDivElement | null) => {
+          if (node) {
+            sticky.scrollRef.current = node;
+            fakeScrollBox(node, box);
+          }
+          element = node;
+        },
+      },
+      createElement('button', { id: 'approve' }, 'Approve'),
+    );
+  }
+
+  const view = render(createElement(Transcript, {}));
+  const sticky = (): StickyBottom => {
+    if (!latest) throw new Error('hook did not render');
+    return latest;
+  };
+  return { box, node: element as unknown as HTMLDivElement, sticky, unmount: () => view.unmount() };
+}
+
+/** Let the hook look again, as its ResizeObserver would after a layout change. */
+function recheck(sticky: () => StickyBottom): void {
+  act(() => sticky().recheck());
+}
+
+/** The scroll listener is frame-throttled: give the frame a chance to run. */
+async function settleFrame(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 32));
+  });
+}
+
+describe('isResizeAfterFollow', () => {
+  it('credits a scroller that shrank under a view that was at the bottom', () => {
+    // The on-screen keyboard: 2000px of transcript, 600px of viewport, flush
+    // with the newest row - then 300px of viewport go away under it.
+    const before = anchoredAtBottom(2000, 600);
+    expect(isResizeAfterFollow(view(1400, 2000, 300), before)).toBe(true);
+    // A grow is the same event: the URL bar collapsed, the keyboard closed.
+    expect(isResizeAfterFollow(view(1400, 2000, 900), before)).toBe(true);
+  });
+
+  it('credits a stream that landed while the height changed', () => {
+    const before = anchoredAtBottom(2000, 600);
+    // 500px of rows arrived and the keyboard took 300px: one gesture to the
+    // reader, two events to the hook.
+    expect(isResizeAfterFollow(view(1400, 2500, 300), before)).toBe(true);
+  });
+
+  it('refuses a resize of a view that was not at the bottom', () => {
+    // The follow anchor was taken 600px up the history: that is a reader.
+    const before: FollowAnchor = { scrollTop: 800, scrollHeight: 2000, clientHeight: 600 };
+    expect(isResizeAfterFollow(view(800, 2000, 300), before)).toBe(false);
+  });
+
+  it('refuses when the view moved down, which is what a reader does', () => {
+    const before = anchoredAtBottom(2000, 600);
+    expect(isResizeAfterFollow(view(1600, 2000, 300), before)).toBe(false);
+  });
+
+  it('refuses a gap the height change cannot explain', () => {
+    const before = anchoredAtBottom(2000, 600);
+    // 600px gone from the viewport, but the view sits 1000px higher: a gesture.
+    expect(isResizeAfterFollow(view(400, 2000, 600), before)).toBe(false);
+  });
+
+  it('refuses a zero height on either side, and no anchor at all', () => {
+    const before = anchoredAtBottom(2000, 600);
+    // Zero is the absence of a viewport (a hidden panel), not a shorter one.
+    expect(isResizeAfterFollow(view(0, 0, 0), before)).toBe(false);
+    expect(isResizeAfterFollow(view(1400, 2000, 300), anchoredAtBottom(2000, 0))).toBe(false);
+    expect(isResizeAfterFollow(view(1400, 2000, 300), null)).toBe(false);
+    // And an unchanged height is not a resize.
+    expect(isResizeAfterFollow(view(1400, 2000, 600), before)).toBe(false);
+  });
+});
+
+describe('useStickyBottom: a scroller resize is a follow event', () => {
+  it('keeps the newest row in view when the keyboard takes 300px of the scroller', () => {
+    // 2000px of transcript in a 600px viewport, opened at the newest row.
+    const { box, sticky, unmount } = mountScrollBox({ scrollHeight: 2000, clientHeight: 600, scrollTop: 0 });
+    try {
+      expect(box.scrollTop).toBe(1400);
+      expect(sticky().showJump).toBe(false);
+
+      // The on-screen keyboard opens. The scroller is 300px shorter, `scrollTop`
+      // is exactly where the follow left it, and the newest row is now 300px
+      // below the fold - the state both growth rules refuse to touch.
+      box.clientHeight = 300;
+      recheck(sticky);
+
+      // Still following: pinned to the new bottom, no pill over it.
+      expect(box.scrollTop).toBe(1700);
+      expect(sticky().showJump).toBe(false);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('closes the gap a collapse and a stream left in the same frame', () => {
+    const { box, sticky, unmount } = mountScrollBox({ scrollHeight: 2000, clientHeight: 600, scrollTop: 0 });
+    try {
+      box.clientHeight = 300;
+      box.scrollHeight = 2500;
+      recheck(sticky);
+      expect(box.scrollTop).toBe(2200);
+      expect(sticky().showJump).toBe(false);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('leaves a reader who scrolled away before the resize where they were', async () => {
+    const { box, node, sticky, unmount } = mountScrollBox({ scrollHeight: 2000, clientHeight: 600, scrollTop: 0 });
+    try {
+      // The reader takes the view (a touch is a gesture, and it drops the follow).
+      box.scrollTop = 400;
+      fireEvent.touchStart(node);
+      fireEvent.scroll(node);
+      await settleFrame();
+      expect(sticky().showJump).toBe(true);
+
+      // Only then does the keyboard open: a resize may not take the view back.
+      box.clientHeight = 300;
+      recheck(sticky);
+      expect(box.scrollTop).toBe(400);
+      expect(sticky().showJump).toBe(true);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('pins to the bottom when a hidden panel is shown again', () => {
+    // The Conversation tab is not selected: `display: none` measures nothing at
+    // all, for height, content and scroll position alike.
+    const { box, sticky, unmount } = mountScrollBox({ scrollHeight: 0, clientHeight: 0, scrollTop: 0 });
+    try {
+      // A look while hidden publishes nothing - a follow recorded at `{0,0,0}`
+      // is what used to leave a stale pill over a transcript at the bottom.
+      expect(sticky().showJump).toBe(false);
+      recheck(sticky);
+      expect(sticky().showJump).toBe(false);
+
+      // The tab is selected and the conversation is laid out.
+      box.scrollHeight = 5000;
+      box.clientHeight = 600;
+      recheck(sticky);
+
+      expect(box.scrollTop).toBe(4400);
+      expect(sticky().showJump).toBe(false);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('does not re-pin a reader who was in history when the panel was hidden', async () => {
+    const { box, node, sticky, unmount } = mountScrollBox({ scrollHeight: 5000, clientHeight: 600, scrollTop: 0 });
+    try {
+      box.scrollTop = 1200;
+      fireEvent.touchStart(node);
+      fireEvent.scroll(node);
+      await settleFrame();
+      expect(sticky().showJump).toBe(true);
+
+      // Hidden (every number a hidden element reports) and shown again at the
+      // same size: no gesture has changed, and no resize may take them to the tail.
+      box.clientHeight = 0;
+      box.scrollHeight = 0;
+      recheck(sticky);
+      box.clientHeight = 600;
+      box.scrollHeight = 5000;
+      recheck(sticky);
+
+      expect(box.scrollTop).toBe(1200);
+      expect(sticky().showJump).toBe(true);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('does not steal a scroll it merely observed for the first time', () => {
+    // Nothing was ever laid out (an embedded renderer, jsdom), and the first look
+    // with a real box arrives on a scroll event. That is a view that moved, not a
+    // resize that has to be undone.
+    const { box, sticky, unmount } = mountScrollBox({ scrollHeight: 0, clientHeight: 0, scrollTop: 0 });
+    try {
+      box.scrollHeight = 1600;
+      box.clientHeight = 400;
+      box.scrollTop = 200;
+      recheck(sticky);
+      expect(box.scrollTop).toBe(200);
+    } finally {
+      unmount();
+    }
+  });
+});
 
 describe('useStickyBottom: a keystroke is not a scroll', () => {
   it('keeps following on Tab, and on a key the transcript control owns', () => {

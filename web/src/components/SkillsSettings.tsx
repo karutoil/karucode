@@ -18,6 +18,10 @@ import {
 } from '../ui';
 import { CloseIcon, EditIcon, EyeIcon, RefreshIcon, TrashIcon } from './icons';
 
+/** How long the skill this pane just created keeps its ring. The reader is put
+ *  on the row; the ring is what says "this is the one you made". */
+const NEW_SKILL_MARKER_MS = 8000;
+
 /**
  * The **Skills** section of the settings sheet: every switch, folder and skill
  * the feature has.
@@ -69,18 +73,25 @@ function rootSummary(root: SkillRoot): string {
 function SkillRow({
   skill,
   busy,
+  isNew = false,
   onView,
   onEdit,
 }: {
   skill: SkillSummary;
   busy: boolean;
+  /** Created by this pane a moment ago; marked and focused once (LS-15). */
+  isNew?: boolean;
   onView: () => void;
   onEdit: () => void;
 }): JSX.Element {
   const custom = skill.custom === true;
   return (
     <article
-      class="skill-row"
+      // Not a Tab stop: the row is focused programmatically after an add, so the
+      // reader lands on the skill they created instead of wherever the form left
+      // them. `tabIndex` keeps that focus legal.
+      tabIndex={-1}
+      class={`skill-row${isNew ? ' is-new' : ''}`}
       data-testid="skill-row"
       data-skill-id={skill.id}
       data-enabled={skill.enabled ? 'true' : 'false'}
@@ -313,7 +324,14 @@ function SkillEditor({ detail }: { detail: SkillDetail }): JSX.Element {
   );
 }
 
-function AddSkillForm({ disabled }: { disabled: boolean }): JSX.Element {
+function AddSkillForm({
+  disabled,
+  onAdded,
+}: {
+  disabled: boolean;
+  /** The ids the new skill created, so the panel can reveal it (LS-15). */
+  onAdded?: (ids: string[]) => void;
+}): JSX.Element {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [body, setBody] = useState('');
@@ -328,11 +346,19 @@ function AddSkillForm({ disabled }: { disabled: boolean }): JSX.Element {
       return;
     }
     setProblem(null);
+    // The server slugifies the name and may rename the skill, so the new id is
+    // found by comparing the list before with the list after rather than guessed
+    // from the fields.
+    const before = new Set((skills.skillsData.value?.skills ?? []).map((skill) => skill.id));
     const created = await skills.addSkill({ name, description, body });
     if (created) {
+      const added = (skills.skillsData.value?.skills ?? [])
+        .filter((skill) => !before.has(skill.id))
+        .map((skill) => skill.id);
       setName('');
       setDescription('');
       setBody('');
+      if (added.length > 0) onAdded?.(added);
     }
   };
 
@@ -686,6 +712,29 @@ export function SkillsSettings({ disabled = false }: { disabled?: boolean }): JS
   const busy = skills.skillsBusy.value || disabled;
   const staleRoots = skills.skillRootsStale.value;
   const [dialog, setDialog] = useState<'view' | 'edit' | null>(null);
+  /** The skill this pane just created; marked, revealed and focused once. */
+  const [addedId, setAddedId] = useState<string | null>(null);
+
+  // LS-15: the add form sits *below* the list, so a skill created from it
+  // appears in a list the reader is not looking at. Rather than move the form
+  // (which is where a reader expects it after reading the list), the row is
+  // brought into view and focused, and keeps its ring for as long as the marker.
+  //
+  // The pane is found by its test id because `Stack` is a primitive that
+  // forwards no ref; it is a singleton in the settings sheet, so there is never
+  // more than one.
+  useEffect(() => {
+    if (addedId === null) return undefined;
+    const pane = document.querySelector('[data-testid="skills-panel"]');
+    const rows: HTMLElement[] = Array.from(pane?.querySelectorAll<HTMLElement>('[data-skill-id]') ?? []);
+    const row = rows.find((element) => element.dataset.skillId === addedId);
+    if (row) {
+      row.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+      row.focus?.();
+    }
+    const timer = window.setTimeout(() => setAddedId(null), NEW_SKILL_MARKER_MS);
+    return () => window.clearTimeout(timer);
+  }, [addedId]);
 
   // One read when the pane is first opened. The sheet keeps panels mounted, so
   // this is "on open" for the sheet's lifetime, not "on every tab switch".
@@ -765,6 +814,17 @@ export function SkillsSettings({ disabled = false }: { disabled?: boolean }): JS
             <PromptOptions data={data} disabled={disabled} />
           </section>
 
+          <section class="settings-section" aria-labelledby="settings-skills-add">
+            <div class="settings-section-head">
+              <h3 id="settings-skills-add">Add a skill</h3>
+              <span class="settings-section-note">Stored in the settings table, no file needed</span>
+            </div>
+            <AddSkillForm
+              disabled={disabled}
+              onAdded={(ids) => setAddedId(ids[0] ?? null)}
+            />
+          </section>
+
           <section class="settings-section" aria-labelledby="settings-skills-installed">
             <div class="settings-section-head">
               <h3 id="settings-skills-installed">Installed</h3>
@@ -806,20 +866,13 @@ export function SkillsSettings({ disabled = false }: { disabled?: boolean }): JS
                     key={skill.id}
                     skill={skill}
                     busy={busy}
+                    isNew={skill.id === addedId}
                     onView={() => open(skill.id, 'view')}
                     onEdit={() => open(skill.id, 'edit')}
                   />
                 ))}
               </div>
             )}
-          </section>
-
-          <section class="settings-section" aria-labelledby="settings-skills-add">
-            <div class="settings-section-head">
-              <h3 id="settings-skills-add">Add a skill</h3>
-              <span class="settings-section-note">Stored in the settings table, no file needed</span>
-            </div>
-            <AddSkillForm disabled={disabled} />
           </section>
 
           <p class="settings-section-note">

@@ -1,9 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/preact';
+import { act, createEvent, fireEvent, render, screen, within } from '@testing-library/preact';
 import type { Project } from '../api/types';
 import * as store from '../state/store';
 import * as actions from '../state/actions';
 import { ProjectRail, pathHint, projectInitials } from './ProjectRail';
+
+/** `LONG_PRESS_MS` in `lib/menu.tsx`, which is not exported: a finger has to
+ *  rest this long before the primitive treats the press as a menu gesture. */
+const LONG_PRESS = 450;
 import { Dialog } from './Dialog';
 import * as railPeek from '../state/railPeek';
 import { controlPlaneOpen } from '../state/controlPlane';
@@ -576,6 +580,62 @@ describe('ProjectRail unread counters and the collapsed rail', () => {
       expect(railPeek.peekProjectId.value).toBe(docsProject.id);
       vi.advanceTimersByTime(railPeek.PEEK_CLOSE_MS + 1);
       expect(railPeek.peekProjectId.value).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('ProjectRail touch gestures', () => {
+  it('opens the tile menu from a finger resting on it', () => {
+    // LS-06: `contextmenu` never fires on iOS Safari and arrives late on
+    // Android, so the tile menu was a desktop-only feature. `contextMenuProps`
+    // adds the long-press, on the tile that was pressed.
+    vi.useFakeTimers();
+    try {
+      renderRail();
+      const tile = screen.getByRole('button', { name: 'Switch to Docs Site (/home/me/docs)' });
+      const press = createEvent.pointerDown(tile, { pointerType: 'touch', button: 0, clientX: 20, clientY: 40 });
+      fireEvent(tile, press);
+
+      // Nothing opens on the press itself: a tap still switches project.
+      expect(screen.queryByRole('menu', { name: 'Project actions for Docs Site' })).toBeNull();
+      act(() => {
+        vi.advanceTimersByTime(LONG_PRESS + 1);
+      });
+      expect(screen.getByRole('menu', { name: 'Project actions for Docs Site' })).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels the long-press when the finger travels', () => {
+    // A scroll that opened a menu mid-gesture would be worse than no gesture.
+    vi.useFakeTimers();
+    try {
+      renderRail();
+      const tile = screen.getByRole('button', { name: 'Switch to Docs Site (/home/me/docs)' });
+      fireEvent(tile, createEvent.pointerDown(tile, { pointerType: 'touch', button: 0, clientX: 20, clientY: 40 }));
+      fireEvent(tile, createEvent.pointerMove(tile, { pointerType: 'touch', clientX: 20, clientY: 90 }));
+      act(() => {
+        vi.advanceTimersByTime(LONG_PRESS + 1);
+      });
+      expect(screen.queryByRole('menu', { name: 'Project actions for Docs Site' })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves a mouse press to the native right-click', () => {
+    vi.useFakeTimers();
+    try {
+      renderRail();
+      const tile = screen.getByRole('button', { name: 'Switch to Docs Site (/home/me/docs)' });
+      fireEvent(tile, createEvent.pointerDown(tile, { pointerType: 'mouse', button: 0, clientX: 20, clientY: 40 }));
+      act(() => {
+        vi.advanceTimersByTime(LONG_PRESS + 1);
+      });
+      expect(screen.queryByRole('menu', { name: 'Project actions for Docs Site' })).toBeNull();
     } finally {
       vi.useRealTimers();
     }

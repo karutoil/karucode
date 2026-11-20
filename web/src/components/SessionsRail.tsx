@@ -7,8 +7,9 @@ import { controlPlaneOpen } from '../state/controlPlane';
 import * as railPeek from '../state/railPeek';
 import { invalidateFacts, loadFactsFor } from '../state/sessionFacts';
 import * as store from '../state/store';
-import { PlusIcon, SearchIcon } from './icons';
-import { Button, Input, Keycap } from '../ui';
+import { CloseIcon, PlusIcon, SearchIcon } from './icons';
+import { Button, IconButton, Input, Keycap } from '../ui';
+import { useCoveredInert } from '../features/rail/coveredInert';
 import {
   passesFilter,
   PROJECTS_HOVER_CLOSE_MS,
@@ -45,10 +46,13 @@ export function SessionsRail(): JSX.Element {
   const [query, setQuery] = useState('');
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>('all');
   useFocusTrap(railRef, isNarrow && isSheetOpen, actions.closeSheets);
+  // The chat behind the sheet is unreachable to a thumb; it must be unreachable
+  // to a screen reader and the Tab order too (A11Y-05).
+  useCoveredInert(railRef, isNarrow && isSheetOpen);
   const unread = store.unread.value;
 
   const filterCounts = useMemo<Record<SessionFilter, number>>(() => {
-    const counts: Record<SessionFilter, number> = { all: sessions.length, needs: 0, running: 0, changes: 0 };
+    const counts: Record<SessionFilter, number> = { all: sessions.length, needs: 0, running: 0 };
     for (const session of sessions) {
       if (passesFilter(session, 'needs', unread[session.id] ?? 0)) counts.needs += 1;
       if (session.running) counts.running += 1;
@@ -67,6 +71,61 @@ export function SessionsRail(): JSX.Element {
   // rows first and never more than the cap.
   const sessionKey = sessions.map((session) => session.id).join(',');
   const projectId = project?.id ?? null;
+
+  /* ---------- the landing contract (§5.6, LS-01/LS-05) ------------------ */
+
+  // The sheet opens at the top of a list that is sorted newest-first, so the
+  // session the reader is actually in can be a long way down. It is revealed
+  // once on open, and again when the open session changes while the sheet is
+  // still open — but never after the reader has scrolled it themselves, because
+  // a list that pulls itself back is worse than one that starts in the wrong
+  // place.
+  const readerScrolled = useRef(false);
+  /** When our own `scrollIntoView` ran: its scroll event is not the reader's. */
+  const lastReveal = useRef(0);
+  const opened = useRef(false);
+
+  useEffect(() => {
+    const nav = railRef.current?.querySelector<HTMLElement>('.session-nav');
+    if (!isNarrow || !isSheetOpen || !nav) return;
+    const onScroll = (): void => {
+      if (Date.now() - lastReveal.current > 250) readerScrolled.current = true;
+    };
+    nav.addEventListener('scroll', onScroll, { passive: true });
+    return () => nav.removeEventListener('scroll', onScroll);
+  }, [isNarrow, isSheetOpen]);
+
+  useEffect(() => {
+    if (!isNarrow || !isSheetOpen) {
+      // A closed sheet starts again from "land on the open row" next time.
+      opened.current = false;
+      readerScrolled.current = false;
+      return;
+    }
+    const root = railRef.current;
+    const first = !opened.current;
+    opened.current = true;
+    if (!first && readerScrolled.current) return;
+    const row = root?.querySelector<HTMLElement>('.session-row.is-active');
+    if (!row) return;
+    // `center`, not `nearest`: a row one line inside the fold reads as the last
+    // thing on screen rather than as the place you are.
+    lastReveal.current = Date.now();
+    row.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+  }, [isNarrow, isSheetOpen, currentId]);
+
+  // The project strip is horizontal and ordered oldest-first, so the open
+  // project — and a project just added, which is appended — can be off-screen to
+  // the right (LS-05). Revealed on open and whenever the open project changes.
+  const activeProjectId = store.currentProjectId.value;
+  useEffect(() => {
+    if (!isNarrow || !isSheetOpen) return;
+    const pill = railRef.current?.querySelector<HTMLElement>(
+      '.project-switcher-item[aria-current="true"]',
+    );
+    pill?.scrollIntoView?.({ inline: 'center', block: 'nearest' });
+  }, [isNarrow, isSheetOpen, activeProjectId]);
+
   const previousRunning = useRef<Record<string, boolean>>({});
   // A project switch must not let a late response from the previous project
   // paint the new rail. The loader also guards the response, but clearing here
@@ -128,6 +187,25 @@ export function SessionsRail(): JSX.Element {
       aria-modal={isSheetOpen ? 'true' : undefined}
     >
       <div class="rail-inner">
+        {/* The sheet's head: what this surface is, and the one visible way out
+         * of it (C10, SH-07). The wide column has the project disclosure here and
+         * nothing to close, so the row only exists inside the sheet. 44px is the
+         * tap floor (C3); the reader's focus still goes to the search field,
+         * which is where a session sheet is actually used. */}
+        {isNarrow ? (
+          <div class="rail-sheet-head">
+            <span class="rail-sheet-title">Sessions</span>
+            <IconButton
+              size="md"
+              class="rail-sheet-close"
+              label="Close sessions"
+              title="Close the sessions sheet"
+              testId="rail-sheet-close"
+              icon={<CloseIcon size={16} />}
+              onClick={actions.closeSheets}
+            />
+          </div>
+        ) : null}
         {/* One switcher owns project navigation and management in both layouts.
          * Wide screens get a compact disclosure; the phone sheet keeps the full
          * horizontal list and its existing close/control-plane actions. */}

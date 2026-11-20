@@ -137,14 +137,37 @@
  * genuine viewport concerns (a whole-window layout and `dvh`), so they stay
  * `@media` - §5A allows that; it is the *regions'* internal layout that must be
  * container-driven. */
-/* The shell stacks below a 900px *window*; the rail fills the plane below a
- * 780px *container* (control-rail.css). The container tier is safe only because
- * the window tier always fires first: the plane is the window minus the project
- * rail, so a 780px container implies a window well above 900px. If the plane is
- * ever rendered full-window, or the surrounding chrome shrinks past that
- * headroom, move the stacking into the container query too. */
-@media (max-width: 900px) {
-  .control-plane.cp { display: block; overflow: auto; }
+/* The shell stacks below a 1023px *window* - the same tier `layout.css`,
+ * `tokens.css` and `narrowViewport` use - and the rail fills the plane below a
+ * 780px *container* (control-rail.css).
+ *
+ * This was 900px, on the theory that the plane is the window minus the project
+ * rail and so needs that much more room before stacking. The theory broke the
+ * moment `rail.css` started hiding the rail at <=1023: between 901 and 1023 the
+ * plane is full-window while still rendering two columns next to a rail that is
+ * not there (SH-01). One tier, one answer. */
+@media (max-width: 1023px) {
+  /* Overview: a dashboard, so the page itself may scroll. The rail keeps a
+     bounded height, or the dashboard the reader came for starts after the whole
+     session list. `.session-nav` scrolls inside it (`layout.css`). */
+  .control-plane.cp:not(.detail-open) { display: block; overflow: auto; }
+  .control-plane.cp:not(.detail-open) .cp-browser { max-height: 45dvh; }
+
+  /* An open chat: the transcript owns the scroll, and there is exactly one
+   * scroller.
+   *
+   * `display: block` here used to take `.cp-pane`, `.cp-session`,
+   * `.cp-session-body` and `.cp-chat` out of flex flow, so all of them became
+   * content-height and `.cp-chat .chat-main { height: 100% }` (control-session)
+   * resolved against an auto height - the percentage computes to `auto`, so
+   * `.chat-scroll` stopped being a scroller and the plane's own page scroll
+   * landed on the oldest message. */
+  .control-plane.cp.detail-open {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .control-plane.cp.detail-open .cp-pane { flex: 1 1 auto; min-height: 0; }
 
   /* With a chat open the rail is behind the conversation, so it is dropped
      rather than squeezed: one column at a time, with Back to return. */
@@ -169,4 +192,32 @@
   flex-direction: column;
   gap: var(--hairline);
   min-width: 0;
+}
+
+/* ------------------------------------------------------------ thumb floor
+ *
+ * The plane's controls are desktop-sized (24-30px) and none of the four plane
+ * sheets carried a `pointer: coarse` rule, so every one of them stayed at its
+ * desktop size on a phone. 40px is the product's existing coarse floor
+ * (`layout.css`), used here rather than a new number. The two controls a phone
+ * user touches most - the row kebab and the filter chips - were the smallest.
+ */
+@media (pointer: coarse) {
+  .control-plane .icon-button,
+  .control-plane .button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Hover never latches on a touch screen, so the kebab must be visible at rest
+     and big enough to hit without opening the row behind it. */
+  .control-plane .session-menu-trigger {
+    width: 44px;
+    height: 44px;
+    opacity: 1;
+  }
+
+  .control-plane .filter-chip { height: 36px; }
+  .control-plane .agent-card-open { min-width: 44px; min-height: 44px; }
+  .control-plane .link-button { min-width: 44px; min-height: 44px; }
 }

@@ -209,6 +209,14 @@
 
 /* ---------- panel & sections ------------------------------------------ */
 
+/* The file tree's scroller, and therefore part of its contract (WB-07).
+ *
+ * `FileTree` walks up from `.tree` to find a scrolling ancestor and measures the
+ * listing against it; `.tree` itself has no height. This rule is what makes that
+ * box a scroller. If a future panel moved the scrolling to a wrapper - or dropped
+ * `overflow-y` here - the tree would measure a zero-height viewport and mount the
+ * whole listing (or freeze on its first screen), with nothing else looking wrong.
+ * Keep `.tab-panel` scrolling while the tree is inside it. */
 .tab-panel {
   flex: 1 1 auto;
   min-height: 0;
@@ -380,7 +388,15 @@
 
 /* ---------- file tree -------------------------------------------------- */
 
+/* The one number the windowing arithmetic and the row share (WB-04).
+ *
+ * `FileTree.tsx` reads this custom property off the `<ul>` rather than assuming
+ * 29, so the coarse tier below moves the *rows* and the window with them: a
+ * tree that kept computing 29px offsets against 44px rows mounts the wrong
+ * slice, and the error grows with every scroll step. */
 .tree {
+  --tree-row-h: 29px;
+
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -408,7 +424,7 @@
   gap: var(--space-4);
   width: 100%;
   min-width: 0;
-  height: 29px;
+  height: var(--tree-row-h);
   padding: 0 var(--space-4);
   border: 0;
   border-radius: var(--radius-sm);
@@ -2328,7 +2344,11 @@
     right: 0;
     bottom: 0;
     left: auto;
-    width: min(420px, 100vw);
+    /* `100%`, not `100vw` (SH-11): on iOS the layout viewport that `vw` measures
+     * is wider than the visible one, so a `100vw` drawer ran under the edge of
+     * the screen it was supposed to fit. A fixed element's percentage resolves
+     * against the viewport anyway, which is exactly what was meant. */
+    width: min(420px, 100%);
     border-top: 0;
     border-right: 0;
     border-bottom: 0;
@@ -2349,4 +2369,21 @@
   .context-result-links {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* WB-04: 29px is a mouse row. A thumb needs 44, so on a coarse pointer the row
+ * grows - and because `.tree-row`'s height and `--tree-row-h` are the same
+ * number, `FileTree`'s windowing arithmetic (`rowsOnScreen`, spacer heights,
+ * the row a keyboard focus scrolls to) moves with it instead of drifting. */
+@media (pointer: coarse) {
+  .tree {
+    --tree-row-h: 44px;
+  }
+}
+
+/* The subagent row's icon and the open control are 22px; on touch they take the
+ * same floor as the rest of the panel (A11Y-02). */
+@media (pointer: coarse) {
+  .si-agent-icon { min-width: 44px; min-height: 44px; }
+  .agent-card-open { min-width: 44px; min-height: 44px; }
 }

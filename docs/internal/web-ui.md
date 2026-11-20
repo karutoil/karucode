@@ -1057,12 +1057,20 @@ plane owns that drawer, so the keystroke is not swallowed for nothing.
 Below 1024 px Sessions and Results retain their full-height slide-over sheets.
 There is no bottom toolbar or ordinary-layout project rail: the sessions sheet
 carries project selection/management, New session, Control plane and Settings;
-the session header retains Sessions, Context, notifications, commands and Task
-actions. Results are also reachable from the command palette and Context's real
-result links. A narrow Source control or Terminal view uses the available
-workspace rather than leaving another result stack beside it. The **Results
-panel** pop-out preference is a desktop presentation: a phone always reaches
-Results through its sheet, the palette or Context's result links.
+the session header retains Sessions, **Files** (Results, including the file
+tree), Context, notifications, commands and Task actions. Results are also
+reachable from the command palette and Context's real result links. A narrow
+Source control or Terminal view uses the available workspace rather than
+leaving another result stack beside it. The **Results panel** pop-out
+preference is a desktop presentation: a phone always reaches Results through
+its sheet, its header button, the palette or Context's result links.
+
+**The phone frame is one header row.** At the ≤640px tier the workspace strip
+(Conversation / Source control / Terminal) becomes an icon-only segmented
+control inside the same header row as the title and the buttons, so the frame
+costs `--header-h` (52px) plus the status-bar inset instead of a 104px
+two-row header. From 641px to the narrow boundary the two-row header stays:
+there is width for the labels there and the actions stay mounted.
 
 Context becomes the top full-height dialog, traps focus and makes the mounted
 result sheet inert behind it. Closing it restores the sheet that was underneath
@@ -1072,10 +1080,14 @@ dismiss search/menu/editor state first, then Context or the open sheet; stopping
 a run is not the first effect of dismissing those controls.
 
 The composer remains opaque and measured above the transcript. Its input uses a
-viewport-aware cap and re-grows after resize; at the ≤640px tier its 16px text
-avoids iOS focus zoom. `viewport-fit=cover` plus the safe-area insets keeps the
-frame clear of the phone status bar and home indicator. Shortcut hint prose and
-decorative meters yield before visible actions and accessible labels.
+viewport-aware cap and re-grows after resize; its 16px text - the floor that
+stops iOS zooming the page on focus - belongs to the pointer, not to a width,
+so a landscape phone and an iPad get it too, and the same floor is emitted by
+the field primitives (`ui-field`) rather than by a legacy `.input` class.
+`viewport-fit=cover` plus `env(safe-area-inset-*)` on all four edges keeps the
+frame, the dock and both sheets clear of the status bar, the home indicator and
+the landscape notch. Shortcut hint prose and decorative meters yield before
+visible actions and accessible labels.
 
 **The phone dock is one row, not two squeezed pills.** Model and reasoning are
 one control there: the pill names the model with the effort on a quiet second
@@ -1122,15 +1134,61 @@ stays above the keyboard. A strip smaller than 15% of the layout is the browser
 toolbar collapsing, not a keyboard, and a pinch-zoomed page is not one either;
 both are ignored rather than shrinking the workspace.
 
-**Touch targets are finger-sized, on every pointer-coarse device.** The header
-controls are 26-31px boxes 4px apart and the dock's attach/Stop/Send were
-24-28px; `@media (pointer: coarse)` raises them to 40x40 (labelled pills to 32px)
-in `styles/workbench.css`, `styles/layout.css` and `styles/composer.css`. The
-model sheet's effort toggles take the same 40px floor, and the capsule around
-them grows to hold them. The workbench header's floor lives in `workbench.css`
-because that file both owns the 30px declaration and loads last. The
-transcript's row toggles keep their density: they are full-width rows, not
-thumb-sized buttons.
+**Touch targets are finger-sized, on every pointer-coarse device.** The floor
+lives with the primitives - `styles/base.css` plus `src/ui/` - so a new control
+inherits it instead of being added to a selector list: `.button`,
+`.icon-button`, `.ui-field` and their variants are 44x44 under
+`@media (pointer: coarse)`, with 40px kept for dense rows and the transcript's
+row toggles (full-width rows, not thumb buttons). Deliberately destructive or
+primary controls stay at 44. The one-offs are covered too: the tab close, the
+session/project kebabs, the terminal chip actions, code copy, the per-call
+rewind, the notification mark-read, the goal pills, the model-gallery chip and
+the model sheet's effort toggles.
+
+**Hover is an enhancement, never the only path.** A reveal that exists only in
+`:hover` does not exist on a touch screen, and a `display: none` child cannot
+take focus either - which is how the per-call rewind button and notification
+"mark as read" were unreachable on a phone. Controls that appear on hover are
+visible at rest under `@media (hover: none)` / `pointer: coarse` and only hide
+for a hover-capable pointer.
+
+**An open sheet is a dialog to the whole app.** Sessions, Results, Context and
+the full-screen overlays set `role=dialog`/`aria-modal`, trap focus, mark the
+covered shell `inert` and count as a dialog for `isDialogOpen()`, so the global
+chords (Mod+N, Mod+\, Mod+Shift+X, plugin bindings) do nothing behind one. Each
+carries a visible 44px Close control, and opening one pushes a history entry
+whose `popstate` closes it, so Android Back closes the sheet instead of leaving
+the app. Closing restores the sheet that was underneath. Escape reaches the
+caret first: a control that opts in with `data-escape-local` (a search box, a
+filter, an open menu) and a keydown that belongs to an IME composition are never
+taken as "close the sheet".
+
+**The keyboard inset is one coordinate space.** `--kb-inset` is subtracted by
+the shell, both slide-over sheets, every full-screen dialog and the fixed
+model/effort and mention popovers - not only by the workspace frame. A field
+and its primary action stay above an iOS keyboard rather than behind it, and a
+popover that cannot fit scrolls inside its own reduced cap.
+
+**The transcript follows a resize, not only new output.** A change in the
+scroller's own height - the on-screen keyboard, a URL bar collapsing, a
+rotation, a hidden panel returning - re-pins a reader who was at the bottom
+instead of silently ending the follow; a reader who scrolled up is still left
+alone. The row correction that replaces native scroll anchoring runs for short
+transcripts too, not only windowed ones, height estimates use the measured
+column width, and "Jump to latest" is a 44px/132px pill clear of the dock and
+the home indicator.
+
+**The control plane keeps one scroller on a phone.** With a chat open the
+transcript owns the scroll: the plane is a flex column with a definite height,
+so the newest message is on screen when it opens, new output follows and
+"Jump to latest" behaves as it does in the workspace. The overview is still a
+dashboard and the page scrolls there, but its rail is capped so the dashboard
+is not a list-length swipe away, and "Back to sessions" stays on screen.
+
+**Lists open where you are.** The sessions sheet reveals the open session, the
+phone project strip reveals the active project - including one just added -
+and the goals/todo/skills panels reveal the row that just changed. Ordering was
+already newest-first from the server; the scroll position was not.
 
 ### Menus on a phone
 

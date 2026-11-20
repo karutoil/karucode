@@ -30,7 +30,7 @@ export function AttachmentStrip({
           </span>
           <IconButton
             size="sm"
-            class="attachment-chip-remove w-[24px] h-[24px]"
+            class="attachment-chip-remove"
             label={`Remove ${attachment.name}`}
             icon={<CloseIcon size={11} />}
             testId={`remove-attachment-${attachment.id}`}

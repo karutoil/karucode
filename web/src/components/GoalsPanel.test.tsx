@@ -249,6 +249,65 @@ describe('GoalsPanel', () => {
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
+  it('marks the goal this session is working on and scrolls to it once', () => {
+    // LS-11 / §5.6: the panel's list is plugin order, so the open goal can be
+    // anywhere in it. It is marked, and the panel lands on it — once.
+    const scroll = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scroll;
+    try {
+      const { container } = render(
+        <GoalsPanel
+          data={payload({
+            goals: [
+              goal({ goal: 'g_done', title: 'An older goal', status: 'done', is_current_session: false }),
+              goal({ goal: 'g_open', title: 'The open one', status: 'active', is_current_session: true }),
+            ],
+          })}
+          panel={panelTab()}
+          plugin="kc-goals"
+          version="0.1.0"
+          refresh={() => undefined}
+        />,
+      );
+      const cards = container.querySelectorAll('.goals-goal');
+      expect(cards).toHaveLength(2);
+      expect(cards[0]?.classList.contains('is-open')).toBe(false);
+      expect(cards[1]?.classList.contains('is-open')).toBe(true);
+      // The marker, not just the class: the reader has to be able to see why the
+      // panel is where it is.
+      expect(cards[1]?.querySelector('.goals-open-flag')?.textContent).toBe('Open');
+      expect(cards[0]?.querySelector('.goals-open-flag')).toBeNull();
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(scroll.mock.calls[0]?.[0]).toMatchObject({ block: 'center' });
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it('leaves a panel of finished goals exactly where it was', () => {
+    // A closed goal is not "the open goal": marking it would point the reader at
+    // history instead of at work.
+    const scroll = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scroll;
+    try {
+      const { container } = render(
+        <GoalsPanel
+          data={payload({ goals: [goal({ status: 'done' })] })}
+          panel={panelTab()}
+          plugin="kc-goals"
+          version="0.1.0"
+          refresh={() => undefined}
+        />,
+      );
+      expect(container.querySelector('.goals-goal.is-open')).toBeNull();
+      expect(scroll).not.toHaveBeenCalled();
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
   it('draws the goal, its criteria, the check verdict and the evidence', () => {
     render(<GoalsPanel data={payload()} panel={panelTab()} plugin="kc-goals" version="0.1.0" refresh={() => undefined} />);
     expect(screen.getByText('Ship the widget')).toBeTruthy();

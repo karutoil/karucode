@@ -165,6 +165,15 @@ export function closeFileViewer(): void {
  */
 export function openFileInTab(path: string): void {
   store.fileViewerPath.value = null;
+  // A phone sheet is 92vw wide: without this it stays on top of the tab the reader
+  // just asked for (`replaceOverlay` clears it for the same reason). Context
+  // travels *in* that sheet on a phone, so it is closed through `workbench` first -
+  // and only while a sheet is up, so a docked Context column on a wide layout stays
+  // exactly where the reader put it.
+  if (store.mobileSheet.value !== null) {
+    workbench.closeContext();
+    store.mobileSheet.value = null;
+  }
   workspaceTabs.openFileTab(path);
 }
 

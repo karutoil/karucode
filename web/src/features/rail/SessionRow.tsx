@@ -34,6 +34,17 @@ export interface SessionRowProps {
   onRequestDelete: (session: SessionSummary, trigger: HTMLElement | null) => void;
 }
 
+/** Is this a finger rather than a mouse? The app asks the same question of CSS
+ *  (`@media (pointer: coarse)`); the kebab needs the answer in JS because it
+ *  decides *where* its menu opens, not how big it is. */
+function coarsePointer(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(pointer: coarse)').matches
+  );
+}
+
 export function SessionRow({
   session,
   active,
@@ -249,15 +260,38 @@ export function SessionRow({
           <IconButton
             size="sm"
             // `.icon-button` + `.session-menu-trigger` are the shared row-kebab
-            // recipe (24px, revealed on row hover): keep both hooks, let the
-            // primitive own the box.
-            class="icon-button session-menu-trigger w-[24px] h-[24px]"
+            // recipe (24px, revealed on row hover): keep both hooks and let
+            // `rail.css` own the box, because a Tailwind `w-[24px]` would outrank
+            // the sheet's coarse-pointer tier.
+            class="icon-button session-menu-trigger"
             label={`Actions for ${session.title || 'untitled session'}`}
             buttonRef={menu.triggerProps.ref}
             aria-haspopup="menu"
             expanded={menu.triggerProps['aria-expanded']}
             icon={<KebabIcon size={15} />}
-            onClick={menu.triggerProps.onClick}
+            onClick={() => {
+              // A kebab click has no pointer coordinates of its own, so the menu
+              // renders inline inside the scrolling list and a row near the
+              // bottom opens a menu that is clipped by the scrollport (LS-04).
+              // On a touch screen there is no hover to have revealed it higher
+              // up, so it opens anchored at the kebab and portalled out of the
+              // scroller instead.
+              if (menu.open) {
+                menu.close();
+                return;
+              }
+              if (!coarsePointer()) {
+                menu.toggle();
+                return;
+              }
+              const trigger = menu.triggerRef.current;
+              const rect = trigger?.getBoundingClientRect();
+              menu.openAt(
+                rect && rect.width > 0 ? rect.right - 8 : 24,
+                rect && rect.height > 0 ? rect.bottom : 24,
+                trigger,
+              );
+            }}
           />
           <Menu
             menu={menu}

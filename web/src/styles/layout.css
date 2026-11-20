@@ -1577,13 +1577,17 @@
 .jump-latest {
   position: absolute;
   left: 50%;
-  bottom: calc(var(--composer-h, 0px) + 10px);
+  bottom: calc(var(--composer-h, 0px) + 10px + env(safe-area-inset-bottom, 0px));
   z-index: 5;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
   height: 42px;
+  /* The only way back to a live answer: a 42px pill was under every platform's
+   * thumb floor and only as wide as its label. */
+  min-height: 44px;
+  min-width: 132px;
   padding: 0 var(--space-7);
   transform: translateX(-50%);
   border: 1px solid var(--line-strong);
@@ -1719,7 +1723,13 @@
     left: 0;
     z-index: 40;
     width: min(300px, 88vw);
-    height: auto;
+    /* A fixed sheet resolves against the *layout* viewport, so it has to do the
+     * shell's arithmetic itself or its footer (Settings, version) sits under the
+     * keyboard. `env()` because the sheet paints edge to edge. */
+    height: calc(100dvh - var(--kb-inset, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-left: env(safe-area-inset-left, 0px);
     border-right: 1px solid var(--line-strong);
     box-shadow: 15px 0 30px var(--shadow-lg);
     transform: translateX(-102%);
@@ -1757,7 +1767,10 @@
     bottom: 0;
     z-index: 40;
     width: min(380px, 92vw);
-    height: auto;
+    height: calc(100dvh - var(--kb-inset, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
     border-left: 1px solid var(--line-strong);
     box-shadow: -15px 0 36px var(--shadow-lg);
     transform: translateX(102%);
@@ -1808,10 +1821,15 @@
     gap: var(--space-4);
     /* The status bar is not part of the viewport when the app is installed to
      * the home screen (`viewport-fit=cover`), so the header has to inset itself
-     * or the session buttons sit under the clock. */
+     * or the session buttons sit under the clock. The horizontal insets matter in
+     * landscape, where the notch owns 47-59px of the leading edge. */
     height: calc(var(--header-h) + env(safe-area-inset-top, 0px));
     min-height: calc(var(--header-h) + env(safe-area-inset-top, 0px));
-    padding: env(safe-area-inset-top, 0px) var(--space-6) 0;
+    padding:
+      env(safe-area-inset-top, 0px)
+      max(var(--space-6), env(safe-area-inset-right, 0px))
+      0
+      max(var(--space-6), env(safe-area-inset-left, 0px));
   }
 
   /* Like the mock's mobile header: icon buttons only, one 31px square each. */
@@ -1837,42 +1855,27 @@
   .composer-wrap {
     /* The mock's narrow-viewport composer region (`<=800` in the mock; our
        compact mode starts at 1023, where the rail becomes a sheet). The inline
-       gutter is the transcript's (`.chat-inner`), so the box keeps lining up. */
-    padding: var(--space-5) var(--space-6) var(--space-5);
+       gutter is the transcript's (`.chat-inner`), so the box keeps lining up -
+       and takes the landscape notch's band when there is one. */
+    padding:
+      var(--space-5)
+      max(var(--space-6), env(safe-area-inset-right, 0px))
+      calc(var(--space-5) + env(safe-area-inset-bottom, 0px))
+      max(var(--space-6), env(safe-area-inset-left, 0px));
   }
 }
 
 /* A 52px header keeps the conversation in view on the phone. The breadcrumb
  * is now one line, so the title remains the header's primary label on every
- * viewport. */
+ * viewport.
+ *
+ * `--header-h` itself is declared in `tokens.css`, not here: this sheet lives in
+ * `layer(components)` and `tokens.css` is imported unlayered, so a tier here
+ * loses to the base token whatever its specificity or order (SH-06). */
 @media (max-width: 640px) {
-  /* The phone header is a space budget, not a density knob.
-   *
-   * The density rules in `tokens.css` are `:root[data-density='…']` (0,2,0), so
-   * the bare `:root` here (0,1,0) lost to them and the tier inherited whatever
-   * density said: `compact` produced a 54px header — 2px *taller* than the 52px
-   * comfortable header it exists to shrink — and `spacious` produced 76px, 8% of
-   * a 956px screen spent on chrome before a message. Restating the tier per
-   * density makes it a decision. `layout.css` loads after `tokens.css` (see
-   * `index.css`), so at equal specificity this rule wins; the phone header
-   * shrinks for compact and stays put for spacious, which still gets its extra
-   * room inside the conversation from the spacing scale. */
-  :root,
-  :root[data-density='comfortable'] {
-    --header-h: 52px;
-  }
-
-  :root[data-density='compact'] {
-    --header-h: 50px;
-  }
-
-  :root[data-density='spacious'] {
-    --header-h: 52px;
-  }
-
   .main-head {
-    padding-right: var(--space-5);
-    padding-left: var(--space-5);
+    padding-right: max(var(--space-5), env(safe-area-inset-right, 0px));
+    padding-left: max(var(--space-5), env(safe-area-inset-left, 0px));
   }
 
   .header-buttons {
@@ -2289,20 +2292,22 @@
  */
 @media (pointer: coarse) {
   .main-head .head-btn {
-    min-width: 40px;
-    min-height: 40px;
+    min-width: 44px;
+    min-height: 44px;
   }
 
   /* The context button is already wide (it carries the usage percentage); it only
    * needed height, and a wider box there would take the title's room. */
   .main-head .head-btn.context-header-btn {
-    min-width: 0;
+    /* It carries the usage percentage, so it is already wide at rest - but
+     * "wide" is not "tall enough to hit". 44 square, like its neighbours. */
+    min-width: 44px;
     padding: 0 var(--space-4);
   }
 
   .rail-tool,
   .main-head .head-btn.head-icon {
-    min-height: 40px;
+    min-height: 44px;
   }
 
   /* The model sheet's effort toggles sit four to a row between "Low" and "Max":
@@ -2310,6 +2315,36 @@
    * Pro Max viewport (440x956) before this rule. The choices are styled in this
    * file, so the floor lives here with the rest of the coarse-pointer controls. */
   .reasoning-choice {
-    min-height: 40px;
+    min-height: 44px;
+  }
+
+  /* The recovery pill is the one control a thumb hunts for mid-stream, and its
+   * only job is to be found: a little over the floor costs nothing while hidden. */
+  .jump-latest {
+    min-height: 48px;
+  }
+}
+
+/* 320px is the reflow floor (WCAG 1.4.10) and the header cluster is ~32px past
+ * it once every control takes the 44px coarse floor. The branch chip goes first:
+ * it is informational, and Source control is one tap away in the tab strip. */
+@media (max-width: 374px) {
+  /* `!important` is load-bearing: the primitive emits the unlayered `inline-flex`
+   * utility, and an unlayered rule beats every layer whatever the specificity -
+   * the same escape `base.css` documents for `.ui-field`. The chip is
+   * informational; Source control is one tap away in the tab strip. */
+  .main-head .head-btn.branch-chip {
+    display: none !important;
+  }
+
+  .header-buttons {
+    gap: var(--space-1);
+  }
+
+  /* Same escape as the branch chip: the <=640 rule above loses to the
+   * primitive's unlayered `inline-flex` utility, so the palette button never
+   * actually went away. At 320 it has to: Commands lives in the task menu. */
+  .head-btn.command-head-btn {
+    display: none !important;
   }
 }

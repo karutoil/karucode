@@ -252,6 +252,38 @@ describe('SkillsSettings', () => {
     await waitFor(() => expect(listReads()).toHaveLength(2));
   });
 
+  it('reveals and focuses the skill it just created', async () => {
+    // LS-15: the add form sits below the list, so the row it creates appears in
+    // a list the reader is not looking at — above the form they are using.
+    const scroll = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scroll;
+    try {
+      await renderTab();
+      // The server owns the id and answers the re-read with one more row.
+      data = {
+        ...data,
+        skills: [
+          ...data.skills,
+          skill({ id: 'deploy', source: 'custom', custom: true, path: null }),
+        ],
+      };
+
+      fireEvent.input(screen.getByTestId('skill-add-name'), { target: { value: 'deploy' } });
+      fireEvent.input(screen.getByTestId('skill-add-body'), { target: { value: '# Deploy\n\n1. Tag it.' } });
+      fireEvent.click(screen.getByTestId('skill-add-submit'));
+
+      await waitFor(() => expect(rowFor('deploy').classList.contains('is-new')).toBe(true));
+      expect(document.activeElement).toBe(rowFor('deploy'));
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(scroll.mock.calls[0]?.[0]).toMatchObject({ block: 'center' });
+      // The rows that were already there are not marked.
+      expect(rowFor('release').classList.contains('is-new')).toBe(false);
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
   it('refuses an empty body before any request', async () => {
     await renderTab();
 

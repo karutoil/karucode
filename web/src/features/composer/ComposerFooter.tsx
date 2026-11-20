@@ -14,6 +14,13 @@ export interface ComposerFooterProps {
   sendChord: string;
   mentionLabel?: string;
   usageLabel?: string;
+  /**
+   * True while a plain `Enter` sends. A device with a soft keyboard then has no
+   * way to break a line at all, so the foot offers the one control that does.
+   */
+  enterSends: boolean;
+  /** Insert a newline at the caret; the box stays focused. */
+  onLineBreak: () => void;
   onOpenSettings: () => void;
 }
 
@@ -25,6 +32,8 @@ export function ComposerFooter({
   sendChord,
   mentionLabel,
   usageLabel,
+  enterSends,
+  onLineBreak,
   onOpenSettings,
 }: ComposerFooterProps): JSX.Element {
   const approvals = describeApprovals(store.config.value);
@@ -76,6 +85,19 @@ export function ComposerFooter({
           </span>
         )}
       </span>
+
+      {enterSends && !disabledReason ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          class="compose-newline"
+          aria-label="Start a new line instead of sending"
+          testId="compose-newline"
+          onClick={onLineBreak}
+        >
+          ↵ New line
+        </Button>
+      ) : null}
 
       {approvals ? (
         <Button

@@ -127,10 +127,15 @@ export function SessionList({
           >
             {pluginText(store.pluginUi.value, UI_REPLACE_NEW_SESSION_LABEL, 'New session')}
           </Button>
-          <p class="rail-hint">
-            Create with <kbd>{modKey()}</kbd> + <kbd>N</kbd>, or pick one from the command palette{' '}
-            <kbd>{modKey()}</kbd> + <kbd>K</kbd>.
-          </p>
+          {/* A phone has no ⌘ and no keyboard to summon: the hint that is a
+           * helpful nudge on a laptop is three impossible instructions on a
+           * thumb (LS-08). The button above is the whole of the phone's path. */}
+          {store.narrowViewport.value ? null : (
+            <p class="rail-hint">
+              Create with <kbd>{modKey()}</kbd> + <kbd>N</kbd>, or pick one from the command palette{' '}
+              <kbd>{modKey()}</kbd> + <kbd>K</kbd>.
+            </p>
+          )}
         </div>
       ) : visible.length === 0 ? (
         <div class="rail-empty" role="status">

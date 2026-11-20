@@ -3053,4 +3053,25 @@
     opacity: 1;
     border-color: var(--line);
   }
+
+  /* Call-level rewind was `display: none` with a `:hover`/`:focus-within` reveal.
+   * Neither can fire on a touch screen - `:hover` never latches, and a
+   * `display: none` child cannot take focus - so rewinding one tool call simply
+   * did not exist on a phone. Always present there instead. */
+  .rewind-tool {
+    display: inline-flex;
+    opacity: 1;
+    background: var(--surface-raised);
+  }
+}
+
+/* A thumb needs more than the 24px strip a mouse can afford. These two are the
+ * §5.3 transcript-row exception: 40, not 44, because they repeat once per row. */
+@media (pointer: coarse) {
+  .code-copy { height: 40px; }
+  .rewind-tool { min-height: 40px; padding-inline: var(--space-4); }
+  .msg-top > .rewind-button { min-height: 40px; }
+  /* A tool *group* header is a transcript row too: full width, 35px tall, and a
+   * thumb hits it by aiming at the row, not the glyph. */
+  .tool-group-head { min-height: 40px; }
 }

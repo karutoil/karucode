@@ -130,3 +130,32 @@ describe('session-info panel stylesheet', () => {
     expect(rail.slice(start, rail.indexOf('\n}', start))).toContain('display: flex');
   });
 });
+
+describe('the file tree and Context at thumb size', () => {
+  it('publishes the row height the windowing arithmetic reads (WB-04)', () => {
+    // One number, two readers: `.tree-row`'s height and `FileTree.tsx`'s window
+    // arithmetic (spacer heights, rows on screen, the row a keypress reveals). A
+    // constant in the component drifted from the stylesheet the moment the coarse
+    // tier moved the rows, and then every scroll mounted the wrong slice.
+    expect(cssDeclarations('.tree')['--tree-row-h']).toBe('29px');
+    expect(cssDeclarations('.tree-row')['height']).toBe('var(--tree-row-h)');
+  });
+
+  it('raises the row to a thumb target on a coarse pointer', () => {
+    const coarse = cssSource.slice(cssSource.indexOf('@media (pointer: coarse) {'));
+    expect(coarse).toMatch(/\.tree \{\s*\n\s*--tree-row-h: 44px;/);
+  });
+
+  it('keeps .tab-panel the file tree\'s scroller (WB-07)', () => {
+    // `FileTree` walks up from `.tree` to its scrolling ancestor and measures the
+    // listing against it. If this rule stops scrolling, the tree measures a
+    // zero-height viewport and mounts every row of the listing.
+    expect(cssDeclarations('.tab-panel')['overflow-y']).toBe('auto');
+  });
+
+  it('sizes the Context drawer against the viewport, not 100vw (SH-11)', () => {
+    const phone = cssSource.slice(cssSource.indexOf('@media (max-width: 1023px) {'));
+    expect(phone).toMatch(/\.context-drawer \{[\s\S]*?width: min\(420px, 100%\);/);
+    expect(phone).not.toMatch(/width: min\(420px, 100vw\)/);
+  });
+});

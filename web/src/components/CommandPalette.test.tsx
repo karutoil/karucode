@@ -188,6 +188,47 @@ describe('the palette and an IME', () => {
   });
 });
 
+describe('the palette takes the caret when it opens', () => {
+  /* SH-10/OV-11: the field inside a dialog was focused from a `setTimeout(…, 0)`.
+   * iOS raises the software keyboard only for a `focus()` that happens inside the
+   * gesture that opened the surface, and a timer is a new task — the palette
+   * opened with a caret and no keyboard, and the reader had to tap the field
+   * before they could type. `useFocusTrap` now focuses in the same frame the
+   * portal is committed. */
+
+  beforeEach(() => {
+    resetAppState();
+  });
+
+  afterEach(() => {
+    cleanup();
+    resetAppState();
+  });
+
+  it('focuses the field in the render that creates it', () => {
+    store.paletteOpen.value = true;
+    render(<CommandPalette />);
+
+    const input = screen.getByRole('combobox', { name: 'Search commands' });
+    // No `waitFor` and no `await`: the caret is already in the field. With the
+    // timer it was still on `<body>` at this point.
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('does it in a microtask when the palette opens over a running app', async () => {
+    store.paletteOpen.value = false;
+    render(<CommandPalette />);
+
+    // The real flow: a keybinding flips the store and Preact re-renders in a
+    // microtask. Microtasks only — a `setTimeout(0)` would not have run yet.
+    store.paletteOpen.value = true;
+    for (let tick = 0; tick < 5; tick += 1) await Promise.resolve();
+
+    const input = screen.getByRole('combobox', { name: 'Search commands' });
+    expect(document.activeElement).toBe(input);
+  });
+});
+
 describe('plugin commands in the palette', () => {
   beforeEach(() => {
     resetAppState();

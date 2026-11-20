@@ -403,6 +403,7 @@ export function ControlOverview({
         <Button
           type="submit"
           variant="primary"
+          testId="cp-launch-submit"
           class="button button-primary cp-launch-submit"
           disabled={opening}
           iconRight={<ArrowRightIcon size={14} />}

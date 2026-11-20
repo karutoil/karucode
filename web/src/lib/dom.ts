@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef } from 'preact/hooks';
+import { isImeComposing } from './keyboard';
 import type { RefObject } from 'preact';
 
 const activeTraps: symbol[] = [];
@@ -60,6 +61,17 @@ const FOCUSABLE_SELECTOR = [
  * listbox role describes semantics, not proof that the component handles Escape.
  */
 const LOCAL_ESCAPE_SELECTOR = '[data-escape-local]';
+
+/**
+ * Escape belongs to a control that opts in with `data-escape-local`.
+ *
+ * Deliberately not "any input": a *modal form* (rename a project, edit a
+ * provider) is expected to close on Escape even from its own field, and deferring
+ * for every caret broke exactly that. A surface where the field owns Escape - a
+ * search box that clears, a filter, a menu - marks the control instead, and the
+ * window-level handler defers to editable targets in its own branches
+ * (`useGlobalKeybindings`).
+ */
 
 /**
  * Does this document have layout at all?
@@ -212,7 +224,16 @@ export function useFocusTrap(
     scrollLocks += 1;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
-    const focusFirst = window.setTimeout(() => {
+    // Synchronously, in the same frame the portal is committed — not in a
+    // `setTimeout(…, 0)`. iOS only raises the software keyboard for a `focus()`
+    // that happens inside the user's own gesture, and a timer is a new task: the
+    // command palette opened with a caret and no keyboard, and the reader had to
+    // tap the field again (SH-10, OV-11). `useLayoutEffect` runs after the DOM is
+    // in place and before paint, still inside the press that opened the surface,
+    // so this is the earliest moment the field and the gesture are both real. The
+    // trap's own semantics (first `[data-autofocus]`, else the first focusable,
+    // else the surface itself) are unchanged.
+    const focusFirst = (): void => {
       if (!ref.current) return;
       const preferred = ref.current.querySelector<HTMLElement>('[data-autofocus]');
       const first = preferred ?? focusableWithin(ref.current)[0];
@@ -221,7 +242,8 @@ export function useFocusTrap(
         ref.current.tabIndex = -1;
         ref.current.focus();
       }
-    }, 0);
+    };
+    focusFirst();
 
     const onKeyDown = (event: KeyboardEvent): void => {
       // Nested surfaces (a confirm dialog over a mobile sheet) form a stack;
@@ -233,6 +255,7 @@ export function useFocusTrap(
         // runs before the target, so deferring is the only way the local handler
         // ever sees the key. It must also not stop propagation: the local
         // handler is the one that decides whether anything else closes.
+        if (isImeComposing(event)) return;
         if (
           event.target instanceof Element &&
           event.target.closest(LOCAL_ESCAPE_SELECTOR) !== null
@@ -270,7 +293,6 @@ export function useFocusTrap(
 
     document.addEventListener('keydown', onKeyDown, true);
     return () => {
-      window.clearTimeout(focusFirst);
       document.removeEventListener('keydown', onKeyDown, true);
       const index = activeTraps.lastIndexOf(trapId);
       if (index !== -1) activeTraps.splice(index, 1);

@@ -56,11 +56,27 @@
   /* Under a modal on purpose: the inspector's sheets and the workbench drawers. */
   --z-sheet: 90;
   --z-modal: 100;
+  /* A menu belongs to whatever opened it, and a menu can be opened *inside* a
+   * dialog: a long-press or right-click on a session row in the Context drawer.
+   * At the sheet rung (90) it painted behind the dialog that owned it, so the
+   * next tap on an invisible item hit the backdrop and closed the dialog
+   * (OV-04). It is above the modal and still below a toast, because a toast may
+   * report on the menu but never be eaten by it. */
+  --z-menu: 110;
   /* Above the modal, below the skip link: the one surface that must be readable
    * over a dialog. */
   --z-toast: 130;
   /* Above everything, including a toast: `base.css`'s "skip to content". */
   --z-skip-link: 200;
+}
+
+/* Where the menu rung lands. `layout.css` draws `.menu-layer` (a right-click or
+ * long-press menu portalled into `<body>`) and carries the number from before a
+ * dialog could own a menu; the ladder is published here, so the rung is applied
+ * here too. One declaration, `body >` for the specificity, and the sheet order
+ * (this file is imported before `layout.css`'s siblings) no longer decides it. */
+body > .menu-layer {
+  z-index: var(--z-menu);
 }
 
 /* ---------- one veil per stack ------------------------------------------ */
@@ -289,13 +305,16 @@ body
 }
 
 /* The footer never scrolls and never shrinks: the decision stays where the eye
- * left it. */
+ * left it. Its bottom inset is the device's own, so the home indicator on an
+ * iPhone does not sit on the Save button (OV-02, SH-03): `env()` is 0 on every
+ * engine and every screen without a safe area. */
 .overlay-footer {
   display: flex;
   align-items: center;
   gap: var(--space-5);
   flex: 0 0 auto;
-  padding: var(--space-5) var(--space-7) var(--space-5) var(--space-8);
+  padding: var(--space-5) var(--space-7) calc(var(--space-5) + env(safe-area-inset-bottom, 0px))
+    var(--space-8);
   border-top: 1px solid var(--line);
 }
 
@@ -417,6 +436,14 @@ body
   margin-top: min(17vh, 150px);
 }
 
+/* The rewind dialog's measure lives here, with the other role measures, and not
+ * with its own rules at the end of this file: declared there it came *after* the
+ * phone tier, so its 620px took the sheet's `width: 100%` back with it
+ * (OV-09) — the one dialog whose width the responsive block could not set. */
+.dialog-rewind {
+  width: min(var(--overlay-w-standard), 100%);
+}
+
 .confirm-body {
   padding: var(--space-6) var(--space-8) var(--space-7);
   color: var(--text-secondary);
@@ -464,8 +491,11 @@ body
 .dialog-palette {
   align-self: start;
   width: min(var(--overlay-w-palette), 100%);
-  margin-top: min(12vh, 110px);
-  max-height: min(90vh, 475px);
+  /* `dvh` and not `vh` (SH-10): mobile Safari's `vh` is the *largest* viewport,
+   * so a palette sized in it is 90px taller than the screen while the toolbar is
+   * showing. The anchor is in `dvh` for the same reason. */
+  margin-top: min(12dvh, 110px);
+  max-height: min(90dvh, 475px);
   border-radius: var(--radius);
 }
 
@@ -1324,21 +1354,43 @@ body
 
 /* ---------- responsive overlays --------------------------------------- */
 
-@media (max-width: 640px) {
+/* Two axes, because a phone is not always a narrow window: 740x360 (a phone on
+ * its side) is wider than this tier and shorter than any desktop, and it used to
+ * get the centred desktop sheet in a 312px box (OV-03) with the onboarding rail
+ * wrapping over the fields (OV-10). Every rule below is "a phone" — height is the
+ * constraint that matters on a landscape one, so the tier is narrow OR short. */
+@media (max-width: 640px), (max-height: 500px) {
+  /* The layer scrolls, so no dialog can ever be taller than the band it sits in
+   * (OV-01). The body's scroll is locked while a dialog is open, so a fixed,
+   * non-scrolling layer with a top-anchored child put the confirm row of a tall
+   * `compact` dialog below the fold with nothing able to reach it. */
   .dialog-layer {
     padding: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* The layer has to end where the keyboard starts, not where the layout
+     * viewport does: a dialog that sizes itself to the visible band but is
+     * centred in an 844px layer still hangs its footer 160px below the keyboard
+     * (measured: band ends 524, footer at 674). OV-02/SH-03. */
+    height: calc(100dvh - var(--kb-inset, 0px));
   }
 
   /* A phone has no room for "a dialog on a page": every role except the two
    * deliberately small ones becomes the whole screen, with the header and the
    * footer pinned and the body scrolling between them. The drawer joins them,
    * because a 620px drawer is a full screen at 390px anyway — and it keeps the
-   * document's own shadow and edge instead of losing them. */
+   * document's own shadow and edge instead of losing them.
+   *
+   * The height is the *shell's* arithmetic, not `100dvh`: `--kb-inset` is the
+   * strip of viewport the on-screen keyboard covers (published by
+   * `lib/viewportInset.ts`), and a dialog that ignored it put its own Save
+   * button under the keyboard (OV-02, SH-03). `var(--kb-inset, 0px)` is 0 on
+   * every device with no keyboard up. */
   .overlay:not(.overlay-compact):not(.overlay-palette) {
     width: 100%;
     max-width: 100%;
-    height: 100dvh;
-    max-height: 100dvh;
+    height: calc(100dvh - var(--kb-inset, 0px));
+    max-height: calc(100dvh - var(--kb-inset, 0px));
     border: 0;
     border-radius: 0;
   }
@@ -1346,6 +1398,7 @@ body
   .overlay-drawer {
     width: 100%;
     max-width: 100%;
+    bottom: var(--kb-inset, 0px);
     border-left: 0;
   }
 
@@ -1355,8 +1408,8 @@ body
   .dialog {
     width: 100%;
     max-width: 100%;
-    height: 100dvh;
-    max-height: 100dvh;
+    height: calc(100dvh - var(--kb-inset, 0px));
+    max-height: calc(100dvh - var(--kb-inset, 0px));
     border: 0;
     border-radius: 0;
   }
@@ -1369,18 +1422,21 @@ body
   }
 
   .overlay-drawer .overlay-footer {
-    padding: var(--space-5) var(--space-6);
+    padding: var(--space-5) var(--space-6) calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
   }
 
   /* Keep command search compact on phones so the current workspace remains
    * visible around the modal and the list owns the scroll. The palette is the
-   * one role that stays a floating box instead of becoming the screen. */
+   * one role that stays a floating box instead of becoming the screen. Its width
+   * is the role's measure *capped* by the window, so a 740px-wide landscape phone
+   * gets the 560px palette rather than a 712px band (OV-03), and its cap loses
+   * the keyboard's strip like every other surface (SH-10). */
   .overlay-palette {
     align-self: center;
-    width: calc(100vw - 28px);
+    width: min(var(--overlay-w-palette), calc(100vw - 28px));
     height: auto;
     max-width: calc(100vw - 28px);
-    max-height: 82dvh;
+    max-height: calc(82dvh - var(--kb-inset, 0px));
     margin-top: 0;
     border: 1px solid var(--line-strong);
     border-radius: var(--radius);
@@ -1401,19 +1457,22 @@ body
     min-height: 44px;
   }
 
-  /* A thumb-sized row plus three key hints fill a 390px-wide dialog exactly. Below
-   * that the keys are the part worth keeping — they teach the keyboard contract —
-   * so the count, which the live region already announces, is the row that gives
-   * way. Measured at 320x700: without this the footer's count ran 13px past the
-   * dialog's edge. */
-  @media (max-width: 374px) {
-    .palette-keys > span:nth-child(2) {
-      display: none;
-    }
+  /* OV-11: the palette's footer is a keyboard's vocabulary — "↑ ↓ Enter Esc" —
+   * printed on the one surface whose user has no hardware keys. It costs a whole
+   * band at the bottom of a 360px-tall landscape screen, so on a phone the hints
+   * go, and the band they alone draw goes with them. (This replaces the ≤374px
+   * rule that hid one hint group at a time: the whole row is gone now, and the
+   * live region still announces the result count the groups sat beside.) */
+  .palette-keys,
+  .overlay-palette .overlay-footer {
+    display: none;
   }
 
+  /* The top of the screen, so the newest message is under the thumb's view and
+   * not under the keyboard. 64px clears the dialog header's own close control
+   * (its 16px inset plus its 32px button) when a sheet is open. */
   .toast-region {
-    top: calc(64px + env(safe-area-inset-top, 0px));
+    top: calc(var(--space-10) * 2 + env(safe-area-inset-top, 0px));
     right: 12px;
     bottom: auto;
     left: 12px;
@@ -1423,21 +1482,38 @@ body
     overflow-y: auto;
   }
 
-  /* A confirmation is a question, not a page: it keeps its measure and its
-   * top anchor on a phone so the answer stays in the thumb's reach. */
+  /* OV-06: the band the region now occupies is also where a dialog draws its
+   * header. While one is open the region holds two toasts and a quarter of the
+   * screen at most — a message about the dialog must not be the thing that hides
+   * the control that closes it. `nth-child(n + 3)` drops the *oldest*: the list
+   * renders in arrival order, so the newest two are the ones kept. */
+  body:has(> .dialog-layer) .toast-region {
+    max-height: 25vh;
+  }
+
+  body:has(> .dialog-layer) .toast-region .toast:nth-child(n + 3) {
+    display: none;
+  }
+
+  /* OV-01: a confirmation keeps its measure on a phone but not its top anchor.
+   * Centred, with the cap below the window and a layer that scrolls, a 619px cap
+   * in a 667px screen always leaves the buttons in the band; the 113px anchor
+   * plus the cap is what pushed them out. */
   .dialog-confirm,
   .overlay-compact {
+    align-self: center;
     width: calc(100vw - 28px);
     height: auto;
-    max-height: calc(100dvh - var(--space-10) - var(--space-7));
+    margin-top: 0;
+    max-height: calc(100dvh - var(--kb-inset, 0px) - var(--space-10) - var(--space-7));
     border: 1px solid var(--line-strong);
     border-radius: var(--radius);
   }
 
   .dialog-file,
   .overlay-full {
-    height: 100dvh;
-    max-height: 100dvh;
+    height: calc(100dvh - var(--kb-inset, 0px));
+    max-height: calc(100dvh - var(--kb-inset, 0px));
   }
 
   /* The file panel's single bar carries a toggle and four actions. On a phone
@@ -1468,9 +1544,8 @@ body
 }
 /* ---------- rewind dialog ---------------------------------------------- */
 
-.dialog-rewind {
-  width: min(var(--overlay-w-standard), 100%);
-}
+/* `.dialog-rewind`'s measure is declared with the shell's other role measures
+ * (see `.dialog-confirm`), so the phone tier below can make it full width. */
 
 .rewind-body {
   display: flex;
@@ -1614,5 +1689,25 @@ body
 
 .rewind-file.is-incomplete {
   background: color-mix(in srgb, var(--warn) 5%, transparent);
+}
+
+/* ---------- the thumb floor (OV-05) ------------------------------------ */
+/* A coarse pointer is the one media feature that says "a finger, not a mouse",
+ * and none of these controls had a rule for it: the dialog close button measured
+ * 32px, the footer buttons 32px and the toast's dismiss 24px. 44px is the floor
+ * the platform vendors and WCAG 2.5.5 both name.
+ *
+ * The rule lives here, not beside each control, because these are all the
+ * overlay family's own controls (the two sheets' chrome is raised in its own
+ * sheet, where its later rules live). `min-height`/`min-width` and not `height`:
+ * the box grows around its glyph instead of scaling the icon with it, and a
+ * surface that already sets a height keeps it where it is at least 44. */
+@media (pointer: coarse) {
+  .overlay-close,
+  .toast-close,
+  .overlay-footer .button {
+    min-width: 44px;
+    min-height: 44px;
+  }
 }
 

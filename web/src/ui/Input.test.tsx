@@ -15,6 +15,9 @@ describe('Input', () => {
     expect(input.className).toContain('h-[32px]');
     expect(input.className).toContain('text-small');
     expect(input.classList.contains('input')).toBe(false);
+    // A11Y-08: the stable hook the iOS zoom floor in `base.css` targets. The
+    // legacy `.input` class the old guard used is never emitted.
+    expect(input.classList.contains('ui-field')).toBe(true);
     expect(input.hasAttribute('aria-invalid')).toBe(false);
     expect(input.hasAttribute('data-invalid')).toBe(false);
   });
@@ -126,6 +129,7 @@ describe('Textarea', () => {
     expect(textarea.className).toContain('bg-rail');
     expect(textarea.className).toContain('text-small');
     expect(textarea.classList.contains('input')).toBe(false);
+    expect(textarea.classList.contains('ui-field')).toBe(true);
   });
 
   it('supports mono, invalid, disabled, readOnly, and events', () => {
@@ -195,6 +199,7 @@ describe('Select', () => {
     expect(select.tagName).toBe('SELECT');
     expect(select.value).toBe('read_only');
     expect(select.classList.contains('input')).toBe(false);
+    expect(select.classList.contains('ui-field')).toBe(true);
     expect(select.options).toHaveLength(3);
     expect(select.options[2]?.disabled).toBe(true);
 

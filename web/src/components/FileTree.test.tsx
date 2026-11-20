@@ -409,6 +409,36 @@ describe('FileTree windowing', () => {
     expect(spacers[0]?.style.height).toBe(`${(1500 - 20) * 29}px`);
   });
 
+  it('follows the row height the stylesheet publishes, so a thumb-sized row moves the window with it', () => {
+    // `--tree-row-h` is 29px and 44px under `pointer: coarse` (inspector.css), and
+    // `FileTree` reads it instead of hardcoding 29: 300px of scroller at 44px is
+    // ceil(300 / 44) + 1 = 8 rows on screen, plus the 8-row overscan below, and the
+    // spacer has to be 44px per remaining row or the scrollbar lies.
+    const { container, scroller } = renderWindowed({ rootEntries: manyFiles(1500) });
+    const list = container.querySelector('ul.tree') as HTMLElement;
+    const real = window.getComputedStyle.bind(window);
+    // Only the tree's own computed style is patched: the scroller lookup itself
+    // reads `overflow-y` off the same elements, so faking the whole function would
+    // stop the tree from finding a scroll parent at all.
+    const spy = vi.spyOn(window, 'getComputedStyle').mockImplementation(((element: Element, pseudo?: string | null) => {
+      const style = real(element, pseudo);
+      if (element === list) {
+        const read = style.getPropertyValue.bind(style);
+        style.getPropertyValue = (name: string) => (name === '--tree-row-h' ? '44px' : read(name));
+      }
+      return style;
+    }) as typeof window.getComputedStyle);
+
+    fireEvent.scroll(scroller);
+
+    const mounted = screen.getAllByRole('treeitem');
+    expect(mounted).toHaveLength(16);
+    expect(mounted[0]?.getAttribute('data-tree-path')).toBe('file-0000.rs');
+    const spacers = Array.from(container.querySelectorAll<HTMLElement>('.tree-spacer'));
+    expect(spacers[0]?.style.height).toBe(`${(1500 - 16) * 44}px`);
+    spy.mockRestore();
+  });
+
   it('moves the window with the scroller', () => {
     const { container, scroller } = renderWindowed({ rootEntries: manyFiles(1500) });
 

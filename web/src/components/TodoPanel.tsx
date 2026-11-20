@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { truncate } from '../lib/format';
 import { Badge, Button, Callout, Chip, Inline, Stack, Text } from '../ui';
 import type { FeedbackTone } from '../ui';
@@ -12,6 +12,11 @@ import {
   ChevronRightIcon,
   CircleCheckIcon,
 } from './icons';
+
+/** How long a task the agent just added keeps its "New" marker. Long enough to
+ *  be noticed after the panel reveals it, short enough that it never reads as
+ *  the task's actual state. */
+const NEW_TASK_MARKER_MS = 8000;
 
 /**
  * The renderer for the `kc-todo` plugin's `todo` panel.
@@ -292,8 +297,21 @@ function noteFor(item: PanelItem): { kind: string; text: string } | null {
   return null;
 }
 
-function ItemRow({ item, isSubtask }: { item: PanelItem; isSubtask: boolean }): JSX.Element {
+function ItemRow({
+  item,
+  isSubtask,
+  isNew = false,
+  reveal = false,
+}: {
+  item: PanelItem;
+  isSubtask: boolean;
+  /** Added to the list since this panel last read it (LS-13). */
+  isNew?: boolean;
+  /** The one new task the panel scrolls to; the rest are only marked. */
+  reveal?: boolean;
+}): JSX.Element {
   const [open, setOpen] = useState(false);
+  const rowRef = useRef<HTMLLIElement>(null);
   const note = noteFor(item);
   const expandable = Boolean(item.detail) || Boolean(note);
   const tone = toneFor(item.status);
@@ -303,9 +321,28 @@ function ItemRow({ item, isSubtask }: { item: PanelItem; isSubtask: boolean }): 
   // is what the reader recognises, so both go in the name.
   const task = item.title ? `${item.id}: ${truncate(item.title, 60)}` : item.id;
 
+  // The list is in plan order, so an item the agent just added can land anywhere
+  // in it — including below the fold of a panel the reader is already looking
+  // at. One reveal, on the render that first marks it (LS-13).
+  useEffect(() => {
+    if (!reveal) return;
+    const row = rowRef.current;
+    if (row && typeof row.scrollIntoView === 'function') {
+      row.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }, [reveal]);
+
   return (
-    <li class={`todo-item todo-tone-${tone}${isSubtask ? ' is-subtask' : ''}`}>
+    <li
+      ref={rowRef}
+      class={`todo-item todo-tone-${tone}${isSubtask ? ' is-subtask' : ''}${isNew ? ' is-new' : ''}`}
+    >
       <div class="todo-item-head">
+        {isNew ? (
+          <span class="todo-new-flag">
+            <span class="sr-only">Added just now. </span>New
+          </span>
+        ) : null}
         {expandable ? (
           <button
             type="button"
@@ -419,6 +456,28 @@ function AuditStrip({ audit }: { audit: PanelAudit }): JSX.Element | null {
  */
 export function TodoPanel({ data, refresh }: PluginPanelRenderProps): JSX.Element {
   const payload = parseTodoPayload(data);
+  // Which tasks this panel had already drawn, and which of the current ones the
+  // agent added since. Both are refs/state above the early returns because they
+  // have to survive every one of them (hooks are not conditional).
+  const seen = useRef<Set<string> | null>(null);
+  const [newIds, setNewIds] = useState<string[]>([]);
+  const listKey = (payload?.items ?? []).map((item) => item.id).join('\u0000');
+
+  useEffect(() => {
+    const ids = listKey === '' ? [] : listKey.split('\u0000');
+    const before = seen.current;
+    seen.current = new Set(ids);
+    // The first read is the panel opening, not news: marking every task "new"
+    // because the tab mounted would be a lie the reader would see through.
+    if (before === null) return undefined;
+    const added = ids.filter((id) => !before.has(id));
+    if (added.length === 0) return undefined;
+    setNewIds(added);
+    // Long enough to read, short enough that it cannot look like current state.
+    const timer = window.setTimeout(() => setNewIds([]), NEW_TASK_MARKER_MS);
+    return () => window.clearTimeout(timer);
+  }, [listKey]);
+
   // `matches` below guarantees this, but a renderer must never throw: a bad
   // payload should degrade, not blank the inspector.
   if (!payload) {
@@ -518,7 +577,15 @@ export function TodoPanel({ data, refresh }: PluginPanelRenderProps): JSX.Elemen
 
       <Stack as="ul" gap="1" class="todo-list">
         {rows.map((item) => (
-          <ItemRow key={item.id} item={item} isSubtask={item.depth > 0 || Boolean(item.parent)} />
+          <ItemRow
+            key={item.id}
+            item={item}
+            isSubtask={item.depth > 0 || Boolean(item.parent)}
+            isNew={newIds.includes(item.id)}
+            // One reveal, not one per added task: five scrolls race and the last
+            // one wins, which is not the item the reader needs to see first.
+            reveal={newIds[0] === item.id}
+          />
         ))}
       </Stack>
 

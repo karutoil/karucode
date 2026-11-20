@@ -71,6 +71,22 @@
   background: var(--bg);
 }
 
+/* A skill this pane just created. The add form sits below the list, so the row
+ * appears above the form the reader is still looking at; the ring plus the
+ * panel's one scroll (see `SkillsSettings`) is what connects the two (LS-15). */
+.skill-row.is-new {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 1px var(--accent-faint);
+}
+
+/* A row is not normally a Tab stop; it only takes focus programmatically, after
+ * an add, so the reader lands on the skill they created. `:focus-visible` would
+ * not paint that, so the ring is stated here. */
+.skill-row:focus {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
 .skills-options-actions {
   display: flex;
   flex-wrap: wrap;

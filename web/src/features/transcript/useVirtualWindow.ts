@@ -4,7 +4,7 @@ import { isOwnScroll, noteOwnScroll } from '../../lib/ownScroll';
 import { elementAtBottom, followingNewest } from '../../lib/stickyBottom';
 import { prefixHeights, visibleRange } from '../../lib/virtualWindow';
 import type { ChatItem } from '../../state/chat';
-import { estimateEntryHeight } from './entries';
+import { DEFAULT_CHARS_PER_LINE, estimateCharsPerLine, estimateEntryHeight } from './entries';
 import type { Entry } from './types';
 import { useTranscriptEntries } from './useTranscriptEntries';
 
@@ -100,6 +100,17 @@ export function useVirtualWindow({
   sessionKeyRef.current = sessionKey;
   const [viewportHeight, setViewportHeight] = useState<number | null>(null);
   /**
+   * The measured width of the scroller, in px, or `null` before anything has
+   * been laid out.
+   *
+   * `clientHeight` alone was enough while the estimate assumed a desktop column.
+   * It is not: a phone's transcript is a third of the width for the same text, so
+   * the row heights the first window claims are wrong by the same factor, and
+   * the difference is the document moving under the thumb when the rows are
+   * finally measured. The width is what makes the estimate honest (TR-07).
+   */
+  const [viewportWidth, setViewportWidth] = useState<number | null>(null);
+  /**
    * The last non-zero viewport height. A hidden chat panel (the Terminal tab is
    * open) measures zero, and that is not a reason to mount a whole long history:
    * the window keeps the height it had. Only a viewport that has never measured
@@ -185,6 +196,10 @@ export function useVirtualWindow({
       } else if (seenHeight.current === 0) {
         setViewportHeight(0);
       }
+      // A hidden panel measures zero for both; keeping the last real width is
+      // what lets the window come back with estimates that still fit it.
+      const width = element.clientWidth;
+      if (width > 0) setViewportWidth(width);
       // A session that fits the viewport is both top and bottom; a long one
       // starts at the tail and is only pinned to the bottom after this effect.
       if (element.scrollTop > 0 || element.scrollHeight <= element.clientHeight + 1) {
@@ -205,7 +220,15 @@ export function useVirtualWindow({
     };
   }, [viewportRef]);
 
-  const estimates = useMemo(() => entries.map(estimateEntryHeight), [entries]);
+  /**
+   * The width every row is estimated at: the measured column, or the historic
+   * desktop default until one exists.
+   */
+  const charsPerLine = viewportWidth === null ? DEFAULT_CHARS_PER_LINE : estimateCharsPerLine(viewportWidth);
+  const estimates = useMemo(
+    () => entries.map((entry) => estimateEntryHeight(entry, charsPerLine)),
+    [entries, charsPerLine],
+  );
   const heights = useMemo(
     () => entries.map((entry, index) => measured.current.get(entry.key) ?? estimates[index] ?? 0),
     [entries, estimates, measuredTick],
@@ -256,45 +279,17 @@ export function useVirtualWindow({
   // actual box disagree by that much), so the geometry is only asked for
   // heights, never for corrections.
   useLayoutEffect(() => {
-    if (!virtual) return;
+    // The correction below is what replaces the browser's own scroll anchoring
+    // (`overflow-anchor: none` is global, in `styles/chat.css`), so it belongs to
+    // every transcript and not only a windowed one: an unwindowed transcript has
+    // no padding to absorb a row that measures differently from its estimate, so
+    // a Markdown block finishing above the reader moves the whole document under
+    // their thumb. Only the window's own arithmetic is gated on `virtual` (TR-03).
+    if (entries.length === 0) return;
     const root = transcriptRef.current;
     const element = viewportRef?.current;
     if (!root || !element) return;
     const rows = root.children;
-    // The gap under a row is a property of the layout, not of the row: every
-    // child of a *windowed* transcript carries the same bottom margin (`.msg` is
-    // `margin: 0 0 var(--space-10)`, the date marker
-    // `margin: var(--space-2) auto var(--space-10)`), and the one rule that
-    // removes it (`.transcript:not(.is-windowed) > :last-child`) cannot match
-    // while this effect runs. `getComputedStyle` forces the style system to
-    // resolve the element it is asked about, so asking all ~200 mounted rows on
-    // every commit spent the scroll in style resolution. Read once from a sample
-    // row instead, and drop the reading when the thing that can change it - the
-    // density token on `<html>` or the viewport's box - has changed. If a row
-    // type ever needs a different gap, key this cache by the row's class too:
-    // nothing below may assume there is only one value.
-    const density = document.documentElement.dataset.density ?? '';
-    const layoutKey = `${density}|${element.clientWidth}x${element.clientHeight}`;
-    let margin = rowMargin.current;
-    if (margin === null || margin.key !== layoutKey) {
-      // A non-last row is the sample: `:last-child` is the only place a bottom
-      // margin is overridden, and that one is answered separately below.
-      const sample = (rows.length > 1 ? rows[1] : rows[0]) as HTMLElement | undefined;
-      margin = {
-        key: layoutKey,
-        margin: sample ? Number.parseFloat(getComputedStyle(sample).marginBottom) || 0 : 0,
-        lastMargin: null,
-      };
-      rowMargin.current = margin;
-    }
-    const lastRow = rows.length > 0 ? (rows[rows.length - 1] as HTMLElement) : null;
-    if (lastRow && margin.lastMargin === null) {
-      // Only the last child can carry the `:last-child` override, and only while
-      // it is mounted. One read per layout, not one per commit.
-      margin.lastMargin =
-        rows.length > 1 ? Number.parseFloat(getComputedStyle(lastRow).marginBottom) || 0 : margin.margin;
-    }
-    const lastMargin = margin.lastMargin ?? margin.margin;
 
     // One read pass over the mounted rows, before anything writes to the scroll:
     // a `getBoundingClientRect` *after* a `scrollTop` write flushes layout again
@@ -308,25 +303,66 @@ export function useVirtualWindow({
       boxes.push(row.getBoundingClientRect());
       keys.push(row.getAttribute('data-entry-key'));
     }
+
+    // Every row's model height is only ever asked for by the window: an
+    // unwindowed transcript renders all of them, so measuring them buys nothing
+    // and a `setMeasuredTick` would re-render the whole conversation for it.
     let changed = false;
-    for (let index = 0; index < boxes.length; index += 1) {
-      const key = keys[index];
-      if (!key) continue;
-      // The row's *extent*, not its border box: the gap below it is a bottom
-      // margin (`--space-10` on `.msg`), which `getBoundingClientRect` leaves
-      // out. Replacing a row with padding of its height would then move the
-      // layout by that margin every time the window's start crossed over it; the
-      // anchor would correct that, the correction could cross back, and the two
-      // would flip each other indefinitely at 32px a frame. The computed margin
-      // is the used value, so a last child that does lose it is honoured too, and
-      // every row's model height matches what it occupies in the document.
-      const height =
-        (boxes[index] as DOMRect).height + (index === boxes.length - 1 ? lastMargin : margin.margin);
-      const previous = measured.current.get(key);
-      if (previous !== undefined && Math.abs(previous - height) < 1) continue;
-      measured.current.set(key, height);
-      changed = true;
+    if (virtual) {
+      // The gap under a row is a property of the layout, not of the row: every
+      // child of a *windowed* transcript carries the same bottom margin (`.msg` is
+      // `margin: 0 0 var(--space-10)`, the date marker
+      // `margin: var(--space-2) auto var(--space-10)`), and the one rule that
+      // removes it (`.transcript:not(.is-windowed) > :last-child`) cannot match
+      // while this effect runs. `getComputedStyle` forces the style system to
+      // resolve the element it is asked about, so asking all ~200 mounted rows on
+      // every commit spent the scroll in style resolution. Read once from a sample
+      // row instead, and drop the reading when the thing that can change it - the
+      // density token on `<html>` or the viewport's box - has changed. If a row
+      // type ever needs a different gap, key this cache by the row's class too:
+      // nothing below may assume there is only one value.
+      const density = document.documentElement.dataset.density ?? '';
+      const layoutKey = `${density}|${element.clientWidth}x${element.clientHeight}`;
+      let margin = rowMargin.current;
+      if (margin === null || margin.key !== layoutKey) {
+        // A non-last row is the sample: `:last-child` is the only place a bottom
+        // margin is overridden, and that one is answered separately below.
+        const sample = (rows.length > 1 ? rows[1] : rows[0]) as HTMLElement | undefined;
+        margin = {
+          key: layoutKey,
+          margin: sample ? Number.parseFloat(getComputedStyle(sample).marginBottom) || 0 : 0,
+          lastMargin: null,
+        };
+        rowMargin.current = margin;
+      }
+      const lastRow = rows.length > 0 ? (rows[rows.length - 1] as HTMLElement) : null;
+      if (lastRow && margin.lastMargin === null) {
+        // Only the last child can carry the `:last-child` override, and only while
+        // it is mounted. One read per layout, not one per commit.
+        margin.lastMargin =
+          rows.length > 1 ? Number.parseFloat(getComputedStyle(lastRow).marginBottom) || 0 : margin.margin;
+      }
+      const lastMargin = margin.lastMargin ?? margin.margin;
+
+      for (let index = 0; index < boxes.length; index += 1) {
+        const key = keys[index];
+        if (!key) continue;
+        // The row's *extent*, not its border box: the gap below it is a bottom
+        // margin (`--space-10` on `.msg`), which `getBoundingClientRect` leaves
+        // out. Replacing a row with padding of its height would then move the
+        // layout by that margin every time the window's start crossed over it; the
+        // anchor would correct that, the correction could cross back, and the two
+        // would flip each other indefinitely at 32px a frame. The computed margin
+        // is the used value, so a last child that does lose it is honoured too, and
+        // every row's model height matches what it occupies in the document.
+        const height = (boxes[index] as DOMRect).height + (index === boxes.length - 1 ? lastMargin : margin.margin);
+        const previous = measured.current.get(key);
+        if (previous !== undefined && Math.abs(previous - height) < 1) continue;
+        measured.current.set(key, height);
+        changed = true;
+      }
     }
+
     const before = rowAnchor.current;
     // Whether the reader is following decides *who* corrects this commit, and it
     // is the same question the follow in `useStickyBottom` asks - of the same
@@ -380,7 +416,18 @@ export function useVirtualWindow({
       // few pixels short of it and nothing will ever say so.
       onMeasured?.();
     }
-  }, [virtual, range.start, range.end, estimates, measuredTick, viewportRef, windowTop, onMeasured]);
+  }, [
+    virtual,
+    entries.length,
+    sessionKey,
+    range.start,
+    range.end,
+    estimates,
+    measuredTick,
+    viewportRef,
+    windowTop,
+    onMeasured,
+  ]);
 
   const topPadding = range.start > 0 ? geometry.offsets[range.start] ?? 0 : 0;
   const bottomPadding =

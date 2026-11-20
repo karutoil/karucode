@@ -2,8 +2,13 @@ import type { ComponentChildren, JSX, MouseEventHandler, Ref } from 'preact';
 import type { BaseUiProps } from './types';
 import { cn, variants, type VariantProps } from './variants';
 
+/* `ui-button` is a stable hook, not a style: `base.css` raises `.ui-button` to
+ * the 44×44 touch floor under `(pointer: coarse)`. The utilities below are the
+ * *fine-pointer* size, and a class
+ * is required rather than a utility because a `pointer: coarse` variant would
+ * have to be spelled out at all 200-odd `<Button>` call sites. */
 export const buttonVariants = variants({
-  base: 'inline-flex items-center justify-center gap-3 rounded-sm border text-small whitespace-nowrap transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 enabled:active:translate-y-px',
+  base: 'ui-button inline-flex items-center justify-center gap-3 rounded-sm border text-small whitespace-nowrap transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 enabled:active:translate-y-px',
   variants: {
     variant: {
       secondary:
@@ -31,7 +36,7 @@ export const buttonVariants = variants({
 });
 
 export const iconButtonVariants = variants({
-  base: 'inline-grid place-items-center flex-none rounded-sm border border-transparent bg-transparent text-muted transition-colors cursor-pointer hover:enabled:bg-raised hover:enabled:text-text active:enabled:bg-hover aria-expanded:bg-raised aria-expanded:text-text aria-pressed:text-accent disabled:cursor-not-allowed disabled:opacity-50',
+  base: 'ui-icon-button inline-grid place-items-center flex-none rounded-sm border border-transparent bg-transparent text-muted transition-colors cursor-pointer hover:enabled:bg-raised hover:enabled:text-text active:enabled:bg-hover aria-expanded:bg-raised aria-expanded:text-text aria-pressed:text-accent disabled:cursor-not-allowed disabled:opacity-50',
   variants: {
     size: {
       sm: 'w-[26px] h-[26px]',
@@ -44,7 +49,7 @@ export const iconButtonVariants = variants({
 });
 
 export const linkButtonVariants = variants({
-  base: 'inline-flex items-center gap-2 px-1 rounded-sm border-0 bg-transparent text-small text-left transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50',
+  base: 'ui-link-button inline-flex items-center gap-2 px-1 rounded-sm border-0 bg-transparent text-small text-left transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50',
   variants: {
     tone: {
       muted: 'text-muted hover:enabled:text-accent-text',
