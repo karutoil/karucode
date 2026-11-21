@@ -1468,6 +1468,13 @@ impl Settings for SettingsHandle {
         // every write (see `SettingsHandle::update_skills`).
         self.read().skills.clone()
     }
+
+    /// The whole `[prompt]` section. Read once per run by the agent loop, so a
+    /// config change takes effect on the next run rather than mid-run (which
+    /// would move `message[0]` and cost a prompt-cache miss on every turn after).
+    async fn prompt(&self) -> kc_core::config::PromptConfig {
+        self.read().prompt.clone()
+    }
 }
 
 /// Resolve a session's model selection against the current profiles.

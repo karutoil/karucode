@@ -1832,6 +1832,25 @@ pub(crate) fn context_from_payload(payload: &Value) -> kc_core::plugin::ToolCall
 }
 
 async fn fan_out(plugins: &[Arc<PluginShared>], hook: &str, payload: &Value) -> Vec<Value> {
+    fan_out_named(plugins, hook, payload)
+        .await
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect()
+}
+
+/// [`fan_out`] with the name of the plugin each answer came from.
+///
+/// Needed wherever the answer is attributed - the prompt layers must record
+/// which plugin claimed a segment, because `source` is the tie-break between two
+/// contributions of equal priority and the person reading the conflict has to be
+/// able to find the plugin. The host assigns the name (it is the manifest name it
+/// logs and keys state by), never the plugin's own claim.
+async fn fan_out_named(
+    plugins: &[Arc<PluginShared>],
+    hook: &str,
+    payload: &Value,
+) -> Vec<(String, Value)> {
     let mut set = JoinSet::new();
     for (index, shared) in plugins.iter().enumerate() {
         if shared.status() != PluginStatus::Ready {
@@ -1840,16 +1859,22 @@ async fn fan_out(plugins: &[Arc<PluginShared>], hook: &str, payload: &Value) -> 
         let shared = Arc::clone(shared);
         let hook = hook.to_string();
         let payload = payload.clone();
-        set.spawn(async move { (index, shared.hook_output(&hook, &payload).await) });
+        set.spawn(async move {
+            let name = shared.name.clone();
+            (index, name, shared.hook_output(&hook, &payload).await)
+        });
     }
     let mut indexed = Vec::new();
     while let Some(joined) = set.join_next().await {
-        if let Ok((index, Some(value))) = joined {
-            indexed.push((index, value));
+        if let Ok((index, name, Some(value))) = joined {
+            indexed.push((index, name, value));
         }
     }
-    indexed.sort_by_key(|(index, _)| *index);
-    indexed.into_iter().map(|(_, value)| value).collect()
+    indexed.sort_by_key(|(index, _, _)| *index);
+    indexed
+        .into_iter()
+        .map(|(_, name, value)| (name, value))
+        .collect()
 }
 
 fn value_to_text(value: &Value) -> Option<String> {
@@ -2418,7 +2443,9 @@ fn gate_targets(self_: &PluginHooks) -> Vec<Arc<PluginShared>> {
 #[async_trait]
 impl kc_core::hooks::Hooks for PluginHooks {
     async fn before_prompt(&self, session_id: &str, workspace: &str) -> Vec<String> {
-        prompt_notes(&self.plugins.snapshot(), session_id, workspace, None).await
+        prompt_contribution(&self.plugins.snapshot(), session_id, workspace, None)
+            .await
+            .notes
     }
 
     async fn before_prompt_for_turn(
@@ -2427,7 +2454,18 @@ impl kc_core::hooks::Hooks for PluginHooks {
         workspace: &str,
         turn: Option<&str>,
     ) -> Vec<String> {
-        prompt_notes(&self.plugins.snapshot(), session_id, workspace, turn).await
+        prompt_contribution(&self.plugins.snapshot(), session_id, workspace, turn)
+            .await
+            .notes
+    }
+
+    async fn before_prompt_parts(
+        &self,
+        session_id: &str,
+        workspace: &str,
+        turn: Option<&str>,
+    ) -> kc_core::hooks::PromptContribution {
+        prompt_contribution(&self.plugins.snapshot(), session_id, workspace, turn).await
     }
 
     async fn on_run_end(&self, session_id: &str, run_id: &str, status: &str) {
@@ -2492,7 +2530,9 @@ impl kc_core::hooks::NotificationObserver for PluginHooks {
 #[async_trait]
 impl kc_core::hooks::Hooks for PluginHost {
     async fn before_prompt(&self, session_id: &str, workspace: &str) -> Vec<String> {
-        prompt_notes(&self.ready_plugins(), session_id, workspace, None).await
+        prompt_contribution(&self.ready_plugins(), session_id, workspace, None)
+            .await
+            .notes
     }
 
     async fn before_prompt_for_turn(
@@ -2501,7 +2541,18 @@ impl kc_core::hooks::Hooks for PluginHost {
         workspace: &str,
         turn: Option<&str>,
     ) -> Vec<String> {
-        prompt_notes(&self.ready_plugins(), session_id, workspace, turn).await
+        prompt_contribution(&self.ready_plugins(), session_id, workspace, turn)
+            .await
+            .notes
+    }
+
+    async fn before_prompt_parts(
+        &self,
+        session_id: &str,
+        workspace: &str,
+        turn: Option<&str>,
+    ) -> kc_core::hooks::PromptContribution {
+        prompt_contribution(&self.ready_plugins(), session_id, workspace, turn).await
     }
 
     async fn on_run_end(&self, session_id: &str, run_id: &str, status: &str) {
@@ -2840,7 +2891,7 @@ fn cap_text(text: &str, max: usize) -> (String, bool) {
     (format!("{}{TRUNCATION_MARKER}", &text[..end]), true)
 }
 
-/// Fan `before_prompt` out and collect the contributions for the prompt.
+/// Fan `before_prompt` out and collect what the plugins contribute.
 ///
 /// `turn` is the user message the run is answering. It is forwarded as a payload
 /// field so a plugin can retrieve against the question instead of memoising one
@@ -2850,12 +2901,12 @@ fn cap_text(text: &str, max: usize) -> (String, bool) {
 /// (see [`fan_out`]): the text lands in the system prompt on every call, and an
 /// order that depended on which process answered first would rewrite message 0
 /// between turns.
-async fn prompt_notes(
+async fn prompt_contribution(
     plugins: &[Arc<PluginShared>],
     session_id: &str,
     workspace: &str,
     turn: Option<&str>,
-) -> Vec<String> {
+) -> kc_core::hooks::PromptContribution {
     let mut payload = serde_json::json!({
         "session_id": session_id,
         "workspace": workspace,
@@ -2871,48 +2922,163 @@ async fn prompt_notes(
         }
         payload["turn"] = Value::String(text);
     }
+    let mut notes = Vec::new();
+    let mut parts = Vec::new();
+    let mut notes_total = 0usize;
+    let mut parts_total = 0usize;
+    for (source, value) in fan_out_named(plugins, hooks::BEFORE_PROMPT, &payload).await {
+        let (answer_notes, answer_parts) = split_prompt_answer(&value, &source);
+        for text in answer_notes {
+            if text.trim().is_empty() {
+                continue;
+            }
+            // Hook output lands in the system prompt verbatim, so it is capped
+            // like tool output: a plugin must not be able to blow the context
+            // budget (or bury the harness's own instructions) by returning
+            // megabytes.
+            let (text, cut) = cap_text(&text, MAX_HOOK_NOTE_BYTES);
+            if cut {
+                warn!(
+                    hook = hooks::BEFORE_PROMPT,
+                    limit = MAX_HOOK_NOTE_BYTES,
+                    "a plugin's hook output was truncated before it reached the system prompt"
+                );
+            }
+            let remaining = MAX_HOOK_NOTES_BYTES.saturating_sub(notes_total);
+            if remaining <= TRUNCATION_MARKER.len() {
+                warn!(
+                    hook = hooks::BEFORE_PROMPT,
+                    limit = MAX_HOOK_NOTES_BYTES,
+                    "dropping plugin hook output: the total budget for prompt contributions is spent"
+                );
+                break;
+            }
+            let (text, cut) = cap_text(&text, remaining);
+            if cut {
+                warn!(
+                    hook = hooks::BEFORE_PROMPT,
+                    limit = MAX_HOOK_NOTES_BYTES,
+                    "plugin hook output was truncated: the total budget for prompt contributions is \
+                     spent"
+                );
+            }
+            notes_total += text.len();
+            notes.push(text);
+        }
+        // A part may remove or replace a segment, so it gets its own budget:
+        // spending the notes budget on a replacement would leave the retrieval
+        // notes that follow it with nothing.
+        for mut part in answer_parts {
+            let remaining = MAX_HOOK_NOTES_BYTES.saturating_sub(parts_total);
+            if remaining <= TRUNCATION_MARKER.len() {
+                warn!(
+                    hook = hooks::BEFORE_PROMPT,
+                    limit = MAX_HOOK_NOTES_BYTES,
+                    "dropping a plugin's prompt part: the total budget for prompt parts is spent"
+                );
+                break;
+            }
+            let (text, cut) = cap_text(&part.text, MAX_HOOK_NOTE_BYTES.min(remaining));
+            if cut {
+                warn!(
+                    plugin = %part.source,
+                    segment = %part.name,
+                    limit = MAX_HOOK_NOTE_BYTES,
+                    "a plugin's prompt part was truncated before it reached the system prompt"
+                );
+            }
+            parts_total += text.len();
+            part.text = text;
+            parts.push(part);
+        }
+    }
+    kc_core::hooks::PromptContribution { notes, parts }
+}
+
+/// Split one `before_prompt` answer into notes and named prompt parts.
+///
+/// Every shape a plugin could already return still means "append this text":
+/// a string, an array of strings, or `{"text": ...}`. The one new shape is an
+/// object carrying `parts`, which is how a plugin asks for a segment to be
+/// added, removed or replaced:
+///
+/// ```json
+/// {"notes": ["retrieved context"],
+///  "parts": [{"op": "replace", "name": "rules", "text": "house rules", "priority": 0}]}
+/// ```
+///
+/// `source` is the host-assigned plugin name, never anything from the answer.
+fn split_prompt_answer(
+    value: &Value,
+    source: &str,
+) -> (Vec<String>, Vec<kc_core::prompt::PromptPart>) {
+    let Value::Object(map) = value else {
+        return (value_to_text(value).into_iter().collect(), Vec::new());
+    };
+    let Some(parts) = map.get("parts").and_then(Value::as_array) else {
+        // No `parts` key: this is a legacy answer, notes and all.
+        return (value_to_text(value).into_iter().collect(), Vec::new());
+    };
+    let notes = map
+        .get("notes")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(value_to_text).collect())
+        .unwrap_or_default();
     let mut out = Vec::new();
-    let mut total = 0usize;
-    for value in fan_out(plugins, hooks::BEFORE_PROMPT, &payload).await {
-        let Some(text) = value_to_text(&value) else {
+    for part in parts {
+        let Some(entry) = part.as_object() else {
+            warn!(
+                hook = hooks::BEFORE_PROMPT,
+                "ignored a prompt part that is not an object"
+            );
             continue;
         };
-        if text.trim().is_empty() {
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        let Some(name) = name else {
+            warn!(
+                hook = hooks::BEFORE_PROMPT,
+                "ignored a prompt part with no `name`"
+            );
             continue;
-        }
-        // Hook output lands in the system prompt verbatim, so it is capped like
-        // tool output: a plugin must not be able to blow the context budget (or
-        // bury the harness's own instructions) by returning megabytes.
-        let (text, cut) = cap_text(&text, MAX_HOOK_NOTE_BYTES);
-        if cut {
-            warn!(
-                hook = hooks::BEFORE_PROMPT,
-                limit = MAX_HOOK_NOTE_BYTES,
-                "a plugin's hook output was truncated before it reached the system prompt"
-            );
-        }
-        let remaining = MAX_HOOK_NOTES_BYTES.saturating_sub(total);
-        if remaining <= TRUNCATION_MARKER.len() {
-            warn!(
-                hook = hooks::BEFORE_PROMPT,
-                limit = MAX_HOOK_NOTES_BYTES,
-                "dropping plugin hook output: the total budget for prompt contributions is spent"
-            );
-            break;
-        }
-        let (text, cut) = cap_text(&text, remaining);
-        if cut {
-            warn!(
-                hook = hooks::BEFORE_PROMPT,
-                limit = MAX_HOOK_NOTES_BYTES,
-                "plugin hook output was truncated: the total budget for prompt contributions is \
-                 spent"
-            );
-        }
-        total += text.len();
-        out.push(text);
+        };
+        let op = match entry.get("op").and_then(Value::as_str).unwrap_or("") {
+            "" | "replace" => kc_core::prompt::PromptOp::Replace,
+            "add" => kc_core::prompt::PromptOp::Add,
+            "remove" => kc_core::prompt::PromptOp::Remove,
+            other => {
+                warn!(
+                    hook = hooks::BEFORE_PROMPT,
+                    op = other,
+                    "ignored a prompt part with an unknown `op` (expected add, remove or replace)"
+                );
+                continue;
+            }
+        };
+        // A priority is a tie-break, not a lever: clamping it keeps a plugin that
+        // puts `i64::MAX` in a field from outranking every future source by
+        // accident, and keeps the diagnostics readable.
+        let priority = entry
+            .get("priority")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .clamp(-1_000, 1_000);
+        out.push(kc_core::prompt::PromptPart {
+            source: source.to_string(),
+            op,
+            name: name.to_string(),
+            text: entry
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            priority,
+        });
     }
-    out
+    (notes, out)
 }
 
 #[cfg(test)]

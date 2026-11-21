@@ -712,6 +712,13 @@ scripts.
   and `GET /api/plugins`.
 * Hook output is capped at 4 KiB per contribution and 16 KiB in total before it
   reaches the system prompt; anything longer is cut with `[… truncated]`.
+* `before_prompt` may answer with `parts` as well as text: a list of
+  `{op, name, text, priority}` objects that **add, remove or replace** one named
+  block of the prompt, or (with `name: "*"`) the whole prompt. The host credits
+  every part to the plugin's manifest name, never to a name in the answer, and
+  caps each part at 4 KiB and all parts at 16 KiB. A part that loses a
+  precedence conflict is reported in the transcript once per run. See the
+  `prompt-override` topic for the block names.
 * A plugin that breaks the framing contract (a line over 8 MiB, a read error) is
   killed and marked `failed`; it is not left running.
 * `before_prompt` output is placed in the system prompt and re-requested on

@@ -991,6 +991,13 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
     let skills_registry = kc_core::skill::discover(&skills_config, spec.workspace.root());
     let skills = kc_core::skill::skills_block(&skills_registry, &skills_config);
     let skills = (!skills.is_empty()).then_some(skills);
+    // Every prompt change this *run* starts with: the operator's `[prompt]`
+    // section and the workspace's own `.karucode/system-prompt.md`, read once
+    // here for the same reason the instructions file is - a source that changed
+    // between two turns of one run would move the cached prefix on every request
+    // after it. A plugin's parts are per turn and are added inside the loop.
+    let prompt_config = inner.deps.settings.prompt().await;
+    let prompt_layers = kc_core::prompt::layers_for_run(spec.workspace.root(), &prompt_config);
     // The user turn this run is answering, captured before the loop mutates the
     // conversation: `run_loop_inner` pushes steers, mail and continuation nudges
     // onto the same history, so deriving it later would drift. It is the last
@@ -1009,6 +1016,7 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
         Arc::clone(&notebook),
         instructions,
         skills,
+        prompt_layers,
         turn,
     ))
     .catch_unwind()
@@ -1050,6 +1058,8 @@ async fn run_loop_inner(
     // off or the workspace has no skills, so the prompt stays byte-identical to
     // the one an install without skills sends.
     skills: Option<String>,
+    // Every prompt change the run starts with, resolved once at run start.
+    prompt_layers: kc_core::prompt::PromptLayers,
     // The user turn this run is answering, read once at run start.
     turn: Option<String>,
 ) -> LoopOutcome {
@@ -1066,6 +1076,9 @@ async fn run_loop_inner(
     // count: a continuation is not an iteration of new work, it is the same run
     // being told what is still missing.
     let mut stop_continuations = 0u32;
+    // Whether this run has already reported a replaced prompt or a losing
+    // contribution. Reported once per run, not once per turn.
+    let mut prompt_reported = false;
     // Answers this run has already seen, and how many turns in a row have taught
     // the model nothing new. With no turn budget to end a runaway, this streak is
     // what ends one: a model that keeps asking questions it already has the
@@ -1332,18 +1345,18 @@ is {})",
         // Bound before the `select!`: a `to_string_lossy()` temporary cannot be
         // borrowed across the await point.
         let workspace_label = spec.workspace.root().to_string_lossy().to_string();
-        let mut extra = tokio::select! {
+        let contribution = tokio::select! {
             biased;
-            _ = spec.cancel.cancelled() => Vec::new(),
-            _ = tokio::time::sleep_until(spec.deadline) => Vec::new(),
-            notes = tokio::time::timeout(
+            _ = spec.cancel.cancelled() => kc_core::hooks::PromptContribution::default(),
+            _ = tokio::time::sleep_until(spec.deadline) => kc_core::hooks::PromptContribution::default(),
+            answer = tokio::time::timeout(
                 HOOK_BUDGET,
                 inner
                     .deps
                     .hooks
-                    .before_prompt_for_turn(&spec.session_id.0, &workspace_label, turn.as_deref()),
-            ) => match notes {
-                Ok(notes) => notes,
+                    .before_prompt_parts(&spec.session_id.0, &workspace_label, turn.as_deref()),
+            ) => match answer {
+                Ok(answer) => answer,
                 Err(_) => {
                     ctx.notice(
                         "warn",
@@ -1352,10 +1365,11 @@ is {})",
                             HOOK_BUDGET.as_secs()
                         ),
                     );
-                    Vec::new()
+                    kc_core::hooks::PromptContribution::default()
                 }
             },
         };
+        let mut extra = contribution.notes;
         if !spec.is_subagent {
             if matches!(
                 inner
@@ -1377,7 +1391,14 @@ is {})",
             }
         }
         let tool_specs = spec.tools.specs();
-        let system = kc_core::prompt::system_prompt_with_context(
+        // A plugin's named changes join the run's own layers for *this* request
+        // only. The run's layers are cloned rather than mutated, so one turn's
+        // contribution cannot accumulate on the next one.
+        let mut layers = prompt_layers.clone();
+        layers.extend(kc_core::prompt::PromptLayers {
+            parts: contribution.parts,
+        });
+        let assembled = kc_core::prompt::system_prompt_with_layers(
             &spec.workspace.root().to_string_lossy(),
             spec.workspace.extra_roots(),
             &tool_specs,
@@ -1386,7 +1407,46 @@ is {})",
             &extra,
             instructions.as_deref(),
             skills.as_deref(),
+            &layers,
         );
+        // Say once per run, not once per turn: a replaced prompt or a losing
+        // contribution is a setup fact, and repeating it on every model call
+        // would fill the transcript a turn at a time.
+        if !prompt_reported && (assembled.replaced_by.is_some() || !assembled.conflicts.is_empty())
+        {
+            prompt_reported = true;
+            if let Some(source) = &assembled.replaced_by {
+                ctx.notice(
+                    "warn",
+                    format!(
+                        "the system prompt for this run is provided by `{source}`, not by karucode: \
+                         the built-in rules and tool list are not in it"
+                    ),
+                );
+            }
+            let shown: Vec<String> = assembled
+                .conflicts
+                .iter()
+                .take(5)
+                .map(ToString::to_string)
+                .collect();
+            if !shown.is_empty() {
+                let more = assembled.conflicts.len().saturating_sub(shown.len());
+                ctx.notice(
+                    "warn",
+                    format!(
+                        "a prompt contribution did not take effect: {}{}",
+                        shown.join("; "),
+                        if more > 0 {
+                            format!(" (+{more} more)")
+                        } else {
+                            String::new()
+                        }
+                    ),
+                );
+            }
+        }
+        let system = assembled.text;
         let mut base = Vec::with_capacity(history.len() + 2);
         base.push(Message::system(system));
         base.extend(history.iter().cloned());
@@ -1486,9 +1546,13 @@ is {})",
             // replace it: the assembled prompt states the harness's own rules
             // (that shell commands are unsandboxed, that tool output is
             // untrusted), and a replacement would let a plugin delete them
-            // silently. The plugin host caps the append at 4 KiB; the request is
-            // then fitted with that block reserved, so it cannot push the turn
-            // over the window.
+            // silently. The plugin host caps the append at 4 KiB
+            // (`MAX_PROMPT_APPEND_BYTES`), so it is bounded before it arrives
+            // here. It is **not** part of the fitted window - `fitted` above was
+            // computed without it - so the cap is what keeps it from pushing the
+            // turn over the context limit. Replacing the *assembled* prompt is a
+            // different mechanism (`prompt-override`) and happens before the fit,
+            // where the window does account for it.
             let extra_system = {
                 let mut names: Vec<String> = tool_specs.iter().map(|t| t.name.clone()).collect();
                 names.sort();
@@ -2117,6 +2181,7 @@ is {})",
                 // only durable memory this run has.
                 && call.name != context::NOTE_TOOL;
                     let repeat_stale = read_only
+                        && !is_wait_shaped(call)
                         && repeats.get(&repeat_key).is_some_and(|repeat| {
                             // The third identical answer carries the warning; the
                             // fourth is refused rather than paying for the same page
@@ -3008,12 +3073,16 @@ fn plan_parallel_turn(
             return None;
         }
         footprints.push(footprint);
+        let repeat_tracked = tool.class() == kc_core::tool::ToolClass::ReadOnly
+            && call.name != context::NOTE_TOOL
+            && !is_wait_shaped(call);
         let key = repeat_fingerprint(&[&call.name, &call.arguments]);
-        let refused = repeats.get(&key).is_some_and(|repeat| {
-            repeat.count >= REPEAT_NOTE_AFTER
-                && repeat.seen_at == mutations
-                && repeat.blocked < REPEAT_MAX_BLOCKS
-        });
+        let refused = repeat_tracked
+            && repeats.get(&key).is_some_and(|repeat| {
+                repeat.count >= REPEAT_NOTE_AFTER
+                    && repeat.seen_at == mutations
+                    && repeat.blocked < REPEAT_MAX_BLOCKS
+            });
         if refused {
             return None;
         }
@@ -3176,7 +3245,7 @@ async fn fold_tool_result(
     // one of the shapes that pushes this model into a reasoning stall (see the
     // request-building comment). The fourth identical call is refused outright
     // instead.
-    if count >= REPEAT_NOTE_AFTER && read_only {
+    if count >= REPEAT_NOTE_AFTER && read_only && !is_wait_shaped(call) {
         ctx.notice(
             "warn",
             format!(

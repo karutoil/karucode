@@ -1,5 +1,5 @@
 {
-  "count": 38,
+  "count": 39,
   "generated_by": "cargo run -p kc-docs -- --write",
   "topics": [
     {
@@ -338,7 +338,9 @@
         "file:crates/kc-core/src/contrib.rs",
         "hook:on_tool_call",
         "hook:before_prompt",
-        "config:[[plugins]]"
+        "hook:before_prompt_parts",
+        "config:[[plugins]]",
+        "config:[[prompt.parts]]"
       ],
       "path": "contribution-registry.md",
       "slug": "contribution-registry",
@@ -921,7 +923,7 @@
       ],
       "path": "project-instructions.md",
       "slug": "project-instructions",
-      "source": "crates/kc-core/src/prompt.rs:104",
+      "source": "crates/kc-core/src/prompt.rs:121",
       "summary": "How karucode finds a workspace's instructions file, which name wins, how much of it reaches the system prompt, and why it cannot override your request.",
       "tags": [
         "agents.md",
@@ -997,6 +999,37 @@
         "provider"
       ],
       "title": "Keep the prompt cache hitting (cheap long runs)"
+    },
+    {
+      "applies_to": [
+        "config:[prompt]",
+        "config:prompt.replace",
+        "config:prompt.replace_file",
+        "config:prompt.append",
+        "config:prompt.workspace_file",
+        "config:[[prompt.parts]]",
+        "file:.karucode/system-prompt.md",
+        "hook:before_prompt",
+        "hook:before_prompt_parts",
+        "tool:write_file",
+        "concept:system prompt"
+      ],
+      "path": "prompt-override.md",
+      "slug": "prompt-override",
+      "source": "crates/kc-core/src/prompt.rs:190",
+      "summary": "The three ways to change what the agent is told - a [prompt] section, a workspace file the agent itself can write, and named segments a plugin can add, remove or replace - and who wins when two of them disagree.",
+      "tags": [
+        "system prompt",
+        "prompt",
+        "override",
+        "segments",
+        "prompt parts",
+        "system-prompt.md",
+        "plugins",
+        "agent",
+        "house style"
+      ],
+      "title": "Replace or edit the system prompt (config, project file, plugin)"
     },
     {
       "applies_to": [

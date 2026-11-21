@@ -2,7 +2,7 @@
 // @kc-title: Extend or override harness behaviour (contribution registry)
 // @kc-summary: The Add / Remove / Replace / Wrap primitive behind every extensible registry in karucode, and how precedence decides a conflict.
 // @kc-tags: extensibility, registry, plugins, override, remove, precedence, hooks, tools
-// @kc-applies-to: file:crates/kc-core/src/contrib.rs, hook:on_tool_call, hook:before_prompt, config:[[plugins]]
+// @kc-applies-to: file:crates/kc-core/src/contrib.rs, hook:on_tool_call, hook:before_prompt, hook:before_prompt_parts, config:[[plugins]], config:[[prompt.parts]]
 //
 // # What this is
 //
@@ -425,6 +425,19 @@ impl<T: Clone> ContributionRegistry<T> {
                     }
                 }
                 Op::Replace => {
+                    if let Some(winner) = decided.get(name) {
+                        // A higher-precedence `Replace` (or `Remove`) already
+                        // owns this name. Without this check the last claim
+                        // applied wins, and a low-priority contribution silently
+                        // overwrites the one that outranked it - which is exactly
+                        // what `outranked` exists to prevent.
+                        conflicts.push(Conflict::Outranked {
+                            name: name.clone(),
+                            source: source.clone(),
+                            lost_to: winner.clone(),
+                        });
+                        continue;
+                    }
                     if removed.contains_key(name) {
                         conflicts.push(Conflict::Outranked {
                             name: name.clone(),
@@ -699,6 +712,43 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Conflict::Outranked { source, .. } if source == "low")),
             "and the loser is reported: {:?}",
+            view.conflicts
+        );
+    }
+
+    #[test]
+    fn a_lower_priority_replace_does_not_overwrite_a_higher_one() {
+        // Regression: `Replace` did not consult the `decided` map that `Remove`
+        // did, so the last claim applied won and a high-priority replacement was
+        // silently overwritten by a lower-priority one on the same name. The
+        // module docs promise the opposite ("the highest-precedence claim wins"),
+        // and `Outranked` is the report that makes the promise checkable.
+        let mut registry = reg();
+        registry.contribute(Contribution::new(
+            "workspace",
+            Op::Replace,
+            "on_run_end",
+            "workspace",
+            10,
+        ));
+        registry.contribute(Contribution::new(
+            "config",
+            Op::Replace,
+            "on_run_end",
+            "config",
+            0,
+        ));
+        let view = registry.resolve();
+        assert_eq!(
+            view.get("on_run_end").unwrap().value,
+            "workspace",
+            "the higher priority replacement must survive the lower one"
+        );
+        assert!(
+            view.conflicts
+                .iter()
+                .any(|c| matches!(c, Conflict::Outranked { source, .. } if source == "config")),
+            "the losing replacement must be reported: {:?}",
             view.conflicts
         );
     }

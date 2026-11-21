@@ -453,6 +453,27 @@ of memoising one block per session. It is capped at 4 KiB (cut with the usual
 without a user turn, such as a continuation. Ignoring it is fully backwards
 compatible.
 
+An answer may also change the prompt itself, by naming blocks:
+
+```json
+{"jsonrpc":"2.0","id":4,"result":{"output":{
+  "notes": ["retrieved context for this question"],
+  "parts": [
+    {"op": "replace", "name": "rules", "text": "House rules: ..."},
+    {"op": "remove",  "name": "artifacts"},
+    {"op": "add",     "name": "house-style", "text": "\nWrite in British English.\n", "priority": 5},
+    {"op": "replace", "name": "*", "text": "You are exactly this."}
+  ]}}}
+```
+
+`op` is `add`, `remove` or `replace` (default `replace`); `name` is one of the
+prompt blocks (`identity`, `workspace`, `instructions`, `how-to-work`, `rules`,
+`budget`, `plugins`, `docs`, `issue-report`, `artifacts`, `skills`, `tools`,
+`tail`, `notes`) or `*` for the whole prompt; `priority` is an optional tie-break,
+clamped to ±1000. The host attributes each part to your manifest name, caps each
+part at 4 KiB and all parts at 16 KiB, and reports a losing claim in the
+transcript once per run. See the `prompt-override` topic.
+
 ### 4.5 `shutdown` (host → plugin)
 
 ```json
@@ -774,7 +795,7 @@ non-null `output` values. A failing hook never fails a run.
 
 | Hook | Status | Payload | Output |
 | --- | --- | --- | --- |
-| `before_prompt` | **implemented** | `{session_id, workspace, turn}` | text appended to the system prompt |
+| `before_prompt` | **implemented** | `{session_id, workspace, turn}` | text appended to the system prompt; may also carry named `parts` that add, remove or replace a prompt block (§4.4) |
 | `on_run_end` | **implemented** | `{session_id, run_id, status}` | ignored |
 | `on_tool_result` | **implemented** | `{session_id, tool, ok}` | ignored |
 | `on_notify` | **implemented** | `{session_id, run_id, kind, title, body, source}` | ignored |

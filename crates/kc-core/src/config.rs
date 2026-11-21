@@ -2053,6 +2053,86 @@ fn d_stdio() -> String {
     "stdio".into()
 }
 
+/// `[prompt]`: change the system prompt - the whole text, or one named part.
+///
+/// Read once per run by [`crate::prompt::layers_for_run`], which turns it into
+/// [`crate::prompt::PromptPart`]s. Every field is optional, and a `[prompt]`
+/// section that is absent renders exactly the prompt an install sent before this
+/// section existed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PromptConfig {
+    /// Replace the whole system prompt with this text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace: Option<String>,
+    /// Replace the whole system prompt with this file's contents. Beats
+    /// `replace` when both are set, and a relative path resolves against the
+    /// workspace root. Read once per run, at most
+    /// [`crate::prompt::PROMPT_REPLACE_MAX_CHARS`] characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace_file: Option<PathBuf>,
+    /// Text placed at the end of the prompt, after the tool list and before the
+    /// per-turn plugin notes. Sugar for a `replace` on the `tail` segment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub append: Option<String>,
+    /// Read `.karucode/system-prompt.md` from the workspace and let it replace
+    /// the prompt. On by default: that file is how the agent, or the person
+    /// working in the project, changes what the run is told. Set it to `false` to
+    /// keep the harness prompt in every project.
+    #[serde(default = "d_true")]
+    pub workspace_file: bool,
+    /// `[[prompt.parts]]` - surgical edits to one named segment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<PromptPartConfig>,
+}
+
+impl Default for PromptConfig {
+    fn default() -> Self {
+        Self {
+            replace: None,
+            replace_file: None,
+            append: None,
+            workspace_file: true,
+            parts: Vec::new(),
+        }
+    }
+}
+
+/// One `[[prompt.parts]]` entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PromptPartConfig {
+    /// What to do with `name`. Defaults to `replace`, the operation a person
+    /// almost always means.
+    #[serde(default)]
+    pub op: PromptPartOpConfig,
+    /// A segment name (`rules`, `docs`, `tools`, ...) or `*` for the whole
+    /// prompt. The list is `crate::prompt::SEGMENTS`.
+    pub name: String,
+    /// The text. Ignored by `remove`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// Higher wins over another source's claim on the same name. The default
+    /// outranks nothing and loses a tie to the operator's own `[prompt]` values.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub priority: i64,
+}
+
+fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
+}
+
+/// The `op` of a `[[prompt.parts]]` entry.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptPartOpConfig {
+    /// Bring a segment that does not exist into being.
+    Add,
+    /// Drop a segment.
+    Remove,
+    /// Replace a segment's text (or, with `name = "*"`, the whole prompt).
+    #[default]
+    Replace,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConfigFile {
     #[serde(default)]
@@ -2100,6 +2180,10 @@ pub struct ConfigFile {
     /// folders.
     #[serde(default)]
     pub skills: Option<crate::skill::SkillsConfig>,
+    /// `[prompt]`: the system prompt as text a person, a project file or a plugin
+    /// can change (see [`PromptConfig`]).
+    #[serde(default)]
+    pub prompt: Option<PromptConfig>,
     /// `[access]`: web-UI sign-in (password/passkeys), the public URL and the
     /// tunnel/proxy trust list. See [`AccessConfig`].
     #[serde(default)]
@@ -2188,6 +2272,10 @@ pub struct Config {
     /// Agent skills: auto-detected instruction packs plus the ones added through
     /// the UI (see [`crate::skill::SkillsConfig`]). On by default.
     pub skills: crate::skill::SkillsConfig,
+    /// How the system prompt may be changed (see [`PromptConfig`]). The default
+    /// changes nothing and reads `.karucode/system-prompt.md` when a workspace
+    /// has one.
+    pub prompt: PromptConfig,
     /// How the web UI is reached and who may use it (see [`AccessConfig`]).
     pub access: AccessConfig,
     /// Automatic update checking (see [`UpdatesConfig`]). On by default: a check
@@ -2246,6 +2334,7 @@ impl Default for Config {
             notifications: NotificationsConfig::default(),
             terminals: TerminalConfig::default(),
             skills: crate::skill::SkillsConfig::default(),
+            prompt: PromptConfig::default(),
             access: AccessConfig::default(),
             updates: UpdatesConfig::default(),
             plugins: Vec::new(),
@@ -2471,6 +2560,9 @@ impl Config {
         }
         if let Some(v) = file.skills {
             cfg.skills = v;
+        }
+        if let Some(v) = file.prompt {
+            cfg.prompt = v;
         }
         if let Some(v) = file.access {
             cfg.access = v;
@@ -5433,5 +5525,59 @@ retry_max_stream_restarts = 0
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_prompt_section_parses_and_defaults_to_reading_the_workspace_file() {
+        let file: ConfigFile = toml::from_str(
+            r#"
+[prompt]
+append = "A house paragraph."
+
+[[prompt.parts]]
+op = "remove"
+name = "artifacts"
+
+[[prompt.parts]]
+name = "identity"
+text = "You are Acme's agent."
+priority = 5
+"#,
+        )
+        .expect("a valid [prompt] section");
+
+        let prompt = file.prompt.expect("[prompt]");
+        // An absent `workspace_file` means on: the project file is the agent's
+        // own way to change what it is told, so turning it off is a deliberate
+        // `false`.
+        assert!(prompt.workspace_file);
+        assert_eq!(prompt.append.as_deref(), Some("A house paragraph."));
+        assert_eq!(prompt.parts.len(), 2);
+        assert_eq!(prompt.parts[0].op, PromptPartOpConfig::Remove);
+        // `op` defaults to replace, which is what a person almost always means.
+        assert_eq!(prompt.parts[1].op, PromptPartOpConfig::Replace);
+        assert_eq!(prompt.parts[1].priority, 5);
+
+        // An install with no `[prompt]` section is unchanged.
+        let plain: ConfigFile = toml::from_str("").unwrap();
+        assert!(plain.prompt.is_none());
+        let cfg = Config::from_parts(plain, None).expect("config");
+        assert_eq!(cfg.prompt, PromptConfig::default());
+        assert!(PromptConfig::default().workspace_file);
+    }
+
+    #[test]
+    fn the_prompt_section_reaches_the_layered_config() {
+        let file: ConfigFile = toml::from_str(
+            r#"
+[prompt]
+replace = "You are exactly this."
+workspace_file = false
+"#,
+        )
+        .unwrap();
+        let cfg = Config::from_parts(file, None).expect("config");
+        assert_eq!(cfg.prompt.replace.as_deref(), Some("You are exactly this."));
+        assert!(!cfg.prompt.workspace_file);
     }
 }

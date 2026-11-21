@@ -323,6 +323,38 @@ max_skills = 64          # most skills the registry keeps (1 .. 512)
 # on disk. Both live in the settings table, so an added skill survives a restart
 # without a file. Editing them by hand is not refused, but the UI will not know.
 
+# --- the system prompt -----------------------------------------------------
+# Change what the agent is told, without patching the binary. Three sources, in
+# precedence order: this section (priority 0), the workspace's own
+# `.karucode/system-prompt.md` (priority 10, and the agent itself may write it),
+# and a plugin's `before_prompt` answer (its own priority, clamped to +/-1000).
+# A higher priority wins; a losing claim is reported in the transcript once per
+# run. The prompt is *not* a security control: the approval policy and the path
+# confinement are enforced in code, so replacing the text cannot remove a gate.
+#
+# This section is read at startup, so a change here needs a restart. The
+# workspace file is read at the start of every run, so it needs none.
+# See the `prompt-override` topic.
+[prompt]
+# Replace the whole system prompt. Nothing of the built-in prompt survives, and
+# the run reports who replaced it. Up to 32,000 characters.
+# replace = "You are the Acme agent. Answer in British English."
+# Read the replacement from a file instead. Wins over `replace` when both are
+# set. A relative path resolves against the workspace root.
+# replace_file = "prompt/agent.md"
+# Text appended after the tool list and before the per-turn plugin notes.
+# append = "This project is on freeze. Read only."
+# Read `.karucode/system-prompt.md` from the project and let it replace the
+# prompt there. On by default; `false` ignores that file everywhere.
+workspace_file = true
+# Surgical edits to one named block. `op` is add, remove or replace (default
+# replace); `name` is identity, workspace, instructions, how-to-work, rules,
+# budget, plugins, docs, issue-report, artifacts, skills, tools, tail, notes, or
+# `*` for the whole prompt.
+# [[prompt.parts]]
+# op = "remove"
+# name = "artifacts"
+
 # Tell a human when something happened: a run settled, an approval is waiting, a
 # run failed. On by default; every switch below is also editable in Settings and
 # through PATCH /api/config, and overridable from the environment.

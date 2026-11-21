@@ -53,6 +53,17 @@ pub trait Settings: Send + Sync {
         crate::skill::SkillsConfig::default()
     }
 
+    /// Live `[prompt]` settings: how this install lets the system prompt be
+    /// changed.
+    ///
+    /// Defaulted to "nothing changes", so an embedding or a test written before
+    /// the section existed keeps the exact prompt it had. The runtime reads it
+    /// once per run, because the text is `message[0]` of every request in that
+    /// run and re-reading it per turn would move the cached prefix.
+    async fn prompt(&self) -> crate::config::PromptConfig {
+        crate::config::PromptConfig::default()
+    }
+
     /// Resolve the `model` argument of `spawn_agent`/`spawn_agents` - one id
     /// that came from *outside* the config, typed by the caller and derived
     /// by nothing - against the models this install actually made available.

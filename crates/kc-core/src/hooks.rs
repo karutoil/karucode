@@ -34,6 +34,34 @@ pub trait Hooks: Send + Sync {
         self.before_prompt(session_id, workspace).await
     }
 
+    /// [`Hooks::before_prompt_for_turn`] plus the named prompt changes this
+    /// source wants the request to carry, and the reason they lost if they lose.
+    ///
+    /// Defaults to wrapping `before_prompt_for_turn` with no parts, so every
+    /// existing source keeps working and is still called **once** per model call
+    /// - an implementor that overrides this is the only one asked twice.
+    ///
+    /// A part may `add`, `remove` or `replace` a named segment of the prompt, or
+    /// replace the whole thing (`name: "*"`). The runtime applies them through
+    /// [`crate::prompt::PromptLayers`], which resolves every source with one
+    /// precedence rule and reports the losers; it does not grant a permission.
+    /// The approval policy, the path confinement and the sandbox are enforced by
+    /// the runtime, so rewriting the text that describes them changes what the
+    /// model is told, never what it is allowed to do.
+    async fn before_prompt_parts(
+        &self,
+        session_id: &str,
+        workspace: &str,
+        turn: Option<&str>,
+    ) -> PromptContribution {
+        PromptContribution {
+            notes: self
+                .before_prompt_for_turn(session_id, workspace, turn)
+                .await,
+            parts: Vec::new(),
+        }
+    }
+
     async fn on_run_end(&self, session_id: &str, run_id: &str, status: &str) {
         let _ = (session_id, run_id, status);
     }
@@ -75,10 +103,16 @@ pub trait Hooks: Send + Sync {
 
     /// Text to append to the system prompt for one model request.
     ///
-    /// The assembled system prompt is passed in and is **not** modifiable: a
-    /// replacement would let a plugin erase the harness's own rules, including the
-    /// statement that shell commands are unsandboxed. Appending is enough for
-    /// retrieval, a house style, or "this project is on freeze".
+    /// The assembled system prompt is passed in and is **not** modifiable through
+    /// this hook: it is a read-only view, so a plugin cannot erase the harness's
+    /// own rules by accident. Appending is enough for a house style, a "this
+    /// project is on freeze" note, or a per-request reminder.
+    ///
+    /// Changing or replacing the prompt is a different, explicit channel:
+    /// [`Hooks::before_prompt_parts`], whose parts are applied *before* the
+    /// request is fitted for the context window. That is the one to use for a
+    /// named change; this one is a per-request append that the window does not
+    /// count (the plugin host caps it at 4 KiB).
     async fn on_model_request(&self, _request: &ModelRequestGate) -> Option<String> {
         None
     }
@@ -131,6 +165,25 @@ pub struct NoHooks;
 #[async_trait]
 impl Hooks for NoHooks {}
 
+/// What one hook source contributes to the system prompt of one model request.
+///
+/// Two channels with different powers, on purpose:
+///
+/// * `notes` is text appended to the prompt's last segment. It cannot remove
+///   anything, so a source that only retrieves context cannot damage the prompt
+///   by accident, and it is what `before_prompt` has always returned.
+/// * `parts` addresses the prompt by name and can therefore remove or replace a
+///   segment. The runtime reports every part that lost a precedence conflict and
+///   names the source that replaced the whole prompt, so a change nobody expected
+///   is visible in the transcript rather than silent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptContribution {
+    /// Text blocks appended as the prompt's `notes` segment.
+    pub notes: Vec<String>,
+    /// Named changes to the prompt itself, applied with every other source's.
+    pub parts: Vec<crate::prompt::PromptPart>,
+}
+
 /// What a plugin may do about a tool call it was shown, before it runs.
 ///
 /// The three answers map to the only three safe things a policy hook can do:
@@ -179,7 +232,8 @@ pub struct ModelRequestGate {
     pub session_id: String,
     pub run_id: String,
     /// The assembled system prompt. Read-only by design: a plugin may append
-    /// through [`Hooks::on_model_request`] but may not remove anything.
+    /// through [`Hooks::on_model_request`] but may not remove anything here. A
+    /// named change belongs in [`Hooks::before_prompt_parts`].
     pub system: String,
     /// How many messages the request carries.
     pub messages: usize,

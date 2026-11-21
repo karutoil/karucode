@@ -7,7 +7,7 @@
 
 - **Slug:** `contribution-registry`
 - **Tags:** extensibility, registry, plugins, override, remove, precedence, hooks, tools
-- **Applies to:** `file:crates/kc-core/src/contrib.rs`, `hook:on_tool_call`, `hook:before_prompt`, `config:[[plugins]]`
+- **Applies to:** `file:crates/kc-core/src/contrib.rs`, `hook:on_tool_call`, `hook:before_prompt`, `hook:before_prompt_parts`, `config:[[plugins]]`, `config:[[prompt.parts]]`
 - **Source:** `crates/kc-core/src/contrib.rs:1`
 
 ---

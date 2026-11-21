@@ -1692,6 +1692,12 @@ pub(crate) struct FakeSettings {
     /// about skills opts in with
     /// `with_skills(SkillsConfig::default())`.
     pub skills: kc_core::skill::SkillsConfig,
+    /// Live `[prompt]` settings: how the run's system prompt may be changed.
+    ///
+    /// `PromptConfig::default()` changes nothing and still reads
+    /// `.karucode/system-prompt.md` when a test workspace has one - the same
+    /// default an install ships with.
+    pub prompt: kc_core::config::PromptConfig,
     /// What `resolve_requested_model` judges against. Empty (the default)
     /// means "no catalog to judge against", which is the permissive behaviour
     /// a single-model embedding has.
@@ -1731,6 +1737,7 @@ impl Default for FakeSettings {
                 auto_detect: false,
                 ..Default::default()
             },
+            prompt: kc_core::config::PromptConfig::default(),
             known_models: Vec::new(),
             alt_profile: None,
         }
@@ -1841,6 +1848,10 @@ impl Settings for FakeSettings {
 
     async fn skills(&self) -> kc_core::skill::SkillsConfig {
         self.skills.clone()
+    }
+
+    async fn prompt(&self) -> kc_core::config::PromptConfig {
+        self.prompt.clone()
     }
 
     /// Mirrors the server's resolver closely enough to prove the runtime

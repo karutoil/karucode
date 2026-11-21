@@ -33,9 +33,10 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`missions`](missions.md) | Group explicitly started project-local sessions across projects in durable missions. | `crates/kc-server/src/routes/missions.rs:3` |
 | [`notifications`](notifications.md) | karucode pings you when a run settles, parks on an approval or fails — with a sound per kind, desktop notifications, an unread badge, and four independent ways to turn it off. | `crates/kc-core/src/notify.rs:24` |
 | [`plugins`](plugins.md) | Build a plugin with the SDK, register it, install a plugin collection from a GitHub repository or a local directory, ask the operator for a tool-output budget, and debug it when it fails to start. | `crates/kc-plugin-sdk/src/lib.rs:49` |
-| [`project-instructions`](project-instructions.md) | How karucode finds a workspace's instructions file, which name wins, how much of it reaches the system prompt, and why it cannot override your request. | `crates/kc-core/src/prompt.rs:104` |
+| [`project-instructions`](project-instructions.md) | How karucode finds a workspace's instructions file, which name wins, how much of it reaches the system prompt, and why it cannot override your request. | `crates/kc-core/src/prompt.rs:121` |
 | [`projects`](projects.md) | How projects map to directories, how sessions are confined to one, and what happens when a project's directory moves or is deleted. | `crates/kc-server/src/state.rs:6` |
 | [`prompt-cache`](prompt-cache.md) | Why a long run can re-bill its whole context every turn, what karucode does to keep the cached prefix stable, and how to read the hit rate. | `crates/kc-runtime/src/context.rs:88` |
+| [`prompt-override`](prompt-override.md) | The three ways to change what the agent is told - a [prompt] section, a workspace file the agent itself can write, and named segments a plugin can add, remove or replace - and who wins when two of them disagree. | `crates/kc-core/src/prompt.rs:190` |
 | [`provider-profiles`](provider-profiles.md) | Point karucode at any OpenAI-compatible endpoint, by environment or as named profiles, and choose the active model. | `crates/kc-provider/src/lib.rs:8` |
 | [`provider-stream-recovery`](provider-stream-recovery.md) | Pre-content provider retries and post-content runtime restarts are separate, deadline-bounded layers. | `crates/kc-runtime/src/agent.rs:13` |
 | [`queued-run-recovery`](queued-run-recovery.md) | Accepted input is applied, converted to an ordered follow-up, or remains recallable after submission conflicts. | `crates/kc-runtime/src/agent.rs:54` |
@@ -54,4 +55,4 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`web-auth`](web-auth.md) | Put a password or a passkey in front of the web UI, choose the address it answers to, and understand what each sign-in method costs. | `crates/kc-server/src/routes/auth.rs:14` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-38 topic(s).
+39 topic(s).

@@ -10,6 +10,7 @@ use kc_core::hooks::Hooks;
 use kc_core::ids::{RunId, SessionId};
 use kc_core::paths::Workspace;
 use kc_core::plugin::{PluginStatus, ToolCallContext};
+use kc_core::prompt::PromptOp;
 use kc_core::settings::Settings;
 use kc_core::tool::{
     ApprovalGate, ApprovalHandle, Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOrigin,
@@ -3563,6 +3564,111 @@ async fn one_manifest_cannot_replace_one_target_twice() {
         notes.contains("label.new-session") && notes.contains("second `replace`"),
         "the dropped duplicate must be explained: {notes}"
     );
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Named prompt parts in the `before_prompt` answer
+// ---------------------------------------------------------------------------
+
+/// Inline plugin that answers `before_prompt` with the new object shape: notes
+/// plus named parts, including two malformed entries the host must skip.
+const PROMPT_PARTS_PLUGIN: &str = r#"
+import json, sys
+
+NAME = "parts"
+MANIFEST = {"name": NAME, "version": "0.1.0", "protocol": "1",
+            "capabilities": ["hooks"], "permissions": [], "hooks": ["before_prompt"]}
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": MANIFEST})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": []}})
+    elif method == "hooks/run":
+        hook = req.get("params", {}).get("hook", "")
+        if hook == "before_prompt":
+            out = {
+                "notes": ["a note from the parts plugin"],
+                "parts": [
+                    {"op": "replace", "name": "identity",
+                     "text": "identity from the plugin\n", "priority": 7},
+                    {"op": "remove", "name": "artifacts"},
+                    {"op": "add", "name": "house", "text": "house rules\n"},
+                    {"name": "tail", "text": "default op is replace"},
+                    {"op": "explode", "name": "rules", "text": "boom"},
+                    {"op": "replace", "name": "  ", "text": "no name"},
+                ],
+            }
+            send({"jsonrpc": "2.0", "id": rid, "result": {"output": out}})
+        else:
+            send({"jsonrpc": "2.0", "id": rid, "result": {"output": None}})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": rid, "result": None})
+        break
+    elif rid is not None:
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "unknown"}})
+"#;
+
+#[tokio::test]
+async fn a_plugin_can_remove_replace_and_add_prompt_segments() {
+    let dir = temp_dir("prompt-parts");
+    let script = dir.join("parts.py");
+    std::fs::write(&script, PROMPT_PARTS_PLUGIN).unwrap();
+    let cfg = PluginConfig {
+        name: "parts".to_string(),
+        enabled: true,
+        command: vec!["python3".to_string(), script.to_string_lossy().into_owned()],
+        env: BTreeMap::new(),
+        permissions: Vec::new(),
+        settings: BTreeMap::new(),
+        tool_output_bytes: None,
+    };
+    let mut host = PluginHost::discover(&[cfg], &dir);
+    host.start_all().await;
+
+    let contribution = host
+        .before_prompt_parts("s_1", "/w", Some("a question"))
+        .await;
+    // The note still travels through the old channel, unchanged.
+    assert_eq!(contribution.notes, vec!["a note from the parts plugin"]);
+
+    // Only the four well-formed parts survive: the unknown `op` and the blank
+    // name are dropped with a warning rather than guessed at.
+    let names: Vec<&str> = contribution
+        .parts
+        .iter()
+        .map(|part| part.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["identity", "artifacts", "house", "tail"]);
+
+    let identity = &contribution.parts[0];
+    assert_eq!(identity.op, PromptOp::Replace);
+    assert_eq!(identity.priority, 7);
+    assert_eq!(
+        identity.source, "parts",
+        "the host attributes the part to the plugin name it assigned"
+    );
+    assert_eq!(contribution.parts[1].op, PromptOp::Remove);
+    assert_eq!(contribution.parts[2].op, PromptOp::Add);
+    // `op` defaults to replace, which is what a plugin (or a person) almost
+    // always means when it names a segment.
+    assert_eq!(contribution.parts[3].op, PromptOp::Replace);
+
+    // The old accessors keep returning only notes, so an existing caller is not
+    // handed a type it cannot use.
+    let legacy = host.before_prompt("s_1", "/w").await;
+    assert_eq!(legacy, vec!["a note from the parts plugin"]);
 
     host.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();

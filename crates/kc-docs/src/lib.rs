@@ -146,6 +146,7 @@ pub const REQUIRED_SLUGS: &[&str] = &[
     "projects",
     "provider-profiles",
     "prompt-cache",
+    "prompt-override",
     "run-server",
     "security",
     "skills",
@@ -235,13 +236,19 @@ pub fn count() -> usize {
     GENERATED.len()
 }
 
-/// `- `slug` — title` lines, used as the system-prompt topic index.
+/// The system prompt's topic index: `` `slug`, `slug`, ... `` on one line.
+///
+/// Slugs only. The titles this used to carry doubled the block's size in
+/// `message[0]`, which is re-sent and re-billed on every model call - and the
+/// `karucode_docs` tool's own `list` action returns title and summary for the
+/// same set, so the prompt only has to make a topic *recognizable* enough to read
+/// or search for. One comma-separated line also costs less than 38 `- ` bullets.
 pub fn topic_index() -> String {
     GENERATED
         .iter()
-        .map(|doc| format!("- `{}` — {}", doc.slug, doc.title))
+        .map(|doc| format!("`{}`", doc.slug))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join(", ")
 }
 
 /// Slugs from [`REQUIRED_SLUGS`] that are missing from the compiled registry.

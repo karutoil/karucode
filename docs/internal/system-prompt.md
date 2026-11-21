@@ -84,6 +84,12 @@ planning against a limit it will never be given is worse than no number.
 
 ## What is bounded inside the prompt
 
+* Each named block has **its own ceiling**, enforced by a test rather than one
+  opaque total: a rule can triple while the tool list loses a line and a single
+  sum would still pass. The ceilings are a review trigger, not a byte count.
+* The topic index is one line of slugs. Carrying the titles too cost 2,085
+  characters - 42% of the whole prompt - and `karucode_docs` action `list`
+  returns the title and summary for the same set when the agent needs them.
 * A project's instructions file: 8,000 characters, cut with a note that says so
   (see `project-instructions`).
 * Text a plugin adds for the run (the control-chat and mission paragraphs):
@@ -94,12 +100,23 @@ planning against a limit it will never be given is worse than no number.
   its own description in another process, so a description with no sentence break
   is cut with `…` rather than pasted whole.
 
+## Changing it
+
+A person, a project file or a plugin can replace the whole prompt or edit one
+named block - see `prompt-override`. The blocks, in order, are `identity`,
+`workspace`, `instructions`, `how-to-work`, `rules`, `budget`, `plugins`,
+`docs`, `issue-report`, `artifacts`, `skills`, `tools`, `tail` and `notes`.
+
+The order is volatility order: everything that changes once per run comes
+before `notes`, which a plugin may change on every turn. The provider caches the
+request prefix, so a block that changes per turn costs the tail of message[0]
+and not the blocks before it.
+
 ## Gotchas
 
 * Adding a line here is a recurring cost: it is re-sent, and re-billed, on every
   model call of every run. Change it as prose a model can act on, and keep it
-  short. A test pins the assembled prompt's size with a fixed builtin tool set
-  (a ceiling, not a byte count): raising it is a deliberate diff, not a drift.
+  short. The per-block ceilings are a deliberate diff, not a drift.
 * The prompt is deterministic for the same inputs - no timestamps, no map
   iteration order, plugin names sorted and deduped - so the provider's prefix
   cache keeps hitting across turns. Editing this file costs one cache miss per

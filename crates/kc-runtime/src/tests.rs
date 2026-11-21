@@ -1967,6 +1967,255 @@ async fn cancelling_during_a_parallel_batch_still_ends_the_turn() {
     assert!(h.wait_idle().await.is_empty());
 }
 
+#[tokio::test]
+async fn many_parallel_turns_using_the_same_tool_never_trigger_repeat_or_loop_guards() {
+    // Running the same tool in parallel across many turns (more than both
+    // REPEAT_NOTE_AFTER=3 and NO_NEWS_TURNS=4) with distinct arguments must never
+    // be flagged as a repetitive call or a tool-call loop.
+    let probe = ProbeTool::read_only("probe");
+    let read_peak = probe.peak();
+    let writer = PathProbeTool::new("write_probe");
+    let write_peak = writer.peak();
+
+    let mut scripts = Vec::new();
+    for turn in 0..6 {
+        let calls: Vec<(String, String, String)> = (0..4)
+            .map(|slot| {
+                (
+                    format!("r_{turn}_{slot}"),
+                    "probe".to_string(),
+                    format!(
+                        "{{\"path\":\"src/f_{turn}_{slot}.rs\",\"sleep_ms\":20,\"tag\":\"t{turn}_{slot}\"}}"
+                    ),
+                )
+            })
+            .collect();
+        let refs: Vec<(&str, &str, &str)> = calls
+            .iter()
+            .map(|(id, name, args)| (id.as_str(), name.as_str(), args.as_str()))
+            .collect();
+        scripts.push(Script::call(&refs));
+    }
+    scripts.push(Script::call(&[
+        (
+            "w0",
+            "write_probe",
+            "{\"path\":\"out/a.txt\",\"sleep_ms\":20,\"tag\":\"a\"}",
+        ),
+        (
+            "w1",
+            "write_probe",
+            "{\"path\":\"out/b.txt\",\"sleep_ms\":20,\"tag\":\"b\"}",
+        ),
+        (
+            "w2",
+            "write_probe",
+            "{\"path\":\"out/c.txt\",\"sleep_ms\":20,\"tag\":\"c\"}",
+        ),
+    ]));
+    scripts.push(Script::text("all done"));
+
+    let mut h = HarnessBuilder::new(scripts)
+        .tool(probe.boxed())
+        .tool(Arc::new(writer))
+        .build()
+        .await;
+
+    let events = h
+        .run_to_finish("read 24 files in 6 parallel turns, then write 3")
+        .await;
+    assert_eq!(
+        finished_status(&events),
+        "completed",
+        "parallel turns with distinct arguments must not hit the loop guard: {:?}",
+        kinds(&events)
+    );
+    assert!(
+        read_peak.load(Ordering::SeqCst) >= 2,
+        "reads must have executed concurrently"
+    );
+    assert_eq!(
+        write_peak.load(Ordering::SeqCst),
+        3,
+        "disjoint writes must have executed concurrently"
+    );
+
+    let messages = h.session_messages().await;
+    let tools: Vec<&str> = messages
+        .iter()
+        .filter(|m| m.role == "tool")
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(tools.len(), 27);
+    assert!(
+        !tools.iter().any(|body| body.starts_with("[blocked:")),
+        "no distinct parallel call may be blocked: {tools:?}"
+    );
+    let warnings: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::Notice { level, message } if level == "warn" => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        warnings.is_empty(),
+        "no repeat or loop-guard warning should fire: {warnings:?}"
+    );
+}
+
+#[tokio::test]
+async fn streamed_parallel_tool_calls_with_similar_json_never_trip_repetition_detectors() {
+    // Streaming many parallel ToolCallDeltas in one turn (> PARALLEL_BATCH_LIMIT=8
+    // and > REPEAT_NOTE_AFTER=3) with similar JSON keys must neither trip the
+    // stream repetition detector nor trigger repeat warnings.
+    let probe = ProbeTool::read_only("probe");
+    let peak = probe.peak();
+
+    let mut chunks = Vec::new();
+    for i in 0..10 {
+        let args =
+            format!("{{\"path\":\"crates/mod_{i}/src/lib.rs\",\"sleep_ms\":25,\"tag\":\"m{i}\"}}");
+        chunks.push(ProviderChunk::ToolCallDelta {
+            index: i,
+            id: Some(format!("call_{i}")),
+            name: Some("probe".to_string()),
+            arguments_delta: Some(args[..args.len() / 2].to_string()),
+        });
+        chunks.push(ProviderChunk::ToolCallDelta {
+            index: i,
+            id: None,
+            name: None,
+            arguments_delta: Some(args[args.len() / 2..].to_string()),
+        });
+    }
+    chunks.push(ProviderChunk::Finish {
+        reason: "tool_calls".to_string(),
+    });
+
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(chunks), Script::text("finished")])
+        .tool(probe.boxed())
+        .build()
+        .await;
+
+    let events = h.run_to_finish("inspect 10 modules at once").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert!(
+        peak.load(Ordering::SeqCst) >= 2,
+        "10 read-only calls should execute concurrently in windows"
+    );
+    let messages = h.session_messages().await;
+    let tools: Vec<&str> = messages
+        .iter()
+        .filter(|m| m.role == "tool")
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(tools.len(), 10);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.event, Event::Notice { level, .. } if level == "warn")),
+        "streamed parallel calls must not emit any warning notices: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn parallel_readonly_wait_shaped_polls_are_never_blocked_or_flagged_as_a_loop() {
+    // A wait-shaped tool marked ReadOnly (e.g. `terminal_read` in a plugin's
+    // `read_only_tools`) returns identical output while waiting. Polling multiple
+    // terminals in parallel across >= NO_NEWS_TURNS and >= REPEAT_NOTE_AFTER
+    // turns must stay parallel, never warn, never `[blocked: ...]`, and never
+    // stop as a loop.
+    struct ReadOnlyTerminalTool {
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        invocations: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for ReadOnlyTerminalTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "plugin__background-terminals__terminal_read".into(),
+                description: "Read retained output from a running terminal.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } }
+                }),
+                origin: ToolOrigin::Plugin {
+                    name: "background-terminals".into(),
+                },
+            }
+        }
+
+        fn class(&self) -> ToolClass {
+            ToolClass::ReadOnly
+        }
+
+        async fn invoke(&self, _request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            ToolOutcome::ok(r#"{"cursor":0,"output":"","status":"running"}"#)
+        }
+    }
+
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let tool = Arc::new(ReadOnlyTerminalTool {
+        in_flight,
+        peak: Arc::clone(&peak),
+        invocations: Arc::clone(&invocations),
+    });
+
+    let mut scripts = (0..5)
+        .map(|turn| {
+            Script::call(&[
+                (
+                    &format!("p1_{turn}"),
+                    "plugin__background-terminals__terminal_read",
+                    "{\"id\":\"t1\"}",
+                ),
+                (
+                    &format!("p2_{turn}"),
+                    "plugin__background-terminals__terminal_read",
+                    "{\"id\":\"t2\"}",
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    scripts.push(Script::text("both terminals finished"));
+
+    let mut h = HarnessBuilder::new(scripts).tool(tool).build().await;
+    let events = h.run_to_finish("poll two terminals in parallel").await;
+
+    assert_eq!(
+        finished_status(&events),
+        "completed",
+        "parallel wait-shaped polls must not be stopped: {:?}",
+        kinds(&events)
+    );
+    assert_eq!(peak.load(Ordering::SeqCst), 2);
+    assert_eq!(invocations.load(Ordering::SeqCst), 10);
+    let messages = h.session_messages().await;
+    assert!(
+        !messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .any(|m| m.content.starts_with("[blocked:")),
+        "wait-shaped polls must never be blocked as repeats"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.event, Event::Notice { level, .. } if level == "warn")),
+        "wait-shaped polls must not emit repeat warnings: {events:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // the workspace's instructions
 // ---------------------------------------------------------------------------
@@ -2032,6 +2281,58 @@ async fn a_workspace_without_instructions_sends_no_instructions_block() {
             .content
             .contains("Project instructions:"),
         "an empty workspace grew an instructions block"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the whole-prompt replacement (person, project, plugin)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_workspace_prompt_file_replaces_the_whole_prompt_for_the_run() {
+    // The agent's own way in: a project file it can write with `write_file`.
+    let mut h = HarnessBuilder::new(vec![Script::text("done")])
+        .build()
+        .await;
+    let file = h.workspace_dir.join(kc_core::prompt::PROMPT_OVERRIDE_FILE);
+    std::fs::create_dir_all(file.parent().expect("parent")).expect("create .karucode");
+    std::fs::write(&file, "You are the project's own agent.\n").expect("seed the prompt file");
+
+    let events = h.run_to_finish("who are you?").await;
+    let requests = h.factory.requests();
+    assert_eq!(
+        requests[0].messages[0].content, "You are the project's own agent.\n",
+        "the workspace file must be the whole prompt"
+    );
+    assert!(
+        events.iter().any(|envelope| matches!(
+            &envelope.event,
+            Event::Notice { message, .. } if message.contains("provided by `workspace:")
+        )),
+        "a run whose prompt was replaced must say so"
+    );
+}
+
+#[tokio::test]
+async fn the_configured_prompt_replaces_the_whole_prompt_for_the_run() {
+    let settings = FakeSettings {
+        prompt: kc_core::config::PromptConfig {
+            replace: Some("You are the configured agent.\n".into()),
+            workspace_file: false,
+            ..Default::default()
+        },
+        ..FakeSettings::default()
+    };
+    let mut h = HarnessBuilder::new(vec![Script::text("done")])
+        .settings(settings)
+        .build()
+        .await;
+
+    h.run_to_finish("who are you?").await;
+    let requests = h.factory.requests();
+    assert_eq!(
+        requests[0].messages[0].content, "You are the configured agent.\n",
+        "[prompt] replace must be the whole prompt"
     );
 }
 
@@ -2304,6 +2605,130 @@ async fn the_prompt_hook_sees_the_turn_it_is_answering() {
     assert!(
         !requests[0].messages[0].content.contains("WRONG HOOK"),
         "the runtime called before_prompt instead of before_prompt_for_turn"
+    );
+}
+
+/// A hook that changes named segments instead of only appending notes.
+struct LayeredPromptHook;
+
+#[async_trait::async_trait]
+impl Hooks for LayeredPromptHook {
+    async fn before_prompt_parts(
+        &self,
+        _session_id: &str,
+        _workspace: &str,
+        _turn: Option<&str>,
+    ) -> kc_core::hooks::PromptContribution {
+        kc_core::hooks::PromptContribution {
+            notes: vec!["a note from the layered hook".to_string()],
+            parts: vec![
+                kc_core::prompt::PromptPart::replace(
+                    "house",
+                    "identity",
+                    "You are the house agent.\n",
+                ),
+                kc_core::prompt::PromptPart::remove("house", "artifacts"),
+                // Two sources claim the same segment: one wins and the loser is
+                // reported, instead of the last writer silently winning.
+                kc_core::prompt::PromptPart::replace("aaa", "rules", "rules from aaa\n"),
+                kc_core::prompt::PromptPart::replace("zzz", "rules", "rules from zzz\n"),
+            ],
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_prompt_hook_can_rewrite_segments_and_the_loser_is_reported_once() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "echo", "{\"n\":1}")]),
+        Script::text("done"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .hooks(Arc::new(LayeredPromptHook))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("rewrite yourself").await;
+    let requests = h.factory.requests();
+    assert!(requests.len() >= 2, "the run must make more than one call");
+    let first = &requests[0].messages[0].content;
+    assert!(first.starts_with("You are the house agent.\n"), "{first}");
+    assert!(!first.contains("You are karucode"), "{first}");
+    assert!(
+        !first.contains("Artifacts:"),
+        "a removed segment must be gone: {first}"
+    );
+    assert!(first.contains("rules from aaa"), "{first}");
+    assert!(
+        !first.contains("rules from zzz"),
+        "the losing claim must not be in the prompt: {first}"
+    );
+    assert!(first.contains("a note from the layered hook"), "{first}");
+    // Everything nobody touched survives.
+    assert!(first.contains("How to work:"));
+    assert!(first.contains("Available tools:"));
+
+    // The conflict is reported once per run, not once per model call.
+    let notices: Vec<String> = events
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            Event::Notice { level, message } if level == "warn" => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    let conflicts: Vec<&String> = notices
+        .iter()
+        .filter(|message| message.contains("did not take effect"))
+        .collect();
+    assert_eq!(conflicts.len(), 1, "{notices:?}");
+    assert!(conflicts[0].contains("zzz"), "{:?}", conflicts[0]);
+}
+
+/// A hook that replaces the whole prompt.
+struct WholePromptHook;
+
+#[async_trait::async_trait]
+impl Hooks for WholePromptHook {
+    async fn before_prompt_parts(
+        &self,
+        _session_id: &str,
+        _workspace: &str,
+        _turn: Option<&str>,
+    ) -> kc_core::hooks::PromptContribution {
+        kc_core::hooks::PromptContribution {
+            notes: Vec::new(),
+            parts: vec![kc_core::prompt::PromptPart::replace(
+                "house",
+                kc_core::prompt::WHOLESALE,
+                "You are exactly this.\n",
+            )],
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_hook_can_replace_the_whole_prompt_and_the_run_says_so() {
+    let mut h = HarnessBuilder::new(vec![Script::text("done")])
+        .hooks(Arc::new(WholePromptHook))
+        .build()
+        .await;
+
+    let events = h.run_to_finish("who are you?").await;
+    let requests = h.factory.requests();
+    assert_eq!(
+        requests[0].messages[0].content, "You are exactly this.\n",
+        "a wholesale replacement is the entire prompt"
+    );
+    let reported = events.iter().any(|envelope| {
+        matches!(
+            &envelope.event,
+            Event::Notice { level, message }
+                if level == "warn" && message.contains("provided by `house`")
+        )
+    });
+    assert!(
+        reported,
+        "a run whose prompt was replaced must say so: {events:?}"
     );
 }
 
