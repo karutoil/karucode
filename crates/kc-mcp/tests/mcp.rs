@@ -54,6 +54,7 @@ fn stdio_server(name: &str) -> McpServerConfig {
         headers: BTreeMap::new(),
         enabled: true,
         require_approval: true,
+        lazy: false,
     }
 }
 
@@ -894,6 +895,7 @@ fn http_config(name: &str, url: String, headers: BTreeMap<String, String>) -> Mc
         headers,
         enabled: true,
         require_approval: true,
+        lazy: false,
     }
 }
 
@@ -1691,6 +1693,116 @@ async fn a_namespaced_mcp_tool_name_collision_is_refused_loudly() {
 
     manager.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A lazy server contributes one index tool instead of one per server tool.
+///
+/// This is the fix for a large catalogue: a 180-tool server used to cost 180
+/// schemas - sent, and reserved out of the context budget - on every model call of
+/// every run, whether or not the session ever called one. The index keeps the
+/// schemas on this side of the wire and gives the model search-then-call.
+#[tokio::test]
+async fn a_lazy_server_exposes_one_index_tool_that_searches_and_calls() {
+    let dir = temp_dir("lazy-index");
+    let mut config = stdio_server("fake");
+    config.lazy = true;
+    let mut manager = McpManager::new(&[config]);
+    manager.connect_all().await;
+
+    // One tool, not four - and the four are still reachable through it.
+    let tools = manager.tools();
+    let names: Vec<String> = tools.iter().map(|t| t.spec().name).collect();
+    assert_eq!(names, vec!["mcp__fake__tools".to_string()], "{names:?}");
+
+    let index = find(&tools, "mcp__fake__tools");
+    let spec = index.spec();
+    assert_eq!(spec.origin, ToolOrigin::Mcp { server: "fake".into() });
+    // Same approval path as any tool on that server: external, and asking when the
+    // server asks.
+    assert_eq!(index.class(), ToolClass::External);
+    assert!(index.requires_approval());
+    assert!(spec.description.contains("[mcp: fake]"), "{}", spec.description);
+    assert_eq!(spec.parameters["properties"]["action"]["enum"], json!(["search", "call"]));
+
+    // A search with no query is how an agent discovers the server at all: every
+    // tool, its own description, and the schema it needs to call it.
+    let out = call_tool(index.clone(), &dir, json!({"action": "search"})).await;
+    assert!(out.ok, "{}", out.content);
+    for name in ["mcp__fake__echo", "mcp__fake__sleep", "mcp__fake__fail"] {
+        assert!(out.content.contains(&format!("- `{name}`")), "{}", out.content);
+    }
+    assert!(out.content.contains("Echo text back."), "{}", out.content);
+    assert!(
+        out.content.contains("arguments: {\"properties\""),
+        "a search result must carry the schema it needs: {}",
+        out.content
+    );
+
+    // A narrowed search returns the match and not the rest.
+    let out = call_tool(index.clone(), &dir, json!({"action": "search", "query": "echo"})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.contains("mcp__fake__echo"), "{}", out.content);
+    assert!(!out.content.contains("mcp__fake__sleep"), "{}", out.content);
+
+    // A query nothing matches says so and names the way out.
+    let out = call_tool(index.clone(), &dir, json!({"action": "search", "query": "zzz"})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.contains("No tool"), "{}", out.content);
+
+    // Call dispatches to the server's own tool, through the same transport and
+    // redaction an eager server uses.
+    let out = call_tool(
+        index.clone(),
+        &dir,
+        json!({"action": "call", "tool": "echo", "arguments": {"text": "hi"}}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(out.content, "mcp echo: hi");
+
+    // The full name works too, so a model that copies from a search result does
+    // not have to strip a prefix.
+    let out = call_tool(
+        index.clone(),
+        &dir,
+        json!({"action": "call", "tool": "mcp__fake__echo", "arguments": {"text": "again"}}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(out.content, "mcp echo: again");
+
+    // An unknown tool is refused, and the refusal names what does exist.
+    let out = call_tool(index.clone(), &dir, json!({"action": "call", "tool": "nope"})).await;
+    assert!(!out.ok, "{}", out.content);
+    assert!(out.content.contains("no tool"), "{}", out.content);
+
+    // A missing name, an unknown action and a missing arguments object each say
+    // what to do rather than failing silently.
+    let out = call_tool(index.clone(), &dir, json!({"action": "call"})).await;
+    assert!(!out.ok);
+    assert!(out.content.contains("`tool` is required"), "{}", out.content);
+    let out = call_tool(index.clone(), &dir, json!({"action": "nope"})).await;
+    assert!(!out.ok);
+    assert!(out.content.contains("\"search\" or \"call\""), "{}", out.content);
+
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A lazy server with `require_approval = false` keeps that exemption: the index
+/// tool carries the server's setting because it is one per server.
+#[tokio::test]
+async fn a_lazy_index_tool_carries_the_servers_approval_setting() {
+    let mut config = stdio_server("fake");
+    config.lazy = true;
+    config.require_approval = false;
+    let mut manager = McpManager::new(&[config]);
+    manager.connect_all().await;
+    let index = find(&manager.tools(), "mcp__fake__tools");
+    assert!(!index.requires_approval());
+    // The class stays external either way, so read_only still denies the call.
+    assert_eq!(index.class(), ToolClass::External);
+    manager.shutdown().await;
 }
 
 /// A canned SSE server that answers each request with a `text/event-stream`

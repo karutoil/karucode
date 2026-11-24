@@ -46,6 +46,7 @@ nav:
       - Security model: SECURITY.md
       - Internal docs system: INTERNAL-DOCS.md
       - Contributing (agents): CONTRIBUTING-AGENTS.md
+      - Windows support plan: WINDOWS-SUPPORT.md
       - Contributing: CONTRIBUTING.md
   - Reference:
       - Issue API keys for applications: internal/api-keys.md

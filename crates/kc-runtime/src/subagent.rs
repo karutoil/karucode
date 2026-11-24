@@ -1762,6 +1762,10 @@ async fn start_child(
         agent_id: Some(agent_id.clone()),
         depth: child_depth,
         is_subagent: true,
+        // A subagent is never the control chat, at any depth: the tools it would
+        // get are the parent session's authority over *other* sessions, which is
+        // not a thing a delegated task was given.
+        control_chat: false,
         budget: kc_core::prompt::Budget::for_subagent(&limits, &cfg),
         deadline: Instant::now() + Duration::from_secs(cfg.timeout_secs.max(1)),
         // The child's own window. Its request also carries a tool catalogue (a

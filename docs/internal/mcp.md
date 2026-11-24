@@ -7,7 +7,7 @@
 
 - **Slug:** `mcp`
 - **Tags:** mcp, tools, servers, stdio, http, setup
-- **Applies to:** `config:[[mcp_servers]]`, `config:require_approval`, `config:transport`, `route:GET /api/mcp`, `tool:mcp__<server>__<tool>`, `doc:docs/MCP.md`
+- **Applies to:** `config:[[mcp_servers]]`, `config:require_approval`, `config:transport`, `config:lazy`, `route:GET /api/mcp`, `tool:mcp__<server>__<tool>`, `tool:mcp__<server>__tools`, `config:[tools]`, `doc:docs/MCP.md`
 - **Source:** `crates/kc-mcp/src/lib.rs:18`
 
 ---
@@ -106,6 +106,38 @@ marker stating how many bytes and lines were dropped and naming that key. MCP
 has no argument karucode can narrow for you, so a server whose tool returns
 something huge should page it itself (take its own `offset`/`limit`) or return a
 file path the agent can open with `read_file`.
+
+## A large catalogue: `lazy = true`
+
+Every tool a connected server exposes is registered as its own tool, and every
+registration is sent to the model on every call - name, description, input
+schema - and reserved out of the context budget before any history is fitted. A
+server with 20 tools is fine; one with 200 is the largest fixed cost in the
+request, and most sessions never call one of them.
+
+```toml
+[[mcp_servers]]
+name = "catalyst"
+command = ["catalyst-mcp"]
+lazy = true                # off by default
+```
+
+With `lazy = true` the server contributes **one** tool instead of N:
+`mcp__<server>__tools`, with `action: "search"` (returns the matching tools with
+their descriptions and input schemas, at most twelve at a time),
+`action: "call"` (`tool` plus an `arguments` object). The model then looks a tool
+up before calling it, which costs one extra turn the first time it needs a given
+tool and saves the whole catalogue on every other call.
+
+The approval path does not change. The index tool is as external as the tools
+behind it (`read_only` denies it), it asks when the server asks
+(`require_approval`), a call is dispatched through the same tool a non-lazy
+server would have registered - so the transport, the 120 s budget, the secret
+redaction and the `isError` mapping are the ones described above - and what a
+`search` returns is bounded by the same `limits.max_tool_output_bytes`.
+
+`lazy` is off by default, and a server whose tool set is small should leave it
+off: a model that has to search before calling is a model that can search badly.
 
 ## Not supported
 

@@ -112,7 +112,70 @@ A change is not done until all of these hold:
 4. The block answers the question a user would actually ask. Re-read it as
    someone who has never seen this repository.
 
-## 5. Do not
+## 5. Windows is a supported target — do not regress it
+
+karucode is being ported to Windows (`x86_64-pc-windows-msvc`). The work order,
+the evidence and the milestones are in [`docs/WINDOWS-SUPPORT.md`](docs/WINDOWS-SUPPORT.md).
+Read it before touching process spawning, paths, the terminal, or packaging.
+
+CI enforces the cheap half already: the **`windows cross-check`** job in
+`.github/workflows/ci.yml` cross-checks every crate that is already
+Windows-clean (`kc-core`, `kc-store`, `kc-provider`, `kc-runtime`,
+`kc-plugin-sdk`, `kc-plugin-host`, `kc-mcp`, `kc-docs`, both plugins) for
+`x86_64-pc-windows-gnu` on every push and PR. **If your change adds un-gated
+POSIX code to one of those crates, that job goes red and your change is not
+done.** `kc-tools/src/command.rs` and `kc-server/src/terminals.rs` are the two
+files still being ported; they are checked in a second, non-blocking step that
+reports the remaining error count. Do not add new POSIX code to them either —
+shrink that number, never grow it.
+
+The rules:
+
+* **Never add un-gated `libc::`, `std::os::unix`, `pre_exec`, `setsid`, `kill`,
+  `openpty`, `ioctl`, `PermissionsExt`/`from_mode`, or a hardcoded `/bin/sh`,
+  `/tmp` or `$HOME` to library or binary code.** Gate it `#[cfg(unix)]` and write
+  the `#[cfg(windows)]` arm in the same change.
+* **A `#[cfg(not(unix))]` arm that returns `Ok(())` or `false` is a promise you
+  are breaking silently.** This codebase already has several (process-group
+  teardown, attachment `0600`, the store's writer lock). Either implement the
+  Windows behaviour or make the feature report itself unavailable — never leave
+  a no-op that a doc block still describes as working.
+* **Process trees:** use the shared process-group seam, not fresh `setsid`/`kill`
+  code. Windows has no process groups and no `SIGTERM`; killing a tree needs a
+  Job Object. There are four spawn sites (`kc-tools/src/command.rs`,
+  `kc-plugin-host/src/rpc.rs`, `kc-mcp/src/stdio.rs`,
+  `kc-server/src/terminals.rs`) and they must not drift apart.
+* **Paths are a security boundary.** Windows paths are case-insensitive, carry
+  drive prefixes and `\\?\` verbatim forms, and have junctions as well as
+  symlinks. Any change to `kc-core/src/paths.rs` needs tests for those, not just
+  the Unix ones.
+* **Spawning a program by name:** `CreateProcess` does not apply `PATHEXT`, so
+  `npm`, `npx` and `uvx` are `.cmd` files on Windows and will not launch. Resolve
+  through `PATH`×`PATHEXT`.
+* **Tests:** a test you gate `#[cfg(unix)]` needs a Windows counterpart asserting
+  the *same guarantee*, or coverage silently drops.
+* **Docs:** a platform-specific claim in an `@kc-doc` block (`/bin/sh -c`,
+  SIGHUP, `0700`, systemd, `~/.config`) must gain its Windows wording in the same
+  change — see §1 of this file. Do not document Windows behaviour the code does
+  not have yet.
+
+To check locally before pushing (this is the hard gate CI runs):
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+# Debian/Ubuntu: sudo apt-get install -y mingw-w64
+KARUCODE_SKIP_WEB_BUILD=1 \
+CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc \
+CXX_x86_64_pc_windows_gnu=x86_64-w64-mingw32-g++ \
+AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar \
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+cargo check --target x86_64-pc-windows-gnu --lib --bins \
+  -p kc-core -p kc-store -p kc-provider -p kc-runtime \
+  -p kc-plugin-sdk -p kc-plugin-host -p kc-mcp -p kc-docs \
+  -p example-hello -p session-status
+```
+
+## 6. Do not
 
 * Add a feature and leave its docs to the next agent.
 * Edit `docs/internal/*.md` by hand — it is generated and `--check` will fail.

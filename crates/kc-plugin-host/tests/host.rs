@@ -210,8 +210,8 @@ async fn handshake_lists_namespaced_tools() {
     assert!(!spec.description.contains("Runs out of process"));
     assert!(!spec.description.contains("Effective permissions"));
 
-    // All exposed tools produce one prompt note naming the plugin, not one note
-    // per tool; the tool descriptions themselves are untouched by that note.
+    // All exposed tools produce one prompt note about plugins, not one note per
+    // tool; the names live in the tool list and nowhere else.
     let specs: Vec<_> = tools.iter().map(|tool| tool.spec()).collect();
     let prompt = kc_core::prompt::system_prompt(
         "/ws",
@@ -221,11 +221,15 @@ async fn handshake_lists_namespaced_tools() {
         &[],
     );
     assert!(
-        prompt.contains("Plugins with tools available: `fake`."),
+        prompt.contains("Plugins with tools available: 1 `plugin__*` tools are listed below."),
         "{prompt}"
     );
     assert_eq!(prompt.matches("Plugins with tools available:").count(), 1);
     assert_eq!(prompt.matches("Plugin tools run out of process").count(), 1);
+    assert!(
+        prompt.contains("`plugin__fake__echo`"),
+        "the tool list still names the plugin's tools: {prompt}"
+    );
     for tool in &specs {
         assert!(
             !tool.description.contains("Runs out of process"),

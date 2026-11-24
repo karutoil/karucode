@@ -2776,6 +2776,45 @@ pub fn with_note_tool(
     registry
 }
 
+/// The prefix every tool of the central control chat uses.
+///
+/// The list itself lives with the tools (`kc-server`'s `control` and
+/// `control_sessions`); the runtime only needs the shape, because it is the layer
+/// that decides who is offered them. The prefix is unambiguous by construction: a
+/// plugin's tools are named `plugin__<plugin>__<tool>` and an MCP server's
+/// `mcp__<server>__<tool>`, so nothing else in a registry can start with
+/// `control_`.
+pub const CONTROL_TOOL_PREFIX: &str = "control_";
+
+/// `tools` without the entries `keep` rejects.
+///
+/// Used once per run to build the registry a loop is actually offered: the
+/// `control_*` family is the central control chat's own hands - it starts other
+/// sessions, acts as their user and stops their runs - so a project session and
+/// every subagent have it removed rather than refused. A tool a model can see is a
+/// tool it plans around, and an approval prompt for something the session was never
+/// meant to do is the user's problem, not a policy.
+///
+/// A new registry of shared `Arc`s, not a mutation: the runtime's registry is
+/// built once and handed to every run, so a per-run filter has to copy the
+/// pointers it wants rather than remove from the shared set - otherwise the first
+/// run to narrow its catalogue would narrow everyone's.
+pub fn filtered(
+    tools: &kc_core::tool::ToolRegistry,
+    keep: impl Fn(&str) -> bool,
+) -> kc_core::tool::ToolRegistry {
+    let mut registry = kc_core::tool::ToolRegistry::new();
+    for name in tools.names() {
+        if !keep(&name) {
+            continue;
+        }
+        if let Some(tool) = tools.get(&name) {
+            registry.register(tool);
+        }
+    }
+    registry
+}
+
 // ---------------------------------------------------------------------------
 // last-resort elision
 // ---------------------------------------------------------------------------

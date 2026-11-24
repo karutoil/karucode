@@ -3032,6 +3032,7 @@ async fn broken_plugin_and_mcp_servers_are_isolated() {
         headers: Default::default(),
         enabled: true,
         require_approval: true,
+            lazy: false,
     };
 
     let h = HarnessBuilder::new(vec![text("still works")])
@@ -3118,6 +3119,7 @@ async fn mcp_servers_reload_without_a_restart() {
             headers: Default::default(),
             enabled: true,
             require_approval: true,
+            lazy: false,
         }
     }
 
@@ -3216,6 +3218,7 @@ async fn the_mcp_watcher_applies_a_config_edit_without_a_restart() {
             headers: Default::default(),
             enabled: true,
             require_approval: true,
+            lazy: false,
         }
     }
 
@@ -7229,6 +7232,42 @@ async fn control_chat_can_list_projects_before_dispatching() {
     assert!(
         body.contains(&name),
         "tool output must name the project: {body}"
+    );
+}
+
+#[tokio::test]
+async fn every_control_tool_is_named_with_the_prefix_the_runtime_gates_on() {
+    // `kc-runtime` keeps the control plane out of every other session's catalogue
+    // by dropping the `control_` prefix (`without_control_tools`). That makes the
+    // naming convention a contract between two crates: a control tool registered
+    // under any other name would leak back in and be visible - and callable - from
+    // every project session. This pins the whole family, so adding one to
+    // `control.rs` or `control_sessions.rs` fails here until it is namespaced.
+    let h = HarnessBuilder::new(vec![]).no_ai_titles().build().await;
+    let mut named: Vec<String> = h
+        .state
+        .runtime()
+        .tools()
+        .names()
+        .into_iter()
+        .filter(|name| name.starts_with("control_"))
+        .collect();
+    named.sort();
+    assert_eq!(
+        named,
+        vec![
+            "control_cancel_run",
+            "control_create_control_chat",
+            "control_delete_control_chat",
+            "control_list_agents",
+            "control_list_projects",
+            "control_list_sessions",
+            "control_read_session",
+            "control_rename_session",
+            "control_send_message",
+            "control_set_session_model",
+            "control_start_session",
+        ]
     );
 }
 

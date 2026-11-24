@@ -15,13 +15,12 @@ use kc_core::tool::{
 };
 use serde_json::json;
 
-const DESCRIPTION: &str = "Search and read karucode's own built-in documentation. Call this before answering any \
+const DESCRIPTION: &str = "Search and read karucode's own built-in documentation. Call it before answering any \
 question about karucode itself: configuration, environment variables, model providers or gateways, plugins, MCP \
 servers, approvals, tools, the HTTP API, projects, subagents, the web UI, or how these docs are maintained. The text \
-is compiled from the code at build time, so it matches the running version. Actions: \"list\" (all topics), \
-\"search\" (ranked matches for a query), \"read\" (one topic, paged with `offset`/`limit` so a long topic says \
-exactly which offset continues it). Read-only, no approval, works in any workspace. Prefer it over the workspace \
-tools when the question is about karucode rather than about the user's project.";
+is compiled from the code at build time, so it matches the running version. Actions: \"list\" (all topics with titles \
+and summaries), \"search\" (a query), \"read\" (one topic, paged with `offset`/`limit`). Read-only; prefer it over the \
+workspace tools when the question is about karucode rather than about the user's project.";
 
 const MAX_LIMIT: usize = 20;
 /// Lines of a topic returned by one `read` when the call does not ask for more.

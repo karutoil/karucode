@@ -2047,10 +2047,148 @@ pub struct McpServerConfig {
     /// Tool calls from this server require approval even in ask_commands mode.
     #[serde(default = "d_true")]
     pub require_approval: bool,
+    /// Offer this server's tools through one index tool instead of one tool per
+    /// server tool.
+    ///
+    /// Off by default: a server's own tools are registered under
+    /// `mcp__<server>__<tool>` and the model sees every schema up front. That is
+    /// the right default for a small server and an expensive one for a large
+    /// catalogue - the server's whole tool set is sent, and reserved out of the
+    /// context budget, on every model call of every run.
+    ///
+    /// With `lazy = true` the server contributes **one** tool,
+    /// `mcp__<server>__tools`, whose `action: "search"` returns the matching
+    /// tools with their descriptions and input schemas, and whose
+    /// `action: "call"` runs one of them. The approval path is unchanged: the
+    /// index tool is as external as the tools behind it, it asks when the server
+    /// asks (`require_approval`), `read_only` still denies every call, and a
+    /// result is redacted the same way. What changes is that the model has to
+    /// look a tool up before it can call it - one extra turn the first time it
+    /// needs a given tool.
+    #[serde(default)]
+    pub lazy: bool,
 }
 
 fn d_stdio() -> String {
     "stdio".into()
+}
+
+/// `[tools]`: which registered tools a run is offered.
+///
+/// The tool catalogue is the largest fixed part of every request - every tool's
+/// name, description and JSON schema is sent on every model call, and reserved
+/// out of the context budget before any history is fitted. An install that has
+/// connected a large MCP server pays for all of its tools in every session,
+/// including the sessions that will never call one.
+///
+/// This section is the operator's answer to that. It filters by **name**, after
+/// everything has been registered and before the run is offered anything, so it
+/// reaches first-party, plugin and MCP tools alike:
+///
+/// ```toml
+/// # ~/.config/karucode/config.toml
+/// [tools]
+/// deny  = ["mcp__catalyst__*", "plugin__discord__*"]
+/// allow = ["*"]                    # the default; `allow` is checked first
+/// ```
+///
+/// A pattern matches the whole name, with `*` for any run of characters
+/// (including none) and `?` for one. A tool is offered when some `allow` pattern
+/// matches it **and** no `deny` pattern does, so `deny` always wins. The default
+/// is `allow = ["*"]`, `deny = []`: every registered tool is offered, which is
+/// exactly what an install without this section sent before it existed.
+///
+/// Two consequences are worth stating plainly:
+///
+/// * An empty `allow = []` offers **no tools at all**. Omit the key rather than
+///   writing an empty list.
+/// * A denied tool is absent, not refused. A model cannot plan around a tool it
+///   cannot see, and a name it was never given cannot be called - which is also
+///   what keeps the grant honest: a call the model never had a schema for is not
+///   a call the operator has to refuse at approval time.
+///
+/// `read_only_tools` and the approval policy still apply to whatever survives
+/// this filter; `[tools]` decides who is *offered* a tool, not who may run it.
+///
+/// The value is read once per run, from the loaded config - so it costs nothing
+/// per turn, and it is not part of `PATCH /api/config`: a change in this file
+/// takes effect on the next run **after a restart**, exactly like `[prompt]`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolsConfig {
+    /// Name patterns a run may be offered. Defaults to `["*"]`.
+    #[serde(default = "d_all_tools")]
+    pub allow: Vec<String>,
+    /// Name patterns a run is never offered. Checked after `allow`; empty by
+    /// default.
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+fn d_all_tools() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            allow: d_all_tools(),
+            deny: Vec::new(),
+        }
+    }
+}
+
+impl ToolsConfig {
+    /// True when a tool with this name is offered to a run.
+    pub fn exposes(&self, name: &str) -> bool {
+        self.allow.iter().any(|pattern| glob_matches(pattern, name))
+            && !self.deny.iter().any(|pattern| glob_matches(pattern, name))
+    }
+
+    /// True when this section changes nothing: `allow` is `["*"]` and `deny` is
+    /// empty.
+    ///
+    /// The runtime checks this so an install that never wrote `[tools]` keeps the
+    /// exact registry it had before the section existed, rather than a rebuilt
+    /// copy that happens to contain the same tools.
+    pub fn is_default(&self) -> bool {
+        self.deny.is_empty() && self.allow.len() == 1 && self.allow[0] == "*"
+    }
+}
+
+/// Match a whole name against a pattern of literals, `*` (any run, possibly
+/// empty) and `?` (one character).
+///
+/// The classic single-star-backtracking loop: linear in the common case, and
+/// correct for patterns like `mcp__*__*` because every `*` remembers the position
+/// it can retry from. No crate, no regex, no way for an operator's pattern to
+/// cost more than the name is long.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let name: Vec<char> = name.chars().collect();
+    let (mut pi, mut ni) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut resume = 0usize;
+    while ni < name.len() {
+        if pi < pattern.len() && (pattern[pi] == '?' || pattern[pi] == name[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < pattern.len() && pattern[pi] == '*' {
+            star = Some(pi);
+            pi += 1;
+            resume = ni;
+        } else if let Some(at) = star {
+            // The last `*` swallows one more character and we try again.
+            pi = at + 1;
+            resume += 1;
+            ni = resume;
+        } else {
+            return false;
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == '*' {
+        pi += 1;
+    }
+    pi == pattern.len()
 }
 
 /// `[prompt]`: change the system prompt - the whole text, or one named part.
@@ -2162,6 +2300,8 @@ pub struct ConfigFile {
     #[serde(default)]
     pub limits: Option<Limits>,
     #[serde(default)]
+    pub tools: Option<ToolsConfig>,
+    #[serde(default)]
     pub approvals: Option<ApprovalPolicy>,
     #[serde(default)]
     pub subagents: Option<SubagentConfig>,
@@ -2261,6 +2401,9 @@ pub struct Config {
     pub active_provider: Option<String>,
     pub active_model: Option<String>,
     pub limits: Limits,
+    /// Which registered tools a run is offered (see [`ToolsConfig`]). Defaults to
+    /// every tool, which is what an install without a `[tools]` section sends.
+    pub tools: ToolsConfig,
     pub approvals: ApprovalPolicy,
     pub subagents: SubagentConfig,
     /// AI-written session titles (see [`TitlesConfig`]). On by default.
@@ -2328,6 +2471,7 @@ impl Default for Config {
             active_provider: None,
             active_model: None,
             limits: Limits::default(),
+            tools: ToolsConfig::default(),
             approvals: ApprovalPolicy::default(),
             subagents: SubagentConfig::default(),
             titles: TitlesConfig::default(),
@@ -2542,6 +2686,9 @@ impl Config {
         }
         if let Some(v) = file.limits {
             cfg.limits = v;
+        }
+        if let Some(v) = file.tools {
+            cfg.tools = v;
         }
         if let Some(v) = file.approvals {
             cfg.approvals = v;
@@ -5074,6 +5221,7 @@ retry_max_stream_restarts = 0
                 headers: Default::default(),
                 enabled: true,
                 require_approval: true,
+                lazy: false,
             }],
             ..Config::default()
         };
@@ -5579,5 +5727,80 @@ workspace_file = false
         let cfg = Config::from_parts(file, None).expect("config");
         assert_eq!(cfg.prompt.replace.as_deref(), Some("You are exactly this."));
         assert!(!cfg.prompt.workspace_file);
+    }
+
+    #[test]
+    fn a_glob_pattern_covers_the_whole_name() {
+        assert!(glob_matches("*", "read_file"));
+        assert!(glob_matches("*", ""));
+        assert!(glob_matches("read_file", "read_file"));
+        assert!(!glob_matches("read", "read_file"));
+        assert!(!glob_matches("read_file", "read_files"));
+        assert!(glob_matches("read_*", "read_file"));
+        assert!(glob_matches("*_file", "read_file"));
+        assert!(glob_matches("mcp__*__*", "mcp__catalyst__list_servers"));
+        assert!(glob_matches("mcp__catalyst__*", "mcp__catalyst__list_servers"));
+        assert!(!glob_matches("mcp__catalyst__*", "mcp__discord__list_servers"));
+        assert!(glob_matches("read_file?", "read_file2"));
+        assert!(!glob_matches("read_file?", "read_file"));
+        assert!(glob_matches("**", "anything"));
+        // A literal `_` is a literal, not a wildcard: an operator who writes
+        // `control_*` must not accidentally match `controlXstart_session`.
+        assert!(!glob_matches("control_*", "control-start"));
+        assert!(glob_matches("control_*", "control_start_session"));
+    }
+
+    #[test]
+    fn deny_wins_over_allow_and_the_default_offers_everything() {
+        let default = ToolsConfig::default();
+        assert!(default.is_default());
+        assert!(default.exposes("read_file"));
+        assert!(default.exposes("mcp__catalyst__list_servers"));
+
+        let config = ToolsConfig {
+            deny: vec!["mcp__catalyst__*".to_string()],
+            ..ToolsConfig::default()
+        };
+        assert!(!config.is_default());
+        assert!(!config.exposes("mcp__catalyst__list_servers"));
+        assert!(config.exposes("mcp__discord__list_servers"));
+        assert!(config.exposes("read_file"));
+
+        // `deny` is checked after `allow`, so it wins a name both match.
+        let config = ToolsConfig {
+            allow: vec!["mcp__*".to_string()],
+            deny: vec!["mcp__catalyst__*".to_string()],
+        };
+        assert!(config.exposes("mcp__discord__x"));
+        assert!(!config.exposes("mcp__catalyst__x"));
+        assert!(!config.exposes("read_file"), "allow is the only way in");
+
+        // Documented consequence: an empty `allow` offers nothing at all.
+        let empty = ToolsConfig {
+            allow: Vec::new(),
+            deny: Vec::new(),
+        };
+        assert!(!empty.exposes("read_file"));
+    }
+
+    #[test]
+    fn the_tools_section_reaches_the_layered_config_and_defaults_on_absence() {
+        let file: ConfigFile = toml::from_str(
+            r#"
+[tools]
+deny = ["mcp__catalyst__*", "plugin__discord__*"]
+"#,
+        )
+        .unwrap();
+        let cfg = Config::from_parts(file, None).expect("config");
+        assert_eq!(cfg.tools.allow, vec!["*".to_string()], "allow keeps its default");
+        assert_eq!(cfg.tools.deny.len(), 2);
+        assert!(!cfg.tools.exposes("mcp__catalyst__list_servers"));
+        assert!(cfg.tools.exposes("read_file"));
+
+        // No section at all: every tool, and the runtime can tell it is the
+        // default rather than a section that happens to spell the same thing.
+        let cfg = Config::from_parts(ConfigFile::default(), None).expect("config");
+        assert!(cfg.tools.is_default());
     }
 }

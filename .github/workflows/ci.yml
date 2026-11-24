@@ -451,6 +451,169 @@ jobs:
           shared-key: workspace
       - run: cargo check --locked --workspace
 
+  # Windows, gated from Linux. The port is NOT finished, and this job is honest
+  # about that: the workspace does not yet compile for Windows. Two library files
+  # still hold un-gated POSIX code, measured by running the check below:
+  #
+  #   crates/kc-tools/src/command.rs    12 errors  (setsid/kill/SIGKILL/pre_exec)
+  #   crates/kc-server/src/terminals.rs 41 errors  (openpty/ioctl/winsize/raw fds)
+  #
+  # Everything else - kc-core, kc-store, kc-provider, kc-runtime, kc-plugin-sdk,
+  # kc-plugin-host, kc-mcp, kc-docs, both plugins, and the rest of kc-server -
+  # already compiles for Windows, including ring and bundled SQLite.
+  #
+  # So the job runs in two parts:
+  #   1. a HARD gate over every crate that is already clean, so a regression in
+  #      any of them fails the build immediately;
+  #   2. a REPORTED (non-blocking) check of the two files still being ported, so
+  #      the remaining error count is visible on every push and shrinks to zero.
+  #
+  # `continue-on-error` on step 2 is a tracked debt, not a passing grade. Delete
+  # step 2 and add `-p kc-tools -p kc-server` to step 1 when
+  # docs/WINDOWS-SUPPORT.md milestones M2/M3 land; then widen to `--all-targets`
+  # and add a windows-latest `cargo test` lane at M6 - with `timeout-minutes`,
+  # because the macOS lane once burned 4h53m on one hung test (see `test-core`).
+  windows-check:
+    name: windows cross-check
+    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    env:
+      KARUCODE_SKIP_WEB_BUILD: "1"
+      CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
+      CXX_x86_64_pc_windows_gnu: x86_64-w64-mingw32-g++
+      AR_x86_64_pc_windows_gnu: x86_64-w64-mingw32-ar
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-gnu
+      - name: mingw-w64 toolchain
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      # ring and the bundled libsqlite3-sys both need a C compiler for the target;
+      # cc-rs picks these up by target-triple name (the env block above).
+      - name: crates that must stay Windows-clean (hard gate)
+        run: |
+          cargo check --locked --target x86_64-pc-windows-gnu --lib --bins \
+            -p kc-core -p kc-store -p kc-provider -p kc-runtime \
+            -p kc-plugin-sdk -p kc-plugin-host -p kc-mcp -p kc-docs \
+            -p example-hello -p session-status
+      - name: the two files still being ported (reported, not blocking)
+        continue-on-error: true
+        run: |
+          cargo check --locked --target x86_64-pc-windows-gnu --lib \
+            -p kc-tools -p kc-server --message-format short 2>&1 \
+            | tee /tmp/windows-remaining.txt || true
+          n=$(grep -c 'error\[' /tmp/windows-remaining.txt || true)
+          echo "::notice title=Windows port remaining::${n} compile errors left in kc-tools/command.rs and kc-server/terminals.rs (see docs/WINDOWS-SUPPORT.md)"
+
+  # The Windows release lane. It builds the real MSVC binary on a Windows runner
+  # and stages the artifacts under the names the release manifest accepts.
+  #
+  # TWO naming rules here are load-bearing, and both were verified by running
+  # scripts/release_manifest.py rather than by reading it:
+  #
+  #   1. The raw updater asset MUST be extensionless. TARGET_RE
+  #      (release_manifest.py:63) is ^[a-z0-9_]+(-[a-z0-9_]+){2,}$, which does not
+  #      admit a dot, so `...-x86_64-pc-windows-msvc.exe` is SILENTLY skipped by
+  #      find_artifacts() - the target would just never appear in updates.json and
+  #      every Windows install would report "no artifact for this platform".
+  #      `karucode.exe` is therefore copied to `karucode-<build>-<triple>`.
+  #   2. Only `.tar.gz` is recognised as an archive (release_manifest.py:87).
+  #      A `.zip` is what a Windows user can actually open, so the zip is shipped
+  #      for humans and deliberately not recorded as the manifest's `tarball`.
+  #
+  # `continue-on-error` and the `if:` guard keep this lane from holding releases
+  # hostage while the port is unfinished: `release` merges these artifacts when
+  # they exist and publishes Linux regardless. Flip both off at milestone M7,
+  # when a Windows install can self-update end to end.
+  windows-release:
+    name: build server (windows)
+    timeout-minutes: 45
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    continue-on-error: true
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The commit count is the version; a shallow clone would stamp build 1.
+          fetch-depth: 0
+      - id: version
+        name: decide the build number
+        run: |
+          $build = git rev-list --count HEAD
+          $commit = git rev-parse --short=12 HEAD
+          $date = git log -1 --format=%cI HEAD
+          "build=$build" >> $env:GITHUB_OUTPUT
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+          "date=$date" >> $env:GITHUB_OUTPUT
+          Write-Host "Windows build $build ($commit)"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22.22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-msvc
+      - name: build the frontend
+        # Explicit npm steps, exactly like the Linux release job. build.rs would
+        # otherwise try to spawn `npm`, which on Windows is `npm.cmd` and cannot
+        # be launched by CreateProcess (docs/WINDOWS-SUPPORT.md §10.1); building
+        # the bundle here means build.rs finds a fresh dist and never spawns it.
+        run: |
+          cd web
+          npm ci
+          npm run build
+          cd ..
+      - name: build
+        env:
+          KARUCODE_BUILD_NUMBER: ${{ steps.version.outputs.build }}
+          KARUCODE_COMMIT: ${{ steps.version.outputs.commit }}
+          KARUCODE_COMMIT_DATE: ${{ steps.version.outputs.date }}
+        run: |
+          cargo build --release --locked -p kc-server -p example-hello --target x86_64-pc-windows-msvc
+          $printed = & "target/x86_64-pc-windows-msvc/release/karucode.exe" --version
+          Write-Host $printed
+          if (-not $printed.StartsWith("karucode ${{ steps.version.outputs.build }} ")) {
+            Write-Host "::error::the Windows release binary reports '$printed'"
+            exit 1
+          }
+      - name: package
+        run: |
+          $build = "${{ steps.version.outputs.build }}"
+          $target = "x86_64-pc-windows-msvc"
+          $name = "karucode-$build-$target"
+          $rel = "target/x86_64-pc-windows-msvc/release"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # Rule 1: extensionless raw asset, so the manifest records this target.
+          Copy-Item "$rel/karucode.exe" "dist/$name"
+          Copy-Item "$rel/example-hello.exe" "dist/example-hello-$build-$target.exe"
+          # Rule 2: a zip for humans, with the runnable .exe names inside it.
+          $stage = "dist/pkg/$name"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "$rel/karucode.exe" "$stage/"
+          Copy-Item "$rel/example-hello.exe" "$stage/"
+          Copy-Item README.md, LICENSE, config.example.toml "$stage/"
+          Compress-Archive -Path $stage -DestinationPath "dist/$name.zip"
+          Remove-Item -Recurse -Force dist/pkg
+          Get-ChildItem dist | Format-Table Name, Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-assets
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 3
+
   # Every commit on `main` is a release. The version is the commit count, so there
   # is no version to bump, no changelog to write first and no tag to remember: the
   # merge is the release. A hand-pushed `v<build>` tag is also accepted, provided it
@@ -491,6 +654,7 @@ jobs:
         msrv,
         version,
         e2e,
+        windows-release,
       ]
     runs-on: ubuntu-latest
     permissions:
@@ -567,6 +731,34 @@ jobs:
           cp packaging/install.sh packaging/karucode.service "${stage}/"
           tar -C dist/pkg -czf "dist/${name}.tar.gz" "${name}"
           rm -rf dist/pkg
+      # Merge the Windows lane's artifacts, when it produced any.
+      #
+      # `windows-release` IS in `needs` so the artifact is guaranteed to exist by
+      # the time this step runs - but it carries `continue-on-error: true`, which
+      # makes GitHub treat a failed job as success for `needs` purposes. That is
+      # the combination that gives both properties we want: the download is
+      # deterministic (no race against an unfinished lane), and a Windows failure
+      # still degrades to "no Windows asset this build", never to "no release".
+      # Remove `continue-on-error` at docs/WINDOWS-SUPPORT.md M7 to make Windows a
+      # hard release gate.
+      - name: fetch Windows artifacts (best effort)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-release-assets
+          path: dist
+      - name: manifest
+        run: |
+          set -eu
+          build="${{ steps.version.outputs.build }}"
+          # A partial Windows upload must not publish a half target: the manifest
+          # needs the extensionless raw binary, so drop a lone zip rather than let
+          # find_artifacts() record a target with no updatable artifact.
+          win="dist/karucode-${build}-x86_64-pc-windows-msvc"
+          if [ ! -f "${win}" ]; then
+            rm -f "${win}.zip" "dist/example-hello-${build}-x86_64-pc-windows-msvc.exe"
+            echo "no Windows raw binary this build; publishing Linux only"
+          fi
           python3 scripts/release_manifest.py \
             --dist dist \
             --build "${build}" \
@@ -593,9 +785,17 @@ jobs:
             # or let a running install do it
             karucode update --apply
             ```
+
+            Windows (`x86_64-pc-windows-msvc`) assets are published when the
+            Windows lane succeeds. The port is in progress — see
+            `docs/WINDOWS-SUPPORT.md` for what works today and what does not.
+            The `.zip` is for people; the extensionless `karucode-<build>-<triple>`
+            file is the artifact the self-updater downloads.
           files: |
             dist/karucode-*.tar.gz
+            dist/karucode-*.zip
             dist/karucode-*-x86_64-unknown-linux-gnu
+            dist/karucode-*-x86_64-pc-windows-msvc
             dist/example-hello-*
             dist/updates.json
             dist/SHA256SUMS

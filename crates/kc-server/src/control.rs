@@ -100,8 +100,16 @@
 //
 // # Tools
 //
-// Only control sessions may use these; ordinary sessions and subagents are
-// refused.
+// Only a control chat holds these. The runtime removes the whole `control_` family
+// from every other catalogue, so an ordinary session's tool list cannot advertise
+// one and there is nothing to refuse: a project session simply has no tool that
+// reaches another session. A subagent is in the same position at every depth - a
+// delegated task was not given the session's authority over other sessions.
+//
+// The names share the prefix precisely so that gate is one string match, which
+// makes the naming a contract between `kc-server` and `kc-runtime`; the
+// `system-prompt` topic describes the filter, and a test in
+// `crates/kc-server/tests/api.rs` pins the whole family.
 //
 // - `control_list_projects` (read-only): registered projects with ids, names and
 //   paths. The chat resolves a project the user names or `@mentions`; it must

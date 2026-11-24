@@ -77,6 +77,9 @@ fn claim_paths_overlap(a: &str, b: &str) -> bool {
 struct Db {
     sessions: Vec<Session>,
     projects: Vec<Project>,
+    /// Sessions the fake store reports as control chats, so the runtime's
+    /// control-plane gating can be exercised without a real sqlite store.
+    control_sessions: Vec<String>,
     messages: Vec<StoredMessage>,
     next_message_id: i64,
     runs: Vec<RunRecord>,
@@ -269,6 +272,12 @@ impl FakeStore {
     pub(crate) fn usage(&self) -> Vec<UsageRecord> {
         self.db().usage.clone()
     }
+
+    /// Mark one session as a control chat, as the real store's
+    /// `create_control_session` would.
+    pub(crate) fn mark_control_session(&self, id: &str) {
+        self.db().control_sessions.push(id.to_string());
+    }
 }
 
 #[async_trait]
@@ -295,6 +304,10 @@ impl Store for FakeStore {
         };
         self.db().sessions.push(session.clone());
         Ok(session)
+    }
+
+    async fn is_control_session(&self, id: &str) -> Result<bool> {
+        Ok(self.db().control_sessions.iter().any(|marked| marked == id))
     }
 
     async fn idle_ephemeral_session_ids(&self) -> Result<Vec<String>> {
@@ -1698,6 +1711,11 @@ pub(crate) struct FakeSettings {
     /// `.karucode/system-prompt.md` when a test workspace has one - the same
     /// default an install ships with.
     pub prompt: kc_core::config::PromptConfig,
+    /// Live `[tools]` settings: which names a run may be offered.
+    ///
+    /// `ToolsConfig::default()` offers everything, so every test written before
+    /// the section existed keeps the exact registry it asserted.
+    pub tools: kc_core::config::ToolsConfig,
     /// What `resolve_requested_model` judges against. Empty (the default)
     /// means "no catalog to judge against", which is the permissive behaviour
     /// a single-model embedding has.
@@ -1737,6 +1755,7 @@ impl Default for FakeSettings {
                 auto_detect: false,
                 ..Default::default()
             },
+            tools: kc_core::config::ToolsConfig::default(),
             prompt: kc_core::config::PromptConfig::default(),
             known_models: Vec::new(),
             alt_profile: None,
@@ -1852,6 +1871,10 @@ impl Settings for FakeSettings {
 
     async fn prompt(&self) -> kc_core::config::PromptConfig {
         self.prompt.clone()
+    }
+
+    async fn tools(&self) -> kc_core::config::ToolsConfig {
+        self.tools.clone()
     }
 
     /// Mirrors the server's resolver closely enough to prove the runtime
@@ -3006,6 +3029,9 @@ pub(crate) struct HarnessBuilder {
     /// retire it. Defaults to false: every pre-existing test talks about a
     /// durable chat.
     ephemeral: bool,
+    /// Create the session as a control chat (`is_control_session` true), so a test
+    /// can see which tools and which prompt paragraph only a control chat gets.
+    control_chat: bool,
 }
 
 impl HarnessBuilder {
@@ -3019,6 +3045,7 @@ impl HarnessBuilder {
             workspaces: None,
             session_workspace: None,
             ephemeral: false,
+            control_chat: false,
         }
     }
 
@@ -3045,6 +3072,13 @@ impl HarnessBuilder {
         self
     }
 
+    /// Create the harness session as a control chat, so the runtime offers it the
+    /// `control_*` family and sends the paragraph that teaches those tools.
+    pub(crate) fn control_chat(mut self) -> Self {
+        self.control_chat = true;
+        self
+    }
+
     pub(crate) fn workspaces(mut self, workspaces: Arc<dyn crate::WorkspaceProvider>) -> Self {
         self.workspaces = Some(workspaces);
         self
@@ -3058,6 +3092,12 @@ impl HarnessBuilder {
     /// Replace the model config (sampling + retry budgets) the runtime sees.
     pub(crate) fn model(mut self, model: ModelConfig) -> Self {
         self.settings.model = model;
+        self
+    }
+
+    /// Replace the `[tools]` section the runtime sees.
+    pub(crate) fn tools_config(mut self, tools: kc_core::config::ToolsConfig) -> Self {
+        self.settings.tools = tools;
         self
     }
 
@@ -3105,6 +3145,9 @@ impl HarnessBuilder {
             )
             .await
             .expect("create session");
+        if self.control_chat {
+            store.mark_control_session(&session_id);
+        }
 
         Harness {
             runtime,

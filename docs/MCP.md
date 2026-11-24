@@ -118,6 +118,39 @@ Fields:
 | `headers` | `{}` | Extra HTTP headers (auth). Never logged. |
 | `enabled` | `true` | `false` keeps the server `disconnected` and unconnected. |
 | `require_approval` | `true` | `true` asks through the runtime approval policy; `false` skips the prompt for this server's tools. It does not change the class (`External`), so `read_only` mode still denies them. |
+| `lazy` | `false` | `true` contributes one `mcp__<server>__tools` index (search, then call) instead of one tool per server tool - see §3. |
+
+---
+
+### Lazy mode: one index tool instead of N
+
+Every tool registration is sent to the model on every call - name, description and
+`inputSchema` - and charged against the context budget. A server with 200 tools is
+the largest fixed cost in the request, and most sessions never call one of them.
+
+`lazy = true` replaces the whole set with a single tool, `mcp__<server>__tools`:
+
+```jsonc
+// search: the matching tools, with their descriptions and input schemas
+{"action": "search", "query": "server list"}
+// call: one of them, by the name a search returned (prefix optional)
+{"action": "call", "tool": "mcp__catalyst__list_servers", "arguments": {}}
+```
+
+`search` returns at most twelve matches and says how many it left out, so the fix
+for a broad query is a narrower one. What it says is bounded by
+`limits.max_tool_output_bytes` like any other result.
+
+Nothing about the call path changes: the index tool is `ToolClass::External`,
+`require_approval` is the server's own setting (which is why there is one index per
+server rather than one global index), a dispatched call goes through the same
+`tools/call`, the same 120 s budget, the same secret redaction and the same
+`isError` mapping, and `GET /api/mcp` still lists the server's own tool names -
+that is what the server exposes, not what the run is offered.
+
+The cost is one extra turn the first time a session needs a given tool. Leave
+`lazy` off for a small server; a model that has to search before calling is a model
+that can search badly.
 
 ---
 

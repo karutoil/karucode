@@ -119,6 +119,40 @@
 //
 // The whole procedure is step 4 of the `plugins` topic.
 //
+// # Which tools a run is offered
+//
+// Every registered tool is sent to the model on every call: its name, its
+// description and its JSON schema, and those characters are reserved out of the
+// context budget before any history is fitted. On an install with a large plugin or
+// MCP catalogue that is the biggest fixed part of a request, and most sessions
+// never call one of those tools. `[tools]` narrows it, by name, after everything
+// has been registered:
+//
+// ```toml
+// # ~/.config/karucode/config.toml
+// [tools]
+// deny  = ["mcp__catalyst__*", "plugin__discord__*"]
+// allow = ["*"]              # the default; `allow` is checked first, `deny` wins
+// ```
+//
+// * A pattern matches the **whole** name: `*` is any run of characters (including
+//   none), `?` is one. Everything else is literal - `_` is not a wildcard.
+// * A tool is offered when some `allow` pattern matches it **and** no `deny`
+//   pattern does. Omitting the section means `allow = ["*"]`, `deny = []`, which is
+//   every tool.
+// * `allow = []` offers **no tools at all**; omit the key rather than writing an
+//   empty list.
+// * A denied tool is absent, not refused: the model is never given its schema, so
+//   it cannot plan around it and cannot call it. `read_only_tools` and the approval
+//   policy still apply to whatever survives.
+// * It reaches first-party, plugin and MCP tools alike. The value is read once per
+//   run, where the loop's tool set is decided, so it costs nothing per turn - but it
+//   is not part of `PATCH /api/config`, so a change in this file takes effect on the
+//   next run **after a restart**, exactly like `[prompt]`. The `system-prompt` topic
+//   describes the filter.
+// * A **control chat** keeps its own `control_*` family; no other session is offered
+//   those whatever `[tools]` says, and `allow` can still narrow them.
+//
 // # The admin gate
 //
 // `KARUCODE_LOCK_SETTINGS` is all-or-nothing. For the middle ground - the UI may
@@ -1474,6 +1508,10 @@ impl Settings for SettingsHandle {
     /// would move `message[0]` and cost a prompt-cache miss on every turn after).
     async fn prompt(&self) -> kc_core::config::PromptConfig {
         self.read().prompt.clone()
+    }
+
+    async fn tools(&self) -> kc_core::config::ToolsConfig {
+        self.read().tools.clone()
     }
 }
 

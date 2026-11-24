@@ -8,7 +8,7 @@
 // @kc-title: The built-in tools the agent can call
 // @kc-summary: What each first-party tool does, how it is gated, and the limits and gotchas that shape its output.
 // @kc-tags: tools, agent, files, search, shell, git
-// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:glob, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:git_log, tool:karucode_docs, tool:skill, tool:report_karucode_issue, tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, route:POST /api/sessions/:id/rewind, config:[limits], config:limits.max_file_read_bytes, config:limits.max_command_output_bytes, config:limits.search_max_results, config:limits.max_tool_output_bytes, config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:limits.parallel_tool_calls, env:KARUCODE_PARALLEL_TOOL_CALLS, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:RIPGREP_CONFIG_PATH
+// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:glob, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:git_log, tool:karucode_docs, tool:skill, tool:report_karucode_issue, tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, route:POST /api/sessions/:id/rewind, config:[limits], config:[tools], config:tools.allow, config:tools.deny, config:limits.max_file_read_bytes, config:limits.max_command_output_bytes, config:limits.search_max_results, config:limits.max_tool_output_bytes, config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:limits.parallel_tool_calls, env:KARUCODE_PARALLEL_TOOL_CALLS, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:RIPGREP_CONFIG_PATH
 //
 // | Tool | Class | Approval | What it does |
 // | --- | --- | --- | --- |
@@ -62,6 +62,15 @@
 // {"name": "git_log", "arguments": {"path": "crates/kc-tools", "max_count": 10}}
 // {"name": "edit_file", "arguments": {"path": "a.txt", "old_string": "old", "new_string": "new"}}
 // ```
+//
+// # Which tools a run is offered
+//
+// Everything registered is sent to the model, and a run may be offered less than
+// that: a **control chat** is the only run that holds the `control_*` family, and an
+// operator's `[tools]` section narrows the rest by name pattern (`allow`/`deny`,
+// `deny` winning - the `configuration` topic). A tool that was filtered out is
+// absent rather than refused, so "I do not have that tool" is the correct answer
+// for a name this list does not contain: there is no hidden tool to keep trying.
 //
 // # Output limits
 //
@@ -647,17 +656,13 @@ impl Tool for ReadFile {
         spec(
             "read_file",
             "Read one file, several files, or several windows of one file, inside the workspace. \
-             Text comes back as numbered lines with a `path — lines A-B of N (bytes)` header (use \
-             offset/limit for large files: default 400 lines, max 2000). Any line of a large file \
-             is reachable: `limits.max_file_read_bytes` bounds the bytes *returned* by one read, \
-             not the offsets you can ask for. `paths` reads several files in one call and \
-             `ranges` reads several windows of `path`; a bad path or range is reported inline and \
-             the other reads still return. An image (PNG/JPEG/GIF/WebP) passed as `path` is \
-             attached for a model that accepts image input; on a text-only model it is refused \
-             with an explanation, as are binary files and image formats vision APIs do not \
-             accept. Output is capped by the configured tool-output limit. A page that is cut \
-             ends with `[next N lines omitted; continue with offset=X]`: pass that offset (or \
-             another `ranges` window) instead of reading the file again from the start.",
+             Lines are numbered under a `path — lines A-B of N (bytes)` header; `offset`/`limit` \
+             page a large file (default 400 lines, max 2000), and `limits.max_file_read_bytes` \
+             bounds the bytes returned, not the offset you may ask for. `paths` reads several \
+             files, `ranges` several windows of one; a bad entry is reported inline and the rest \
+             still return. An image path is shown to a vision model and refused, with a reason, by \
+             a text-only one. A cut page ends `[next N lines omitted; continue with offset=X]`: \
+             pass that offset instead of starting over.",
             json!({
                 "type": "object",
                 "properties": {
@@ -970,14 +975,12 @@ impl Tool for SearchFiles {
     fn spec(&self) -> ToolSpec {
         spec(
             "search_files",
-            "Search file contents. Uses ripgrep when installed and falls back to a built-in regex \
-             walker (both honour .gitignore) and both return exactly the same shape. Returns \
-             `path:line: text` matches; `context` adds the `N` lines either side of each match as \
-             `path:line- text`, `files_only` returns just the distinct paths that matched, and \
-             `max_matches_per_file` stops one noisy file from spending the whole result cap. \
-             Results are bounded by the configured search limit. Narrow before you widen: a \
-             `glob` and `max_matches_per_file` keep a result readable, and `files_only` answers \
-             where without the lines.",
+            "Search file contents. ripgrep when installed, else a built-in regex walker; both \
+             honour .gitignore and return the same shape. Matches come back as `path:line: text`; \
+             `context` adds N lines either side as `path:line- text`, `files_only` returns the \
+             paths that matched, and `max_matches_per_file` stops one noisy file from spending the \
+             whole cap. Narrow before you widen: a `glob` and `max_matches_per_file` keep a result \
+             readable, and `files_only` answers where without the lines.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1127,14 +1130,12 @@ impl Tool for Glob {
     fn spec(&self) -> ToolSpec {
         spec(
             "glob",
-            "Find files and directories by name with a glob. This is the name-based finder (not a \
-             content search): it is `.gitignore`-aware and skips `.git`/`node_modules`. The pattern \
-             is matched against each entry's file name, its path relative to `path` and its \
-             workspace-relative path, so `*.rs`, `src/**/*.rs` and `crates/*/src/lib.rs` all work. \
-             Directories are listed with a trailing `/`. Bounded at 200 paths, and a truncated \
-             result says the walk stopped at the cap. A truncated walk reports the total as a \
-             lower bound; narrow `path` or `pattern` rather than assuming the rest. Read-only, no \
-             approval.",
+            "Find files and directories by name with a glob. Name-based, not a content search: \
+             `.gitignore`-aware, skips `.git`/`node_modules`. The pattern matches an entry's file \
+             name, its path relative to `path` and its workspace-relative path, so `*.rs`, \
+             `src/**/*.rs` and `crates/*/src/lib.rs` all work; directories end with `/`. Bounded at \
+             200 paths, and a truncated walk says so and reports the total as a lower bound: narrow \
+             `path` or `pattern` rather than assuming the rest.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1486,14 +1487,12 @@ impl Tool for RunCommand {
     fn spec(&self) -> ToolSpec {
         spec(
             "run_command",
-            "Run a shell command with `/bin/sh -c` in the workspace and stream stdout/stderr. \
-             This is NOT a sandbox: the command runs as the server user with that user's full \
-             filesystem and network access, so treat it as trusted unless the approval policy says \
-             otherwise. Requires approval per policy; refused in read_only mode. Output is kept \
-             head+tail within the configured limit, and stdout and stderr are budgeted separately so \
-             a long stdout cannot push stderr out. Timeouts kill the whole process group. A command \
-             that exits 0 while a background child still holds the output pipes is reported as a \
-             success whose output may be incomplete, not as a timeout.",
+            "Run a shell command with `/bin/sh -c` in the workspace and stream stdout/stderr. NOT \
+             a sandbox: it runs as the server user, with that user's filesystem and network access. \
+             Requires approval per policy and is refused in read_only mode. Output keeps its head \
+             and tail within the limit, with stdout and stderr budgeted separately; a timeout kills \
+             the process group. A command that exits 0 while a background child still holds the \
+             pipes is a success whose output may be incomplete.",
             json!({
                 "type": "object",
                 "properties": {

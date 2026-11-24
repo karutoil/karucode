@@ -2315,9 +2315,13 @@ most recently active first, each with its session). Control chats appear only in
 only** - they are separate totals, not parts of one. `failed` counts every
 failing session even though the `attention` list shows the newest 12.
 
-Only a control chat may call the `control_*` tools; ordinary sessions and
-subagents are refused. Mutating ones follow the approval policy: `read_only`
-refuses, `ask`/`ask_commands` ask with the exact action, `auto` permits.
+Only a control chat holds the `control_*` tools. The runtime drops the whole
+family from every other run's registry - an ordinary session and every subagent,
+at any depth - so they are not offered rather than refused, and an ordinary
+session's tool list cannot name a tool it does not have. The names share the
+`control_` prefix precisely so that gate is one string match. Mutating ones follow
+the approval policy: `read_only` refuses, `ask`/`ask_commands` ask with the exact
+action, `auto` permits.
 
 * `control_list_projects`, `control_list_sessions`, `control_read_session`,
   `control_list_agents` are read-only: projects with ids and paths, sessions

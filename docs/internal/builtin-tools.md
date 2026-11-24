@@ -7,7 +7,7 @@
 
 - **Slug:** `builtin-tools`
 - **Tags:** tools, agent, files, search, shell, git
-- **Applies to:** `tool:read_file`, `tool:list_dir`, `tool:search_files`, `tool:glob`, `tool:write_file`, `tool:edit_file`, `tool:run_command`, `tool:git_status`, `tool:git_diff`, `tool:git_log`, `tool:karucode_docs`, `tool:skill`, `tool:report_karucode_issue`, `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `route:POST /api/sessions/:id/rewind`, `config:[limits]`, `config:limits.max_file_read_bytes`, `config:limits.max_command_output_bytes`, `config:limits.search_max_results`, `config:limits.max_tool_output_bytes`, `config:allow_temp_dir`, `env:KARUCODE_ALLOW_TEMP_DIR`, `config:limits.parallel_tool_calls`, `env:KARUCODE_PARALLEL_TOOL_CALLS`, `config:[model]`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:RIPGREP_CONFIG_PATH`
+- **Applies to:** `tool:read_file`, `tool:list_dir`, `tool:search_files`, `tool:glob`, `tool:write_file`, `tool:edit_file`, `tool:run_command`, `tool:git_status`, `tool:git_diff`, `tool:git_log`, `tool:karucode_docs`, `tool:skill`, `tool:report_karucode_issue`, `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `route:POST /api/sessions/:id/rewind`, `config:[limits]`, `config:[tools]`, `config:tools.allow`, `config:tools.deny`, `config:limits.max_file_read_bytes`, `config:limits.max_command_output_bytes`, `config:limits.search_max_results`, `config:limits.max_tool_output_bytes`, `config:allow_temp_dir`, `env:KARUCODE_ALLOW_TEMP_DIR`, `config:limits.parallel_tool_calls`, `env:KARUCODE_PARALLEL_TOOL_CALLS`, `config:[model]`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:RIPGREP_CONFIG_PATH`
 - **Source:** `crates/kc-tools/src/lib.rs:7`
 
 ---
@@ -64,6 +64,15 @@ attached, and how it is filed.
 {"name": "git_log", "arguments": {"path": "crates/kc-tools", "max_count": 10}}
 {"name": "edit_file", "arguments": {"path": "a.txt", "old_string": "old", "new_string": "new"}}
 ```
+
+## Which tools a run is offered
+
+Everything registered is sent to the model, and a run may be offered less than
+that: a **control chat** is the only run that holds the `control_*` family, and an
+operator's `[tools]` section narrows the rest by name pattern (`allow`/`deny`,
+`deny` winning - the `configuration` topic). A tool that was filtered out is
+absent rather than refused, so "I do not have that tool" is the correct answer
+for a name this list does not contain: there is no hidden tool to keep trying.
 
 ## Output limits
 

@@ -86,6 +86,12 @@ node_modules/
 /docs/internal/design-verify/modal-family/screens/
 /docs/internal/design-verify/appearance-matrix.json
 
+# A one-off full frontend visual audit dropped a large local artifact tree here:
+# browser profiles (caches, History, Cookies, Login Data), harness logs, coverage
+# CSVs and hundreds of PNG captures. None of it is a build input, it is regenerable
+# scratch, and the audit is over — keep the whole tree out of the repository.
+/docs/internal/design-verify/full-visual-audit/
+
 # The production-readiness audit is an internal review artifact: it enumerates
 # open findings with file/line pointers, and it is written for this checkout's
 # maintainers, not for a public release. Kept locally, never shipped.
@@ -104,6 +110,11 @@ node_modules/
 /docs/plans/
 
 # --- local research artifacts ------------------------------------------------
+# The Windows-port work order is a local planning artifact for this checkout:
+# milestones and evidence that go stale as the port lands. Kept locally, never
+# shipped; AGENTS.md links to it for readers of this checkout.
+/docs/WINDOWS-SUPPORT.md
+
 # The harness-literature survey written for the agent-loop roadmap. It cites ~45
 # papers with a trailing window that goes stale, no build or test reads it, and a
 # fresh copy is cheap to regenerate; so it sits with the design-verify captures as

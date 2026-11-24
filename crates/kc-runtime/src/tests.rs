@@ -2684,6 +2684,115 @@ async fn a_prompt_hook_can_rewrite_segments_and_the_loser_is_reported_once() {
     assert!(conflicts[0].contains("zzz"), "{:?}", conflicts[0]);
 }
 
+#[tokio::test]
+async fn a_project_session_is_not_offered_the_control_family() {
+    // The `control_*` tools reach every *other* session: they dispatch new work,
+    // act as another session's user, and stop its runs. A project session has one
+    // project and no authority over the rest of the server, so the tools are
+    // removed from its catalogue - a model that can see `control_start_session`
+    // plans around it, and an approval prompt for a tool the session was never
+    // meant to hold is the user's problem, not a policy.
+    let mut h = HarnessBuilder::new(vec![Script::text("looked around")])
+        .tool(EchoTool::boxed("echo"))
+        .tool(EchoTool::boxed("control_list_sessions"))
+        .build()
+        .await;
+    h.run_to_finish("look around").await;
+
+    let requests = h.factory.requests();
+    assert!(!requests.is_empty(), "the run made no model call");
+    let names: Vec<&str> = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert!(names.contains(&"echo"), "the run's own tools stay: {names:?}");
+    assert!(
+        !names.iter().any(|name| name.starts_with("control_")),
+        "a project session was offered the control family: {names:?}"
+    );
+    assert!(
+        !requests[0].messages[0]
+            .content
+            .contains("persistent central control chat"),
+        "an ordinary session was told it is the control chat"
+    );
+}
+
+#[tokio::test]
+async fn a_control_chat_is_offered_the_control_family_and_told_about_it() {
+    // The other side of the same gate: the central control chat keeps the tools,
+    // the paragraph that teaches them, and one line per tool in the prompt's index.
+    let mut h = HarnessBuilder::new(vec![Script::text("checked")])
+        .tool(EchoTool::boxed("control_list_sessions"))
+        .control_chat()
+        .build()
+        .await;
+    h.run_to_finish("what is running?").await;
+
+    let requests = h.factory.requests();
+    assert!(!requests.is_empty(), "the run made no model call");
+    let names: Vec<&str> = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"control_list_sessions"),
+        "a control chat lost its own tools: {names:?}"
+    );
+    let prompt = &requests[0].messages[0].content;
+    assert!(
+        prompt.contains("persistent central control chat"),
+        "the control chat was not told that it is one: {prompt}"
+    );
+    assert!(
+        prompt.contains("`control_list_sessions`"),
+        "the prompt's tool index does not name the tool the run holds: {prompt}"
+    );
+}
+
+#[tokio::test]
+async fn a_tools_deny_list_narrows_what_a_run_is_offered() {
+    // `[tools]` is the operator's answer to a large catalogue: a 180-tool MCP
+    // server costs its whole schema list on every call of every run, and most
+    // sessions will never call one of them. A denied tool is absent from the
+    // request, not refused at call time - the model cannot plan around a name it
+    // was never given.
+    let mut h = HarnessBuilder::new(vec![Script::text("done")])
+        .tool(EchoTool::boxed("echo"))
+        .tool(EchoTool::boxed("mcp__catalyst__list_servers"))
+        .tool(EchoTool::boxed("mcp__discord__list_guilds"))
+        .tools_config(kc_core::config::ToolsConfig {
+            allow: vec!["*".into()],
+            deny: vec!["mcp__catalyst__*".into()],
+        })
+        .build()
+        .await;
+    h.run_to_finish("do the thing").await;
+
+    let requests = h.factory.requests();
+    assert!(!requests.is_empty(), "the run made no model call");
+    let names: Vec<&str> = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert!(names.contains(&"echo"), "an allowed tool stays: {names:?}");
+    assert!(
+        !names.contains(&"mcp__catalyst__list_servers"),
+        "a denied tool was offered to the model: {names:?}"
+    );
+    assert!(
+        names.contains(&"mcp__discord__list_guilds"),
+        "a tool the deny list does not name must survive: {names:?}"
+    );
+    // And the prompt's index is built from the same set, so it cannot advertise
+    // the tool the request does not carry.
+    let prompt = &requests[0].messages[0].content;
+    assert!(!prompt.contains("`mcp__catalyst__list_servers`"), "{prompt}");
+}
+
 /// A hook that replaces the whole prompt.
 struct WholePromptHook;
 

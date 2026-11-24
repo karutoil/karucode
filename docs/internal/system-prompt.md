@@ -87,9 +87,11 @@ planning against a limit it will never be given is worse than no number.
 * Each named block has **its own ceiling**, enforced by a test rather than one
   opaque total: a rule can triple while the tool list loses a line and a single
   sum would still pass. The ceilings are a review trigger, not a byte count.
-* The topic index is one line of slugs. Carrying the titles too cost 2,085
-  characters - 42% of the whole prompt - and `karucode_docs` action `list`
-  returns the title and summary for the same set when the agent needs them.
+* There is no topic index in the prompt. Thirty-eight slugs cost 604 characters
+  of message[0] on every model call, and `karucode_docs` action `list` returns
+  the same set with each topic's title and summary - a call the block already
+  tells the agent to make. Titles *and* slugs together once cost 2,085
+  characters, 42% of the whole prompt.
 * A project's instructions file: 8,000 characters, cut with a note that says so
   (see `project-instructions`).
 * Text a plugin adds for the run (the control-chat and mission paragraphs):
@@ -99,6 +101,31 @@ planning against a limit it will never be given is worse than no number.
 * One line per tool: its first sentence, at most 200 characters. A plugin writes
   its own description in another process, so a description with no sentence break
   is cut with `…` rather than pasted whole.
+* A family of more than twelve tools from one origin - an MCP server, a plugin -
+  is **one line**, not one per tool. The request already carries every schema,
+  so itemising a 180-tool server in message[0] re-billed that catalogue on every
+  model call of every run. karucode's own tools are never collapsed: they are
+  hand-written, they are what the agent plans with, and there are a few dozen.
+
+## The tool list
+
+`Available tools:` names every tool the loop may call, and says where each came
+from: a plugin tool carries `(plugin:<name>)`, an MCP tool `(mcp:<server>)`, and
+a first-party tool carries no label because its name is not namespaced. It is an
+index, not the catalogue - the request's own tool list has the arguments and the
+schema - so the prompt names what exists and the request says how to call it.
+
+The list is filtered, not universal. A **control chat** gets the `control_*`
+family - the tools that reach other sessions and projects; a project session and
+every subagent never see them, so a session cannot dispatch, steer or stop
+another one (`central-control` topic). An operator's `[tools]` section narrows
+what is left by name pattern (`allow`/`deny`, `deny` winning), which is the
+answer to a large catalogue: a 180-tool MCP server costs its whole schema list,
+and the same characters out of the context budget, on every call of every run
+that will never call one of them (the `configuration` topic). Both filters run
+once per run, where the loop's tool set is decided, and the list is built from
+the tools the loop was actually given - so it cannot advertise a tool the run
+does not have.
 
 ## Changing it
 

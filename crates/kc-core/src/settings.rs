@@ -64,6 +64,16 @@ pub trait Settings: Send + Sync {
         crate::config::PromptConfig::default()
     }
 
+    /// Live `[tools]` settings: which registered tools a run is offered.
+    ///
+    /// Defaulted to "every tool", so an embedding or a test written before the
+    /// section existed keeps the exact registry it had. The runtime reads it once
+    /// per run, next to the control-plane gate, because the answer decides what
+    /// the request's tool list contains on every turn.
+    async fn tools(&self) -> crate::config::ToolsConfig {
+        crate::config::ToolsConfig::default()
+    }
+
     /// Resolve the `model` argument of `spawn_agent`/`spawn_agents` - one id
     /// that came from *outside* the config, typed by the caller and derived
     /// by nothing - against the models this install actually made available.

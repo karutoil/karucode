@@ -355,6 +355,19 @@ workspace_file = true
 # op = "remove"
 # name = "artifacts"
 
+# Which registered tools a run is offered. Every tool's name, description and JSON
+# schema is sent on every model call and charged against the context budget, so an
+# install with a large plugin or MCP catalogue pays for it in sessions that will
+# never call one of those tools. Patterns match the whole name: `*` is any run of
+# characters, `?` is one. `allow` is checked first and `deny` wins, so the default
+# (allow = ["*"], no deny) is every tool. A denied tool is absent from the request,
+# not refused at call time. Empty `allow` offers nothing at all - omit the key.
+# See the `configuration` topic. Read from the loaded config once per run; a change
+# here takes effect on the next run after a restart, like [prompt].
+# [tools]
+# allow = ["*"]
+# deny = ["mcp__catalyst__*", "plugin__discord__*"]
+
 # Tell a human when something happened: a run settled, an approval is waiting, a
 # run failed. On by default; every switch below is also editable in Settings and
 # through PATCH /api/config, and overridable from the environment.
@@ -414,6 +427,12 @@ ephemeral_sessions = false
 # transport = "stdio"
 # command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/me/project"]
 # require_approval = true
+# Offer this server's tools as one `mcp__<server>__tools` index (search, then call)
+# instead of one tool per server tool. Off by default: it costs the model a lookup
+# turn the first time it needs a given tool, and saves the whole catalogue - which
+# is sent, and charged against the context budget, on every call - when the server
+# has many tools.
+# lazy = true
 
 # [[mcp_servers]]
 # name = "remote"

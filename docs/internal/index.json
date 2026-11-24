@@ -152,6 +152,9 @@
         "tool:report_status",
         "route:POST /api/sessions/:id/rewind",
         "config:[limits]",
+        "config:[tools]",
+        "config:tools.allow",
+        "config:tools.deny",
         "config:limits.max_file_read_bytes",
         "config:limits.max_command_output_bytes",
         "config:limits.search_max_results",
@@ -664,8 +667,11 @@
         "config:[[mcp_servers]]",
         "config:require_approval",
         "config:transport",
+        "config:lazy",
         "route:GET /api/mcp",
         "tool:mcp__<server>__<tool>",
+        "tool:mcp__<server>__tools",
+        "config:[tools]",
         "doc:docs/MCP.md"
       ],
       "path": "mcp.md",
@@ -697,7 +703,7 @@
       ],
       "path": "mcp-hot-reload.md",
       "slug": "mcp-hot-reload",
-      "source": "crates/kc-mcp/src/lib.rs:141",
+      "source": "crates/kc-mcp/src/lib.rs:173",
       "summary": "Apply an added, removed or edited [[mcp_servers]] entry with a reload route or the mcp_watch timer instead of restarting karucode.",
       "tags": [
         "mcp",
@@ -923,7 +929,7 @@
       ],
       "path": "project-instructions.md",
       "slug": "project-instructions",
-      "source": "crates/kc-core/src/prompt.rs:121",
+      "source": "crates/kc-core/src/prompt.rs:148",
       "summary": "How karucode finds a workspace's instructions file, which name wins, how much of it reaches the system prompt, and why it cannot override your request.",
       "tags": [
         "agents.md",
@@ -1016,7 +1022,7 @@
       ],
       "path": "prompt-override.md",
       "slug": "prompt-override",
-      "source": "crates/kc-core/src/prompt.rs:190",
+      "source": "crates/kc-core/src/prompt.rs:217",
       "summary": "The three ways to change what the agent is told - a [prompt] section, a workspace file the agent itself can write, and named segments a plugin can add, remove or replace - and who wins when two of them disagree.",
       "tags": [
         "system prompt",

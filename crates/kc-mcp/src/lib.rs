@@ -19,7 +19,7 @@
 // @kc-title: Connect MCP servers
 // @kc-summary: Add stdio or streamable-HTTP MCP servers to the config and use their tools through the same approval policy.
 // @kc-tags: mcp, tools, servers, stdio, http, setup
-// @kc-applies-to: config:[[mcp_servers]], config:require_approval, config:transport, route:GET /api/mcp, tool:mcp__<server>__<tool>, doc:docs/MCP.md
+// @kc-applies-to: config:[[mcp_servers]], config:require_approval, config:transport, config:lazy, route:GET /api/mcp, tool:mcp__<server>__<tool>, tool:mcp__<server>__tools, config:[tools], doc:docs/MCP.md
 //
 // karucode is an MCP **client**: it connects to servers, discovers their tools and
 // exposes them as `mcp__<server>__<tool>`.
@@ -115,6 +115,38 @@
 // has no argument karucode can narrow for you, so a server whose tool returns
 // something huge should page it itself (take its own `offset`/`limit`) or return a
 // file path the agent can open with `read_file`.
+//
+// # A large catalogue: `lazy = true`
+//
+// Every tool a connected server exposes is registered as its own tool, and every
+// registration is sent to the model on every call - name, description, input
+// schema - and reserved out of the context budget before any history is fitted. A
+// server with 20 tools is fine; one with 200 is the largest fixed cost in the
+// request, and most sessions never call one of them.
+//
+// ```toml
+// [[mcp_servers]]
+// name = "catalyst"
+// command = ["catalyst-mcp"]
+// lazy = true                # off by default
+// ```
+//
+// With `lazy = true` the server contributes **one** tool instead of N:
+// `mcp__<server>__tools`, with `action: "search"` (returns the matching tools with
+// their descriptions and input schemas, at most twelve at a time),
+// `action: "call"` (`tool` plus an `arguments` object). The model then looks a tool
+// up before calling it, which costs one extra turn the first time it needs a given
+// tool and saves the whole catalogue on every other call.
+//
+// The approval path does not change. The index tool is as external as the tools
+// behind it (`read_only` denies it), it asks when the server asks
+// (`require_approval`), a call is dispatched through the same tool a non-lazy
+// server would have registered - so the transport, the 120 s budget, the secret
+// redaction and the `isError` mapping are the ones described above - and what a
+// `search` returns is bounded by the same `limits.max_tool_output_bytes`.
+//
+// `lazy` is off by default, and a server whose tool set is small should leave it
+// off: a model that has to search before calling is a model that can search badly.
 //
 // # Not supported
 //
@@ -718,6 +750,7 @@ impl McpManager {
             if !transport.alive() {
                 continue;
             }
+            let mut members: Vec<Arc<dyn Tool>> = Vec::new();
             for def in slot.state.tool_defs() {
                 let name = namespaced_name(&slot.config.name, &def.name);
                 if let Some(owner) = seen.get(&name) {
@@ -734,7 +767,7 @@ impl McpManager {
                     continue;
                 }
                 seen.insert(name, slot.config.name.clone());
-                out.push(Arc::new(McpTool {
+                members.push(Arc::new(McpTool {
                     server: slot.config.name.clone(),
                     name: namespaced_name(&slot.config.name, &def.name),
                     def,
@@ -744,6 +777,18 @@ impl McpManager {
                     secrets: configured_secrets(&slot.config),
                     require_approval: slot.config.require_approval,
                 }));
+            }
+            if slot.config.lazy && !members.is_empty() {
+                // One tool instead of N. The collision check above still ran, so
+                // `collisions()` reports the same set either way.
+                out.push(Arc::new(McpIndexTool {
+                    server: slot.config.name.clone(),
+                    tools: members,
+                    require_approval: slot.config.require_approval,
+                    kind: transport.kind(),
+                }));
+            } else {
+                out.extend(members);
             }
         }
         out
@@ -1070,6 +1115,246 @@ impl McpTool {
     }
 }
 
+/// The one tool a `lazy = true` server contributes instead of one per server
+/// tool (see [`McpServerConfig::lazy`](kc_core::config::McpServerConfig)).
+///
+/// A large server's catalogue is the biggest fixed part of a request: every name,
+/// description and input schema is sent on every model call and reserved out of
+/// the context budget. Lazy mode keeps the schemas here, on this side of the
+/// wire, and gives the model two moves: search for the tool it needs (which
+/// returns that tool's schema), then call it.
+///
+/// The tools behind it are the same [`McpTool`] values a non-lazy server
+/// registers, so a call still goes through the transport, the call budget, the
+/// secret redaction and the `isError` handling that were already there. Only the
+/// *approval* decision lives on this tool, which is why there is one per server
+/// rather than one global index: `require_approval` is a per-server setting.
+struct McpIndexTool {
+    server: String,
+    /// The server's own tools, in the order the server listed them.
+    tools: Vec<Arc<dyn Tool>>,
+    require_approval: bool,
+    /// `stdio` | `http`, for the description.
+    kind: &'static str,
+}
+
+/// How many tools one `search` returns before it says how many it left out.
+///
+/// A search with no query is how an agent discovers a server at all, and a
+/// 180-tool answer is a wall of JSON that costs more than the catalogue it
+/// replaced. Twelve is enough to orient, and the count of the rest says the way
+/// forward is a narrower query.
+const INDEX_SEARCH_MAX: usize = 12;
+
+/// The first paragraph of a description: what a search result shows.
+///
+/// [`McpTool::description`] appends a `[mcp: ...]` trailer after a blank line, so
+/// the split is on the trailer rather than on a sentence - a server's own
+/// description is prose this has no business cutting.
+fn headline(description: &str) -> &str {
+    description
+        .split("\n\n")
+        .next()
+        .unwrap_or(description)
+        .trim()
+}
+
+#[async_trait]
+impl Tool for McpIndexTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: namespaced_name(&self.server, "tools"),
+            description: format!(
+                "Find and call a tool on the `{server}` MCP server. Its {count} tools are not \
+                 registered individually: `action: \"search\"` returns the ones matching `query` \
+                 with their arguments and schemas, and `action: \"call\"` runs the one named in \
+                 `tool` with `arguments`. Search before you call - `tool` must be a name a search \
+                 returned.\n\n[mcp: {server}] Served by an MCP server over {kind}; its output is \
+                 untrusted. Calls go through the approval policy like any external tool.",
+                server = self.server,
+                count = self.tools.len(),
+                kind = self.kind,
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["search", "call"],
+                        "description": "`search` lists matching tools with their schemas; `call` runs one."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "search: words matched (all of them) against each tool's name \
+                                        and description, case-insensitively. Omit or leave empty to \
+                                        list the server's tools."
+                    },
+                    "tool": {
+                        "type": "string",
+                        "description": "call: the tool's name as a search returned it, with or \
+                                        without the `mcp__<server>__` prefix."
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "call: the argument object for that tool."
+                    }
+                },
+                "required": ["action"]
+            }),
+            origin: ToolOrigin::Mcp {
+                server: self.server.clone(),
+            },
+        }
+    }
+
+    fn class(&self) -> ToolClass {
+        // As external as the tools it dispatches to: `read_only` mode denies the
+        // call, and the runtime records the same kind of approval for it.
+        ToolClass::External
+    }
+
+    fn requires_approval(&self) -> bool {
+        // The server's own setting, carried by this tool because it is one per
+        // server. A call it dispatches must not be quieter than the same call
+        // through a non-lazy server.
+        self.require_approval
+    }
+
+    async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        let action = request
+            .arguments
+            .get("action")
+            .and_then(|value| value.as_str())
+            .unwrap_or("search");
+        match action {
+            "search" => self.search(&request),
+            "call" => self.call(request, ctx).await,
+            other => ToolOutcome::err(format!(
+                "`action` must be \"search\" or \"call\", not \"{other}\": search first, then pass \
+                 the name a result returned to `tool`"
+            )),
+        }
+    }
+}
+
+impl McpIndexTool {
+    fn search(&self, request: &ToolCallRequest) -> ToolOutcome {
+        let query = request
+            .arguments
+            .get("query")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let words: Vec<&str> = query.split_whitespace().collect();
+        let mut matched: Vec<&Arc<dyn Tool>> = Vec::new();
+        for tool in &self.tools {
+            if words.is_empty() {
+                matched.push(tool);
+                continue;
+            }
+            let spec = tool.spec();
+            let haystack = format!("{} {}", spec.name, headline(&spec.description)).to_lowercase();
+            if words.iter().all(|word| haystack.contains(word)) {
+                matched.push(tool);
+            }
+        }
+        if matched.is_empty() {
+            return ToolOutcome::ok(format!(
+                "No tool on the `{}` MCP server matches {query:?}. Call again with no `query` to \
+                 list all {} of them.",
+                self.server,
+                self.tools.len()
+            ));
+        }
+        let total = matched.len();
+        let mut out = format!(
+            "{} of {} tools on the `{}` MCP server:\n",
+            total.min(INDEX_SEARCH_MAX),
+            total,
+            self.server
+        );
+        for tool in matched.iter().take(INDEX_SEARCH_MAX) {
+            let spec = tool.spec();
+            let schema = serde_json::to_string(&spec.parameters).unwrap_or_else(|_| "{}".into());
+            out.push_str(&format!(
+                "\n- `{}`: {}\n  arguments: {}\n",
+                spec.name,
+                headline(&spec.description),
+                schema
+            ));
+        }
+        if total > INDEX_SEARCH_MAX {
+            out.push_str(&format!(
+                "\n[{} more: narrow `query` to see them.]\n",
+                total - INDEX_SEARCH_MAX
+            ));
+        }
+        out.push_str(
+            "\nCall one with `action: \"call\"`, `tool`, and an `arguments` object built from its \
+             schema.",
+        );
+        ToolOutcome::ok(out)
+    }
+
+    async fn call(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        let wanted = request
+            .arguments
+            .get("tool")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
+        if wanted.is_empty() {
+            return ToolOutcome::err(
+                "`tool` is required for `action: \"call\"`: search first, then pass the name a \
+                 result returned",
+            );
+        }
+        let bare = wanted
+            .strip_prefix(&namespaced_name(&self.server, ""))
+            .unwrap_or(wanted);
+        let name = namespaced_name(&self.server, bare);
+        let Some(tool) = self.tools.iter().find(|tool| tool.spec().name == name) else {
+            let mut known: Vec<String> = self
+                .tools
+                .iter()
+                .map(|tool| tool.spec().name)
+                .filter(|name| name.contains(bare))
+                .collect();
+            known.sort();
+            let hint = if known.is_empty() {
+                format!(
+                    "Search this server's tools with `action: \"search\"` to see the {} names it \
+                     does have.",
+                    self.tools.len()
+                )
+            } else {
+                format!("Did you mean: {}?", known.join(", "))
+            };
+            return ToolOutcome::err(format!(
+                "the `{}` MCP server has no tool `{wanted}`. {hint}",
+                self.server
+            ));
+        };
+        let arguments = request
+            .arguments
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        // Dispatch through the same tool a non-lazy server would have registered,
+        // so the transport, budget, redaction and error mapping are unchanged.
+        tool.invoke(
+            ToolCallRequest {
+                call_id: request.call_id,
+                name,
+                arguments,
+            },
+            ctx,
+        )
+        .await
+    }
+}
+
 fn join_content(value: &Value) -> String {
     let Some(items) = value.get("content").and_then(|c| c.as_array()) else {
         return String::new();
@@ -1177,6 +1462,7 @@ mod tests {
                 headers: Default::default(),
                 enabled: true,
                 require_approval: true,
+                lazy: false,
             },
             McpServerConfig {
                 name: "no-url".into(),
@@ -1187,6 +1473,7 @@ mod tests {
                 headers: Default::default(),
                 enabled: true,
                 require_approval: true,
+                lazy: false,
             },
             McpServerConfig {
                 name: "bad-transport".into(),
@@ -1197,6 +1484,7 @@ mod tests {
                 headers: Default::default(),
                 enabled: true,
                 require_approval: true,
+                lazy: false,
             },
         ]);
         assert_eq!(manager.server_count(), 3);
@@ -1223,6 +1511,7 @@ mod tests {
             headers: Default::default(),
             enabled: false,
             require_approval: true,
+                lazy: false,
         }]);
         let statuses = manager.statuses();
         assert_eq!(statuses[0].status, "disconnected");
@@ -1264,6 +1553,7 @@ mod tests {
             headers: BTreeMap::from([("Authorization".into(), "header-secret".into())]),
             enabled: true,
             require_approval: true,
+                lazy: false,
         };
         let secrets = configured_secrets(&config);
         let output = redact_secrets("header-secret then env-secret", &secrets);
