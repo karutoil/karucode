@@ -1,0 +1,8 @@
+# CodeRabbit is disabled for this repository: no automatic PR reviews and no
+# chat auto-replies. Reviews only happen if someone explicitly summons the bot.
+# To re-enable, delete this file (or flip the flags below back to true).
+reviews:
+  auto_review:
+    enabled: false
+chat:
+  auto_reply: false
