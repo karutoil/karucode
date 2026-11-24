@@ -32,7 +32,7 @@ base64.workspace = true
 ciborium = "0.2"
 flate2.workspace = true
 futures-util.workspace = true
-getrandom = "0.2"
+getrandom = "0.4"
 libc.workspace = true
 mime_guess.workspace = true
 p256 = { version = "0.14", features = ["ecdsa"] }
