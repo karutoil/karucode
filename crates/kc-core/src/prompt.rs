@@ -1282,10 +1282,9 @@ fn tool_family_line(origin: &crate::tool::ToolOrigin, count: usize) -> String {
             format!("mcp__{server}__"),
             format!("the `{server}` MCP server"),
         ),
-        crate::tool::ToolOrigin::Plugin { name } => (
-            format!("plugin__{name}__"),
-            format!("the `{name}` plugin"),
-        ),
+        crate::tool::ToolOrigin::Plugin { name } => {
+            (format!("plugin__{name}__"), format!("the `{name}` plugin"))
+        }
         crate::tool::ToolOrigin::Builtin => (String::new(), "karucode itself".to_string()),
     };
     format!(
@@ -1599,7 +1598,10 @@ mod tests {
         // The names live in the tool list, and only there: repeating them here was
         // a line of message[0] per plugin on every model call.
         let block = plugin_block(&tools);
-        assert!(!block.contains("alpha") && !block.contains("zeta"), "{block}");
+        assert!(
+            !block.contains("alpha") && !block.contains("zeta"),
+            "{block}"
+        );
 
         // No plugin tool, no new paragraph or stray bytes.
         let without = system_prompt("/w", &[], "auto", &Budget::for_run(&Limits::default()), &[]);

@@ -983,7 +983,11 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
     // decides whether the paragraph teaching the control tools is sent.
     let control_chat = !spec.is_subagent
         && matches!(
-            inner.deps.store.is_control_session(&spec.session_id.0).await,
+            inner
+                .deps
+                .store
+                .is_control_session(&spec.session_id.0)
+                .await,
             Ok(true)
         );
     spec.control_chat = control_chat;

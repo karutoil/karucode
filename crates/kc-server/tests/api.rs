@@ -3032,7 +3032,7 @@ async fn broken_plugin_and_mcp_servers_are_isolated() {
         headers: Default::default(),
         enabled: true,
         require_approval: true,
-            lazy: false,
+        lazy: false,
     };
 
     let h = HarnessBuilder::new(vec![text("still works")])

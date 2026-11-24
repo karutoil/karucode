@@ -46,7 +46,6 @@ nav:
       - Security model: SECURITY.md
       - Internal docs system: INTERNAL-DOCS.md
       - Contributing (agents): CONTRIBUTING-AGENTS.md
-      - Windows support plan: WINDOWS-SUPPORT.md
       - Contributing: CONTRIBUTING.md
   - Reference:
       - Issue API keys for applications: internal/api-keys.md
@@ -70,6 +69,7 @@ nav:
       - Follow a project's own AGENTS.md instructions: internal/project-instructions.md
       - Work on more than one project: internal/projects.md
       - Keep the prompt cache hitting (cheap long runs): internal/prompt-cache.md
+      - Replace or edit the system prompt: internal/prompt-override.md
       - Configure a model provider: internal/provider-profiles.md
       - Recover a provider stream without extra logical requests: internal/provider-stream-recovery.md
       - Keep steering and follow-up input safe across run endings: internal/queued-run-recovery.md

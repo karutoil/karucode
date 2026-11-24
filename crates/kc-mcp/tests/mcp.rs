@@ -1716,20 +1716,36 @@ async fn a_lazy_server_exposes_one_index_tool_that_searches_and_calls() {
 
     let index = find(&tools, "mcp__fake__tools");
     let spec = index.spec();
-    assert_eq!(spec.origin, ToolOrigin::Mcp { server: "fake".into() });
+    assert_eq!(
+        spec.origin,
+        ToolOrigin::Mcp {
+            server: "fake".into()
+        }
+    );
     // Same approval path as any tool on that server: external, and asking when the
     // server asks.
     assert_eq!(index.class(), ToolClass::External);
     assert!(index.requires_approval());
-    assert!(spec.description.contains("[mcp: fake]"), "{}", spec.description);
-    assert_eq!(spec.parameters["properties"]["action"]["enum"], json!(["search", "call"]));
+    assert!(
+        spec.description.contains("[mcp: fake]"),
+        "{}",
+        spec.description
+    );
+    assert_eq!(
+        spec.parameters["properties"]["action"]["enum"],
+        json!(["search", "call"])
+    );
 
     // A search with no query is how an agent discovers the server at all: every
     // tool, its own description, and the schema it needs to call it.
     let out = call_tool(index.clone(), &dir, json!({"action": "search"})).await;
     assert!(out.ok, "{}", out.content);
     for name in ["mcp__fake__echo", "mcp__fake__sleep", "mcp__fake__fail"] {
-        assert!(out.content.contains(&format!("- `{name}`")), "{}", out.content);
+        assert!(
+            out.content.contains(&format!("- `{name}`")),
+            "{}",
+            out.content
+        );
     }
     assert!(out.content.contains("Echo text back."), "{}", out.content);
     assert!(
@@ -1739,13 +1755,23 @@ async fn a_lazy_server_exposes_one_index_tool_that_searches_and_calls() {
     );
 
     // A narrowed search returns the match and not the rest.
-    let out = call_tool(index.clone(), &dir, json!({"action": "search", "query": "echo"})).await;
+    let out = call_tool(
+        index.clone(),
+        &dir,
+        json!({"action": "search", "query": "echo"}),
+    )
+    .await;
     assert!(out.ok, "{}", out.content);
     assert!(out.content.contains("mcp__fake__echo"), "{}", out.content);
     assert!(!out.content.contains("mcp__fake__sleep"), "{}", out.content);
 
     // A query nothing matches says so and names the way out.
-    let out = call_tool(index.clone(), &dir, json!({"action": "search", "query": "zzz"})).await;
+    let out = call_tool(
+        index.clone(),
+        &dir,
+        json!({"action": "search", "query": "zzz"}),
+    )
+    .await;
     assert!(out.ok, "{}", out.content);
     assert!(out.content.contains("No tool"), "{}", out.content);
 
@@ -1772,7 +1798,12 @@ async fn a_lazy_server_exposes_one_index_tool_that_searches_and_calls() {
     assert_eq!(out.content, "mcp echo: again");
 
     // An unknown tool is refused, and the refusal names what does exist.
-    let out = call_tool(index.clone(), &dir, json!({"action": "call", "tool": "nope"})).await;
+    let out = call_tool(
+        index.clone(),
+        &dir,
+        json!({"action": "call", "tool": "nope"}),
+    )
+    .await;
     assert!(!out.ok, "{}", out.content);
     assert!(out.content.contains("no tool"), "{}", out.content);
 
@@ -1780,10 +1811,18 @@ async fn a_lazy_server_exposes_one_index_tool_that_searches_and_calls() {
     // what to do rather than failing silently.
     let out = call_tool(index.clone(), &dir, json!({"action": "call"})).await;
     assert!(!out.ok);
-    assert!(out.content.contains("`tool` is required"), "{}", out.content);
+    assert!(
+        out.content.contains("`tool` is required"),
+        "{}",
+        out.content
+    );
     let out = call_tool(index.clone(), &dir, json!({"action": "nope"})).await;
     assert!(!out.ok);
-    assert!(out.content.contains("\"search\" or \"call\""), "{}", out.content);
+    assert!(
+        out.content.contains("\"search\" or \"call\""),
+        "{}",
+        out.content
+    );
 
     manager.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();

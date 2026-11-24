@@ -1511,7 +1511,7 @@ mod tests {
             headers: Default::default(),
             enabled: false,
             require_approval: true,
-                lazy: false,
+            lazy: false,
         }]);
         let statuses = manager.statuses();
         assert_eq!(statuses[0].status, "disconnected");
@@ -1553,7 +1553,7 @@ mod tests {
             headers: BTreeMap::from([("Authorization".into(), "header-secret".into())]),
             enabled: true,
             require_approval: true,
-                lazy: false,
+            lazy: false,
         };
         let secrets = configured_secrets(&config);
         let output = redact_secrets("header-secret then env-secret", &secrets);

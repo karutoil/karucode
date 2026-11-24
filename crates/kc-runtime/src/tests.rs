@@ -2706,7 +2706,10 @@ async fn a_project_session_is_not_offered_the_control_family() {
         .iter()
         .map(|tool| tool.name.as_str())
         .collect();
-    assert!(names.contains(&"echo"), "the run's own tools stay: {names:?}");
+    assert!(
+        names.contains(&"echo"),
+        "the run's own tools stay: {names:?}"
+    );
     assert!(
         !names.iter().any(|name| name.starts_with("control_")),
         "a project session was offered the control family: {names:?}"
@@ -2790,7 +2793,10 @@ async fn a_tools_deny_list_narrows_what_a_run_is_offered() {
     // And the prompt's index is built from the same set, so it cannot advertise
     // the tool the request does not carry.
     let prompt = &requests[0].messages[0].content;
-    assert!(!prompt.contains("`mcp__catalyst__list_servers`"), "{prompt}");
+    assert!(
+        !prompt.contains("`mcp__catalyst__list_servers`"),
+        "{prompt}"
+    );
 }
 
 /// A hook that replaces the whole prompt.

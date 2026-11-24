@@ -5739,8 +5739,14 @@ workspace_file = false
         assert!(glob_matches("read_*", "read_file"));
         assert!(glob_matches("*_file", "read_file"));
         assert!(glob_matches("mcp__*__*", "mcp__catalyst__list_servers"));
-        assert!(glob_matches("mcp__catalyst__*", "mcp__catalyst__list_servers"));
-        assert!(!glob_matches("mcp__catalyst__*", "mcp__discord__list_servers"));
+        assert!(glob_matches(
+            "mcp__catalyst__*",
+            "mcp__catalyst__list_servers"
+        ));
+        assert!(!glob_matches(
+            "mcp__catalyst__*",
+            "mcp__discord__list_servers"
+        ));
         assert!(glob_matches("read_file?", "read_file2"));
         assert!(!glob_matches("read_file?", "read_file"));
         assert!(glob_matches("**", "anything"));
@@ -5793,7 +5799,11 @@ deny = ["mcp__catalyst__*", "plugin__discord__*"]
         )
         .unwrap();
         let cfg = Config::from_parts(file, None).expect("config");
-        assert_eq!(cfg.tools.allow, vec!["*".to_string()], "allow keeps its default");
+        assert_eq!(
+            cfg.tools.allow,
+            vec!["*".to_string()],
+            "allow keeps its default"
+        );
         assert_eq!(cfg.tools.deny.len(), 2);
         assert!(!cfg.tools.exposes("mcp__catalyst__list_servers"));
         assert!(cfg.tools.exposes("read_file"));
