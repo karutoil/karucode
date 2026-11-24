@@ -60,7 +60,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 walkdir = "2"
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace", "cors", "compression-gzip"] }
 # `debug-embed` makes dev builds embed the UI too: rust-embed's default is to
